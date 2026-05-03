@@ -22,6 +22,7 @@ from control.chat_routes import router as chat_router
 from control.dashboard_routes import router as dashboard_router
 from control.niche_routes import router as niche_router
 from control.render_routes import router as render_router
+from control.scheduler_routes import router as scheduler_router
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "web" / "static"
@@ -32,6 +33,7 @@ app.include_router(chat_router)
 app.include_router(dashboard_router)
 app.include_router(niche_router)
 app.include_router(render_router)
+app.include_router(scheduler_router)
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
