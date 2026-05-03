@@ -9,7 +9,14 @@ For complementary perspectives see:
 - `docs/data_flows.md` — how data moves through the system
 - `docs/legacy_pipeline.md` — what `make_shorts.py` does internally
 
+> Diagrams in this doc are also rendered as PNGs in
+> [`docs/diagrams/`](./diagrams/) — useful for terminals or markdown
+> viewers without Mermaid support. Re-render after edits with
+> `.venv/bin/python scripts/render_mermaid.py`.
+
 ## At a glance
+
+[![system overview](./diagrams/architecture-01-at-a-glance.png)](./diagrams/architecture-01-at-a-glance.png)
 
 ```mermaid
 graph TB

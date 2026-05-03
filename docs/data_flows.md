@@ -7,6 +7,10 @@ System-level view of how data moves through ytFactory. Complements
 If you're debugging "where did my data go?" or "why is this stuck?",
 start here.
 
+> **PNG copies** of every diagram in this doc live in
+> [`docs/diagrams/`](./diagrams/). See [`docs/diagrams/index.md`](./diagrams/index.md)
+> for the full list. Re-render with `.venv/bin/python scripts/render_mermaid.py`.
+
 ---
 
 ## 0. Where data lives
@@ -281,15 +285,15 @@ sequenceDiagram
     AG->>GCS: download short.mp4 to scratch
     AG->>YT: insert(video, channel=...)
     YT-->>AG: video_id
-    AG->>FS: jobs/&lt;id&gt;.youtube_url = https://youtu.be/...
+    AG->>FS: jobs/{id}.youtube_url = https://youtu.be/...
     AG->>GCS: gc_heavy_artifacts(job_id)<br/>delete beats/, voice.wav, captions, scripts/cast/prompts
     AG->>FS: enqueue RESEARCH_HANDOFF
 
     Note over AG: leases RESEARCH_HANDOFF
-    AG->>FS: youtube_videos/&lt;video_id&gt; = handoff metadata
+    AG->>FS: youtube_videos/{video_id} = handoff metadata
     AG->>R: pipeline.research.rebuild(quiet=True)
     AG->>R: pipeline.youtube_stats.fetch_all([video_id])
-    Note over AG: research-side helpers wrapped in try/except —<br/>YT is already published, never fail this step
+    Note over AG: research-side helpers wrapped in try/except<br/>YT is already published, never fail this step
 ```
 
 ### Why GC before research?
@@ -325,7 +329,7 @@ job reaches a terminal state (`done`, `failed`, `cancelled`).
 sequenceDiagram
     participant UI
     participant CR as GET /api/jobs/{id}
-    participant FS as Firestore jobs/&lt;id&gt;
+    participant FS as Firestore jobs/{id}
     participant GCS
     loop every 3s
         UI->>CR: GET /api/jobs/{id}
@@ -355,17 +359,17 @@ runaway chats from draining the Azure budget.
 
 ```mermaid
 flowchart TB
-    Req[/POST /api/chat or /api/render/]
-    Req --> A{owner_ip?}
-    A -- yes --> Skip[skip per-IP counter]
-    A -- no --> B{spent &gt;= $5/day cap?}
-    B -- yes --> S503[503 Service Unavailable<br/>"resumes after UTC midnight"]
-    B -- no --> C{IP used quota?}
-    C -- yes --> S429[429 Too Many Requests]
-    C -- no --> D[counter +1]
-    D --> Allow[forward to handler]
+    Req["POST /api/chat or /api/render"]
+    Req --> A{"owner_ip?"}
+    A -- yes --> Skip["skip per-IP counter"]
+    A -- no --> B{"spent &gt;= cap?"}
+    B -- yes --> S503["503 Service Unavailable<br/>resumes after UTC midnight"]
+    B -- no --> C{"IP used quota?"}
+    C -- yes --> S429["429 Too Many Requests"]
+    C -- no --> D["counter +1"]
+    D --> Allow["forward to handler"]
     Skip --> Allow
-    Allow --> Handler[chat or render]
+    Allow --> Handler["chat or render"]
 ```
 
 The counters live in `ratelimits/<UTC-date>/...` so they reset every

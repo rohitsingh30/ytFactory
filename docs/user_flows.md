@@ -5,6 +5,10 @@ through the product. Diagrams below render in any Markdown viewer that
 understands Mermaid (GitHub, VS Code with the Mermaid extension, GitLab).
 ASCII fallbacks for raw-text views are included.
 
+> **PNG copies** of every diagram in this doc live in
+> [`docs/diagrams/`](./diagrams/). See [`docs/diagrams/index.md`](./diagrams/index.md)
+> for the full list. Re-render with `.venv/bin/python scripts/render_mermaid.py`.
+
 ---
 
 ## 1. Visitor — fills the form per niche (primary path)
