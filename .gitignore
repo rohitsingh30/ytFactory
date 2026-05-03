@@ -63,10 +63,12 @@ data/scratch/
 **/prompts/**/*.json
 **/dossier/**/*.json
 **/shotlist/**/*.json
-**/uploads/**/*.json
 **/footage/transcripts/**/*.json
 **/specs/**/*.yaml
 **/cooking_bg_queue.yaml
+# uploads/ records (small JSON with video_id + title + thumbnail URL etc.)
+# ARE tracked — the cloud dashboard reads them to know which videos to
+# fetch live stats for. They're tiny (~600 bytes each) and curated.
 
 # Screenshots / branding renders — both are artifacts, regenerable via
 # their producer (UI tour for screenshots, branding.py for icons/banners).

@@ -1,0 +1,30 @@
+{
+  "video_id": "e2EVteSItkE",
+  "url": "https://youtu.be/e2EVteSItkE",
+  "studio_url": "https://studio.youtube.com/video/e2EVteSItkE/edit",
+  "uploaded_at": "2026-05-03T07:11:48.312251+00:00",
+  "title": "Top 3 stoppage-time goals that rewrote football",
+  "privacy": "public",
+  "publish_at": null,
+  "account": "sportstoriesanimated",
+  "thumbnail_path": "/Users/rohit/ytFactory/data/cache/top3-stoppage-goals/auto_thumb.jpg",
+  "thumbnail_set": false,
+  "thumbnail_error": "thumbnail upload failed (403): <HttpError 403 when requesting https://youtube.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=e2EVteSItkE&alt=json&uploadType=media returned \"The authenticated user doesn't have permissions to upload and set custom video thumbnails.\". Details: \"[{'message': \"The authenticated user doesn't have permissions to upload and set custom video thumbnails.\", 'domain': 'youtube.thumbnail', 'reason': 'forbidden', 'location': 'Authorization', 'locationType': 'header'}]\">. Note: custom thumbnails require a verified YouTube account (youtube.com/verify).",
+  "raw_response": {
+    "id": "e2EVteSItkE",
+    "kind": "youtube#video",
+    "etag": "S1v2EYpl9Tk-hI1S0JqLVePqvHI"
+  },
+  "slug": "top3-stoppage-goals",
+  "channel_dir": "sportstoriesanimated_ranked",
+  "mp4_path": "/Users/rohit/ytFactory/top3-stoppage-goals.mp4",
+  "description": "They shouldn't have scored, but they did anyway.\nSource: https://en.wikipedia.org/wiki/Stoppage_time\n",
+  "tags": [
+    "football",
+    "soccer",
+    "ranking",
+    "top5",
+    "shorts",
+    "tier-list"
+  ]
+}

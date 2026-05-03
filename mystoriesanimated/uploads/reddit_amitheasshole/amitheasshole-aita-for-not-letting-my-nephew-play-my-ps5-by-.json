@@ -1,0 +1,31 @@
+{
+  "video_id": "vQ8WX0-7-B0",
+  "url": "https://youtu.be/vQ8WX0-7-B0",
+  "studio_url": "https://studio.youtube.com/video/vQ8WX0-7-B0/edit",
+  "uploaded_at": "2026-05-03T04:33:22.677540+00:00",
+  "title": "AITA for not letting my nephew touch my PS5?",
+  "privacy": "public",
+  "publish_at": null,
+  "account": "mystoriesanimated",
+  "thumbnail_path": "/Users/rohit/ytFactory/data/cache/amitheasshole-aita-for-not-letting-my-nephew-play-my-ps5-by-/auto_thumb.jpg",
+  "thumbnail_set": false,
+  "thumbnail_error": "thumbnail upload failed (403): <HttpError 403 when requesting https://youtube.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=vQ8WX0-7-B0&alt=json&uploadType=media returned \"The authenticated user doesn't have permissions to upload and set custom video thumbnails.\". Details: \"[{'message': \"The authenticated user doesn't have permissions to upload and set custom video thumbnails.\", 'domain': 'youtube.thumbnail', 'reason': 'forbidden', 'location': 'Authorization', 'locationType': 'header'}]\">. Note: custom thumbnails require a verified YouTube account (youtube.com/verify).",
+  "raw_response": {
+    "id": "vQ8WX0-7-B0",
+    "kind": "youtube#video",
+    "etag": "IRkxpcLU5VQDyzd2XYfyqhntHXs"
+  },
+  "slug": "amitheasshole-aita-for-not-letting-my-nephew-play-my-ps5-by-",
+  "channel_dir": "reddit_amitheasshole",
+  "mp4_path": "/Users/rohit/ytFactory/amitheasshole-aita-for-not-letting-my-nephew-play-my-ps5-by-.mp4",
+  "description": "AITA for not letting my nephew play\n\n\ud83d\udcd6 Original story: https://reddit.com/r/AmItheAsshole/comments/1t1tg7c/aita_for_not_letting_my_nephew_play_my_ps5_by/\nFrom r/ by u/Stela_Kalluie.\n\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\ud83d\udc4d LIKE if YTA  \u00b7  \ud83d\udcac COMMENT if NTA\n\ud83d\udd14 Subscribe for more animated stories.\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n#shorts #aita #reddit #redditstories #storytime\n",
+  "tags": [
+    "aita",
+    "reddit",
+    "reddit stories",
+    "storytime",
+    "animated story",
+    "shorts",
+    "story time"
+  ]
+}

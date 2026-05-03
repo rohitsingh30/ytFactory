@@ -15,9 +15,20 @@ COPY requirements-control.txt ./
 RUN pip install -r requirements-control.txt
 
 # Copy only what the control plane needs.
+# (shared/schema.py was merged into control/schema.py in the 2026-05-03
+# reorg so there's no more `shared/` to copy.)
 COPY control/ ./control/
-COPY shared/ ./shared/
 COPY web/static/ ./web/static/
+
+# Per-channel config + upload records — required by the live dashboard
+# (control/dashboard_routes.py). Each channel's config.yaml + uploads/
+# subtree get baked in. Cache/scratch/footage/etc. are gitignored so
+# only the small curated bits land.
+COPY historyrecapped/      ./historyrecapped/
+COPY hindutavaanimated/    ./hindutavaanimated/
+COPY mystoriesanimated/    ./mystoriesanimated/
+COPY rhymetimejunction/    ./rhymetimejunction/
+COPY sportstoriesanimated/ ./sportstoriesanimated/
 
 # Cloud Run sets PORT; default to 8080 for local docker run.
 ENV PORT=8080

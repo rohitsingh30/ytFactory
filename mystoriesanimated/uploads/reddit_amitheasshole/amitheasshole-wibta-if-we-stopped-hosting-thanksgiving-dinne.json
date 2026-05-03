@@ -1,0 +1,31 @@
+{
+  "video_id": "5IfG6nA7Ngc",
+  "url": "https://youtu.be/5IfG6nA7Ngc",
+  "studio_url": "https://studio.youtube.com/video/5IfG6nA7Ngc/edit",
+  "uploaded_at": "2026-05-03T06:43:31.288617+00:00",
+  "title": "AITA for refusing to host Thanksgiving after THIS?",
+  "privacy": "public",
+  "publish_at": null,
+  "account": "mystoriesanimated",
+  "thumbnail_path": "/Users/rohit/ytFactory/data/cache/amitheasshole-wibta-if-we-stopped-hosting-thanksgiving-dinne/auto_thumb.jpg",
+  "thumbnail_set": false,
+  "thumbnail_error": "thumbnail upload failed (403): <HttpError 403 when requesting https://youtube.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=5IfG6nA7Ngc&alt=json&uploadType=media returned \"The authenticated user doesn't have permissions to upload and set custom video thumbnails.\". Details: \"[{'message': \"The authenticated user doesn't have permissions to upload and set custom video thumbnails.\", 'domain': 'youtube.thumbnail', 'reason': 'forbidden', 'location': 'Authorization', 'locationType': 'header'}]\">. Note: custom thumbnails require a verified YouTube account (youtube.com/verify).",
+  "raw_response": {
+    "id": "5IfG6nA7Ngc",
+    "kind": "youtube#video",
+    "etag": "2_bNBjAnM_pexLwFsqgnE3pfvSQ"
+  },
+  "slug": "amitheasshole-wibta-if-we-stopped-hosting-thanksgiving-dinne",
+  "channel_dir": "reddit_amitheasshole",
+  "mp4_path": "/Users/rohit/ytFactory/amitheasshole-wibta-if-we-stopped-hosting-thanksgiving-dinne.mp4",
+  "description": "WIBTA if I stopped hosting Thanksgiving for my in-laws?\n\n\ud83d\udcd6 Original story: https://reddit.com/r/AmItheAsshole/comments/1t27kdq/wibta_if_we_stopped_hosting_thanksgiving_dinner/\nFrom r/ by u/No_Exit_3908.\n\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\ud83d\udc4d LIKE if YTA  \u00b7  \ud83d\udcac COMMENT if NTA\n\ud83d\udd14 Subscribe for more animated stories.\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n#shorts #aita #reddit #redditstories #storytime\n",
+  "tags": [
+    "aita",
+    "reddit",
+    "reddit stories",
+    "storytime",
+    "animated story",
+    "shorts",
+    "story time"
+  ]
+}

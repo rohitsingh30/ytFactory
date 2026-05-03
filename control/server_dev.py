@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from control.agent_routes import router as agent_router
 from control.chat_routes import router as chat_router
+from control.dashboard_routes import router as dashboard_router
 from control.niche_routes import router as niche_router
 from control.render_routes import router as render_router
 
@@ -28,6 +29,7 @@ STATIC_DIR = PROJECT_ROOT / "web" / "static"
 app = FastAPI(title="ytFactory control (dev)")
 app.include_router(agent_router)
 app.include_router(chat_router)
+app.include_router(dashboard_router)
 app.include_router(niche_router)
 app.include_router(render_router)
 

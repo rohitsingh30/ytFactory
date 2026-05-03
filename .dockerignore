@@ -12,19 +12,40 @@ __pycache__/
 
 # Heavy data — never ship to Cloud Run
 data/
-assets/
-sources/
 pipeline/
-agent/
 workers/
-make_shorts.py
-clone_voice.py
-pull_stories.py
-pull_backgrounds.py
-upload.py
+sources/
+agent/
+shared/
 scripts/
 tests/
 docs/
+
+# Per-channel folders: cloud control plane needs config.yaml +
+# variants/ + uploads/ ONLY (for niche routing + dashboard). Heavy
+# bits (cache, scratch, footage, branding, shorts MP4s, learnings,
+# raw stories, narrations, etc.) are gitignored locally too.
+**/cache/
+**/scratch/
+**/footage/
+**/emoji/
+**/cooking_loops/
+**/tts_tests/
+**/cooking_bg_queue.yaml
+**/branding/
+**/shorts/
+**/learnings/
+**/raw/
+**/narrations/
+**/cast/
+**/prompts/
+**/dossier/
+**/shotlist/
+**/specs/
+**/critiques/
+**/songs/
+*/scripts/
+*/SHIPPED.md
 
 # Models
 *.onnx
