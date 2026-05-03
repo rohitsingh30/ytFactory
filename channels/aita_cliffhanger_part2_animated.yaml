@@ -1,0 +1,77 @@
+name: AITA Cliffhanger — Part 2 (Animated)
+source_adapter: reddit_video
+
+# Part 2 of the cliffhanger format — auto-rendered by
+# pipeline/part2_watcher.py once the Part-1 video crosses
+# `part2_trigger.subs_delta` new subscribers (default 100, see the
+# Part-1 cliffhanger YAML).
+#
+# Mechanics:
+#   - `part_two: true` flips pipeline.rewrite._closer_block to the
+#     Part-2 prompt branch: opens with a 1-2 sentence "previously"
+#     recap, continues post-cut, ends with the standard AITA closer.
+#   - The rewriter receives Part-1's narration as additional context
+#     (so Part 2 doesn't repeat scenes) — see pipeline/rewrite.rewrite_part2.
+#   - Visuals reuse Part-1's per-story cast.json for narrator continuity.
+part_two: true
+
+# TTS — same voice as Part 1 for narrator continuity.
+tts_provider: kokoro
+tts_voice: af_bella
+tts_speed: 0.90
+
+# Image gen — same style + steps + seed as the standard aita_animated,
+# so Part 2 looks like a continuation of Part 1 (cast.json reused).
+image_provider: z_image_turbo
+image_style_prefix: |
+  Flat 2D crayon-style children's drawing with thick black outlines and
+  soft pastel fill colors (warm beige, dusty pink, mustard yellow,
+  light blue). Round-headed simple cartoon shapes.
+
+character_description: |
+  A small round-headed character with shoulder-length brown hair, simple
+  dot eyes, a tiny line nose, and a neutral expression. Wears a yellow
+  t-shirt and blue jeans. Always the same character across all images.
+
+opening_image_directives:
+  required_concrete_tokens: 2
+  example_tokens: ["kitchen counter", "phone on table", "red mug",
+                   "leaning forward", "hand on hip", "wooden door"]
+
+image_seed: 42
+image_steps: 4
+image_width: 768
+image_height: 1344
+
+beat_target_s: 2.0
+beat_max_s: 3.2
+
+duration_target_s: [12, 24]
+output_resolution: [1080, 1920]
+
+# Standard AITA closer — Part 2 owns the verdict + LIKE/COMMENT split.
+closer_format: "LIKE if YTA, COMMENT if NTA. AITA?"
+closer_hold_s: 1.0
+
+upload:
+  account: mystoriesanimated
+  privacy: public
+  made_for_kids: false
+  category_id: "24"
+  # Watcher sets --upload explicitly; auto_upload here lets the
+  # subprocess invocation also work without an explicit flag if needed.
+  auto_upload: true
+  tags: [aita, reddit, reddit stories, storytime, animated story, shorts,
+         story time, part 2, finale, the verdict]
+  description_template: |
+    {script.hook}
+
+    📖 Original story: {raw.url}
+    From r/{raw.metadata.subreddit} by u/{raw.metadata.author}.
+
+    ━━━━━━━━━━━━━━━━━━━━
+    👍 LIKE if YTA  ·  💬 COMMENT if NTA
+    🔔 Subscribe for more two-part stories.
+    ━━━━━━━━━━━━━━━━━━━━
+
+    #shorts #aita #reddit #redditstories #storytime #part2 #finale

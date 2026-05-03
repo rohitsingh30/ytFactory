@@ -1,0 +1,133 @@
+# SportsStoriesAnimated — Ranked / Tier-list variant (Top-5 countdown)
+#
+# Manifest-only channel (Path 2 — make_shorts.py autonomous renderer).
+# Same per-beat illustration + footage cut-in pipeline as the parent
+# SportsStoriesAnimated channel. The tier-list FORMAT is enforced by
+# the /make-ranking skill (script structure: 1 hook + 5 ranked beats +
+# 1 closer = 7 beats), NOT by spec template overlays.
+#
+# Visible rank chip ("#5", "#4", ..., "#1") is a renderer addition —
+# pipeline/captions.render_rank_chip + compose.py rank-chip overlay
+# slot, parallel to the existing closer_panel pattern. Toggled by
+# `ranked_chips: true` below; channels without this flag render
+# unchanged. See PIPELINE.md §"Path 2 — rank chips" once that section
+# is added.
+#
+# Pipeline order:
+#   1. /make-ranking writes script.json with ranks[] + footage[] arrays
+#   2. (sports only) wiki_research per ranked moment if needed for
+#      pronunciation; cast.cast_from_dossier composes a minimal cast
+#   3. make_shorts.py — TTS, beats, per-beat AI images, footage cut-ins,
+#      karaoke captions, rank chips (NEW), closer panel
+#
+# Comments-bait closer is the LIKE-if-agree / COMMENT-swap split —
+# survives the 2026 engagement-bait classifier because it asks for a
+# JUDGMENT, not a vote. See project_shorts_algo_2026.md.
+
+name: SportsStoriesAnimatedRanked
+source_adapter: sports_moments_manual
+
+# TTS — same calm Tifo narrator as the parent sports channel; rankings
+# are paced and analytical, not hype.
+tts_provider: kokoro
+tts_voice: am_michael
+tts_speed: 0.98
+
+# Visuals — same minimalist Tifo aesthetic. Different seed so the channel
+# feels visually distinct from non-ranked sports shorts.
+image_provider: z_image_turbo
+image_style_prefix: |
+  hand-drawn editorial line-art illustration, cream parchment background,
+  muted earthy palette of teal burnt-orange and slate, soft halftone
+  shading, single subject focus, simple composition, no text,
+  association football soccer context (never american football or rugby)
+image_seed: 2024  # year UEFA introduced semi-automated offside (the ranking-friendly era of VAR drama)
+image_steps: 4
+
+# Channel-level negatives. Threaded into pipeline/images.py:generate via
+# `extra_negative`. SDXL paths get them in the negative_prompt slot;
+# guidance-distilled paths (mflux, z_image_turbo) fold them as an
+# inline "(avoid: ...)" clause on the positive prompt. Critic 2026-05-02:
+# v0 hook rendered a rugby-shaped ball with garbled text on it; this
+# list is the belt-and-braces fix on top of the image_style_prefix.
+negative_prompt:
+  - "rugby ball"
+  - "oval ball"
+  - "american football"
+  - "gridiron"
+  - "sponsor logo"
+  - "nike swoosh"
+  - "adidas stripes"
+  - "jersey text"
+  - "garbled letters"
+  - "speech bubble text"
+
+# FORCING POSITIVE tokens — appended to every prompt on guidance-distilled
+# providers (z_image_turbo, mflux schnell) which IGNORE negative_prompt
+# and even AMPLIFY avoid-tokens. These positive assertions force the
+# right visual to win. Critic 2026-05-03 (top3-stoppage-goals v1):
+# every animated frame had a rugby ball, american football, or
+# garbled-text speech bubble — the avoid-list backfired. Forcing the
+# soccer ball as a positive token + naming what should NOT be in frame
+# in positive-instruction form (e.g. "no other ball types") tames it.
+force_positive:
+  - "with a single round black-and-white soccer ball only"
+  - "no rugby ball in frame"
+  - "no american football in frame"
+  - "no speech bubble in frame"
+  - "no thought bubble in frame"
+  - "no logo on jersey"
+  - "no text on jersey"
+  - "association football scene"
+
+# OCR-based text-artefact rejection (opt-in). When True, every rendered
+# image is OCR'd; if Tesseract reads >4 alnum chars the gate fails and
+# the orchestrator regens with a bumped seed. Catches the v0 bugs where
+# diffusion put garbled "Aguero/Asurmu" text on the ball, "ADRDES" on a
+# jersey, and "1.4!" in a speech bubble. Requires `brew install tesseract`
+# + `pip install pytesseract` — silently a no-op if neither is on disk.
+quality_gate_ocr: true
+
+# Beat shape — 5 ranks of ~10s + hook ~4s + closer ~5s = ~59s target.
+# 2026 algorithm signal: 50-60s WTR beats <30s. DO NOT shorten total.
+#
+# But beat_max_s MUST stay short — each rank's narration runs ~10s as
+# one long sentence, and rendering that as ONE static image kills
+# retention (DESIGN.md §14 #15: static pixel runs >1s are prohibited).
+# At beat_max_s=4.0 the splitter cuts at comma/colon boundaries so each
+# rank gets 2-3 sub-beats → 2-3 images per rank → visual change every
+# ~3s. Critic finding 2026-05-02 (top5-stoppage-goals v0).
+beat_target_s: 3.0
+beat_max_s: 4.0
+
+# Output
+duration_target_s: [55, 65]
+output_resolution: [1080, 1920]
+closer_hold_s: 1.5
+
+# Closer CTA — judgment-bait, not poll. The 2026 engagement-bait
+# classifier down-weights "vote / poll" CTAs; "agree / swap" passes
+# because it asks for a personal judgment.
+closer_format: "LIKE if you agree, COMMENT who you'd swap in"
+
+# Format flag — make_shorts.py reads this to wire 5 rank-chip overlays
+# at beat[1..5].start. Channels without this flag render unchanged.
+# Implementation lives in pipeline/captions.render_rank_chip +
+# pipeline/compose rank-chip overlay slot (FOLLOW-UP — see
+# tasks/notes elsewhere, not yet implemented).
+ranked_chips: true
+
+# Upload — separate YouTube account/auth from the parent sports channel
+# so analytics on the ranked format stay clean. Auto-upload off until
+# the first 3 ranked Shorts are manually QA'd.
+upload:
+  account: sportstoriesanimated
+  privacy: public
+  made_for_kids: false
+  category_id: "17"  # Sports
+  auto_upload: false
+  min_score: 7
+  tags: [football, soccer, ranking, top5, shorts, tier-list]
+  description_template: |
+    {script.hook}
+    Source: {raw.url}

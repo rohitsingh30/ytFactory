@@ -1,0 +1,27 @@
+kokoro-onnx>=0.4.0
+mlx-whisper>=0.4.0
+diffusers>=0.30.0
+torch>=2.4.0
+transformers>=4.44.0
+accelerate>=0.33.0
+peft>=0.10.0          # required by diffusers for SDXL-Lightning LoRA loading
+Pillow>=10.0.0
+numpy>=2.0.0
+soundfile>=0.12.0
+huggingface_hub>=0.24.0
+
+# Source adapters (stages 1-3)
+requests>=2.31
+youtube-transcript-api>=1.0
+yt-dlp>=2024.10.0   # optional: only needed when YouTube captions absent + you want whisper fallback
+
+# Stage 8 — YouTube upload (pipeline/upload.py)
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.2
+google-auth-httplib2>=0.2
+
+# Optional — opt-in providers (install only when switching the
+# corresponding channel YAML knob)
+# parakeet-mlx>=0.2     # asr_provider: parakeet_mlx        (~600 MB on first use)
+# f5-tts-mlx>=0.2       # tts_provider: f5_tts              (~1.35 GB on first use)
+# imageio>=2.34         # only if you switch animation.py to diffusers' export_to_video

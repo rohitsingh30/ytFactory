@@ -1,0 +1,22 @@
+[
+  {
+    "source_url": "https://www.youtube.com/watch?v=fljAYOAZovc",
+    "source_file": "data/cache/backgrounds/fljAYOAZovc.mp4",
+    "clips": [
+      "assets/cooking_loops/fljayoazovc_00.mp4",
+      "assets/cooking_loops/fljayoazovc_01.mp4",
+      "assets/cooking_loops/fljayoazovc_02.mp4",
+      "assets/cooking_loops/fljayoazovc_03.mp4",
+      "assets/cooking_loops/fljayoazovc_04.mp4",
+      "assets/cooking_loops/fljayoazovc_05.mp4",
+      "assets/cooking_loops/fljayoazovc_06.mp4",
+      "assets/cooking_loops/fljayoazovc_07.mp4",
+      "assets/cooking_loops/fljayoazovc_08.mp4",
+      "assets/cooking_loops/fljayoazovc_09.mp4",
+      "assets/cooking_loops/fljayoazovc_10.mp4",
+      "assets/cooking_loops/fljayoazovc_11.mp4"
+    ],
+    "clip_len_s": 7.0,
+    "face_check": true
+  }
+]

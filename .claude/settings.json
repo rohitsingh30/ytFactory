@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ffprobe *)",
+      "mcp__playwright__browser_snapshot"
+    ]
+  }
+}

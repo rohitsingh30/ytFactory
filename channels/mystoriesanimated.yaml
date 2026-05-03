@@ -1,0 +1,97 @@
+# MyStoriesAnimated — animated Reddit/AITA stories, uploaded to the
+# MyStoriesAnimated YouTube channel.
+#
+# Visual + audio config is identical to aita_animated.yaml — same
+# Z-Image-Turbo flat-crayon aesthetic, same Kokoro TTS defaults — and
+# the only thing this YAML adds on top is the upload: block at the
+# bottom that points Stage 8 at the right Google account and metadata.
+#
+# To switch which YouTube channel this targets:
+#   1. Authenticate the desired Google account once:
+#        .venv/bin/python upload.py auth --account mystoriesanimated
+#   2. (No code change needed — `upload.account` below picks the cached
+#      token from ~/.config/ytfactory/youtube_token_<account>.json.)
+
+name: MyStoriesAnimated
+source_adapter: reddit_video
+
+# ---- TTS ---------------------------------------------------------------
+tts_provider: kokoro
+tts_voice: af_bella
+tts_speed: 0.90
+
+# ---- Image gen ---------------------------------------------------------
+image_provider: z_image_turbo
+image_style_prefix: |
+  Flat 2D crayon-style children's drawing with thick black outlines and
+  soft pastel fill colors (warm beige, dusty pink, mustard yellow,
+  light blue). Round-headed simple cartoon shapes.
+
+# Backwards-compat fallback for stories rendered before per-story cast
+# authoring (pipeline/cast.py writes data/intermediate/<channel>/cast/<slug>.json).
+character_description: |
+  A small round-headed character with shoulder-length brown hair, simple
+  dot eyes, a tiny line nose, and a neutral expression. Wears a yellow
+  t-shirt and blue jeans. Always the same character across all images.
+
+opening_image_directives:
+  required_concrete_tokens: 2
+  example_tokens: ["kitchen counter", "phone on table", "red mug",
+                   "leaning forward", "hand on hip", "wooden door"]
+
+image_seed: 42
+image_steps: 4
+image_width: 768
+image_height: 1344
+
+# ---- Beat / output -----------------------------------------------------
+beat_target_s: 2.0
+beat_max_s: 3.2
+duration_target_s: [10, 20]
+output_resolution: [1080, 1920]
+
+# ---- Closer CTA --------------------------------------------------------
+closer_format: "LIKE if YTA, COMMENT if NTA. AITA?"
+closer_hold_s: 1.0
+
+# ---- Upload (Stage 8) --------------------------------------------------
+#
+# The `account` here picks which OAuth token to use:
+#   ~/.config/ytfactory/youtube_token_<account>.json
+# Run `python upload.py auth --account mystoriesanimated` once,
+# signed into the Google account that owns the MyStoriesAnimated YouTube
+# channel, to populate that file.
+#
+# privacy:
+#   private  — only you can see it (default — review before going live)
+#   unlisted — anyone with the link can see it (use for review by others)
+#   public   — listed publicly the moment YouTube finishes processing
+#
+# YouTube hard limits: title ≤ 100 chars, description ≤ 5000, ≤ 500
+# tags totaling ≤ 500 chars. derive_metadata() truncates as needed.
+upload:
+  account: mystoriesanimated
+  privacy: private
+  made_for_kids: false
+  category_id: "24"          # Entertainment
+  auto_upload: false         # set true to upload at the end of make_shorts.py
+  tags:
+    - aita
+    - reddit
+    - reddit stories
+    - storytime
+    - animated story
+    - shorts
+    - story time
+  description_template: |
+    {script.hook}
+
+    📖 Original story: {raw.url}
+    From r/{raw.metadata.subreddit} by u/{raw.metadata.author}.
+
+    ━━━━━━━━━━━━━━━━━━━━
+    👍 LIKE if YTA  ·  💬 COMMENT if NTA
+    🔔 Subscribe for more animated stories.
+    ━━━━━━━━━━━━━━━━━━━━
+
+    #shorts #aita #reddit #redditstories #storytime

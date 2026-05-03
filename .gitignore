@@ -1,0 +1,35 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+
+# Heavy / runtime data — never commit
+data/cache/
+data/critiques/
+data/intermediate/
+data/scratch/
+data/shorts/
+data/tts_tests/
+data/uploads/
+data/telemetry/
+data/_jobs/
+data/sources/*.mp4
+data/sources/*.mkv
+
+# Model weights
+*.onnx
+*.bin
+*.safetensors
+
+# IDE / agent local state
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.playwright-mcp/
+
+# Build artifacts
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/

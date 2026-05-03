@@ -1,0 +1,53 @@
+name: Wiki Oddities
+source_adapter: wikipedia
+
+# TTS — Kokoro (local)
+tts_provider: kokoro
+tts_voice: am_michael    # warm-curious male narrator suits oddities
+tts_speed: 1.0
+
+# Image gen — Z-Image-Turbo 6B via mflux (MLX-native).
+# Replaced sd_turbo (May 2026): SD-Turbo was trained for 512x512 only
+# and was producing smudgy charcoal-wash output at this channel's 9:16
+# vertical (768x1344). Z-Image-Turbo handles 9:16 natively, hits the
+# "vintage etching" style with detail instead of blur, and runs at
+# ~half Schnell's RAM. See images.validate_provider_config.
+image_provider: z_image_turbo
+image_style_prefix: |
+  vintage encyclopedia illustration, hand-engraved ink etching, sepia
+  ink lines on aged parchment, fine cross-hatching, detailed but
+  minimalist, single subject centered, no text
+image_seed: 137
+image_steps: 4  # See aita_animated.yaml comment. M2 Max compile-disabled path.
+
+# Beat shape
+beat_target_s: 2.0
+beat_max_s: 3.0
+
+# Output
+duration_target_s: [12, 22]
+output_resolution: [1080, 1920]
+
+# Source defaults — what the /make-script skill should pull by default.
+source:
+  page: unusual_deaths_21c   # preset key in sources/wikipedia.py
+  limit: 10
+
+# ---- Upload (Stage 8) — shipped to MyStoriesAnimated YouTube channel.
+upload:
+  account: mystoriesanimated
+  privacy: public
+  made_for_kids: false
+  category_id: "27"          # Education
+  auto_upload: false         # web/server.py passes --upload per render
+  tags: [wiki, oddities, history, weird, animated, shorts, did you know, history shorts]
+  description_template: |
+    {script.hook}
+
+    📖 Source: {raw.url}
+
+    ━━━━━━━━━━━━━━━━━━━━
+    🔔 Subscribe for more strange-but-true stories.
+    ━━━━━━━━━━━━━━━━━━━━
+
+    #shorts #history #wikipedia #didyouknow #oddities
