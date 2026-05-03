@@ -11,13 +11,14 @@ import os
 import unittest
 
 # Set token + memory backend BEFORE importing control.* so the queue factory picks them up.
-os.environ["YTFACTORY_AGENT_TOKEN"] = "test-token-do-not-use-in-prod"
+os.environ["YTFACTORY_AGENT_TOKEN"] = "test-token"
 os.environ["YTFACTORY_QUEUE_BACKEND"] = "memory"
 
 import httpx  # noqa: E402
 
 from control.agent_routes import router as agent_router  # noqa: E402
-from control.queue import get_queue, new_task_id  # noqa: E402
+from control.agent_routes import _LAST_SEEN  # noqa: E402
+from control.queue import get_queue, new_task_id, reset_queue  # noqa: E402
 from agent import runner  # noqa: E402
 from agent.config import AgentConfig  # noqa: E402
 from agent.main import _lease_one  # noqa: E402
@@ -33,6 +34,10 @@ def _make_app():
 
 
 class AgentLeaseProtocolTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        reset_queue()
+        _LAST_SEEN.clear()
+
     async def test_noop_round_trip(self) -> None:
         # Reuse the singleton in-memory queue across server + test.
         q = get_queue()
@@ -47,7 +52,7 @@ class AgentLeaseProtocolTest(unittest.IsolatedAsyncioTestCase):
         cfg = AgentConfig(
             agent_id="test-agent",
             control_url="http://test",
-            auth_token="test-token-do-not-use-in-prod",
+            auth_token="test-token",
             heartbeat_interval_s=15.0,
             lease_caps=("noop",),
             lease_ttl_s=60,
@@ -92,7 +97,7 @@ class AgentLeaseProtocolTest(unittest.IsolatedAsyncioTestCase):
             r = await client.post(
                 "/agent/heartbeat",
                 json=body,
-                headers={"Authorization": "Bearer test-token-do-not-use-in-prod"},
+                headers={"Authorization": "Bearer test-token"},
             )
         self.assertEqual(r.status_code, 200)
         seen = get_last_seen()

@@ -16,7 +16,9 @@ def _utcnow() -> datetime:
 
 
 class TaskKind(str, Enum):
-    # Light (cloud-side) tasks
+    # v1 — single mega-task that runs the full pipeline on the laptop
+    RENDER_SHORT = "render_short"
+    # Light (cloud-side) tasks — used after v1 fine-grained split
     SCRIPT = "script"
     CRITIC = "critic"
     CAST = "cast"
@@ -24,6 +26,7 @@ class TaskKind(str, Enum):
     PULL_STORY = "pull_story"
     WIKI_RESEARCH = "wiki_research"
     YOUTUBE_UPLOAD = "youtube_upload"
+    RESEARCH_HANDOFF = "research_handoff"
     # Heavy (laptop-side) tasks
     IMAGES = "images"
     TTS = "tts"
@@ -35,7 +38,8 @@ class TaskKind(str, Enum):
 
 
 HEAVY_KINDS: frozenset[str] = frozenset(
-    {TaskKind.IMAGES, TaskKind.TTS, TaskKind.ASR, TaskKind.COMPOSE, TaskKind.FOOTAGE}
+    {TaskKind.IMAGES, TaskKind.TTS, TaskKind.ASR, TaskKind.COMPOSE, TaskKind.FOOTAGE,
+     TaskKind.RENDER_SHORT}
 )
 
 
