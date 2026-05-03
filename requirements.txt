@@ -28,6 +28,7 @@ httpx>=0.28
 psutil>=6.0
 google-cloud-firestore>=2.27
 google-cloud-storage>=3.10
+openai>=1.50  # Azure OpenAI client used by control/chat_service.py
 
 # Optional — opt-in providers (install only when switching the
 # corresponding channel YAML knob)

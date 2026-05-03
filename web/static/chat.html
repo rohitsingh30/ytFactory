@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ytFactory — make a Short by chat</title>
+<style>
+  :root {
+    --bg: #0d1117; --fg: #e6edf3; --muted: #8d96a0;
+    --user: #1f6feb; --bot: #21262d; --accent: #f6c177;
+    --ok: #3fb950; --err: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         background: var(--bg); color: var(--fg); }
+  .app { max-width: 720px; margin: 0 auto; height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 16px 20px; border-bottom: 1px solid #30363d; display: flex; justify-content: space-between; align-items: baseline; }
+  header h1 { margin: 0; font-size: 17px; font-weight: 600; }
+  header small { color: var(--muted); font-size: 12px; }
+  #log { flex: 1; overflow-y: auto; padding: 16px 20px; }
+  .msg { margin-bottom: 14px; display: flex; }
+  .msg .bubble { padding: 10px 14px; border-radius: 14px; max-width: 80%; line-height: 1.45; white-space: pre-wrap; word-wrap: break-word; }
+  .msg.user { justify-content: flex-end; }
+  .msg.user .bubble { background: var(--user); color: white; }
+  .msg.bot .bubble { background: var(--bot); }
+  .proposal { border: 1px solid var(--accent); border-radius: 10px; padding: 12px 14px; margin-top: 8px; background: rgba(246,193,119,0.06); }
+  .proposal h3 { margin: 0 0 6px; font-size: 13px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
+  .proposal dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: 13px; }
+  .proposal dt { color: var(--muted); }
+  .proposal dd { margin: 0; }
+  .proposal button { margin-top: 10px; background: var(--accent); color: #1c1c1c; border: 0; padding: 8px 14px;
+                     border-radius: 8px; font-weight: 600; cursor: pointer; }
+  .proposal button:hover { filter: brightness(1.1); }
+  .proposal button:disabled { opacity: 0.5; cursor: not-allowed; }
+  form { display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid #30363d; }
+  input[type=text] { flex: 1; padding: 10px 14px; background: #161b22; color: var(--fg); border: 1px solid #30363d; border-radius: 10px; font: inherit; }
+  input[type=text]:focus { outline: 0; border-color: var(--user); }
+  button[type=submit] { background: var(--user); color: white; border: 0; padding: 10px 18px; border-radius: 10px; font-weight: 600; cursor: pointer; }
+  button[type=submit]:disabled { opacity: 0.5; }
+  .status { color: var(--muted); font-size: 13px; padding: 4px 20px; min-height: 20px; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--err); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>ytFactory</h1>
+    <small id="session-label">no session yet</small>
+  </header>
+  <div id="log"></div>
+  <div class="status" id="status"></div>
+  <form id="form">
+    <input id="input" type="text" placeholder='e.g. "AITA short — daughter says I ruined her wedding"' autocomplete="off" required>
+    <button type="submit" id="send">Send</button>
+  </form>
+</div>
+<script>
+let sessionId = "";
+
+function el(tag, attrs = {}, text) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v;
+    else node.setAttribute(k, v);
+  }
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function appendMsg(role, text) {
+  const log = document.getElementById("log");
+  const row = el("div", { class: `msg ${role}` });
+  const bubble = el("div", { class: "bubble" }, text);
+  row.appendChild(bubble);
+  log.appendChild(row);
+  log.scrollTop = log.scrollHeight;
+  return bubble;
+}
+
+function appendProposal(proposal) {
+  const log = document.getElementById("log");
+  const card = el("div", { class: "proposal" });
+  card.appendChild(el("h3", {}, "draft proposal"));
+  const dl = el("dl");
+  for (const [k, v] of Object.entries(proposal)) {
+    if (v === null || v === undefined || v === "") continue;
+    dl.appendChild(el("dt", {}, k));
+    dl.appendChild(el("dd", {}, String(v)));
+  }
+  card.appendChild(dl);
+  const btn = el("button", { type: "button" }, "Make this Short");
+  btn.onclick = () => confirmProposal(btn, card);
+  card.appendChild(btn);
+  log.appendChild(card);
+  log.scrollTop = log.scrollHeight;
+}
+
+function setStatus(text, kind = "") {
+  const s = document.getElementById("status");
+  s.textContent = text;
+  s.className = "status" + (kind ? " " + kind : "");
+}
+
+async function send(message) {
+  appendMsg("user", message);
+  setStatus("thinking...");
+  document.getElementById("send").disabled = true;
+  try {
+    const r = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, session_id: sessionId }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const body = await r.json();
+    sessionId = body.session_id;
+    document.getElementById("session-label").textContent = "session " + sessionId.slice(0, 8);
+    appendMsg("bot", body.response);
+    if (body.proposal) appendProposal(body.proposal);
+    setStatus(body.configured ? "" : "azure not configured — replies are stubbed", body.configured ? "" : "err");
+  } catch (e) {
+    setStatus(`error: ${e.message}`, "err");
+  } finally {
+    document.getElementById("send").disabled = false;
+  }
+}
+
+async function confirmProposal(btn, card) {
+  btn.disabled = true;
+  setStatus("queueing render job...");
+  try {
+    const r = await fetch("/api/chat/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    const body = await r.json();
+    setStatus(`queued — job ${body.job_id.slice(0, 8)} (task ${body.task_id.slice(0, 8)})`, "ok");
+    card.appendChild(el("p", { class: "ok" },
+      `Queued. Job ID: ${body.job_id}. The laptop agent will pick this up when it has free capacity.`));
+  } catch (e) {
+    setStatus(`error: ${e.message}`, "err");
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const inp = document.getElementById("input");
+  const v = inp.value.trim();
+  if (!v) return;
+  inp.value = "";
+  send(v);
+});
+
+setStatus("hi! tell me what kind of Short you want to make.");
+</script>
+</body>
+</html>

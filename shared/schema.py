@@ -68,6 +68,41 @@ class TaskEnvelope(BaseModel):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class ShortProposal(BaseModel):
+    """What the chat AI extracts from a conversation, ready to enqueue as a job.
+
+    The chat model emits this as a JSON block once it has enough info. The
+    user confirms in the UI, then it becomes a JobEnvelope.
+    """
+
+    channel: str  # mystoriesanimated | sportstoriesanimated | mahabharathindi | auto
+    format: str = "auto"  # animated | text | cooking | cliffhanger | ...
+    topic: str  # one-line description of what the Short is about
+    source_kind: str = "auto"  # reddit_url | wikipedia_topic | user_text | youtube_video | auto
+    source_ref: str | None = None  # the URL / topic / pasted text
+    length_s: int = 55  # target Short length, 50–60s sweet spot per algo memory
+    notes: str = ""  # any extra direction the AI extracted
+
+
+class ChatTurn(BaseModel):
+    """One message in a chat session."""
+
+    role: Literal["system", "user", "assistant"]
+    content: str
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ChatSession(BaseModel):
+    """Persisted chat state. Stored in Firestore under chat_sessions/<session_id>."""
+
+    session_id: str
+    owner_uid: str | None = None
+    messages: list[ChatTurn] = Field(default_factory=list)
+    proposal: ShortProposal | None = None
+    created_at: datetime = Field(default_factory=_utcnow)
+    last_active_at: datetime = Field(default_factory=_utcnow)
+
+
 class JobEnvelope(BaseModel):
     """A user-facing render job; spawns one or more tasks."""
 
