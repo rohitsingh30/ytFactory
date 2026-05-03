@@ -1,0 +1,24 @@
+{
+  "slug": "pointe-du-hoc-1944",
+  "hook": "On D-Day, 225 men were given the most impossible job of the war.",
+  "narration": "Pointe du Hoc. Normandy. 6 June 1944. On top of a hundred-foot cliff sit six German guns, ranged onto Omaha and Utah beaches. If they fire, the invasion is over. The job goes to the 2nd Ranger Battalion. 225 men. The plan: land at the base of the cliff, fire grappling hooks from rocket launchers, and climb. While being shot at. The landing craft arrive forty minutes late. The ropes are soaked and heavy. Many fall short. They climb anyway. Forty-five minutes later, Rangers are on top of the cliff. They reach the gun positions. The casemates are empty. The Germans had moved the guns inland. Two Rangers find them in an orchard and destroy them with thermite. Two days later, only 90 of the 225 are still able to fight. The guns of Pointe du Hoc never fire on the beaches. LIKE to honor those who served. COMMENT below — which battle next?",
+  "title_options": [
+    "The 225 men who climbed a cliff on D-Day",
+    "How the Rangers silenced Hitler's guns",
+    "The most impossible mission of D-Day"
+  ],
+  "source_url": "https://en.wikipedia.org/wiki/Pointe_du_Hoc",
+  "source": "manual:historyrecapped",
+  "footage": [
+    {
+      "match_text": "Fire grappling hooks from rocket launchers",
+      "url": "<TBD: HD restored archival of Rangers landing/scaling Pointe du Hoc — try US National Archives Identifier 38935, IWM, or 'WW2 in Color' YouTube channel. Verify rights/CC license before shipping.>",
+      "in_s": 0.0,
+      "out_s": 12.0,
+      "audio_mix": 0.6,
+      "black_intro": true,
+      "_design_notes": "Pivot at the buildup beat 'Fire grappling hooks from rocket launchers' (the moment the action commits) — NOT at 'Rangers are on top of the cliff' (the payoff). Per feedback_sports_footage_cut_at_pivot.md, match_text = the buildup beat, NOT the punchline. Per feedback_sports_footage_align_to_commentary.md, run whisper on the source clip first; align in_s ~1s before the rocket-launcher firing frame, out_s at the first natural editorial cut (likely a B&W still or title card in restored footage). Per feedback_sports_footage_dont_overshoot.md, cut BEFORE post-call replays kill energy. black_intro=true gives the narrator's setup ('The plan: land at the base of the cliff. Fire grappling hooks from rocket launchers.') a black-screen suspense beat before the archival cuts in."
+    }
+  ],
+  "_pronunciation_notes": "Run wiki_research before TTS to populate pronunciation_dict. Likely needed: 'Pointe du Hoc' (PWAHNT-doo-OHK), 'Rudder' (RUH-der — keep as-is), 'thermite' (THUR-mite). 'casemates' Kokoro will read as KASE-mates which is correct."
+}

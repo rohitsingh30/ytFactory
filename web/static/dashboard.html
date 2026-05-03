@@ -113,12 +113,20 @@ function renderRollup(d) {
   document.getElementById("rollup-views").textContent = fmt(d.totals.views);
   document.getElementById("rollup-likes").textContent = fmt(d.totals.likes);
   document.getElementById("rollup-comments").textContent = fmt(d.totals.comments);
-  if (d.latest_fetch) {
-    document.getElementById("last-fetched").textContent =
-      "live YouTube data · last refreshed " + fmtRel(d.latest_fetch);
+  const lf = document.getElementById("last-fetched");
+  // Local server returns `refresh_error`; prod control plane returns
+  // `warning`. Either means stats may be stale — surface to the user.
+  const err = d.refresh_error || d.warning;
+  if (err) {
+    lf.textContent = "⚠ " + err
+      + (d.latest_fetch ? " · cache last updated " + fmtRel(d.latest_fetch) : "");
+    lf.className = "text-xs text-amber-400";
+  } else if (d.latest_fetch) {
+    lf.textContent = "live YouTube data · last refreshed " + fmtRel(d.latest_fetch);
+    lf.className = "text-xs text-slate-400";
   } else {
-    document.getElementById("last-fetched").textContent =
-      "no stats cached yet — click refresh";
+    lf.textContent = "no stats cached yet — click refresh";
+    lf.className = "text-xs text-slate-400";
   }
 }
 
@@ -222,7 +230,11 @@ async function load(refresh = false) {
 }
 
 document.getElementById("refresh-btn").addEventListener("click", () => load(true));
-load(false);
+// Always hit YouTube on page load + every 60s so view/like/comment counts
+// stay live. videos.list?part=statistics is 1 quota unit per batched call
+// (≤50 ids), so refreshing every minute is well under the 10k daily cap.
+load(true);
+setInterval(() => load(true), 60_000);
 </script>
 </body>
 </html>

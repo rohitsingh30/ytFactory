@@ -1,0 +1,24 @@
+{
+  "slug": "battle-of-britain-few",
+  "hook": "In 1940, Britain stood alone. Then 2,937 men climbed into Spitfires.",
+  "narration": "Summer 1940. France has fallen. The British Army has just been pulled off the beaches at Dunkirk. Hitler's next move is the invasion of Britain. But first the Luftwaffe has to destroy the Royal Air Force. From July to October, the skies over southern England become the front line. The Luftwaffe sends 2,500 aircraft. The RAF puts up 2,937 pilots. They scramble four, five, six times a day. Many are 19 years old. The decisive day comes on 15 September. The Luftwaffe sends two massive raids on London. The RAF puts up every fighter it has. By dusk, German bomber losses are catastrophic. Hitler postpones the invasion. 544 RAF pilots are killed. In the House of Commons, Churchill gives them their name. Never was so much owed by so many to so few. LIKE if you learned something. SUBSCRIBE for more deep dives like this one. Could you have done it at nineteen?",
+  "title_options": [
+    "The 2,937 men who saved Britain",
+    "How the RAF stopped Hitler's invasion",
+    "The summer the Luftwaffe lost the sky"
+  ],
+  "source_url": "https://en.wikipedia.org/wiki/Battle_of_Britain",
+  "source": "manual:historyrecapped",
+  "footage": [
+    {
+      "match_text": "They scramble four, five, six times a day",
+      "url": "https://www.youtube.com/watch?v=agDllH81pb0",
+      "in_s": 1410.0,
+      "out_s": 1422.0,
+      "audio_mix": 0.0,
+      "black_intro": true,
+      "_design_notes": "Source: 'The Battle of Britain and the Role of the Spitfire (1940): Superb Restored and Colorized footage' — 30:36 documentary, 1920x1080 AV1, 25fps. Window 1410-1422s = 12s of pure aerial-combat archival: diving Spitfires, gun-camera tracer hits, banking attacks, smoke trails, cockpit shots — verified via 70-frame 0.5s sample of the window. Pivot at 'They scramble four, five, six times a day' — the buildup beat per feedback_sports_footage_cut_at_pivot.md. Source narration overlaps ('The Spitfires tore into the Bf 109 fighter escorts...' starts at 1416.9s) so audio_mix=0.0 — unlike sports, the source is competing documentary narration not commentator-call payoff; muting it lets our narrator carry the moment. End at 1422.0s, ~5s before the next editorial cut to title cards / maps (per feedback_sports_footage_dont_overshoot.md). black_intro=true gives the 'They scramble...' setup line a beat of black before the dogfight cuts in. v1 upgrade: source a no-narration restored cut (IWM FLM 1487 or British Pathé) to use audio_mix > 0 and let the Merlin engine roar through."
+    }
+  ],
+  "_pronunciation_notes": "Run wiki_research before TTS. Likely needed: 'Luftwaffe' (LOOFT-vah-feh), 'Messerschmitt' (MES-er-shmit), 'Hawker' (keep), 'Bf 109E' Kokoro will struggle — respell as 'Bee Eff one-oh-nine'. 'Sea Lion' Kokoro reads correctly. 'Wehrmacht' would be VEHR-mahkt if added later."
+}

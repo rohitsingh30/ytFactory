@@ -1,0 +1,91 @@
+{
+  "slug": "hathi-raja-kahan-chale",
+  "hook": "Dadi waves at the Junction — \"Suno bachcho, hathi raja aaye!\"",
+  "narration": "Suno bachcho, Junction par hathi raja!\n\nहाथी राजा कहाँ चले। सुंदर सुंदर बेले लाले।\n\nमेरे घर भी आते जाना। केले खाना दूध पीना।\n\nWalking down the marigold lane. Trunk that sways just like a chain. Come on home for milk and bun. Hathi raja, join the fun.\n\nTuk-Tuk barks from the rooftop high. Pug-pug paws beneath blue sky. Jalebi smiles and Laddu waves. Dadi sings as the elephant plays.\n\nहाथी राजा कहाँ चले। सुंदर सुंदर बेले लाले। Laddu, Jalebi, Tuk-Tuk sing। हाथी राजा our friend, our king।\n\nPhir milenge agle station par!",
+  "lyrics": [
+    {
+      "beat": 0,
+      "kind": "spoken_bridge",
+      "lang": "hi",
+      "voice": "dadi",
+      "text": "Suno bachcho, Junction par hathi raja!",
+      "duration_s": 5.0
+    },
+    {
+      "beat": 1,
+      "kind": "sung_verse",
+      "lang": "hi",
+      "verse_label": "verse_1",
+      "text": "हाथी राजा कहाँ चले\nसुंदर सुंदर बेले लाले",
+      "duration_s": 20.0
+    },
+    {
+      "beat": 2,
+      "kind": "sung_verse",
+      "lang": "hi",
+      "verse_label": "verse_2",
+      "text": "मेरे घर भी आते जाना\nकेले खाना दूध पीना",
+      "duration_s": 20.0
+    },
+    {
+      "beat": 3,
+      "kind": "sung_verse",
+      "lang": "en",
+      "verse_label": "bridge",
+      "text": "Walking down the marigold lane\nTrunk that sways just like a chain\nCome on home for milk and bun\nHathi raja, join the fun",
+      "duration_s": 20.0
+    },
+    {
+      "beat": 4,
+      "kind": "sung_verse",
+      "lang": "en",
+      "verse_label": "story_beat",
+      "text": "Tuk-Tuk barks from the rooftop high\nPug-pug paws beneath blue sky\nJalebi smiles and Laddu waves\nDadi sings as the elephant plays",
+      "duration_s": 20.0,
+      "notes": "Mascot ensemble shot — all four mascots in frame with the elephant. Tuk-Tuk on rooftop is the comic visual."
+    },
+    {
+      "beat": 5,
+      "kind": "sung_verse",
+      "lang": "mixed",
+      "verse_label": "chorus",
+      "text": "हाथी राजा कहाँ चले\nसुंदर सुंदर बेले लाले\nLaddu, Jalebi, Tuk-Tuk sing\nहाथी राजा our friend, our king",
+      "duration_s": 20.0
+    },
+    {
+      "beat": 6,
+      "kind": "spoken_bridge",
+      "lang": "hi",
+      "voice": "dadi",
+      "text": "Phir milenge agle station par!",
+      "duration_s": 5.0,
+      "notes": "Outro — Dadi waves goodbye, mascots wave from the train platform. Subscribe + bell icon embedded in the frame per channel closer rule."
+    }
+  ],
+  "suno_prompt": {
+    "style": "Cheerful upbeat children's nursery rhyme. WARM INDIAN FEMALE LEAD VOCALIST FLUENT IN HINDI, authentic desi accent on Hindi words, no English accent on Devanagari. Kids choir on chorus, gentle acoustic guitar + tabla, 120 BPM, warm Hinglish bilingual, picture-book joyful tone.",
+    "lyrics": "[Verse 1]\nहाथी राजा कहाँ चले\nसुंदर सुंदर बेले लाले\n\n[Verse 2]\nमेरे घर भी आते जाना\nकेले खाना दूध पीना\n\n[Bridge — English]\nWalking down the marigold lane\nTrunk that sways just like a chain\nCome on home for milk and bun\nHathi raja, join the fun\n\n[Story Beat — English]\nTuk-Tuk barks from the rooftop high\nPug-pug paws beneath blue sky\nJalebi smiles and Laddu waves\nDadi sings as the elephant plays\n\n[Chorus]\nहाथी राजा कहाँ चले\nसुंदर सुंदर बेले लाले\nLaddu, Jalebi, Tuk-Tuk sing\nहाथी राजा our friend, our king",
+    "notes": "Skip the Dadi spoken bridges from this lyrics block — the pipeline TTS's those separately via Cartesia Arushi (Hinglish female) and stitches them around the Suno song. Suno song should only contain the SUNG verses + chorus."
+  },
+  "title_options": [
+    "Hathi Raja Kahan Chale | हाथी राजा कहाँ चले — Bilingual Kids Rhyme",
+    "Hathi Raja Visits the Junction | Hinglish Nursery Rhyme for Kids",
+    "हाथी राजा The Elephant King | Hindi + English Kids Song"
+  ],
+  "thumbnail_hint": "Laddu (mustard kurta + jeans, curly hair) and Jalebi (twin braids + magenta frock) waving at a cartoon elephant covered in marigold garlands, Tuk-Tuk pug puppy at their feet wagging, Dadi smiling in the back, bright sunny train-platform setting, picture-book aesthetic with the warm Indian palette of marigold + magenta + teal + cream.",
+  "guest_characters": [
+    {
+      "name": "hathi_raja",
+      "description": "Friendly chubby cartoon elephant in flat 2D Pingu/Peppa style: warm yellow-tan body, gold crown between big floppy ears, brick-red embroidered blanket on back, big round smiling eyes, no tusks (kid-safe). Walks with a gentle bounce; marigold garlands around the neck. Always drawn with thick black outlines and soft shading."
+    }
+  ],
+  "metadata": {
+    "rhyme_type": "classic_hindi",
+    "estimated_duration_s": 110.0,
+    "language_split": {"hindi_pct": 50, "english_pct": 50},
+    "mascots_on_screen": ["laddu", "jalebi", "tuk_tuk", "dadi"],
+    "guests_on_screen": ["hathi_raja"]
+  },
+  "source_url": null,
+  "source": "manual:nursery-rhyme-classic"
+}

@@ -21,10 +21,9 @@ scripts/
 tests/
 docs/
 
-# Per-channel folders: cloud control plane needs config.yaml +
-# variants/ + uploads/ ONLY (for niche routing + dashboard). Heavy
-# bits (cache, scratch, footage, branding, shorts MP4s, learnings,
-# raw stories, narrations, etc.) are gitignored locally too.
+# Per-channel folders: cloud control plane needs config.yaml + variants/
+# + uploads/ + raw/ + narrations/ (the last two so the round-robin
+# scheduler can see the backlog). Everything heavy stays out.
 **/cache/
 **/scratch/
 **/footage/
@@ -35,8 +34,6 @@ docs/
 **/branding/
 **/shorts/
 **/learnings/
-**/raw/
-**/narrations/
 **/cast/
 **/prompts/
 **/dossier/

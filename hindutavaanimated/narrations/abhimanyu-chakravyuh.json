@@ -1,0 +1,120 @@
+{
+  "slug": "abhimanyu-chakravyuh",
+  "hook": "महाभारत का सबसे जवान योद्धा सिर्फ़ सोलह साल का था।",
+  "narration": "महाभारत का सबसे जवान योद्धा सिर्फ़ सोलह साल का था। अभिमन्यु। अर्जुन का बेटा।\n\nमाँ के गर्भ में रहते हुए ही उसने चक्रव्यूह में घुसना सीख लिया था। लेकिन बाहर निकलना — वो उसे कभी नहीं सिखाया गया।\n\nकुरुक्षेत्र का तेरहवाँ दिन। कौरवों ने चक्रव्यूह रचा। सात महारथियों ने उसे घेर लिया। एक के बाद एक — अभिमन्यु ने सब को धूल चटा दी। उसके बाण आसमान को चीर रहे थे। लेकिन सात योद्धाओं ने एक साथ हमला किया। उसका रथ, धनुष, तलवार — सब टूट गए। और जब उसके पास सिर्फ़ एक रथ का पहिया बचा — तब भी वो लड़ता रहा। आख़िरी साँस तक।\n\nअधूरा ज्ञान सबसे ख़तरनाक होता है।\n\nजय श्री कृष्णा।\n\nअगर ये कहानी पसंद आई हो, तो कमेंट करें और चैनल को सब्सक्राइब करें।",
+  "narration_prosody": [
+    {"text": "महाभारत का सबसे जवान योद्धा सिर्फ़ सोलह साल का था।", "speed": 0.82, "post_pause_s": 0.10, "tag": "hook-weighty"},
+    {"text": "अभिमन्यु।",                                          "speed": 0.78, "post_pause_s": 0.15, "tag": "name-reveal"},
+    {"text": "अर्जुन का बेटा।",                                    "speed": 0.85, "post_pause_s": 0.50, "tag": "lineage", "paragraph_end": true},
+    {"text": "माँ के गर्भ में रहते हुए ही उसने चक्रव्यूह में घुसना सीख लिया था।", "speed": 0.88, "post_pause_s": 0.10, "tag": "backstory"},
+    {"text": "लेकिन बाहर निकलना — वो उसे कभी नहीं सिखाया गया।",     "speed": 0.82, "post_pause_s": 0.50, "tag": "tension-seed", "paragraph_end": true},
+    {"text": "कुरुक्षेत्र का तेरहवाँ दिन।",                          "speed": 0.85, "post_pause_s": 0.10, "tag": "scene-set"},
+    {"text": "कौरवों ने चक्रव्यूह रचा।",                            "speed": 0.92, "post_pause_s": 0.05, "tag": "scene-build"},
+    {"text": "सात महारथियों ने उसे घेर लिया।",                      "speed": 0.88, "post_pause_s": 0.10, "tag": "stakes"},
+    {"text": "एक के बाद एक — अभिमन्यु ने सब को धूल चटा दी।",      "speed": 0.98, "post_pause_s": 0.05, "tag": "action-escalate"},
+    {"text": "उसके बाण आसमान को चीर रहे थे।",                      "speed": 0.98, "post_pause_s": 0.10, "tag": "action-sustain"},
+    {"text": "लेकिन सात योद्धाओं ने एक साथ हमला किया।",            "speed": 0.92, "post_pause_s": 0.10, "tag": "turn-drop-tempo"},
+    {"text": "उसका रथ, धनुष, तलवार — सब टूट गए।",                 "speed": 0.85, "post_pause_s": 0.10, "tag": "loss-collapsed"},
+    {"text": "और जब उसके पास सिर्फ़ एक रथ का पहिया बचा — तब भी वो लड़ता रहा।", "speed": 0.82, "post_pause_s": 0.10, "tag": "climax-slow"},
+    {"text": "आख़िरी साँस तक।",                                    "speed": 0.78, "post_pause_s": 0.60, "tag": "death-let-sit", "paragraph_end": true},
+    {"text": "अधूरा ज्ञान सबसे ख़तरनाक होता है।",                  "speed": 0.78, "post_pause_s": 0.50, "tag": "lesson-verdict", "paragraph_end": true},
+    {"text": "जय श्री कृष्णा।",                                     "speed": 0.85, "post_pause_s": 0.40, "tag": "blessing", "paragraph_end": true},
+    {"text": "अगर ये कहानी पसंद आई हो, तो कमेंट करें और चैनल को सब्सक्राइब करें।", "speed": 0.95, "post_pause_s": 0.0, "tag": "cta-warm"}
+  ],
+  "title_options": [
+    "अभिमन्यु — महाभारत का सबसे जवान योद्धा | सोलह साल में सात महारथी",
+    "चक्रव्यूह में अभिमन्यु — अधूरा ज्ञान सबसे ख़तरनाक है",
+    "जब 16 साल के लड़के ने कौरवों के 7 महारथियों को धूल चटाई 🏹"
+  ],
+  "beats": [
+    {
+      "i": 0,
+      "duration_s": 3.5,
+      "narration": "महाभारत का सबसे जवान योद्धा सिर्फ़ सोलह साल का था।",
+      "scene_kind": "hook",
+      "caption_overlay": null
+    },
+    {
+      "i": 1,
+      "duration_s": 4.5,
+      "narration": "अभिमन्यु। अर्जुन का बेटा।",
+      "scene_kind": "intro",
+      "caption_overlay": null
+    },
+    {
+      "i": 2,
+      "duration_s": 5.5,
+      "narration": "माँ के गर्भ में रहते हुए ही उसने चक्रव्यूह में घुसना सीख लिया था।",
+      "scene_kind": "backstory",
+      "caption_overlay": null
+    },
+    {
+      "i": 3,
+      "duration_s": 4.5,
+      "narration": "लेकिन बाहर निकलना — वो उसे कभी नहीं सिखाया गया।",
+      "scene_kind": "tension_seed",
+      "caption_overlay": null
+    },
+    {
+      "i": 4,
+      "duration_s": 5.0,
+      "narration": "कुरुक्षेत्र का तेरहवाँ दिन। कौरवों ने चक्रव्यूह रचा।",
+      "scene_kind": "scene_setup",
+      "caption_overlay": null
+    },
+    {
+      "i": 5,
+      "duration_s": 4.0,
+      "narration": "सात महारथियों ने उसे घेर लिया।",
+      "scene_kind": "stakes",
+      "caption_overlay": null
+    },
+    {
+      "i": 6,
+      "duration_s": 5.5,
+      "narration": "एक के बाद एक — अभिमन्यु ने सब को धूल चटा दी। उसके बाण आसमान को चीर रहे थे।",
+      "scene_kind": "rising_action",
+      "caption_overlay": null
+    },
+    {
+      "i": 7,
+      "duration_s": 5.5,
+      "narration": "लेकिन सात योद्धाओं ने एक साथ हमला किया। उसका रथ टूटा, धनुष टूटा, तलवार टूटी।",
+      "scene_kind": "turn",
+      "caption_overlay": null
+    },
+    {
+      "i": 8,
+      "duration_s": 6.0,
+      "narration": "और जब उसके पास सिर्फ़ एक रथ का पहिया बचा — तब भी वो लड़ता रहा। आख़िरी साँस तक।",
+      "scene_kind": "climax",
+      "caption_overlay": null,
+      "notes": "Visual centerpiece — Abhimanyu lifting the broken chariot wheel. THE iconic frame of this Short."
+    },
+    {
+      "i": 9,
+      "duration_s": 4.0,
+      "narration": "अधूरा ज्ञान सबसे ख़तरनाक होता है।",
+      "scene_kind": "lesson",
+      "caption_overlay": "अधूरा ज्ञान सबसे ख़तरनाक होता है।",
+      "notes": "Lesson punchline — bold Devanagari overlay so the takeaway lands even on mute."
+    },
+    {
+      "i": 10,
+      "duration_s": 6.0,
+      "narration": "अगर ये कहानी आपके दिल को छू गई — जय श्री कृष्णा कमेंट करें और चैनल को सब्सक्राइब ज़रूर करें।",
+      "scene_kind": "cta_embedded",
+      "caption_overlay": null,
+      "notes": "Per feedback_closer_caption_style — CTA drawn INTO last beat's image."
+    }
+  ],
+  "metadata": {
+    "episode": "अभिमन्यु का चक्रव्यूह — महाभारत, द्रोण पर्व",
+    "epic_section": "Drona Parva (Book 7), days 13",
+    "characters_on_screen": ["abhimanyu"],
+    "lesson_hindi": "अधूरा ज्ञान सबसे ख़तरनाक होता है।",
+    "estimated_duration_s": 54.0
+  },
+  "source_url": null,
+  "source": "manual:mahabharat-drona-parva-13"
+}

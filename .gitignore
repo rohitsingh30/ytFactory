@@ -54,11 +54,8 @@ data/scratch/
 # shipped to YouTube (with video IDs); that's the canonical record.
 **/shorts/*.mp4
 
-# Per-slug content — regenerable by re-running their producer.
-# Repo tracks CODE + CONFIG + DOCS only; per-slug content lives outside git.
-# Keep raw/ stories on disk for the curator's record but don't bloat git.
-**/raw/**/*.json
-**/narrations/**/*.json
+# Per-slug regenerable LLM-authored content — opt-out of tracking
+# (cast/prompts/dossier/shotlist regen in seconds; transcripts in ~5min).
 **/cast/**/*.json
 **/prompts/**/*.json
 **/dossier/**/*.json
@@ -66,9 +63,11 @@ data/scratch/
 **/footage/transcripts/**/*.json
 **/specs/**/*.yaml
 **/cooking_bg_queue.yaml
-# uploads/ records (small JSON with video_id + title + thumbnail URL etc.)
-# ARE tracked — the cloud dashboard reads them to know which videos to
-# fetch live stats for. They're tiny (~600 bytes each) and curated.
+
+# raw/, narrations/, uploads/ — tracked. They're small (avg ~1.5KB each),
+# curated, and the cloud scheduler reads them to find unrendered work
+# (raw + narrations) and which videos to display stats for (uploads).
+# Without these the cloud control plane can't see the backlog.
 
 # Screenshots / branding renders — both are artifacts, regenerable via
 # their producer (UI tour for screenshots, branding.py for icons/banners).

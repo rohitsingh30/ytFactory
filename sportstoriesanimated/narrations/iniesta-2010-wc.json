@@ -1,0 +1,23 @@
+{
+  "slug": "iniesta-2010-wc",
+  "hook": "Spain had never won a World Cup. Then this happened.",
+  "narration": "Soccer City Stadium, Johannesburg. The 2010 World Cup Final. Spain versus the Netherlands. Spain had never won a World Cup. Fourteen yellow cards in one final. The match was brutal. Through 90 minutes, zero-zero. Extra time. The 116th minute. Last touch of the World Cup. Iniesta lifts his shirt. Dani Jarque siempre con nosotros. Spain are World Champions for the first time. LIKE if you remember watching this live. COMMENT your favourite World Cup moment.",
+  "title_options": [
+    "The goal that ended 76 years of waiting",
+    "How Iniesta won Spain their first World Cup",
+    "The 116th minute that made Spain champions"
+  ],
+  "source_url": "https://en.wikipedia.org/wiki/2010_FIFA_World_Cup_Final",
+  "source": "manual:sports_moments",
+  "footage": [
+    {
+      "match_text": "Last touch",
+      "url": "https://www.youtube.com/watch?v=3pCPQDxZzfY",
+      "in_s": 0.0,
+      "out_s": 14.5,
+      "audio_mix": 0.75,
+      "black_intro": true,
+      "_design_notes": "Pivot at 'Last touch of the World Cup' (the buildup beat). Source clip 3pCPQDxZzfY HD 1920x1080 — full English Sky Sports commentary arc verified via whisper: 'Iniesta's in the middle all alone, if Fernando Torres can find him, it's stabbed away uncomfortably to Fabregas, surely now, surely now, Spain have won the World Cup for the first time in history.' Window 0.0-14.5s captures the entire call from buildup through 'history' (last word ends at t=14.28). black_intro=true gives the narrator's setup line a black-screen suspense beat before the broadcast cuts in."
+    }
+  ]
+}

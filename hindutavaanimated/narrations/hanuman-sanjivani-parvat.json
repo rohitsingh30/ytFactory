@@ -1,0 +1,52 @@
+{
+  "slug": "hanuman-sanjivani-parvat",
+  "hook": "रामायण की एक रात — जब एक भक्त ने पूरा हिमालय हाथ में उठा लिया।",
+  "narration": "रामायण की एक रात — जब एक भक्त ने पूरा हिमालय हाथ में उठा लिया।\n\nहनुमान। सूर्य के शिष्य, वायु के पुत्र। पवनपुत्र।\n\nलंका का युद्ध। राम और रावण आमने-सामने। तभी एक तीर — और लक्ष्मण गिर पड़े।\n\nवैद्य सुषेण ने कहा — एक ही रास्ता है। हिमालय पर द्रोणागिरी पर्वत पर एक संजीवनी बूटी मिलेगी। पर सूर्योदय से पहले लानी होगी।\n\nहनुमान ने उड़ान भरी।\n\nपर्वत पर पहुँचे, तो हज़ारों जड़ी-बूटियाँ चमक रही थीं। संजीवनी कौन सी? पहचान नहीं हो रही थी।\n\nएक पल भी नहीं सोचा।\n\nपूरा पर्वत ही उठा लिया।\n\nऔर लक्ष्मण की जान बच गई।\n\nजब रास्ता न दिखे — तो हिम्मत से पूरा पहाड़ उठा लो।\n\nअगर ये कथा पसंद आई हो — Like करें, अपने मन की बात Comment में लिखें, और हमारे चैनल को Subscribe करें ताकि ऐसी और कथाएँ आपको मिलती रहें। जय श्री राम।",
+  "narration_prosody": [
+    {"text": "रामायण की एक रात — जब एक भक्त ने पूरा हिमालय हाथ में उठा लिया।", "speed": 0.82, "post_pause_s": 0.40, "tag": "hook-weighty", "paragraph_end": true},
+    {"text": "हनुमान।",                                                       "speed": 0.78, "post_pause_s": 0.20, "tag": "name-reveal"},
+    {"text": "सूर्य के शिष्य, वायु के पुत्र। पवनपुत्र।",                       "speed": 0.85, "post_pause_s": 0.50, "tag": "lineage", "paragraph_end": true},
+    {"text": "लंका का युद्ध। राम और रावण आमने-सामने।",                         "speed": 0.88, "post_pause_s": 0.20, "tag": "scene-set"},
+    {"text": "तभी एक तीर — और लक्ष्मण गिर पड़े।",                              "speed": 0.78, "post_pause_s": 0.50, "tag": "tragic-turn", "paragraph_end": true},
+    {"text": "वैद्य सुषेण ने कहा — एक ही रास्ता है।",                          "speed": 0.85, "post_pause_s": 0.15, "tag": "diagnosis"},
+    {"text": "हिमालय पर द्रोणागिरी पर्वत पर एक संजीवनी बूटी मिलेगी।",          "speed": 0.85, "post_pause_s": 0.10, "tag": "quest"},
+    {"text": "पर सूर्योदय से पहले लानी होगी।",                                  "speed": 0.82, "post_pause_s": 0.50, "tag": "deadline", "paragraph_end": true},
+    {"text": "हनुमान ने उड़ान भरी।",                                          "speed": 0.95, "post_pause_s": 0.50, "tag": "departure-energetic", "paragraph_end": true},
+    {"text": "पर्वत पर पहुँचे, तो हज़ारों जड़ी-बूटियाँ चमक रही थीं।",           "speed": 0.90, "post_pause_s": 0.10, "tag": "obstacle"},
+    {"text": "संजीवनी कौन सी? पहचान नहीं हो रही थी।",                          "speed": 0.85, "post_pause_s": 0.50, "tag": "obstacle-confusion", "paragraph_end": true},
+    {"text": "एक पल भी नहीं सोचा।",                                            "speed": 0.78, "post_pause_s": 0.40, "tag": "decision-beat", "paragraph_end": true},
+    {"text": "पूरा पर्वत ही उठा लिया।",                                        "speed": 0.74, "post_pause_s": 0.50, "tag": "centerpiece-the-lift", "paragraph_end": true},
+    {"text": "और लक्ष्मण की जान बच गई।",                                      "speed": 0.82, "post_pause_s": 0.50, "tag": "rescue", "paragraph_end": true},
+    {"text": "जब रास्ता न दिखे — तो हिम्मत से पूरा पहाड़ उठा लो।",             "speed": 0.78, "post_pause_s": 0.50, "tag": "lesson-verdict", "paragraph_end": true},
+    {"text": "अगर ये कथा पसंद आई हो — Like करें, अपने मन की बात Comment में लिखें, और हमारे चैनल को Subscribe करें ताकि ऐसी और कथाएँ आपको मिलती रहें।", "speed": 0.92, "post_pause_s": 0.20, "tag": "cta-three-action"},
+    {"text": "जय श्री राम।",                                                  "speed": 0.78, "post_pause_s": 0.0, "tag": "blessing"}
+  ],
+  "title_options": [
+    "हनुमान ने पूरा हिमालय उठा लिया | संजीवनी बूटी की कथा 🙏",
+    "जब लक्ष्मण मरने वाले थे — हनुमान ने एक पल में पहाड़ उठा लिया",
+    "रामायण की वो रात जब हनुमान ने हिमालय हाथ में उठा लिया 🏔️"
+  ],
+  "beats": [
+    {"i": 0,  "duration_s": 4.5, "narration": "रामायण की एक रात — जब एक भक्त ने पूरा हिमालय हाथ में उठा लिया।", "scene_kind": "hook"},
+    {"i": 1,  "duration_s": 4.5, "narration": "हनुमान। सूर्य के शिष्य, वायु के पुत्र। पवनपुत्र।", "scene_kind": "intro"},
+    {"i": 2,  "duration_s": 4.0, "narration": "लंका का युद्ध। राम और रावण आमने-सामने।", "scene_kind": "scene_setup"},
+    {"i": 3,  "duration_s": 3.5, "narration": "तभी एक तीर — और लक्ष्मण गिर पड़े।", "scene_kind": "tragic_turn", "notes": "Lakshman fallen on battlefield, Ram in anguish — visual stakes set."},
+    {"i": 4,  "duration_s": 5.5, "narration": "वैद्य सुषेण ने कहा — एक ही रास्ता है। हिमालय पर द्रोणागिरी पर्वत पर एक संजीवनी बूटी मिलेगी। पर सूर्योदय से पहले लानी होगी।", "scene_kind": "quest_setup"},
+    {"i": 5,  "duration_s": 3.0, "narration": "हनुमान ने उड़ान भरी।", "scene_kind": "departure", "notes": "Energetic — Hanuman launching into the sky"},
+    {"i": 6,  "duration_s": 5.0, "narration": "पर्वत पर पहुँचे, तो हज़ारों जड़ी-बूटियाँ चमक रही थीं। संजीवनी कौन सी? पहचान नहीं हो रही थी।", "scene_kind": "obstacle"},
+    {"i": 7,  "duration_s": 2.5, "narration": "एक पल भी नहीं सोचा।", "scene_kind": "decision_beat"},
+    {"i": 8,  "duration_s": 6.5, "narration": "पूरा पर्वत ही उठा लिया।", "scene_kind": "centerpiece", "notes": "THE ICONIC FRAME — Hanuman flying with the entire mountain in one hand. Most polished image of the whole Short."},
+    {"i": 9,  "duration_s": 3.5, "narration": "और लक्ष्मण की जान बच गई।", "scene_kind": "rescue"},
+    {"i": 10, "duration_s": 5.0, "narration": "जब रास्ता न दिखे — तो हिम्मत से पूरा पहाड़ उठा लो।", "scene_kind": "lesson", "caption_overlay": "जब रास्ता न दिखे — हिम्मत से पूरा पहाड़ उठा लो।"},
+    {"i": 11, "duration_s": 8.5, "narration": "अगर ये कथा पसंद आई हो — Like करें, Comment में लिखें, Subscribe करें। जय श्री राम।", "scene_kind": "cta_three_action", "notes": "Hanuman in devotional namaste pose. NO TEXT in the image — closer overlay panel will render LIKE / COMMENT / SUBSCRIBE post-compose."}
+  ],
+  "metadata": {
+    "episode": "हनुमान और संजीवनी पर्वत",
+    "epic_section": "Ramayan, Yuddha Kanda — Lakshmana wounded by Ravan's son Indrajit",
+    "characters_on_screen": ["hanuman", "lakshman", "ram", "sushena"],
+    "lesson_hindi": "जब रास्ता न दिखे — तो हिम्मत से पूरा पहाड़ उठा लो।",
+    "estimated_duration_s": 56.0
+  },
+  "source_url": null,
+  "source": "manual:ramayan-yuddha-kanda-sanjeevani"
+}

@@ -1539,11 +1539,22 @@ async def dashboard_videos(refresh: bool = False) -> dict:
     ``data/research/analytics/<slug>.json``.
     """
     from pipeline import youtube_stats as _yt
+    refresh_summary: dict | None = None
+    refresh_error: str | None = None
     if refresh:
         try:
-            _yt.fetch_all(quiet=True)
+            refresh_summary = _yt.fetch_all(quiet=True)
         except Exception as e:
-            return {"error": f"refresh failed: {e}", "channels": []}
+            refresh_error = f"refresh failed: {e}"
+        else:
+            # fetch_all swallows per-account auth / HTTP errors and just
+            # records them in `missing_auth`. Surface that to the UI so the
+            # dashboard doesn't silently keep showing stale numbers.
+            if refresh_summary and refresh_summary.get("missing_auth"):
+                refresh_error = (
+                    f"{refresh_summary['missing_auth']} videos skipped — "
+                    "no YouTube auth or API error (re-auth via /auth/youtube)"
+                )
 
     by_channel: dict[str, list[dict]] = {}
     totals = {"videos": 0, "views": 0, "likes": 0, "comments": 0}
@@ -1606,6 +1617,8 @@ async def dashboard_videos(refresh: bool = False) -> dict:
         "channels": channels,
         "totals": totals,
         "latest_fetch": latest_fetch,
+        "refresh_error": refresh_error,
+        "refresh_summary": refresh_summary,
     }
 
 

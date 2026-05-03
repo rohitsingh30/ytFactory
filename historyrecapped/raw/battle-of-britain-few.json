@@ -1,0 +1,19 @@
+{
+  "slug": "battle-of-britain-few",
+  "title": "The Few — Battle of Britain, summer 1940. 2,937 RAF pilots stop the Luftwaffe and end Hitler's invasion plan.",
+  "body": "Summer 1940. France has fallen. The British Army has just been pulled off the beaches at Dunkirk leaving most of its tanks and guns behind. The next step in Hitler's plan is Operation Sea Lion — the invasion of Britain. But before German barges can cross the English Channel, Hermann Göring's Luftwaffe has to wipe out the Royal Air Force. From July to October 1940, the skies over southern England become the front line. The Luftwaffe sends 2,500 aircraft — Messerschmitt Bf 109s and 110s, Heinkel and Dornier bombers. The RAF puts up around 1,960 aircraft, mostly Hurricanes and Spitfires, flown by 2,937 pilots. They are exhausted. They scramble four, five, six times a day. Many are 19, 20 years old. Some are Polish and Czech pilots who escaped the fall of Europe; the Polish 303 Squadron will end the battle as the highest-scoring unit in Fighter Command. The decisive day comes on 15 September 1940 — Battle of Britain Day. The Luftwaffe sends two massive raids on London. The RAF puts up every fighter it has. By dusk, German bomber losses are catastrophic. Two days later, Hitler postpones Sea Lion indefinitely. By the time the battle ends, 544 RAF pilots have been killed and 422 wounded. On 20 August, with the battle still raging, Winston Churchill stands up in the House of Commons and gives them their name: 'Never in the field of human conflict was so much owed by so many to so few.'",
+  "source": "manual:historyrecapped",
+  "url": "https://en.wikipedia.org/wiki/Battle_of_Britain",
+  "metadata": {
+    "date_range": "1940-07-10 to 1940-10-31",
+    "decisive_day": "1940-09-15",
+    "raf_pilots": "2,937",
+    "raf_killed": "544",
+    "raf_wounded": "422",
+    "luftwaffe_aircraft": "~2,500",
+    "raf_aircraft": "~1,960",
+    "key_aircraft": ["Supermarine Spitfire Mk I", "Hawker Hurricane Mk I", "Messerschmitt Bf 109E"],
+    "named_units": ["No. 303 (Polish) Squadron", "No. 11 Group RAF Fighter Command"],
+    "outcome": "Operation Sea Lion postponed indefinitely on 17 September 1940"
+  }
+}
