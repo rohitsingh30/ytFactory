@@ -139,10 +139,19 @@ async def run_agent(cfg: AgentConfig | None = None) -> None:
         except NotImplementedError:
             pass  # not available on Windows
 
+    # N parallel lease loops (each lease loop is a single-task pipeline,
+    # so N loops = N concurrent tasks). Default 2: matches the scheduler's
+    # MAX_HEAVY_IN_FLIGHT and lets two renders run in parallel — fine on
+    # M2 Max for the 2-render case (one in image-gen / one in TTS or
+    # compose at any moment); GPU contention is bounded by the OS-level
+    # mflux serialisation and Metal will queue rather than crash at 2.
+    # Bump higher only on machines with more headroom.
+    n = max(1, cfg.parallelism)
+    logger.info("running %d parallel lease worker(s)", n)
     async with httpx.AsyncClient() as client:
         await asyncio.gather(
             _heartbeat_loop(cfg, client, stop),
-            _lease_loop(cfg, client, stop),
+            *(_lease_loop(cfg, client, stop) for _ in range(n)),
         )
 
 

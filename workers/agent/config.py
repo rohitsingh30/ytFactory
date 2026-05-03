@@ -14,6 +14,7 @@ class AgentConfig:
     heartbeat_interval_s: float
     lease_caps: tuple[str, ...]
     lease_ttl_s: int
+    parallelism: int  # number of concurrent lease loops on this agent
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -43,4 +44,5 @@ class AgentConfig:
             heartbeat_interval_s=float(os.environ.get("YTFACTORY_HEARTBEAT_S", "15")),
             lease_caps=caps,
             lease_ttl_s=int(os.environ.get("YTFACTORY_LEASE_TTL_S", "300")),
+            parallelism=int(os.environ.get("YTFACTORY_AGENT_PARALLELISM", "2")),
         )

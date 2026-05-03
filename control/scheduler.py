@@ -46,6 +46,14 @@ CHANNEL_ROTATION: list[str] = [
     "sportstoriesanimated",
 ]
 
+# How many heavy tasks the scheduler is willing to keep in pipeline
+# (queued + leased). The agent still runs ONE at a time on the GPU
+# (running 2 concurrent mflux sessions crashes Metal — per the
+# `gpu_one_render_at_a_time` rule), but having a second task already
+# leased-or-queued means zero idle gap between renders. Set higher if
+# you ever add a second laptop/agent.
+MAX_HEAVY_IN_FLIGHT = int(os.environ.get("YTFACTORY_MAX_HEAVY_IN_FLIGHT", "2"))
+
 logger = logging.getLogger(__name__)
 
 _MEM_STATE: dict = {}
@@ -57,31 +65,33 @@ def _backend() -> str:
 
 # -------- in-flight check ----------------------------------------------------
 
-def _has_in_flight_heavy() -> bool:
-    """True if any HEAVY task (queued or leased) exists in the queue."""
+def _count_in_flight_heavy() -> int:
+    """How many HEAVY tasks (queued or leased) are in the queue right now."""
     if _backend() == "memory":
         q = get_queue()
-        # _tasks is private but the in-memory backend exposes it; this
-        # only runs in dev/tests.
-        for t in getattr(q, "_tasks", {}).values():
-            if t.kind in HEAVY_KINDS and t.status in (TaskStatus.QUEUED, TaskStatus.LEASED):
-                return True
-        return False
+        return sum(
+            1 for t in getattr(q, "_tasks", {}).values()
+            if t.kind in HEAVY_KINDS and t.status in (TaskStatus.QUEUED, TaskStatus.LEASED)
+        )
 
     from google.cloud import firestore  # noqa: PLC0415
     client = firestore.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod"))
     col = client.collection("tasks")
     heavy_kind_values = [k.value for k in HEAVY_KINDS]
-    # Two queries (one per status) — Firestore doesn't combine `in` filters
-    # on different fields cheaply, and a single status `in` query with a
-    # short list is fine.
+    n = 0
     for status_val in (TaskStatus.QUEUED.value, TaskStatus.LEASED.value):
         q = (col.where("status", "==", status_val)
                 .where("kind", "in", heavy_kind_values)
-                .limit(1))
-        if any(True for _ in q.stream()):
-            return True
-    return False
+                .limit(MAX_HEAVY_IN_FLIGHT + 1))
+        n += sum(1 for _ in q.stream())
+        if n >= MAX_HEAVY_IN_FLIGHT:
+            break
+    return n
+
+
+def _has_in_flight_heavy() -> bool:
+    """Back-compat shim — True iff at least 1 heavy task is in flight."""
+    return _count_in_flight_heavy() > 0
 
 
 # -------- backlog walk -------------------------------------------------------
@@ -152,12 +162,24 @@ def _save_state(state: dict) -> None:
 
 def tick() -> dict:
     """Run one scheduler tick. Returns a small dict describing what
-    happened — surfaced in the /api/scheduler/tick HTTP response."""
-    if _has_in_flight_heavy():
+    happened — surfaced in the /api/scheduler/tick HTTP response.
+
+    Pipeline depth is bounded by ``MAX_HEAVY_IN_FLIGHT`` (default 2):
+    queue stays topped up so the agent has the next task waiting the
+    instant it finishes the current one, but never enough in flight
+    to make a second GPU process try to grab Metal.
+    """
+    in_flight = _count_in_flight_heavy()
+    if in_flight >= MAX_HEAVY_IN_FLIGHT:
         return {
             "action": "skipped",
-            "reason": "heavy_task_in_flight",
-            "explain": "Wait for the current render to finish; only one heavy task at a time so the GPU doesn't OOM.",
+            "reason": "pipeline_full",
+            "in_flight": in_flight,
+            "max_in_flight": MAX_HEAVY_IN_FLIGHT,
+            "explain": (
+                f"{in_flight} heavy task(s) already queued/leased — capped at "
+                f"{MAX_HEAVY_IN_FLIGHT} so the GPU doesn't OOM. Tick again when one finishes."
+            ),
         }
 
     state = _read_state()

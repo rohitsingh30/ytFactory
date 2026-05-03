@@ -12,9 +12,11 @@ keys off it). Channel scope EXPANDED 2026-05-03 from "Mahabharat-only" to
 ॐ icon was chosen specifically for this brand-flexibility.
 
 ## Status (2026-05-03)
-- 2 episodes SHIPPED, both public:
-  - **abhimanyu-chakravyuh** — https://youtu.be/Tf92NmOA0lw — "जब 16 साल के लड़के ने कौरवों के 7 महारथियों को धूल चटाई" — 41s, Mahabharat
-  - **hanuman-sanjivani-parvat** — https://youtu.be/nIEq7zKUg9E — "हनुमान ने पूरा हिमालय उठा लिया | संजीवनी बूटी की कथा" — 44s, Ramayan, with **Suno-generated devotional BGM** under narration at 12% + LIKE/COMMENT/SUBSCRIBE closer panel
+- 3 episodes SHIPPED, all public:
+  - **abhimanyu-chakravyuh** — https://youtu.be/Tf92NmOA0lw — "जब 16 साल के लड़के ने कौरवों के 7 महारथियों को धूल चटाई" — 41s, Mahabharat. First viral signal — user reports it "did well."
+  - **hanuman-sanjivani-parvat** — https://youtu.be/nIEq7zKUg9E — "हनुमान ने पूरा हिमालय उठा लिया | संजीवनी बूटी की कथा" — 44s, Ramayan, with **Suno-generated devotional BGM** under narration at 12% + LIKE/COMMENT/SUBSCRIBE closer panel. No traction yet (user: "not yet").
+  - **eklavya-guru-dakshina** — https://youtu.be/-JXKUhb39tE — "एकलव्य ने अपना अँगूठा काट कर गुरु-दक्षिणा दी | महाभारत की सबसे मार्मिक कथा" — 60.7s, Mahabharat, BGM + closer panel. Just shipped.
+- **Karna kavach-kundal**: image render in flight as of 2026-05-03. ~50s estimated, 13 beats.
 - 1 subscriber
 
 ## Owner / Auth
@@ -85,10 +87,43 @@ episodes. The actual compose flow is `/tmp/compose_episode.py`-style
 - icon_01_krishna_mukut, icon_02_chakravyuh_wheel, banner_02_krishna_chariot — alternates kept for future use
 
 ## Episode candidates queued
-Mahabharat: Eklavya guru-dakshina, Karna kavach-kundal daan, Bheeshma iccha-mrityu, Draupadi cheer-haran, Ashwatthama ka shraap.
-Ramayan: Lakshman-rekha, Hanuman ke Sita-mata se milne (Ashok Vatika), Ravan ke das mukh, Shabri ke ber.
+Mahabharat: Bheeshma iccha-mrityu, Draupadi cheer-haran, Ashwatthama ka shraap, Yudhishthir-yaksh-prashn.
+Ramayan: Lakshman-rekha, Hanuman-Sita-mata-Ashok-Vatika, Ravan ke das mukh, Shabri ke ber.
 Krishna: Kaaliya naag-mardan, Govardhan parvat, Putana vadh, Makhan chor leelas.
-For each, copy the hanuman triple (narrations/cast/prompts) as template.
+For each, copy the eklavya triple (narrations/cast/prompts) as template — it's the cleanest reference (12 beats, 60s, strong centerpiece, no Whisper undercount, no GPU-timeout artefacts after retry).
+
+## Validated story-arc template (use for every new episode)
+The 3-shipped-episodes pattern that works:
+
+| Beat # | Role | Duration |
+|---|---|---|
+| 0 | Hook — "जब X ने Y कर दिया" formula (provocative one-liner that promises a payoff) | 3-4s |
+| 1 | Name reveal — short, confident ("एकलव्य।" / "हनुमान।" / "अभिमन्यु।") | 2-3s |
+| 2-3 | Setup — who, where, what's at stake | 5-10s |
+| 4-6 | Rising action — escalation toward the moment | 12-20s |
+| 7-8 | Twist — the antagonist's calculation (Drona's fear, Indra's disguise) | 5-10s |
+| 9 | **CENTERPIECE** — the iconic visual the whole Short pivots on; ≥4s hold required (10+ words of script narration) | 4-7s |
+| 10 | Lesson — short, weighty Hindi punchline ("सच्ची भक्ति को कोई पहचान नहीं चाहिए") | 3-5s |
+| 11(-12) | CTA — "अगर ये कथा पसंद आई हो, Like करें, Comment में लिखें, Subscribe करें" + "जय श्री कृष्णा" | 5-7s |
+
+**Hook formula proven across 3 episodes:** "जब [unexpected subject] ने [extreme action]" — sets up the "you won't believe this" tension. Always reveal the protagonist's name in beat 1, never the hook.
+
+**Centerpiece prompt rule:** explicitly mark the beat as "HERO SHOT — THE iconic centerpiece" in the prompts.json `notes` field, write ≥10 words of narration so script-proportional allocation gives it ≥4s, and design the visual to read on mute (broken weapon overhead, severed thumb on leaf, mountain-overhead, kavach being cut).
+
+## Production-stable harness suite (slug-aware)
+- `/tmp/render_episode_images.py <slug>` — renders all images from `hindutavaanimated/{prompts,cast}/<slug>.json` to `hindutavaanimated/tts_tests/mahabharat/images_<slug>/`. Skips cached beats. Survive Metal GPU timeouts by restarting (every 7-8 beats expect ~1 timeout requiring restart).
+- `/tmp/compose_episode.py <slug> "<closer_format>"` — Whisper-transcribe, time-proportional beats (with ≥2.5s clamp + redistribute), word-clamp to 1.5s max display, compose with word-captions + Ken Burns, mix BGM at 12% + 1.5s fade-out, overlay closer panel last 4s. Output: `<slug>_FINAL.mp4`.
+- `/tmp/upload_episode.py <slug> "<title>"` — auth via cached token, upload public to HindutavaAnimated.
+
+The Cartesia audio synth + Suno BGM gen are one-shot bash invocations — see channel.md history sections.
+
+## Whisper Hindi quality varies by audio
+Of 3 episodes:
+- abhimanyu (41s, 130 words script) → Whisper 130 words (ratio 1.0) ✅
+- hanuman (44s, 130 words script) → Whisper 65 words (ratio 0.5) ❌ caused stuck-on-हो़ी
+- eklavya (60.7s, 150 words script) → Whisper 129 words (ratio 0.86) ✅
+
+No clear pattern on which audio Whisper handles well. The clamp + script-proportional fallback survives both cases, but caption coverage degrades when Whisper undercounts (the un-transcribed range has no on-screen captions). Future: chunked-Whisper approach (split at silence points, transcribe each chunk separately) per `whisper_hindi_undercount.md`.
 
 ## Open / TODO
 1. Upload `icon_03_om_lotus.png` + upscaled `banner_01_kurukshetra.png` to YouTube Studio (manual — no API endpoint in our pipeline)
