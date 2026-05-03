@@ -65,7 +65,7 @@ def _build_raw(payload: dict[str, Any]) -> dict[str, Any]:
     For reddit_url / wikipedia_topic / youtube_video: leave fetching to a
     later light worker (#9) — for v1 we accept user_text/auto as the path.
     """
-    from sources.base import slugify  # noqa: PLC0415 — lightweight
+    from pipeline.sources.base import slugify  # noqa: PLC0415 — lightweight
 
     topic = (payload.get("topic") or "").strip()
     notes = (payload.get("notes") or "").strip()
