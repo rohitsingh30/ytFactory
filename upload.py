@@ -82,7 +82,7 @@ def _find_intermediate(channel_yaml_path: Path, slug: str) -> tuple[str, dict, d
     if not mp4.exists():
         sys.exit(
             f"error: rendered mp4 not found at {mp4}. "
-            f"Run render_from_spec.py / make_shorts.py first."
+            f"Run make_shorts.py first."
         )
     return channel_dir, script, raw, mp4
 

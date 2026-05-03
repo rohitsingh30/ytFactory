@@ -1,9 +1,12 @@
-# Pipeline — how a Reddit post becomes a YouTube Short
+# Pipeline — how a Reddit post becomes a YouTube Short (legacy)
 
-This is the user-facing walkthrough of the ytFactory pipeline. Read
-this if you want to use the system; read [DESIGN.md](./DESIGN.md) for
-the architecture rationale and [SPEC.md](./SPEC.md) for the spec
-format reference.
+> **Status: legacy reference.** This document describes the monolithic
+> pipeline as it stood pre-migration. Sections about `make_spec.py`,
+> `render_from_spec.py`, and the spec-driven path describe code that
+> has been **removed** — the only active rendering path is the
+> slideshow path via `make_shorts.py`. The full system is being split
+> into a hybrid cloud + laptop architecture; see
+> [architecture.md](./architecture.md) for the target design.
 
 ---
 
