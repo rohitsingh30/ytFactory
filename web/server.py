@@ -1524,6 +1524,91 @@ async def home() -> FileResponse:
     return FileResponse(Path(__file__).resolve().parent / "static" / "index.html")
 
 
+@app.get("/dashboard")
+async def dashboard() -> FileResponse:
+    """Live YouTube analytics dashboard for every uploaded Short."""
+    return FileResponse(Path(__file__).resolve().parent / "static" / "dashboard.html")
+
+
+@app.get("/api/dashboard/videos")
+async def dashboard_videos(refresh: bool = False) -> dict:
+    """Aggregate every uploaded video with cached YouTube analytics.
+
+    Set ``?refresh=true`` to hit the YouTube API and refresh stats before
+    returning. Without it, returns whatever's cached at
+    ``data/research/analytics/<slug>.json``.
+    """
+    from pipeline import youtube_stats as _yt
+    if refresh:
+        try:
+            _yt.fetch_all(quiet=True)
+        except Exception as e:
+            return {"error": f"refresh failed: {e}", "channels": []}
+
+    by_channel: dict[str, list[dict]] = {}
+    totals = {"videos": 0, "views": 0, "likes": 0, "comments": 0}
+    latest_fetch: str | None = None
+
+    for account, slug, vid, rec_path in _yt._enumerate_uploads():
+        try:
+            rec = json.loads(rec_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        stats = _yt.load_for_slug(slug) or {}
+        view = stats.get("view_count")
+        like = stats.get("like_count")
+        comment = stats.get("comment_count")
+        fetched_at = stats.get("fetched_at")
+        if fetched_at and (latest_fetch is None or fetched_at > latest_fetch):
+            latest_fetch = fetched_at
+
+        is_short = bool(rec.get("mp4_path", "").endswith(".mp4"))
+        watch_url = (
+            f"https://youtube.com/shorts/{vid}" if is_short else rec.get("url") or f"https://youtu.be/{vid}"
+        )
+
+        by_channel.setdefault(account, []).append({
+            "slug": slug,
+            "video_id": vid,
+            "title": rec.get("title") or slug,
+            "uploaded_at": rec.get("uploaded_at"),
+            "privacy": rec.get("privacy"),
+            "watch_url": watch_url,
+            "studio_url": rec.get("studio_url") or f"https://studio.youtube.com/video/{vid}/edit",
+            "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+            "stats": {
+                "views": view,
+                "likes": like,
+                "comments": comment,
+                "fetched_at": fetched_at,
+            },
+        })
+        totals["videos"] += 1
+        if view is not None: totals["views"] += view
+        if like is not None: totals["likes"] += like
+        if comment is not None: totals["comments"] += comment
+
+    # Sort each channel by upload date desc.
+    channels = []
+    for account, vids in sorted(by_channel.items()):
+        vids.sort(key=lambda v: v.get("uploaded_at") or "", reverse=True)
+        c_views = sum(v["stats"]["views"] or 0 for v in vids)
+        c_likes = sum(v["stats"]["likes"] or 0 for v in vids)
+        c_comments = sum(v["stats"]["comments"] or 0 for v in vids)
+        channels.append({
+            "account": account,
+            "video_count": len(vids),
+            "totals": {"views": c_views, "likes": c_likes, "comments": c_comments},
+            "videos": vids,
+        })
+
+    return {
+        "channels": channels,
+        "totals": totals,
+        "latest_fetch": latest_fetch,
+    }
+
+
 @app.get("/api/niches")
 async def list_niches() -> dict:
     """Niche options for the home page."""

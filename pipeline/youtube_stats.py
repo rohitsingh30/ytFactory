@@ -32,7 +32,6 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ANALYTICS_DIR = PROJECT_ROOT / "data" / "research" / "analytics"
-UPLOADS_DIR = PROJECT_ROOT / "data" / "uploads"
 
 
 @dataclass
@@ -62,17 +61,23 @@ class VideoStats:
 def _enumerate_uploads() -> list[tuple[str, str, str, Path]]:
     """Yield (account, slug, video_id, upload_record_path) for every upload.
 
-    ``account`` is the channel-dir under data/uploads/ (e.g.
-    ``sportstoriesanimated``); the YouTube account credential is keyed
-    on the same name in upload.py.
+    Post-reorg layout: every YouTube channel is a top-level repo folder
+    (`historyrecapped/`, `mystoriesanimated/`, etc.) with `config.yaml` and
+    its own `uploads/` subdir. Niches inside a channel (e.g.
+    `mystoriesanimated/reddit_amitheasshole/`) ship their upload records
+    under `uploads/<niche>/<slug>.json`. ``account`` is the channel slug
+    (NOT the niche dir) since the OAuth token is keyed by channel.
     """
     out: list[tuple[str, str, str, Path]] = []
-    if not UPLOADS_DIR.exists():
-        return out
-    for chan_dir in sorted(UPLOADS_DIR.iterdir()):
-        if not chan_dir.is_dir():
+    for chan_dir in sorted(PROJECT_ROOT.iterdir()):
+        if not chan_dir.is_dir() or not (chan_dir / "config.yaml").exists():
             continue
-        for f in sorted(chan_dir.glob("*.json")):
+        uploads_dir = chan_dir / "uploads"
+        if not uploads_dir.exists():
+            continue
+        # Recursive: handles flat `uploads/<slug>.json` AND nested
+        # `uploads/<niche>/<slug>.json` (mystoriesanimated variants).
+        for f in sorted(uploads_dir.rglob("*.json")):
             try:
                 rec = json.loads(f.read_text())
             except (OSError, json.JSONDecodeError):
