@@ -24,7 +24,7 @@ sequenceDiagram
     participant CR as Cloud Run /api/*
     participant FS as Firestore
     participant AG as Laptop agent
-    participant MS as make_shorts.py
+    participant MS as scripts/make_shorts.py
     participant GCS as Cloud Storage
     participant YT as YouTube
 
@@ -48,8 +48,8 @@ sequenceDiagram
     AG->>FS: mark stage=rewrite_cast (status=rendering)
     AG->>AG: claude rewrite + cast (in-process)
     AG->>FS: mark stage=render
-    AG->>MS: subprocess make_shorts.py
-    MS-->>AG: mp4 in data/shorts/
+    AG->>MS: subprocess scripts/make_shorts.py
+    MS-->>AG: mp4 in 
     AG->>FS: mark stage=gcs_upload (status=uploading)
     AG->>GCS: upload short.mp4 + thumb
     AG->>FS: mark status=done, short_uri=gs://...
@@ -180,7 +180,7 @@ flowchart LR
 | **Bypass per-IP rate limit** | Set `YTFACTORY_OWNER_IPS=<your-ip>` env on Cloud Run. Spend cap still applies. |
 | **Monitor agent presence + spend** | `GET /api/health` → agents (last seen / mlx_free / kokoro_warm) + Azure spend USD today vs cap. |
 | **Cancel a stuck job** | `POST /api/jobs/{id}/cancel`. Flips job status → `cancelled`, marks queued tasks FAILED so no agent leases them. Already-running tasks finish on the laptop. |
-| **Publish to a YouTube channel** | The `pipeline/upload.py` module uses the OAuth tokens stored under `data/intermediate/<channel>/youtube_oauth.json`. The render worker passes `channel` as the upload target. |
+| **Publish to a YouTube channel** | The `pipeline/upload.py` module uses the OAuth tokens stored under `<channel>/youtube_oauth.json`. The render worker passes `channel` as the upload target. |
 | **Operate locally** | `./scripts/serve_cloud.sh` — same FastAPI app, runs on `:8765` with hot-reload on `control/`, `web/`, `shared/`. Useful when iterating on control-plane code before redeploying. |
 
 ---

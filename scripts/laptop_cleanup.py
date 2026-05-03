@@ -18,14 +18,14 @@ Categories (in delete order, smallest+safest first):
     data/scratch/       — per-job scratch (replaced by agent runner scratch)
     data/critiques/     — critique outputs, can be regenerated
     data/intermediate/  — per-stage JSON / WAV / PNG (in GCS now)
-    data/shorts/        — finished mp4s (in GCS, lifecycle-purged)
+            — finished mp4s (in GCS, lifecycle-purged)
     data/cache/<slug>/  — per-render content-hashed image cache,
                           older than --cache-age-h hours
 
 What we keep:
     .env, channels/, pipeline/, web/static/voice_samples/,
     data/cache/* model weight directories (anything that doesn't look
-    like a per-render slug), data/research/, data/cooking_bg_queue.yaml.
+    like a per-render slug), data/research/, mystoriesanimated/cooking_bg_queue.yaml.
 
 Run before #13 (decommission monolith) so the disk reclaim is visible.
 """
@@ -108,7 +108,7 @@ def _wipe_old_cache(*, dry_run: bool, cache_age_h: float) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--dry-run", action="store_true", help="show what would be deleted; no actual changes")
-    ap.add_argument("--keep-shorts", action="store_true", help="don't delete data/shorts/ (finished mp4s)")
+    ap.add_argument("--keep-shorts", action="store_true", help="don't delete  (finished mp4s)")
     ap.add_argument("--cache-age-h", type=float, default=24.0,
                     help="purge per-render image cache older than this many hours (default 24)")
     args = ap.parse_args()

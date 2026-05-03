@@ -30,8 +30,8 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from sources.base import RawStory, slugify
-from sources.youtube_video import (
+from pipeline.sources.base import RawStory, slugify
+from pipeline.sources.youtube_video import (
     _captions_via_youtube_transcript_api,
     _extract_video_id,
     _fetch_oembed_meta,

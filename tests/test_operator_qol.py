@@ -13,7 +13,7 @@ import httpx  # noqa: E402
 from control import jobs as jobs_mod, rate_limit  # noqa: E402
 from control.queue import get_queue, reset_queue  # noqa: E402
 from control.render_routes import router as render_router  # noqa: E402
-from shared.schema import TaskEnvelope, TaskKind, TaskStatus  # noqa: E402
+from control.schema import TaskEnvelope, TaskKind, TaskStatus  # noqa: E402
 
 
 def _make_app():
@@ -101,7 +101,7 @@ class HealthEndpointTest(unittest.IsolatedAsyncioTestCase):
     async def test_health_surfaces_agent_after_heartbeat(self) -> None:
         # Inject an agent presence directly (bypass the heartbeat route).
         from control.agent_routes import _LAST_SEEN
-        from shared.schema import AgentResources
+        from control.schema import AgentResources
         import time
 
         _LAST_SEEN["mac-1"] = (time.time(), AgentResources(

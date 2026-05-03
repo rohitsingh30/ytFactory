@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 
 from control.auth import require_agent
 from control.queue import Queue, get_queue
-from shared.schema import (
+from control.schema import (
     AckRequest,
     AckResponse,
     AgentResources,

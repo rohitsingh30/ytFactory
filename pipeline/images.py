@@ -457,6 +457,17 @@ _PROVIDER_CAPABILITIES: dict[str, dict] = {
             "RAM of Flux Schnell."
         ),
     },
+    "z_image_turbo_fal": {
+        "native_dim": (1024, 1024),
+        "max_dim": (1344, 1344),
+        "step_range": (1, 8),
+        "vertical_9_16_safe": True,
+        "description": (
+            "Z-Image-Turbo via fal.ai hosted API. Same model as "
+            "z_image_turbo, $0.005/MP (~$0.005/image at 768x1344). "
+            "Requires FAL_KEY env var. No local GPU; ~2-4s/image network."
+        ),
+    },
 }
 
 
@@ -721,7 +732,7 @@ def generate(
     # opts in via `force_positive` block; if absent, we still strip
     # the broken avoid-fold-in (better to ship with a small bug than
     # actively make it worse).
-    if provider in ("mflux", "z_image_turbo"):
+    if provider in ("mflux", "z_image_turbo", "z_image_turbo_fal"):
         # extra_neg_str is intentionally NOT folded in for these
         # providers — see comment above. Channel-level positive tokens
         # are appended via `force_positive` instead.
@@ -756,6 +767,15 @@ def generate(
         )
     elif provider == "z_image_turbo":
         result = _generate_z_image_turbo(
+            prompt=final_prompt,
+            seed=seed,
+            out_path=out_path,
+            width=width,
+            height=height,
+            steps=steps,
+        )
+    elif provider == "z_image_turbo_fal":
+        result = _generate_z_image_turbo_fal(
             prompt=final_prompt,
             seed=seed,
             out_path=out_path,
@@ -798,6 +818,8 @@ def _is_pipe_loaded(provider: str) -> bool:
         return _FLUX_PIPE is not None
     if provider == "z_image_turbo":
         return _ZIMAGE_PIPE is not None
+    if provider == "z_image_turbo_fal":
+        return True  # hosted; no local pipe to cold-load
     if provider in ("sdxl_lightning", "sd_turbo"):
         return _PIPE is not None
     return False
@@ -948,6 +970,65 @@ def _generate_z_image_turbo(
     return out_path
 
 
+def _generate_z_image_turbo_fal(
+    *,
+    prompt: str,
+    seed: int,
+    out_path: Path,
+    width: int,
+    height: int,
+    steps: int,
+) -> Path:
+    """Z-Image-Turbo via fal.ai hosted API. Same model as the local
+    mflux path; trades ~10-15s of M2 Max GPU work for a 2-4s network
+    round trip + $0.005 per 1MP image.
+
+    Requires FAL_KEY in env. fal_client.subscribe() blocks until the
+    queued job finishes and returns a JSON dict with image URLs.
+    """
+    import urllib.request
+
+    import fal_client
+
+    if not _os.environ.get("FAL_KEY"):
+        raise RuntimeError(
+            "z_image_turbo_fal requires FAL_KEY env var. "
+            "Get one from https://fal.ai/dashboard/keys."
+        )
+
+    w = max(16, (width // 16) * 16)
+    h = max(16, (height // 16) * 16)
+
+    result = fal_client.subscribe(
+        "fal-ai/z-image/turbo",
+        arguments={
+            "prompt": prompt,
+            "image_size": {"width": w, "height": h},
+            "num_inference_steps": steps,
+            "seed": seed,
+            "num_images": 1,
+            "output_format": "png",
+            "enable_safety_checker": False,
+        },
+        with_logs=False,
+    )
+    images = result.get("images") or []
+    if not images:
+        raise RuntimeError(
+            f"fal-ai/z-image/turbo returned no images: {result!r}"
+        )
+    url = images[0].get("url")
+    if not url:
+        raise RuntimeError(
+            f"fal-ai/z-image/turbo response missing url: {images[0]!r}"
+        )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(url, timeout=60) as resp:
+        out_path.write_bytes(resp.read())
+    return out_path
+
+
 # --- Prompts file ------------------------------------------------------
 
 
@@ -991,6 +1072,21 @@ def _align_prompts_to_beats(
     n = len(beat_texts)
     m = len(raw)
     if n == 0 or m == 0:
+        return None
+    # Class-of-bug guard (2026-05-03 hathi-raja render): the DP below
+    # assumes m >= n so every beat can claim a unique-and-monotonic
+    # prompt index. When the cached prompts.json is from a PRIOR
+    # narration with fewer beats (e.g. the rhyme channel re-rendered
+    # with sung audio that splits into 20 beats vs the spoken 12),
+    # range(n-1, m) is empty and max() crashes. Return None here so
+    # the caller falls back to heuristic / LLM re-author rather than
+    # crashing the whole render.
+    if m < n:
+        print(
+            f"[images] cached prompts.json has {m} entries but the "
+            f"current narration produces {n} beats — falling back to "
+            f"re-author (delete prompts.json to silence this warning)"
+        )
         return None
 
     beat_tokens = [_tokenise_for_match(t) for t in beat_texts]

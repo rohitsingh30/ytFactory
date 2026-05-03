@@ -18,7 +18,7 @@ from control import rate_limit
 from control import jobs as jobs_mod
 from control.chat_service import ChatService, new_session_id
 from control.queue import get_queue, new_task_id
-from shared.schema import (
+from control.schema import (
     ShortProposal,
     TaskEnvelope,
     TaskKind,

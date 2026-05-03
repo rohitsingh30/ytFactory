@@ -14,7 +14,7 @@ from control import jobs as jobs_mod
 from control import rate_limit
 from control.chat_routes import ConfirmResponse, _enqueue_render_job
 from control.queue import get_queue
-from shared.schema import ShortProposal, TaskStatus
+from control.schema import ShortProposal, TaskStatus
 
 logger = logging.getLogger(__name__)
 

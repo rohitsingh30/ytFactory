@@ -24,8 +24,8 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-from agent.runner import TaskContext, register
-from shared.schema import TaskKind
+from workers.agent.runner import TaskContext, register
+from control.schema import TaskKind
 
 logger = logging.getLogger(__name__)
 

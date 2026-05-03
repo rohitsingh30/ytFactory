@@ -1,0 +1,138 @@
+# SportsStoriesAnimated — animated football moments + real broadcast cut-ins.
+#
+# Pipeline order (DIFFERS from other channels):
+#   1. pull / hand-author raw at sportstoriesanimated/raw/<slug>.json
+#   2. ** wiki_research ** ← run BEFORE cast for this channel (PIPELINE.md §2.5)
+#        .venv/bin/python -m pipeline.wiki_research \
+#            --raw <raw.json> --out <dossier.json> --wiki-query "..." \
+#            --channel-yaml sportstoriesanimated/config.yaml
+#   3. cast.cast_from_dossier(dossier, cfg, cast.json) — no LLM call;
+#      transforms dossier.people → supporting[] with per-character seed.
+#   4. /make-script writes data/intermediate/.../scripts/<slug>.json.
+#      For the **footage cut** (the channel USP — see
+#      feedback_sports_footage_is_usp.md), the script JSON declares an
+#      optional ``footage[]`` array of {match_text, url, in_s, out_s}.
+#      make_shorts.py + compose.compose_hybrid splice the real clip in
+#      at the matching beat.
+#   5. make_shorts.py — TTS uses pronunciation_dict from the dossier so
+#      "Aguero" → "ah-GWAIR-oh" before Kokoro sees it; the original
+#      spelling stays in captions / ASR alignment.
+
+name: SportsStoriesAnimated
+source_adapter: sports_moments_manual  # adapter ID (internal); not the channel display name
+
+# Narrator visual mode — sports stories are third-person voice-overs.
+# The narrator is a VOICE telling the story; the on-screen visuals are
+# the actual match (real people from the dossier + scene/object shots).
+# This switches pipeline/prompts.py to a voice-only authoring mode that:
+#   * suppresses the channel-wide character_description (no analyst persona)
+#   * forbids "the character" / "the narrator" / "a man watching" etc.
+#   * forces every beat to depict a named real person OR a pure scene shot
+# Default for AITA-class channels is "on_screen" (narrator IS the cartoon).
+# See feedback_sports_no_narrator_on_screen.md for the regression we're
+# preventing.
+narrator_visual_mode: voice_only
+
+# TTS — Cartesia Sonic-2 + "Theo" (steady, enunciating, confident young
+# male). Migrated 2026-05-03 from kokoro/am_michael. Tifo's vibe is
+# measured, not hype, so we run a hair under 1.0 (maps to Cartesia
+# "slow"). Requires CARTESIA_API_KEY env var at render time.
+tts_provider: cartesia
+tts_voice: 79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e  # Theo, US male narrator
+tts_speed: 0.98
+
+# Visuals — static-image-per-beat slideshow path (Ken Burns zoom in
+# compose). Z-Image-Turbo 6B via mflux, same provider as today_in_history.
+# DO NOT switch to motion_provider here — the channel design is static
+# cartoon imagery between footage cuts, and the AnimateDiff path was
+# explicitly rejected for this channel.
+image_provider: z_image_turbo
+#
+# CLASS-OF-BUG (branding render 2026-05-01): the bare word "football"
+# biases diffusion models toward American football / gridiron — the v1
+# avatar rendered an oval rugby-shaped ball. This channel is exclusively
+# association football (soccer). Any prompt author — LLM or human —
+# must say "soccer ball", "association football", or describe panels
+# explicitly ("black hexagonal and white pentagonal panels, perfectly
+# round sphere"). The "association football soccer context" tail on the
+# style prefix nudges the model on every render.
+image_style_prefix: |
+  hand-drawn editorial line-art illustration, cream parchment background,
+  muted earthy palette of teal burnt-orange and slate, soft halftone
+  shading, single subject focus, simple composition, no text,
+  association football soccer context (never american football or rugby)
+image_seed: 1872  # year the FA Cup was first contested
+image_steps: 4    # M2 Max compile-disabled path; matches today_in_history
+
+# Beat shape
+beat_target_s: 2.2
+beat_max_s: 3.2
+
+# Output
+duration_target_s: [15, 25]
+output_resolution: [1080, 1920]
+
+# Hold the closer caption for a beat after the audio ends so viewers
+# read the CTA before the loop restarts.
+closer_hold_s: 1.2
+
+# Closer panel — renders the LIKE / COMMENT split via
+# pipeline/captions.render_closer_panel, mirroring the AITA channel's
+# engagement pattern. The panel sits over the closer beats and replaces
+# the plain caption with a two-button visual prompt that drives both
+# likes and comments. Without this the closer reads as a passive caption.
+# Format: two lines, separated by \n; first line is the LIKE side, second
+# is the COMMENT side. Channel-customisable per niche.
+closer_format: "LIKE if you watched it live\nCOMMENT your favourite stoppage-time goal"
+
+# Sports stories are third-person narration ("Manchester City need to
+# beat QPR") rather than AITA-style ("AITA for refusing to host my
+# DIL's home birth?"). They don't fit the AITA hook patterns
+# (question / claim verb / relationship subject) the script_check
+# strict gate enforces. Opt out: closer_format still drives the panel
+# render, but script_check.py keeps issues at warning severity instead
+# of failing the render. (See script_check.py is_aita_class fallback.)
+script_check_strict: false
+
+# ---- Upload (Stage 8) --------------------------------------------------
+#
+# Targets the AnimatedSportsStories YouTube channel. Shares the
+# `sportstoriesanimated` OAuth token with the ranked variant, so a
+# single `upload.py auth --account sportstoriesanimated` covers both
+# the standalone moments and the Top-5 countdowns.
+#
+# Run once before the first upload, signed into the Google account that
+# owns AnimatedSportsStories:
+#     .venv/bin/python upload.py auth --account sportstoriesanimated
+#
+# privacy: public — per feedback_upload_public_default.md (web auto-
+# uploads ship public). category_id 17 is YouTube's "Sports" category.
+# min_score: 7 holds sports shorts to a higher bar than AITA (6) since
+# the footage cut-in is the channel USP — feedback_sports_footage_is_usp.md.
+upload:
+  account: sportstoriesanimated
+  privacy: public
+  made_for_kids: false
+  category_id: "17"          # Sports
+  auto_upload: false         # set true once a few have shipped clean
+  min_score: 7
+  tags:
+    - football
+    - soccer
+    - football shorts
+    - football moments
+    - football history
+    - shorts
+    - animated football
+    - sports stories
+  description_template: |
+    {script.hook}
+
+    📖 Source: {raw.url}
+
+    ━━━━━━━━━━━━━━━━━━━━
+    👍 LIKE if you watched it live  ·  💬 COMMENT your favourite
+    🔔 Subscribe for more animated football moments.
+    ━━━━━━━━━━━━━━━━━━━━
+
+    #shorts #football #soccer #footballshorts #footballmoments

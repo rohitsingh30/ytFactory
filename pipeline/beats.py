@@ -82,7 +82,134 @@ def transcribe_words(
                     end=float(w["end"]),
                 )
             )
-    return words
+    # Class-of-bug fix (2026-05-03 hathi-raja-kahan-chale render): Whisper
+    # on SUNG audio (Suno-generated nursery rhyme with overlapping lead +
+    # choir) produced word_69.start (38.44s) BEFORE word_68.end (44.82s).
+    # Downstream ffmpeg compose computes per-word trim durations as
+    # `next.start - this.start`; a negative value crashes the trim
+    # filter. Sanitise here: clamp every word's start to be ≥ the
+    # previous word's start, and end to be ≥ start. Idempotent.
+    sanitised: list[Word] = []
+    last_start = 0.0
+    last_end = 0.0
+    for w in words:
+        s = max(w.start, last_start)
+        e = max(w.end, s + 0.01, last_end)
+        sanitised.append(Word(text=w.text, start=s, end=e))
+        last_start = s
+        last_end = e
+
+    # Class-of-bug fix (2026-05-03 v5 render observation): Whisper
+    # hallucinates word timestamps (a) past the actual audio duration
+    # and (b) during instrumental gaps where there's no vocal. Both
+    # produce silent caption rolls in the rendered mp4. Two layers:
+    #
+    # (a) Cap every word's start/end to the actual audio duration.
+    #     ffprobe the file and clamp.
+    # (b) Sample audio RMS at 100ms granularity. Drop any word whose
+    #     midpoint falls in a low-RMS span (< -28 dB) — that's
+    #     instrumental / silence with no actual vocal Whisper could
+    #     have transcribed.
+    audio_dur_s = _ffprobe_duration_s(audio_path)
+    if audio_dur_s and audio_dur_s > 0:
+        # Cap word stamps to audio duration first (drops the trailing
+        # hallucinations past the trim end).
+        capped: list[Word] = []
+        for w in sanitised:
+            if w.start >= audio_dur_s:
+                continue  # word entirely past audio — drop
+            s = min(w.start, audio_dur_s - 0.001)
+            e = min(w.end, audio_dur_s)
+            if e <= s:
+                e = s + 0.01
+            capped.append(Word(text=w.text, start=s, end=e))
+        sanitised = capped
+
+    rms_mask = _audio_low_rms_spans(audio_path, threshold_db=-28.0)
+    if rms_mask:
+        masked: list[Word] = []
+        for w in sanitised:
+            mid = 0.5 * (w.start + w.end)
+            in_silence = any(s <= mid <= e for s, e in rms_mask)
+            if in_silence:
+                continue  # word falls in a silent/instrumental span
+            masked.append(w)
+        sanitised = masked
+
+    return sanitised
+
+
+def _ffprobe_duration_s(path: Path) -> float | None:
+    """Return audio duration via ffprobe, or None on failure."""
+    import subprocess as _sp
+    try:
+        res = _sp.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=nw=1:nk=1",
+                str(path),
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        return float(res.stdout.strip())
+    except (ValueError, OSError, _sp.SubprocessError):
+        return None
+
+
+def _audio_low_rms_spans(
+    path: Path,
+    threshold_db: float = -28.0,
+    sample_window_s: float = 0.1,
+    min_span_s: float = 0.5,
+) -> list[tuple[float, float]]:
+    """Return [(start_s, end_s), ...] spans where audio RMS is below
+    ``threshold_db`` for at least ``min_span_s``. Used to mask Whisper
+    hallucinations during instrumental gaps in sung audio.
+    """
+    import re as _re
+    import subprocess as _sp
+    try:
+        res = _sp.run(
+            [
+                "ffmpeg", "-i", str(path),
+                "-af", f"astats=metadata=1:reset={sample_window_s},"
+                       "ametadata=print:key=lavfi.astats.Overall.RMS_level",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, _sp.SubprocessError):
+        return []
+
+    samples: list[tuple[float, float]] = []
+    cur_t = 0.0
+    for line in res.stderr.splitlines():
+        m_t = _re.search(r"pts_time:([0-9.]+)", line)
+        if m_t:
+            cur_t = float(m_t.group(1))
+            continue
+        m_r = _re.search(r"RMS_level=(-?[0-9.]+)", line)
+        if m_r:
+            samples.append((cur_t, float(m_r.group(1))))
+
+    spans: list[tuple[float, float]] = []
+    span_start: float | None = None
+    last_t = 0.0
+    for t, rms in samples:
+        if rms < threshold_db:
+            if span_start is None:
+                span_start = t
+            last_t = t
+        else:
+            if span_start is not None:
+                if last_t - span_start >= min_span_s:
+                    spans.append((span_start, last_t + sample_window_s))
+                span_start = None
+        last_t = t
+    if span_start is not None and last_t - span_start >= min_span_s:
+        spans.append((span_start, last_t + sample_window_s))
+    return spans
 
 
 def _make_beat(words: list[Word]) -> Beat:
@@ -99,11 +226,19 @@ _NORM_RE = None  # lazy-init
 
 def _norm_token(t: str) -> str:
     """Normalize a single word for matching: lowercase, strip everything
-    except letters/digits/apostrophes."""
+    except letters/digits/apostrophes.
+
+    Class-of-bug fix per critique 2026-05-03 (abhimanyu-chakravyuh.video.md):
+    the previous regex ``[^a-z0-9']+`` was ASCII-only — Devanagari and any
+    non-Latin script collapsed to empty strings, breaking
+    split_with_forced_boundaries() for Hindi narrations and silently
+    producing zero word-captions. ``[^\\w']+`` with re.UNICODE keeps
+    Devanagari, Arabic, CJK. .lower() is a no-op on Devanagari.
+    """
     import re as _re
     global _NORM_RE
     if _NORM_RE is None:
-        _NORM_RE = _re.compile(r"[^a-z0-9']+")
+        _NORM_RE = _re.compile(r"[^\w']+", flags=_re.UNICODE)
     return _NORM_RE.sub("", t.lower())
 
 
@@ -426,9 +561,30 @@ def _split_long_group(group: list[Word], max_s: float) -> list[list[Word]]:
 
 
 def save_beats(beats: list[Beat], path: Path) -> None:
+    """Serialise beats to JSON, with a final monotonicity sanity-pass.
+
+    Class-of-bug guard (2026-05-03 hathi-raja sung-audio render): the
+    word-level fix in transcribe_words covers the source-of-truth path,
+    but if a downstream caller ever bypasses transcribe_words (or
+    re-builds beats from a different ASR backend that has the same
+    overlapping-words bug), the safety net catches it. Here we walk the
+    saved beats once more and clamp every beat.start ≥ previous
+    beat.start, every beat.end ≥ beat.start + 0.01s. Idempotent on
+    already-monotonic input.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    last_start = 0.0
+    last_end = 0.0
+    serialised: list[dict] = []
+    for b in beats:
+        d = asdict(b)
+        d["start"] = max(d.get("start", 0.0), last_start)
+        d["end"] = max(d.get("end", 0.0), d["start"] + 0.01, last_end)
+        last_start = d["start"]
+        last_end = d["end"]
+        serialised.append(d)
     with path.open("w") as f:
-        json.dump([asdict(b) for b in beats], f, indent=2)
+        json.dump(serialised, f, indent=2)
 
 
 def load_beats(path: Path) -> list[Beat]:

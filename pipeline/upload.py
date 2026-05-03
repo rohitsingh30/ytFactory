@@ -1,7 +1,7 @@
 """Stage 8 — YouTube upload (resumable, idempotent).
 
 Sits at the end of the pipeline: the previous stages produced
-``data/shorts/<slug>.mp4`` and a ``data/intermediate/<channel>/scripts/<slug>.json``
+``<slug>.mp4`` and a ``data/intermediate/<channel>/scripts/<slug>.json``
 with title options and source metadata. This module turns those into
 a YouTube video.
 

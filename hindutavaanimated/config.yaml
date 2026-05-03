@@ -1,0 +1,132 @@
+# HindutavaAnimated — Mahabharat ki kahaaniyan, narrated in pure Hindi,
+# animated in Amar Chitra Katha comic-book style.
+#
+# Format (decided 2026-05-03, Sanskrit dropped 2026-05-03):
+#   Pure Hindi storytelling — one dramatic episode from the epic per
+#   Short, hooked at the top, lesson-as-punchline at the end.
+#
+#   1. hook (3s) — provocative one-liner ("क्या आप जानते हैं…")
+#   2. setup (2-3 beats) — who, what, where
+#   3. rising action (2-3 beats) — the dramatic moment escalates
+#   4. climax / payoff (1 beat) — the moral pivot of the scene
+#   5. lesson + spoken CTA (1 beat) — "जय श्री कृष्णा कमेंट करें,
+#      चैनल सब्सक्राइब करें"
+#
+# Source candidates: Abhimanyu chakravyuh, Eklavya guru-dakshina,
+# Karna kavach-kundal daan, Bheeshma iccha-mrityu, Draupadi cheer-haran,
+# Ashwatthama ka shraap, etc.
+#
+# This channel is NOT a Reddit/sports clone — there is no auto source
+# adapter. Stories are curated. `source_adapter: manual` tells stage 1
+# to skip pulling and just expect a hand-authored script.json under
+# hindutavaanimated/narrations/<slug>.json.
+
+name: HindutavaAnimated
+source_adapter: manual
+
+# ---- TTS ---------------------------------------------------------------
+# Cartesia Sonic-2 + "Sneha" (Hindi-tuned empathetic female narrator).
+# Migrated 2026-05-03 from kokoro/hm_psi after the user A/B'd Sneha on
+# the abhimanyu-chakravyuh narration and approved Cartesia's Devanagari
+# rendering. Sneha's "gentle and reassuring" tone fits the kathaa
+# format — gravitas without melodrama. Requires CARTESIA_API_KEY env
+# var at render time.
+#
+# tts_language: hi cues Cartesia Sonic-2 for Hindi. Without it Sonic
+# would treat the Devanagari as English (mangled phonemes). Cartesia's
+# Hindi handling on conjuncts (कुरुक्षेत्र, चक्रव्यूह, द्रोणाचार्य) is
+# Sonic-2's responsibility — Kokoro's _HINDI_TATSAMA_RESPELLINGS table
+# in pipeline/audio.py is a no-op for Cartesia (different g2p). If a
+# Cartesia mispronunciation surfaces in critique, fix via
+# pronunciation_dict in the dossier (per-name phonetic respellings),
+# NOT by re-adding the Kokoro respelling table.
+#
+# Fallback: switch tts_provider back to kokoro (hm_psi/hf_alpha) for
+# a free, no-API-cost render.
+tts_provider: cartesia
+tts_voice: 6b02ffe5-e3cb-48c0-a023-c72f85953375  # Sneha, Hindi female
+tts_language: hi
+# 0.85 — storyteller tempo. Maps to Cartesia "slow".
+tts_speed: 0.85
+
+# ---- Image gen — Amar Chitra Katha aesthetic --------------------------
+image_provider: z_image_turbo
+image_style_prefix: |
+  Amar Chitra Katha Indian comic-book illustration style. Bold black
+  ink outlines, flat saturated colors — deep sindoor red, peacock blue,
+  marigold yellow, emerald green, antique gold. Slightly stylized
+  expressive Indian faces with large dark eyes and defined eyebrows.
+  Decorative temple-mural background motifs. Composition centered and
+  iconographic, like a single comic-book panel. No modern objects.
+
+# Per-story character lock (cast.json overrides). The fallback below
+# only applies when a story has no cast.json yet.
+character_description: |
+  Mahabharat-era Indian warrior. Fair-skinned, dark wavy hair tied
+  back, expressive dark eyes, gold earrings, warrior tunic with gold
+  trim, dhoti. Bold black ink outline, flat saturated colors. Always
+  the same character across all images.
+
+opening_image_directives:
+  required_concrete_tokens: 2
+  example_tokens: ["chariot wheel", "Gandiva bow", "conch shell",
+                   "saffron flag", "rising sun", "two armies facing",
+                   "ashram clearing", "guru's hut", "river bank"]
+
+# Locked seed for character consistency across beats.
+image_seed: 108  # auspicious in Hindu tradition
+image_steps: 4
+image_width: 768
+image_height: 1344
+
+# ---- Beat shape -------------------------------------------------------
+# Slightly longer holds than AITA — kathaa is a slower medium and
+# Devanagari captions need reading time.
+beat_target_s: 3.0
+beat_max_s: 5.0
+
+# ---- Output -----------------------------------------------------------
+# 50-60s — matches the 2026 Shorts algo sweet spot (memory: project_shorts_algo_2026).
+duration_target_s: [50, 60]
+output_resolution: [1080, 1920]
+
+# ---- Closer CTA (devotional storytelling variant) --------------------
+# No YTA/NTA verdict-bait. Spoken CTA is woven into the last beat
+# (per feedback_closer_caption_style — captions = narration only),
+# and the closer panel is a simple namaste + subscribe overlay.
+closer_format: "जय श्री कृष्णा 🙏  SUBSCRIBE"
+closer_hold_s: 1.5
+
+# ---- Upload (Stage 8) — NOT WIRED YET ---------------------------------
+# Channel doesn't exist on YouTube yet. To enable:
+#   1. Create the YouTube channel under a Google account.
+#   2. .venv/bin/python upload.py auth --account hindutavaanimated
+#   3. Flip auto_upload below to true.
+upload:
+  account: hindutavaanimated
+  privacy: private          # keep mocks private until human-reviewed
+  made_for_kids: false
+  category_id: "22"          # People & Blogs
+  auto_upload: false
+  tags:
+    - mahabharat
+    - mahabharat in hindi
+    - hindi kahani
+    - hindi story
+    - krishna
+    - hindu mythology
+    - pauranik kathayen
+    - shorts
+    - devotional
+    - spirituality
+  description_template: |
+    {script.hook}
+
+    🕉️ कथा: {script.metadata.episode}
+
+    ━━━━━━━━━━━━━━━━━━━━
+    🙏 जय श्री कृष्णा
+    🔔 Subscribe for more Mahabharat stories
+    ━━━━━━━━━━━━━━━━━━━━
+
+    #shorts #mahabharat #krishna #hindi #kahani #hindumythology #devotional

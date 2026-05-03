@@ -7,7 +7,7 @@ from this repo via `gcloud run deploy --source .`).
 For complementary perspectives see:
 - `docs/user_flows.md` — what each user type does
 - `docs/data_flows.md` — how data moves through the system
-- `docs/legacy_pipeline.md` — what `make_shorts.py` does internally
+- `docs/legacy_pipeline.md` — what `scripts/make_shorts.py` does internally
 
 > Diagrams in this doc are also rendered as PNGs in
 > [`docs/diagrams/`](./diagrams/) — useful for terminals or markdown
@@ -122,7 +122,7 @@ One container, dispatch on `TASK_KIND` env var. Pure I/O, scale to
 zero, ~$0–2/mo total.
 
 - `script.py` `critic.py` `cast.py` `rewrite.py` — claude CLI calls
-- `pull_stories.py` `wiki_research.py` — scrapers
+- `scripts/pull_stories.py` `wiki_research.py` — scrapers
 - `youtube_upload.py` — uses owner's stored OAuth refresh token
 
 ### Heavy workers (`workers/heavy/`) — laptop only
@@ -149,7 +149,7 @@ A persistent Python daemon under launchd. Does only outbound HTTPS.
 
 - `schema.py` — `ShortProposal`, `JobEnvelope`, `TaskEnvelope` types
 - `llm.py` — `claude -p` CLI wrapper (existing `pipeline/llm.py`)
-- `channels.py` — resolves nested `channels/<target>/{channel.yaml, formats/*.yaml}`
+- `channels.py` — resolves nested `<target>/{channel.yaml, formats/*.yaml}`
 - `cast_router.py` `prompts.py` — existing logic, relocated
 
 ## Data flows

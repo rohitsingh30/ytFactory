@@ -139,7 +139,7 @@ def _classify_issues(issues: list[str] | None) -> tuple[int, int]:
 
 
 def build_videos() -> list[dict]:
-    """One row per .mp4 in data/shorts/, joined with script + upload + critique."""
+    """One row per .mp4 in , joined with script + upload + critique."""
     rows: list[dict] = []
     if not SHORTS_DIR.exists():
         return rows

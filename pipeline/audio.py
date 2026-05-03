@@ -18,6 +18,7 @@ model from HF on first use.
 
 from __future__ import annotations
 
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -377,6 +378,422 @@ def _synth_kokoro(
     return out_path
 
 
+# ---------- cartesia (Sonic-2, paid API) -----------------------------------
+#
+# Cartesia Sonic-2 is the production narration backbone for AITA / sports /
+# History Recapped channels (user decision 2026-05-03 after A/B vs ElevenLabs;
+# see `scripts/tts_ab_spike.py` and memory project_cartesia_tts_upgrade.md).
+# Pricing: Sonic Starter $9/mo for 100k chars (~100 shorts/mo) — covers
+# typical channel cadence with 5× headroom; Pro $39/mo for 1.25M chars
+# if/when we scale to compilations.
+#
+# Voice IDs are channel-configurable. Default below is "Sarah" — US female
+# narrator that the user approved on the spike. Channels override via
+# `tts_voice: <cartesia voice uuid>` in their YAML (the `tts_voice` field
+# is interpreted per-provider — Kokoro voice id for kokoro, ref-WAV path
+# for f5_tts, Cartesia voice UUID for cartesia).
+#
+# API key is read from `CARTESIA_API_KEY` at synth time; fails fast with a
+# pointer to https://play.cartesia.ai/keys if unset. Never hardcoded.
+
+_CARTESIA_DEFAULT_VOICE = "694f9389-aac1-45b6-b726-9d9369183238"  # Sarah, US female
+_CARTESIA_TTS_URL = "https://api.cartesia.ai/tts/bytes"
+_CARTESIA_API_VERSION = "2024-11-13"
+
+
+def _synth_cartesia(
+    text: str,
+    voice: str,
+    out_path: Path,
+    speed: float,
+    language: str = "en",
+) -> Path:
+    """Cartesia Sonic-2 synthesis via the REST `/tts/bytes` endpoint.
+
+    Single-shot synthesis (no per-sentence modulation, unlike the Kokoro
+    path) — the model emits one continuous WAV for the full narration.
+    Per-sentence speed modulation is Kokoro-specific; if a channel needs
+    it, the channel should stay on Kokoro.
+
+    `speed` is mapped to Cartesia's `__experimental_controls.speed` knob,
+    which accepts `slow|normal|fast` (string) or a float in [-1.0, 1.0].
+    Channels declare `tts_speed` at human pace (e.g. 0.95 for war
+    history, 0.90 for AITA); we map ≤0.95 → "slow", ≥1.05 → "fast",
+    everything else → "normal", which is the closest analogue Cartesia
+    supports without needing per-channel calibration.
+    """
+    import os
+
+    api_key = os.environ.get("CARTESIA_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "tts_provider=cartesia requires CARTESIA_API_KEY env var.\n"
+            "Get a key: https://play.cartesia.ai/keys\n"
+            "Set in shell: export CARTESIA_API_KEY=sk_car_..."
+        )
+
+    if speed <= 0.95:
+        cartesia_speed = "slow"
+    elif speed >= 1.05:
+        cartesia_speed = "fast"
+    else:
+        cartesia_speed = "normal"
+
+    import json as _json
+
+    body = _json.dumps({
+        "model_id": "sonic-2",
+        "transcript": text,
+        "voice": {"mode": "id", "id": voice or _CARTESIA_DEFAULT_VOICE},
+        "output_format": {
+            "container": "wav",
+            "encoding": "pcm_s16le",
+            "sample_rate": 44100,
+        },
+        "language": language,
+        "__experimental_controls": {"speed": cartesia_speed},
+    }).encode("utf-8")
+    headers = {
+        "X-API-Key": api_key,
+        "Cartesia-Version": _CARTESIA_API_VERSION,
+        "Content-Type": "application/json",
+    }
+    req = urllib.request.Request(_CARTESIA_TTS_URL, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            audio_bytes = resp.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Cartesia HTTP {e.code} from {_CARTESIA_TTS_URL}\n{detail}"
+        ) from None
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(audio_bytes)
+    return out_path
+
+
+# ---------- audio trim helpers (sung-channel duration cap) -----------------
+
+
+def _detect_leading_silence_s(
+    in_path: Path, threshold_db: float = -28.0, min_silence_s: float = 0.3
+) -> float:
+    """Return the duration of low-RMS leading silence at the start of a WAV.
+
+    Suno songs frequently open with a 1-5s quiet guitar intro that
+    Whisper hallucinates as plausible-but-wrong sung words at the wrong
+    timestamps. Trimming this before passing to ASR collapses the
+    caption-desync class of bug at the source rather than masking it
+    after the fact. Threshold tuned to -28 dB based on the
+    abhimanyu / hathi-raja sample (vocals at -14 to -20 dB, guitar
+    intros around -34 to -38 dB).
+    """
+    import re as _re
+    import subprocess as _sp
+
+    cmd = [
+        "ffmpeg", "-i", str(in_path),
+        "-af", f"silencedetect=noise={threshold_db}dB:d={min_silence_s}",
+        "-f", "null", "-",
+    ]
+    res = _sp.run(cmd, capture_output=True, text=True)
+    leading = 0.0
+    for line in res.stderr.splitlines():
+        m = _re.search(r"silence_start:\s*(\d+\.\d+)", line)
+        if m and float(m.group(1)) < 0.05:
+            # Find the matching silence_end on the next silence_end line
+            # in subsequent output.
+            continue
+        m_end = _re.search(r"silence_end:\s*(\d+\.\d+).*silence_duration:\s*(\d+\.\d+)", line)
+        if m_end:
+            end_s = float(m_end.group(1))
+            dur_s = float(m_end.group(2))
+            start_s = end_s - dur_s
+            if start_s < 0.05:
+                leading = end_s
+                break
+    return leading
+
+
+def trim_song_for_short(
+    in_path: Path,
+    out_path: Path,
+    max_duration_s: float,
+    *,
+    trim_start_s: float = 0.0,
+    drop_leading_silence: bool = False,
+    leading_silence_threshold_db: float = -28.0,
+    drop_vocal_pickup: bool = False,
+    vocal_pickup_threshold_db: float = -22.0,
+    fade_out_s: float = 0.0,
+) -> tuple[float, float]:
+    """Trim a song WAV for the Shorts duration cap.
+
+    Pipeline:
+      1. Skip the leading instrumental intro. Either via an explicit
+         ``trim_start_s`` (recommended for Suno — the intro length is
+         consistent at ~2-3s and ffmpeg's silencedetect uses PEAK not
+         RMS so quiet-guitar intros are missed by auto-detection), OR
+         via ``drop_leading_silence=True`` which probes silencedetect
+         (works on truly silent intros only).
+      2. (NEW 2026-05-03 v4 critique) If ``drop_vocal_pickup=True``,
+         apply ffmpeg ``silenceremove`` on the trimmed audio to drop
+         any residual quiet pickup beat between the rough intro cut
+         and the actual vocal entry. Suno V4_5 vocals don't always
+         land at exactly the requested start offset; this catches
+         the 0.3-1.0s "breath / pickup" that left captions ahead of
+         the audio.
+      3. Cap to ``max_duration_s``.
+      4. (NEW 2026-05-03 v4 critique) If ``fade_out_s > 0``, apply
+         ``afade=t=out`` over the final N seconds. Eliminates the
+         abrupt mid-chorus cut at the duration cap so the closer
+         hold transitions gracefully from sung→quiet→still-image.
+
+    Returns ``(trim_start_s, trim_end_s)`` on the SOURCE timeline so the
+    caller can log what was cut.
+
+    Caveat: if ``drop_vocal_pickup`` ate ~0.3-0.5s, the actual output
+    is slightly less than ``max_duration_s`` and the fadeout's
+    effective duration shrinks proportionally. Both effects are still
+    net wins versus no-fadeout / no-pickup-drop.
+    """
+    import subprocess as _sp
+
+    explicit_start = float(trim_start_s or 0.0)
+    if drop_leading_silence and explicit_start <= 0.0:
+        explicit_start = _detect_leading_silence_s(
+            in_path, threshold_db=leading_silence_threshold_db
+        )
+
+    trim_end_s = explicit_start + max_duration_s
+
+    af_parts: list[str] = []
+    if drop_vocal_pickup:
+        # Drop leading audio quieter than the vocal threshold until the
+        # first sample louder. start_silence=0.05 tolerates a 50ms
+        # low-level lead-in; start_duration=0.1 means after we detect
+        # voice we keep 100ms before re-checking. Tuned for Suno's
+        # vocal pickup transient.
+        af_parts.append(
+            f"silenceremove=start_periods=1:"
+            f"start_threshold={vocal_pickup_threshold_db}dB:"
+            f"start_silence=0.05:start_duration=0.1"
+        )
+    if fade_out_s > 0:
+        # afade.st is in OUTPUT timeline AFTER any silenceremove. We
+        # use max_duration_s as the assumed output duration; if
+        # silenceremove cut some leading audio, output is shorter and
+        # the fade truncates accordingly (still a fade, just shorter).
+        af_parts.append(
+            f"afade=t=out:st={max(0.0, max_duration_s - fade_out_s):.3f}:"
+            f"d={fade_out_s:.3f}"
+        )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-ss", f"{explicit_start:.3f}",
+        "-i", str(in_path),
+        "-t", f"{max_duration_s:.3f}",
+    ]
+    if af_parts:
+        cmd += ["-af", ",".join(af_parts)]
+    cmd += [
+        "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le",
+        str(out_path),
+    ]
+    _sp.run(cmd, check=True, capture_output=True)
+    return (explicit_start, trim_end_s)
+
+
+# ---------- sunoapi (Suno via sunoapi.org wrapper, sung music) -------------
+#
+# Suno is the de-facto best AI singing model for bilingual children's
+# rhymes (Hinglish, kids' choir, melody adherence). There is no
+# official Suno HTTP API for individual devs — the public path is
+# the unofficial wrapper at https://sunoapi.org/.
+#
+# Pricing: pay-per-generation, ~$0.05-0.10/song on the V4_5 model.
+# Top up credits at https://sunoapi.org/topup.
+#
+# API:
+#   POST https://api.sunoapi.org/api/v1/generate
+#     Authorization: Bearer <SUNOAPI_API_KEY>
+#     body: {customMode, instrumental, callBackUrl, model, prompt, style, title, vocalGender}
+#     returns: {data: {taskId}}
+#   GET https://api.sunoapi.org/api/v1/generate/record-info?taskId=<id>
+#     returns: {data: {status, response: {sunoData: [{audioUrl, ...}]}}}
+#     poll until status == "SUCCESS" or "FAILED"
+#
+# Risk: sunoapi.org is an unofficial Suno wrapper; Suno periodically
+# DMCAs these. Has weathered ~3 cycles since 2024, currently up. If
+# it goes down, fall back to manual Suno (audio_provider:
+# external_song with the songs/<slug>.wav drop convention).
+
+_SUNOAPI_BASE = "https://api.sunoapi.org"
+_SUNOAPI_GENERATE = f"{_SUNOAPI_BASE}/api/v1/generate"
+_SUNOAPI_RECORD = f"{_SUNOAPI_BASE}/api/v1/generate/record-info"
+
+
+def synth_via_sunoapi(
+    lyrics: str,
+    style: str,
+    out_path: Path,
+    *,
+    title: str = "",
+    model: str = "V4_5",
+    vocal_gender: str = "f",
+    poll_timeout_s: int = 300,
+    poll_interval_s: int = 5,
+) -> Path:
+    """Generate a sung song via sunoapi.org's Suno wrapper.
+
+    ``lyrics`` is the full lyrics block (one per line, may include
+    [Verse 1] / [Chorus] tags — Suno honors those structural markers).
+    ``style`` is a one-sentence description of genre + instrumentation
+    + tempo (e.g. "cheerful upbeat children's nursery rhyme, female
+    lead with kids choir, gentle acoustic guitar + tabla, 120 BPM").
+
+    Returns the path to the downloaded WAV. Raises RuntimeError on
+    auth failure, generation failure, or poll timeout.
+
+    Sunoapi.org's required ``callBackUrl`` field is set to a placeholder;
+    we poll the record-info endpoint instead of relying on the webhook
+    callback (callbacks need a public-internet URL the laptop agent
+    doesn't have).
+    """
+    import json as _json
+    import os as _os
+    import time as _time
+
+    api_key = _os.environ.get("SUNOAPI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "audio_provider=sunoapi requires SUNOAPI_API_KEY env var.\n"
+            "Sign up: https://sunoapi.org/api-key (~$10 top-up = ~100 songs).\n"
+            "Set in shell: export SUNOAPI_API_KEY=...\n"
+            "Or add to .env: SUNOAPI_API_KEY=..."
+        )
+
+    body = _json.dumps({
+        "customMode": True,
+        "instrumental": False,
+        "callBackUrl": "https://example.com/noop",  # required by schema; we poll instead
+        "model": model,
+        "prompt": lyrics,
+        "style": style,
+        "title": title or "Untitled",
+        "vocalGender": vocal_gender,
+    }).encode("utf-8")
+    # Cloudflare on api.sunoapi.org rejects the default urllib UA with
+    # error 1010 ("access denied"). Adding a real browser-class UA + an
+    # Accept header makes the request look like a normal client and gets
+    # past the CF bot challenge. Confirmed 2026-05-03 — without this the
+    # generate endpoint returns HTTP 403 immediately.
+    _UA = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": _UA,
+    }
+
+    print(f"[sunoapi] generate model={model} vocal={vocal_gender} "
+          f"lyrics={len(lyrics)}c style={len(style)}c…")
+    req = urllib.request.Request(_SUNOAPI_GENERATE, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = _json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"sunoapi generate HTTP {e.code}\n{detail}") from None
+
+    task_id = (result.get("data") or {}).get("taskId")
+    if not task_id:
+        raise RuntimeError(f"sunoapi generate returned no taskId: {result}")
+    print(f"[sunoapi] task_id={task_id}; polling for completion…")
+
+    deadline = _time.time() + poll_timeout_s
+    while _time.time() < deadline:
+        poll_req = urllib.request.Request(
+            f"{_SUNOAPI_RECORD}?taskId={task_id}",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+                "User-Agent": _UA,
+            },
+        )
+        try:
+            with urllib.request.urlopen(poll_req, timeout=30) as resp:
+                data = _json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            print(f"[sunoapi] poll HTTP {e.code} — retrying")
+            _time.sleep(poll_interval_s)
+            continue
+
+        outer = data.get("data") or {}
+        status = outer.get("status", "?")
+        if status == "SUCCESS":
+            songs = (outer.get("response") or {}).get("sunoData") or []
+            if not songs:
+                raise RuntimeError(f"sunoapi SUCCESS but empty sunoData: {data}")
+            audio_url = songs[0].get("audioUrl")
+            if not audio_url:
+                raise RuntimeError(f"sunoapi SUCCESS but no audioUrl in {songs[0]!r}")
+            print(f"[sunoapi] downloading {audio_url}")
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            # Cloudflare on the audio CDN (tempfile.aiquickdraw.com)
+            # also rejects Python-urllib UA. Use the browser UA we set
+            # for the API itself and stream the bytes ourselves rather
+            # than urlretrieve which doesn't accept custom headers.
+            dl_req = urllib.request.Request(
+                audio_url,
+                headers={"User-Agent": _UA, "Accept": "*/*"},
+            )
+            # sunoapi V4_5 returns .mp3, not .wav. Whisper / ffmpeg both
+            # handle MP3 transparently downstream, but the pipeline names
+            # the cache slot `narration.wav` by convention. We download
+            # the MP3 to a sibling .mp3, then ffmpeg-transcode to the
+            # caller's out_path so any caller asking for .wav gets a
+            # proper WAV (44.1k mono PCM s16le) regardless of what Suno
+            # served. Saves callers from having to know the extension.
+            mp3_path = out_path.with_suffix(".mp3")
+            with urllib.request.urlopen(dl_req, timeout=120) as resp:
+                mp3_path.write_bytes(resp.read())
+            if out_path.suffix.lower() == ".wav":
+                import subprocess as _sp
+                _sp.run(
+                    ["ffmpeg", "-y", "-loglevel", "error",
+                     "-i", str(mp3_path),
+                     "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le",
+                     str(out_path)],
+                    check=True,
+                )
+                # Keep mp3_path for debugging — small file, helpful when
+                # listening to the raw Suno output without the WAV transcode.
+            else:
+                # Caller asked for .mp3 (or other) — just rename.
+                mp3_path.rename(out_path)
+            return out_path
+        if status in ("FAILED", "ERROR", "FAIL", "CREATE_TASK_FAILED"):
+            raise RuntimeError(f"sunoapi generation failed: status={status} body={data}")
+
+        # Still pending — log every ~30s so a long render is observable.
+        elapsed = int(poll_timeout_s - (deadline - _time.time()))
+        if elapsed % 30 == 0:
+            print(f"[sunoapi] status={status} (elapsed {elapsed}s)")
+        _time.sleep(poll_interval_s)
+
+    raise RuntimeError(
+        f"sunoapi timed out after {poll_timeout_s}s for task {task_id}"
+    )
+
+
 # ---------- f5_tts (zero-shot voice cloning, opt-in) -----------------------
 
 
@@ -551,12 +968,19 @@ def _expand_bare_int(match: _re.Match) -> str:
     versus the constant-cost win on sports / TIH / wiki narration.
     """
     s = match.group(0)
+    # Strip comma-grouped thousands ("2,500" → "2500") before int().
+    # _RE_INTEGER captures comma-separated forms as a single token
+    # (class-of-bug fix 2026-05-03 — see regex docstring).
+    digits = s.replace(",", "")
     try:
-        n = int(s)
+        n = int(digits)
     except ValueError:
         return s
     if n > 999_999_999:
         return s
+    # Year rule applies only to bare 4-digit forms (no commas), so
+    # "1944" becomes "nineteen forty-four" but "1,944" (rare) becomes
+    # the cardinal "one thousand nine hundred forty-four".
     if 1900 <= n <= 2099 and len(s) == 4:
         return _expand_year(n)
     return _int_to_words(n)
@@ -576,17 +1000,27 @@ def _expand_bare_int(match: _re.Match) -> str:
 # from cfg["closer_format"], so the panel stays as "LIKE if YTA /
 # COMMENT if NTA / AITA?" regardless of what the audio path does.
 _ACRONYM_PHRASES: dict[str, str] = {
-    # Story closer / verdict acronyms. The slur "asshole" is sanitised
-    # to "a hole" pre-TTS for YouTube monetisation — Kokoro speaks it
-    # as two phonemes ("ay-hole"), Whisper transcribes those two words
-    # back into the captions, and the on-screen caption matches the
-    # spoken word. User feedback 2026-05-03.
-    "AITA":  "am I the a hole",
-    "WIBTA": "would I be the a hole",
-    "YTA":   "you're the a hole",
-    "NTA":   "not the a hole",
-    "NAH":   "no a holes here",
-    "ESH":   "everyone sucks here",
+    # AITA-class verdict acronyms (AITA / WIBTA / YTA / NTA / NAH / ESH)
+    # are DELIBERATELY ABSENT from this map. User feedback 2026-05-03:
+    # the channel should never PRONOUNCE these acronyms — neither
+    # letter-spelled ("A I T A") nor expanded to natural English
+    # ("am I the a hole"). Both readings sound off-tone for the
+    # channels going forward.
+    #
+    # Two layers enforce this:
+    #   (1) LLM-level (pipeline/rewrite.py + pipeline/prompts.py) —
+    #       the rewrite prompt forbids the LLM from authoring narration
+    #       that contains these tokens; the hook uses "Am I wrong for…"
+    #       framing instead; the spoken closer drops the acronym line
+    #       entirely. All NEW renders are clean by construction.
+    #   (2) Audio-level (this file) — _strip_verdict_acronym_sentences
+    #       below removes any sentence still containing these tokens
+    #       before TTS, as a defensive class-of-bug safety net for
+    #       re-renders of pre-2026-05-03 scripts.
+    #
+    # The visual closer panel STILL renders "LIKE if YTA / COMMENT if NTA"
+    # from cfg["closer_format"] via compose.render_closer_panel — that's
+    # the engagement ask, and it lives entirely in pixels, never audio.
     # Reddit family-relationship abbreviations.
     "MIL":   "mother in law",
     "FIL":   "father in law",
@@ -648,8 +1082,12 @@ _RE_ALLCAPS_WORD = _re.compile(r"\b[A-Z][A-Z'\-]{1,}\b")
 # because they collide with common English words: "So I refused" should
 # stay "so", not "significant other"; "It was bad" should stay "it",
 # not "I T". Those still expand on the all-caps path (uppercase-only).
+#
+# AITA-class VERDICT acronyms (AITA, WIBTA, YTA, NTA, NAH, ESH) are
+# deliberately NOT in this list — they're stripped (whole containing
+# sentence removed) by _strip_verdict_acronym_sentences before this
+# expansion path ever runs. See the _ACRONYM_PHRASES comment block.
 _AITA_ACRONYMS_CI: tuple[str, ...] = (
-    "AITA", "WIBTA", "YTA", "NTA", "NAH", "ESH",
     "MIL", "FIL", "SIL", "BIL", "DIL",
     "OOP", "VLC", "TIFU", "TIL",
     # Note deliberately omitted: SO, OP, NC, INFO, ID, IT, AI, ER, etc.
@@ -680,12 +1118,75 @@ def _expand_any_case_acronym(match: _re.Match) -> str:
 # space is preserved (without this, `\s*([KkMm])?` greedily ate the space
 # after "$4,200" and produced "four thousand two hundred dollarsfrom").
 _RE_CURRENCY = _re.compile(r"\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)(?:\s*([KkMm]))?\b")
-# Bare integer with word-boundary on each side. The negative-lookbehind for
-# `-` and `:` sidesteps phone numbers (555-1234) and timestamps (10:30).
-# The negative-lookahead for `:` and digit-hyphen prevents matching the left
-# half of those patterns. Decimals like "1.5" — we expand the integer part
-# only (the trailing ".5" pronounces correctly on Kokoro).
-_RE_INTEGER = _re.compile(r"(?<![-:\d])\b(\d{1,9})\b(?![-:.\d])")
+# Bare integer with word-boundary on each side, supporting comma-separated
+# thousands (e.g. "2,500", "2,937", "1,000,000"). The negative-lookbehind
+# for `-` and `:` sidesteps phone numbers (555-1234) and timestamps (10:30);
+# the negative-lookahead for `:` and digit-hyphen prevents matching the
+# left half of those patterns. Class-of-bug fix 2026-05-03 — without the
+# comma-grouping branch, "2,500" matched twice (as "2" and "500") and
+# Cartesia narrated "two-comma-five hundred". `_expand_bare_int` strips
+# the commas before int() conversion.
+_RE_INTEGER = _re.compile(
+    r"(?<![-:\d])\b(\d{1,3}(?:,\d{3})+|\d{1,9})\b(?![-:.\d])"
+)
+
+# Day-month natural-speech rewrite. Without this, "15 September" comes out
+# of TTS as "fifteen September" — robotic. Real human narrators say
+# "the fifteenth of September" or "September fifteenth". We rewrite to
+# the British "the Nth of Month" form (better fit for the documentary /
+# historyrecapped tone). Applied BEFORE _RE_INTEGER so the day number isn't
+# stripped to a bare cardinal first. Class-of-bug fix 2026-05-03.
+_MONTH_NAMES = (
+    "January|February|March|April|May|June|July|"
+    "August|September|October|November|December"
+)
+_RE_DAY_MONTH = _re.compile(
+    rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({_MONTH_NAMES})\b",
+    flags=_re.IGNORECASE,
+)
+# Reverse form too: "September 15" / "September 15th" → "September the fifteenth".
+_RE_MONTH_DAY = _re.compile(
+    rf"\b({_MONTH_NAMES})\s+(\d{{1,2}})(?:st|nd|rd|th)?\b",
+    flags=_re.IGNORECASE,
+)
+
+_ORDINAL_TENS = {
+    20: "twentieth", 30: "thirtieth", 40: "fortieth", 50: "fiftieth",
+    60: "sixtieth", 70: "seventieth", 80: "eightieth", 90: "ninetieth",
+}
+_ORDINAL_ONES = {
+    0: "",       1: "first",    2: "second",   3: "third",   4: "fourth",
+    5: "fifth",  6: "sixth",    7: "seventh",  8: "eighth",  9: "ninth",
+    10: "tenth", 11: "eleventh", 12: "twelfth", 13: "thirteenth",
+    14: "fourteenth", 15: "fifteenth", 16: "sixteenth", 17: "seventeenth",
+    18: "eighteenth", 19: "nineteenth",
+}
+
+
+def _ordinal_to_words(n: int) -> str:
+    """Return ``n`` as an English ordinal phrase. Used for date formatting."""
+    if n < 1 or n > 99:
+        return _int_to_words(n) + "th"
+    if n in _ORDINAL_ONES:
+        return _ORDINAL_ONES[n]
+    if n in _ORDINAL_TENS:
+        return _ORDINAL_TENS[n]
+    tens, ones = divmod(n, 10)
+    cardinal_tens = {2: "twenty", 3: "thirty", 4: "forty", 5: "fifty",
+                     6: "sixty", 7: "seventy", 8: "eighty", 9: "ninety"}[tens]
+    return f"{cardinal_tens}-{_ORDINAL_ONES[ones]}"
+
+
+def _expand_day_month(match: _re.Match) -> str:
+    day = int(match.group(1))
+    month = match.group(2)
+    return f"the {_ordinal_to_words(day)} of {month}"
+
+
+def _expand_month_day(match: _re.Match) -> str:
+    month = match.group(1)
+    day = int(match.group(2))
+    return f"{month} the {_ordinal_to_words(day)}"
 
 
 def _lowercase_emphatic_caps(match: _re.Match) -> str:
@@ -779,6 +1280,51 @@ _RE_PROFANITY_ASSHOLE = _re.compile(
 )
 
 
+# AITA-class verdict acronym stripper. Defensive class-of-bug safety
+# net for re-renders of older scripts (pre-2026-05-03) that still
+# contain AITA/WIBTA/YTA/NTA/NAH/ESH in their narration. New renders
+# are kept clean at the LLM authoring layer (pipeline/rewrite.py),
+# but if any of these tokens slip through we strip the WHOLE sentence
+# containing them before TTS so the audio never says them. The
+# visual closer panel still renders the engagement ask from
+# cfg["closer_format"] independently in compose.py, so the panel
+# survives stripping. See user feedback 2026-05-03 — the channel
+# decision is "never pronounce these acronyms".
+_RE_VERDICT_ACRONYM = _re.compile(
+    r"\b(?:AITA|WIBTA|YTA|NTA|NAH|ESH)\b",
+    flags=_re.IGNORECASE,
+)
+
+
+def _strip_verdict_acronym_sentences(text: str) -> str:
+    """Remove sentences containing AITA-class verdict acronyms.
+
+    Whole-sentence removal (not just the token) because excising the
+    bare acronym leaves grammatically-broken fragments — "AITA for
+    refusing to host?" with the acronym deleted becomes " for
+    refusing to host?", which Kokoro then reads as a half-question.
+    Dropping the entire sentence produces clean output: the next
+    sentence becomes the spoken hook, and downstream Whisper alignment
+    sees what was actually said.
+
+    Sentence boundary regex matches the same set as ``_split_into_sentences``
+    above (.!?।॥ followed by whitespace) so the audio path's stripping
+    aligns with how _synth_kokoro will chunk afterwards.
+    """
+    if not text or not _RE_VERDICT_ACRONYM.search(text):
+        return text
+    parts = _re.split(r"(?<=[.!?])\s+", text.strip())
+    kept = [p for p in parts if not _RE_VERDICT_ACRONYM.search(p)]
+    if not kept:
+        # Pathological case: every sentence had a verdict acronym.
+        # Returning empty would crash downstream; return original so
+        # the caller at least gets the legacy "letter-spelled" reading
+        # rather than a hard failure. Should never trigger on
+        # well-formed AITA narrations (only the closer line has them).
+        return text
+    return " ".join(kept)
+
+
 def _sub_profanity_asshole(m: "_re.Match[str]") -> str:
     raw = m.group(1)
     is_plural = raw.lower().endswith("s")
@@ -792,23 +1338,104 @@ def _sub_profanity_asshole(m: "_re.Match[str]") -> str:
     return repl
 
 
+# ---- Hindi tatsama + numeral respelling -----------------------------------
+#
+# Class-of-bug fix per critique 2026-05-03 (data/critiques/abhimanyu-chakravyuh/).
+# Kokoro's Hindi voices (hf_alpha, hf_beta, hm_omega, hm_psi) systematically
+# break Devanagari conjuncts (द्ध, क्ष, ज्ञ, र्भ) and re-segment proper
+# nouns at wrong syllable boundaries. The TTS path replaces these with
+# phonetic respellings; captions / source text continue to see canonical
+# Devanagari (the substitution happens inside normalize_for_tts only).
+#
+# Add new entries here as the audio critic flags new mispronunciations
+# (memory: feedback_pronunciation_pretts.md is the parent principle).
+
+_HINDI_TATSAMA_RESPELLINGS: dict[str, str] = {
+    # Mahabharat dramatis personae — hyphen forces syllable break
+    # (per critique 2026-05-03 v2). Bare अभीमन्यू still re-segmented
+    # at the wrong boundary; the hyphen survives Kokoro's phoneme
+    # pass and prevents म्न्यु cluster collapse.
+    "अभिमन्यु":   "अभि-मन्यु",
+    "अर्जुन":     "अरजुन",
+    "द्रोणाचार्य": "द्रोणाचारीय",
+    # Place names
+    "कुरुक्षेत्र": "कुरुक्शेत्र",
+    "हस्तिनापुर": "हस्तीनापुर",
+    # Tatsama nouns + conjunct workarounds
+    "ज्ञान":       "ग्यान",     # accept colloquial gyaan; document
+    "योद्धा":      "योद-धा",    # द्ध gemination preserved via hyphen
+    "योद्धाओं":    "योद-धाओं",
+    "महारथियों":  "महा-रथियों", # र्थ → र्त collapse fixed
+    "गर्भ":        "गर्-भ",     # र्भ → र्ब collapse fixed
+    "बाण":         "बाण्",      # final ण halant preserves the nasal stop
+    "धनुष":        "धनुष्",     # final ष survives
+    # Nasalisation losses (anusvara ं + chandrabindu ँ silently dropped)
+    "साँस":        "सान्स",
+    "तेरहवाँ":     "तेरहवान",
+    # YouTube CTA tokens — Hindi-transliterated English breaks on hm_psi
+    "सब्सक्राइब":  "सब-स्क्राइब",
+    "कमेंट":       "कमेन्ट",
+    "पसंद":        "पसन्द",
+}
+
+# Hindi numerals collide acoustically with common postpositions/verbs:
+#   सात (seven) ↔ साथ (with)
+#   सोलह (sixteen) — Kokoro inserts a schwa, lands as "soleh" (fuzzy).
+# For collision-prone tokens, respell with explicit vowels so Kokoro
+# emits the numeral, not the homophone.
+_HINDI_NUMERAL_RESPELLINGS: dict[str, str] = {
+    "सात":   "साअत",
+    "सोलह":  "सोलाह",
+}
+
+_DEVANAGARI_PROBE = _re.compile(r"[ऀ-ॿ]")
+
+
+def _apply_hindi_respellings(text: str) -> str:
+    """Apply Hindi tatsama + numeral respellings.
+
+    Cheap Devanagari-character probe so non-Hindi text is a no-op.
+    Word boundaries (``\\b``) don't behave on Indic scripts, so we use
+    plain substring replacement after sorting keys by descending
+    length to avoid prefix collisions (e.g. "महारथियों" before
+    "महारथी" if the latter is ever added).
+    """
+    if not text or not _DEVANAGARI_PROBE.search(text):
+        return text
+    out = text
+    items = sorted(
+        list(_HINDI_TATSAMA_RESPELLINGS.items())
+        + list(_HINDI_NUMERAL_RESPELLINGS.items()),
+        key=lambda kv: -len(kv[0]),
+    )
+    for src, dst in items:
+        out = out.replace(src, dst)
+    return out
+
+
 def normalize_for_tts(text: str) -> str:
     """Make ``text`` pronounceable by neural TTS.
 
-    Five normalisations, applied in order:
-    1. Currency → English words ($2000 → "two thousand dollars")
-    2. Bare integers → English words (60 → "sixty")
-    3. Case-insensitive AITA-class acronyms → their natural phrases
-       (AITA / Aita / aita all → "am I the a hole"). Runs BEFORE the
-       all-caps rule because lowercase "aita?" would otherwise slip
-       past, leaving the literal letters for the TTS to phoneticise.
-    4. Standalone "asshole" / "assholes" → "a hole" / "a holes"
+    Seven normalisations, applied in order:
+    1. AITA-class verdict acronyms (AITA / WIBTA / YTA / NTA / NAH / ESH)
+       — entire containing sentence STRIPPED. User feedback 2026-05-03:
+       the channel must never pronounce these acronyms. Runs FIRST so
+       the downstream all-caps + acronym passes never see them. The
+       visual closer panel still renders the engagement ask from
+       cfg["closer_format"] independently. See _strip_verdict_acronym_sentences.
+    2. Currency → English words ($2000 → "two thousand dollars")
+    3. Bare integers → English words (60 → "sixty")
+    4. Case-insensitive Reddit-class acronyms (MIL/FIL/SIL/BIL/DIL/OOP/
+       VLC/TIFU/TIL) → their natural phrases. AITA-class verdict
+       acronyms are NOT in this list anymore — they were stripped by
+       step 1 above.
+    5. Standalone "asshole" / "assholes" → "a hole" / "a holes"
        (YouTube monetisation sanitisation; see _RE_PROFANITY_ASSHOLE).
-       Runs AFTER the acronym pass so any "asshole" the acronym pass
-       just emitted (it doesn't anymore — the dict was updated — but
-       belt-and-braces for any future regression) gets caught.
-    5. Remaining all-caps tokens (any not handled above) → lowercase
-       (so emphasis-CAPS don't read as letter-spelled acronyms).
+    6. Remaining all-caps tokens → lowercase (so emphasis-CAPS don't
+       read as letter-spelled acronyms).
+    7. Hindi tatsama + numeral respellings — only applied when text
+       contains Devanagari. Fixes Kokoro's collapse of conjuncts +
+       numeral homophones (सात↔साथ, सोलह→soleh).
 
     Idempotent: re-running produces the same output. Numbers in time
     strings (10:30) and phone numbers (555-1234) are left intact via
@@ -816,11 +1443,17 @@ def normalize_for_tts(text: str) -> str:
     """
     if not text:
         return text
-    out = _RE_CURRENCY.sub(_expand_currency, text)
+    out = _strip_verdict_acronym_sentences(text)
+    out = _RE_CURRENCY.sub(_expand_currency, out)
+    # Date forms run BEFORE bare integers so the day numbers don't get
+    # converted to cardinals first ("15 September" → "fifteen September").
+    out = _RE_DAY_MONTH.sub(_expand_day_month, out)
+    out = _RE_MONTH_DAY.sub(_expand_month_day, out)
     out = _RE_INTEGER.sub(_expand_bare_int, out)
     out = _RE_ANY_CASE_ACRONYM.sub(_expand_any_case_acronym, out)
     out = _RE_PROFANITY_ASSHOLE.sub(_sub_profanity_asshole, out)
     out = _RE_ALLCAPS_WORD.sub(_lowercase_emphatic_caps, out)
+    out = _apply_hindi_respellings(out)
     return out
 
 
@@ -836,6 +1469,7 @@ def synthesize(
     ref_audio_text: str | None = None,
     modulation: dict | None = None,
     pronunciation_dict: dict | None = None,
+    language: str = "en",
 ) -> Path:
     """Generate speech audio. Returns path to the .wav file.
 
@@ -882,4 +1516,18 @@ def synthesize(
             out_path=out_path,
             speed=speed,
         )
-    raise ValueError(f"unknown TTS provider {provider!r} (choices: kokoro, f5_tts)")
+    if provider == "cartesia":
+        # Channel YAML declares `tts_language: hi` (or es/fr/etc.) for
+        # non-English narration; passes through here as the `language`
+        # kwarg. Default English.
+        return _synth_cartesia(
+            text,
+            voice=voice,
+            out_path=out_path,
+            speed=speed,
+            language=language,
+        )
+    raise ValueError(
+        f"unknown TTS provider {provider!r} "
+        "(choices: kokoro, f5_tts, cartesia)"
+    )

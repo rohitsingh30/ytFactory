@@ -41,7 +41,7 @@ on the laptop via a pull-based agent over outbound HTTPS.
 | [`docs/architecture.md`](./docs/architecture.md) | engineers | Components, deployment, IAM, repo layout, mermaid system diagram |
 | [`docs/user_flows.md`](./docs/user_flows.md) | designers / PMs / new contributors | Three user types (visitor, owner, operator), state machine, anti-abuse perimeter — sequence diagrams |
 | [`docs/data_flows.md`](./docs/data_flows.md) | backend engineers, debuggers | Where data lives, chat extraction, lease protocol, render pipeline, lifecycle GC, polling — flowcharts + sequence diagrams |
-| [`docs/legacy_pipeline.md`](./docs/legacy_pipeline.md) | rendering engineers | What `make_shorts.py` does internally — the ~7-min render, stage by stage |
+| [`docs/legacy_pipeline.md`](./docs/legacy_pipeline.md) | rendering engineers | What `scripts/make_shorts.py` does internally — the ~7-min render, stage by stage |
 
 | Layer | Where | What |
 |---|---|---|
@@ -141,7 +141,7 @@ YTFACTORY_AGENT_TOKEN=$YTFACTORY_AGENT_TOKEN \
 |---|---|---|
 | **MyStoriesAnimated** | Reddit (AITA / TIFU / etc.) | Flat 2D crayon, pastel fills |
 | **SportsStoriesAnimated** | Football moments | Tifo line-art + real broadcast cut-ins at the climactic moment |
-| **MahabharatHindi** | Mahabharat episodes | Amar Chitra Katha comic-book, Hindi narration |
+| **HindutavaAnimated** | Mahabharat episodes | Amar Chitra Katha comic-book, Hindi narration |
 
 Other channel YAMLs are research / variant configs that share a target.
 
@@ -175,7 +175,7 @@ OpenAI gpt-5.3-chat at <100 chat sessions).
 | ✅ | chat UI at `/`, vanilla JS, proposal preview + confirm |
 | ✅ | per-IP daily rate limits + global Azure spend cap |
 | ✅ | control plane deployed to Cloud Run, prod URL canonical |
-| ✅ | RENDER_SHORT mega-task (wraps make_shorts.py) |
+| ✅ | RENDER_SHORT mega-task (wraps scripts/make_shorts.py) |
 | ✅ | YOUTUBE_UPLOAD light worker (post-upload GC inside) |
 | ✅ | RESEARCH_HANDOFF light worker (calls into pipeline/research.py) |
 | ✅ | scripts/laptop_cleanup.py (dry-run reclaims ~1.9 GiB) |

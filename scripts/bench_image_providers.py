@@ -13,7 +13,7 @@ thread — never parallelise the providers here or you'll trip
 Usage:
     .venv/bin/python scripts/bench_image_providers.py \\
         --providers mflux z_image_turbo \\
-        --channel channels/aita_animated.yaml \\
+        --channel mystoriesanimated/variants/aita_animated.yaml \\
         --prompts data/cache/<slug>/prompts.json \\
         --beats 0 1 2
 
@@ -97,9 +97,9 @@ def main() -> int:
         help="Image providers to compare (run sequentially in order).",
     )
     ap.add_argument(
-        "--channel", default="channels/aita_animated.yaml",
+        "--channel", default="mystoriesanimated/variants/aita_animated.yaml",
         help="Channel YAML to source style_prefix / character_description / "
-             "dims / steps from. Default: channels/aita_animated.yaml.",
+             "dims / steps from. Default: mystoriesanimated/variants/aita_animated.yaml.",
     )
     ap.add_argument(
         "--prompts", type=Path, default=None,

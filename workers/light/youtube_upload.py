@@ -21,11 +21,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from agent.runner import TaskContext, register
+from workers.agent.runner import TaskContext, register
 from control import jobs as jobs_mod
 from control import storage
 from control.queue import get_queue, new_task_id
-from shared.schema import TaskEnvelope, TaskKind
+from control.schema import TaskEnvelope, TaskKind
 
 logger = logging.getLogger(__name__)
 

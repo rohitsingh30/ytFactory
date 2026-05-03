@@ -69,6 +69,22 @@
   /* Nudge main content in so the right panel doesn't cover it on wide screens. */
   @media (min-width: 1280px) { body { padding-right: 380px; } body.chat-collapsed { padding-right: 20px; } }
 
+  /* --- Mobile ( < 768px ): chat panel becomes a full-width overlay --- */
+  @media (max-width: 767px) {
+    #chat-panel { width: 100%; transform: translateX(100%); }
+    #chat-panel.expanded { transform: translateX(0); }
+    /* On mobile we ignore the persisted "collapsed" preference; default
+       state is collapsed (off-screen) and the toggle slides it in. */
+    #chat-panel.collapsed { transform: translateX(100%); }
+    #chat-panel-toggle {
+      left: -36px; width: 36px; height: 60px; font-size: 18px;
+      background: rgb(99 102 241); color: white; border-color: rgb(79 70 229);
+    }
+    body, body.chat-collapsed { padding-right: 0 !important; }
+    /* Niche cards a bit wider so they fill the viewport better on phones. */
+    .niche-reel-card { width: calc(100vw - 64px); max-width: 320px; }
+  }
+
   /* --- Niche reel: horizontally-scrolling 9:16 cards --- */
   .reel-scroll {
     display: flex; gap: 18px; overflow-x: auto; overflow-y: visible;
@@ -162,8 +178,14 @@
       </div>
     </div>
     <div class="flex items-center gap-4">
-      <button id="research-btn" class="text-sm text-slate-400 hover:text-slate-100">📚 Research</button>
-      <button id="telemetry-btn" class="text-sm text-slate-400 hover:text-slate-100">📊 Telemetry</button>
+      <!-- Research/Telemetry hooks live on the legacy localhost server. They
+           404 on the cloud control plane and will be re-enabled once those
+           routes are ported in a follow-up. -->
+      <button id="research-btn" class="hidden text-sm text-slate-400 hover:text-slate-100">📚 Research</button>
+      <button id="telemetry-btn" class="hidden text-sm text-slate-400 hover:text-slate-100">📊 Telemetry</button>
+      <a href="/api/health" target="_blank" rel="noopener"
+        class="text-xs text-slate-500 hover:text-slate-300 font-mono"
+        title="Agent presence + spend usage">⚡ /health</a>
       <button id="reset-btn" class="text-sm text-slate-400 hover:text-slate-100 hidden">← Make another</button>
     </div>
   </div>
@@ -951,21 +973,32 @@
   });
 
   // Toggle / restore from localStorage so the user's preference persists.
+  // Mobile (<768px): default is collapsed regardless of the persisted
+  // preference — we don't want a saved "open" state from desktop to leave
+  // the panel covering a phone viewport on first load.
+  function isMobile() {
+    return window.matchMedia('(max-width: 767px)').matches;
+  }
   function applyCollapsed(collapsed) {
     const panel = $("chat-panel");
     const btn = $("chat-panel-toggle");
     panel.classList.toggle("collapsed", collapsed);
+    panel.classList.toggle("expanded", !collapsed);
     document.body.classList.toggle("chat-collapsed", collapsed);
-    btn.textContent = collapsed ? "‹" : "›";
+    btn.textContent = collapsed ? (isMobile() ? "✦" : "‹") : (isMobile() ? "✕" : "›");
     btn.title = collapsed ? "Open chat" : "Close chat";
   }
-  let collapsed = localStorage.getItem("ytf-chat-collapsed") === "1";
+  let collapsed = isMobile() ? true : localStorage.getItem("ytf-chat-collapsed") === "1";
   applyCollapsed(collapsed);
   $("chat-panel-toggle").addEventListener("click", () => {
     collapsed = !collapsed;
-    localStorage.setItem("ytf-chat-collapsed", collapsed ? "1" : "0");
+    if (!isMobile()) {
+      localStorage.setItem("ytf-chat-collapsed", collapsed ? "1" : "0");
+    }
     applyCollapsed(collapsed);
   });
+  // Re-apply on viewport resize so rotating a phone doesn't strand the panel.
+  window.addEventListener('resize', () => applyCollapsed(collapsed));
 })();
 </script>
 
@@ -2096,7 +2129,7 @@ function showServerRestartBanner(jobId) {
       job <span class="font-mono">${escapeHtml(jobId)}</span> anymore.
       The pipeline subprocess may still be running — it now survives server
       restarts as of this build, so check
-      <span class="font-mono">data/shorts/</span> in a few minutes; the mp4
+      <span class="font-mono"></span> in a few minutes; the mp4
       should land there if it was past the image-gen stage.
     </div>
     <div class="flex gap-2 mt-3">

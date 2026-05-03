@@ -277,6 +277,76 @@ time, in the system_corrections.principle field.
      branch. Cite the WPM per sentence and the file:function
      target.
 
+  L16 HINDI TATSAMA RESPELLING — Kokoro's Hindi voices (h*) collapse
+     Devanagari conjuncts (द्ध, क्ष, ज्ञ, र्भ) and re-segment proper
+     nouns at wrong syllable boundaries. Symptoms: "अभिमन्यु" → "अब
+     ही मन्यू", "कुरुक्षेत्र" → "कुरुक शेत्र", "ज्ञान" → "ग्यान",
+     "योद्धा" → "योधा" (gemination lost). Detection: any source
+     Devanagari token containing a tatsama-prone conjunct (see list
+     above) where the Whisper transcript shows the token split,
+     re-segmented, or with the conjunct simplified. Class-of-bug:
+     ``pipeline/audio.py:_HINDI_TATSAMA_RESPELLINGS`` is missing the
+     token. Add it (canonical → phonetic). Captions/source-text
+     keep canonical Devanagari; only the TTS path sees the
+     respelling. Conjuncts to watch: द्ध, क्ष, ज्ञ, र्भ, र्ज, ण्य, म्न्य.
+
+  L17 HINDI NUMERAL HOMOPHONE — Hindi numerals collide acoustically
+     with common postpositions/verbs: सात (seven) ↔ साथ (with),
+     दो (two) ↔ दो (give imperative), नौ (nine) ↔ नौ (boat). And
+     "सोलह" reads as "soleh" (extra schwa) on hm_psi. Detection:
+     compare source token against transcript token at the same
+     position; if a numeral lemma was heard as its homophone (or
+     a fuzzy variant), CLASS-OF-BUG on
+     ``pipeline/audio.py:_HINDI_NUMERAL_RESPELLINGS``. Cite the
+     specific numeral. Fix: respell with explicit vowels, or use
+     the ASCII digit form which Kokoro phonologises cleanly.
+
+  L18 HINDI CLOSER = THREE PARAGRAPHS — for devotional/storytelling
+     Hindi channels the closer must produce three discrete units:
+     (1) lesson/moral, (2) blessing ("जय श्री कृष्णा।" or similar),
+     (3) CTA ("कमेंट करें और चैनल को सब्सक्राइब करें।"). Each on
+     its own line with a blank line between, so the per-paragraph
+     stitcher inserts the >0.5s gap that L3 requires. Em-dash-joined
+     closers fuse on hm_psi and read as one breathless run-on.
+     Class-of-bug on ``pipeline/rewrite.py:_BASE_PROMPT`` (Hindi
+     closer block) if a Hindi script lands a single-paragraph
+     blessing+CTA fusion.
+
+  L19 DANDA AS SENTENCE TERMINATOR — Hindi sentences end in danda
+     "।" (U+0964) and deergh viram "॥" (U+0965), NOT ASCII period.
+     The sentence splitter at ``pipeline/audio.py:_SENTENCE_SPLIT_RE``
+     and the modulator's hook/closer detection MUST recognise these
+     or every Hindi narration synthesises as one giant sentence,
+     bypassing modulation AND blowing past Kokoro's 510-phoneme
+     cap. Detection: if a Hindi source has multiple "।" but the
+     synth log shows only one sentence, the regex regressed.
+
+  L20 OVER-PAUSED PROSODY — explicit silence inserted between
+     sentences (per-beat ``post_pause_s`` in script.json's
+     ``narration_prosody``) totals more than ~5% of audio
+     duration → reads as "weird" / "too many pauses" even when
+     each individual pause is justified. Tightened from the
+     original 8% threshold per user feedback 2026-05-03 v2:
+     pauses concentrated at paragraph boundaries (typically 4-6
+     transitions in a 60s story) sound natural; pauses scattered
+     after every sentence sound choppy. Cap individual non-paragraph
+     ``post_pause_s`` at ≤0.15s; reserve ≥0.4s pauses for paragraph
+     boundaries (where the source has ``\\n\\n``). Total-pause
+     budget ≤5% of synthesised duration. Gravitas comes from
+     PER-SENTENCE speed drops on weight words (0.70-0.82x), not
+     from dead air.
+
+  L21 DEVANAGARI TOKENISER REGRESSION — a critic-internal lens.
+     If word_count_source AND word_count_heard are both 0 in the
+     metrics block, the tokeniser dropped every word — almost
+     certainly because the regex was ASCII-only. Class-of-bug on
+     ``pipeline/audio_critic.py:_tokenise``: must use
+     ``[\\w']+`` with ``re.UNICODE`` so Devanagari survives. When
+     this lens fires, NO downstream WPM-based lens can produce
+     reliable signal — the rest of the report is degraded. Always
+     cite that this happened so the user knows to disregard
+     pacing-related findings until the tokeniser is fixed.
+
 ENGINEERING THINKING — for EVERY issue:
   • ONE-OFF — unique to this script. Fix lives in `script_corrections`.
   • CLASS-OF-BUG — the pipeline could let this through on any future
@@ -378,8 +448,18 @@ def _diff_lines(source_words: list[str], heard_words: list[str]) -> str:
 
 
 def _tokenise(text: str) -> list[str]:
-    """Lowercase word-tokens, ignoring punctuation and whitespace."""
-    return re.findall(r"[a-z0-9']+", text.lower())
+    """Word-tokens — Latin lowercased, Devanagari preserved.
+
+    The original regex was ``[a-z0-9']+`` which silently dropped every
+    Devanagari character, leaving Hindi renders with word_count=0 and
+    therefore wpm=0 — every WPM-based lens (L2, L15) was bypassed.
+    Class-of-bug fix per critique 2026-05-03 v2.
+
+    \\w with re.UNICODE matches Latin + Devanagari + apostrophe-bearing
+    contractions; .lower() is a no-op on Devanagari and still
+    case-folds the English path.
+    """
+    return [t.lower() for t in re.findall(r"[\w']+", text, flags=re.UNICODE)]
 
 
 def critique_audio(

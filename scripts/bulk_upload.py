@@ -2,7 +2,7 @@
 hasn't been uploaded yet to YouTube.
 
 Walks ``data/intermediate/*/scripts/*.json``, finds the matching
-``data/shorts/<slug>.mp4`` and the (optional) ``raw/<slug>.json``,
+``<slug>.mp4`` and the (optional) ``raw/<slug>.json``,
 skips anything that already has a record under ``data/uploads/``, and
 shows you the candidate list. Pass ``--apply`` to actually upload.
 
@@ -16,16 +16,16 @@ Examples:
 
     # 1. Dry-run — list candidates, don't upload.
     .venv/bin/python scripts/bulk_upload.py \\
-        --channel channels/mystoriesanimated.yaml
+        --channel mystoriesanimated/config.yaml
 
     # 2. Same, but only AITA-class slugs.
     .venv/bin/python scripts/bulk_upload.py \\
-        --channel channels/mystoriesanimated.yaml \\
+        --channel mystoriesanimated/config.yaml \\
         --filter aita
 
     # 3. Apply — upload everything as PUBLIC.
     .venv/bin/python scripts/bulk_upload.py \\
-        --channel channels/mystoriesanimated.yaml \\
+        --channel mystoriesanimated/config.yaml \\
         --apply --privacy public
 """
 

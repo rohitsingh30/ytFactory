@@ -20,10 +20,10 @@ os.environ["YTFACTORY_SCRATCH_ROOT"] = _TMP
 
 os.environ["YTFACTORY_QUEUE_BACKEND"] = "memory"
 
-from agent.runner import TaskContext  # noqa: E402
+from workers.agent.runner import TaskContext  # noqa: E402
 from control import jobs as jobs_mod  # noqa: E402
 from control.queue import reset_queue  # noqa: E402
-from shared.schema import TaskEnvelope, TaskKind  # noqa: E402
+from control.schema import TaskEnvelope, TaskKind  # noqa: E402
 
 
 def _envelope(channel: str = "mystoriesanimated", topic: str = "AITA for ruining the cake") -> TaskEnvelope:
@@ -84,7 +84,7 @@ class ChannelResolveTest(unittest.TestCase):
         from workers.heavy.render_short import _resolve_channel_yaml, _channel_dir_from_yaml
         self.assertTrue(str(_resolve_channel_yaml("mystoriesanimated")).endswith("mystoriesanimated.yaml"))
         self.assertTrue(str(_resolve_channel_yaml("sportstoriesanimated")).endswith("sportstoriesanimated.yaml"))
-        self.assertTrue(str(_resolve_channel_yaml("mahabharathindi")).endswith("mahabharat_hindi.yaml"))
+        self.assertTrue(str(_resolve_channel_yaml("mahabharathindi")).endswith("hindutavaanimated.yaml"))
         # auto falls back to mystoriesanimated.
         self.assertTrue(str(_resolve_channel_yaml("auto")).endswith("mystoriesanimated.yaml"))
         # unknown also falls back.
@@ -92,8 +92,8 @@ class ChannelResolveTest(unittest.TestCase):
 
     def test_channel_dir_inferred_from_stem(self):
         from workers.heavy.render_short import _channel_dir_from_yaml
-        self.assertEqual(_channel_dir_from_yaml(Path("channels/mystoriesanimated.yaml")), "mystoriesanimated")
-        self.assertEqual(_channel_dir_from_yaml(Path("channels/mahabharat_hindi.yaml")), "mahabharat_hindi")
+        self.assertEqual(_channel_dir_from_yaml(Path("mystoriesanimated/config.yaml")), "mystoriesanimated")
+        self.assertEqual(_channel_dir_from_yaml(Path("hindutavaanimated/config.yaml")), "hindutavaanimated")
 
 
 class OrchestrationTest(unittest.IsolatedAsyncioTestCase):
@@ -135,7 +135,7 @@ class OrchestrationTest(unittest.IsolatedAsyncioTestCase):
             return sp, cp
 
         async def fake_run_make_shorts(script_path, channel_yaml, log_path):
-            # Simulate make_shorts.py creating the mp4 in data/shorts/.
+            # Simulate make_shorts.py creating the mp4 in .
             slug = script_path.stem
             mp4 = rs.PROJECT_ROOT / "data" / "shorts" / f"{slug}.mp4"
             mp4.parent.mkdir(parents=True, exist_ok=True)

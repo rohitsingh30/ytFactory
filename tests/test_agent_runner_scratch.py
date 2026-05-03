@@ -12,9 +12,9 @@ from pathlib import Path
 _TMP = tempfile.mkdtemp(prefix="ytf-runner-test-")
 os.environ["YTFACTORY_SCRATCH_ROOT"] = _TMP
 
-from agent import runner  # noqa: E402
-from agent.runner import TaskContext  # noqa: E402
-from shared.schema import TaskEnvelope, TaskKind  # noqa: E402
+from workers.agent import runner  # noqa: E402
+from workers.agent.runner import TaskContext  # noqa: E402
+from control.schema import TaskEnvelope, TaskKind  # noqa: E402
 
 
 def _envelope(kind: TaskKind = TaskKind.NOOP) -> TaskEnvelope:

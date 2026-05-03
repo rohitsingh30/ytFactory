@@ -4,7 +4,7 @@
 > pipeline as it stood pre-migration. Sections about `make_spec.py`,
 > `render_from_spec.py`, and the spec-driven path describe code that
 > has been **removed** — the only active rendering path is the
-> slideshow path via `make_shorts.py`. The full system is being split
+> slideshow path via `scripts/make_shorts.py`. The full system is being split
 > into a hybrid cloud + laptop architecture; see
 > [architecture.md](./architecture.md) for the target design.
 
@@ -48,8 +48,8 @@ ytFactory/
 │   └── critiques/<slug>.md             ← /critique-video output
 ├── assets/
 │   └── cooking_loops/                  ← cached bg loops for the aita_cooking channel
-├── data/cooking_bg_queue.yaml          ← curated queue of YouTube bg sources w/ chop ranges (no downloads)
-├── data/_cooking_bg_research.py        ← yt-dlp metadata-only helper that populates the queue
+├── mystoriesanimated/cooking_bg_queue.yaml          ← curated queue of YouTube bg sources w/ chop ranges (no downloads)
+├── scripts/_cooking_bg_research.py        ← yt-dlp metadata-only helper that populates the queue
 └── tests/                              ← unit tests for the spec interpreter
 ```
 
@@ -60,7 +60,7 @@ ytFactory/
 A channel YAML in `channels/` is two things stapled together:
 
 1. **Manifest fields** at the top level — `name`, `source_adapter`,
-   `source` (subreddit, listing, etc). Used by `pull_stories.py` to
+   `source` (subreddit, listing, etc). Used by `scripts/pull_stories.py` to
    know what to scrape.
 2. **`spec_template:` block** — a *partial* video spec with
    placeholders like `${script.narration}` that `make_spec.py` fills
@@ -69,7 +69,7 @@ A channel YAML in `channels/` is two things stapled together:
 This is what makes the system extensible. To add a new channel
 (different niche, different look) you write one YAML file. No Python.
 
-Example: `channels/aita_cooking.yaml` — pulls from r/AmItheAsshole and
+Example: `mystoriesanimated/variants/aita_cooking.yaml` — pulls from r/AmItheAsshole and
 renders the AITA-text-on-cooking-bg format.
 
 ---
@@ -79,7 +79,7 @@ renders the AITA-text-on-cooking-bg format.
 Scrape raw text from a source.
 
 ```bash
-.venv/bin/python pull_stories.py reddit \
+.venv/bin/python scripts/pull_stories.py reddit \
     --subreddit AmItheAsshole \
     --limit 5 \
     --channel aita_cooking
@@ -87,7 +87,7 @@ Scrape raw text from a source.
 
 Subcommands: `reddit`, `wiki`, `tih`, `youtube`. Each calls into a
 source adapter under `sources/` and emits one JSON per story to
-`data/intermediate/<channel>/raw/<slug>.json`:
+`<channel>/raw/<slug>.json`:
 
 ```json
 {
@@ -113,7 +113,7 @@ via `${raw.metadata.author}` etc.
 
 Either by hand or via the `/make-script` skill. The skill reads each
 raw story and writes a 50-80 word hook-first narration to
-`data/intermediate/<channel>/scripts/<slug>.json`:
+`<channel>/narrations/<slug>.json`:
 
 ```json
 {
@@ -151,7 +151,7 @@ canonical name). The cast file is rewritten on every dossier edit.
 **3. Narrator is voice-over only — never on screen.** The channel
 YAML sets `narrator_visual_mode: voice_only`. The pipeline interprets
 this in three places:
-- `make_shorts.py` clears the channel-wide `character_description`,
+- `scripts/make_shorts.py` clears the channel-wide `character_description`,
   so no "narrator persona" is prepended to per-beat image prompts.
 - `pipeline/prompts.py` switches the prompt-author to a voice-only
   preamble that lists the dossier's real people and FORBIDS the
@@ -225,7 +225,7 @@ for the full audit.
   cannot be a wide static establishing shot (empty stadium, blank pitch,
   generic logo). The first 1.5 seconds must contain a named player in
   motion, a scoreboard, or the iconic broadcast clip itself. Enforce via
-  `channels/sportstoriesanimated.yaml:opening_image_directives` +
+  `sportstoriesanimated/config.yaml:opening_image_directives` +
   `pipeline/script_check.py` reject. Football fans scroll past empty
   pitches in <0.5s.
 
@@ -312,7 +312,7 @@ payoff that flows OUT of it). Transcribe the source clip first:
 .venv/bin/python -c "
 from pipeline import asr
 from pathlib import Path
-src = Path('data/intermediate/<channel>/footage/sources/<video_id>.mp4')
+src = Path('<channel>/footage/sources/<video_id>.mp4')
 result = asr.transcribe(src, provider='whisper_mlx',
                         model='mlx-community/whisper-large-v3-mlx-4bit')
 for seg in result.get('segments', []):
@@ -358,7 +358,7 @@ step below is load-bearing — each one was bought with at least one
 failed render.
 
 **Step 1 — Author the raw story.** Hand-write
-`data/intermediate/sportstoriesanimated/raw/<slug>.json` with
+`sportstoriesanimated/raw/<slug>.json` with
 `{slug, title, body, source, url, metadata}`. The body should run
 ~150-300 words covering the full match context (date, venue,
 scoreline, key people, what made the moment iconic). Wikipedia
@@ -367,10 +367,10 @@ articles are the natural source.
 **Step 2 — Generate the dossier (Stage 2.5).**
 ```bash
 .venv/bin/python -m pipeline.wiki_research \
-    --raw data/intermediate/sportstoriesanimated/raw/<slug>.json \
-    --out data/intermediate/sportstoriesanimated/dossier/<slug>.json \
+    --raw sportstoriesanimated/raw/<slug>.json \
+    --out sportstoriesanimated/dossier/<slug>.json \
     --wiki-query "<specific search; e.g. 2010 FIFA World Cup Final>" \
-    --channel-yaml channels/sportstoriesanimated.yaml
+    --channel-yaml sportstoriesanimated/config.yaml
 ```
 The LLM produces `people[]` (with era-specific kits + per-character
 seeds), `match{}`, `key_moments[]`, and a `pronunciation_dict{}`. The
@@ -424,7 +424,7 @@ Download:
 ```bash
 .venv/bin/python -m yt_dlp -q -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best" \
     --merge-output-format mp4 \
-    -o "data/intermediate/sportstoriesanimated/footage/sources/<id>.mp4" "<url>"
+    -o "sportstoriesanimated/footage/sources/<id>.mp4" "<url>"
 ```
 
 Transcribe to find the commentary arc:
@@ -444,7 +444,7 @@ for the first time in history"). Set `in_s = IN word's start`,
 matters.
 
 **Step 6 — Author the script with footage block.**
-`data/intermediate/sportstoriesanimated/scripts/<slug>.json`:
+`sportstoriesanimated/narrations/<slug>.json`:
 ```jsonc
 {
   "slug": "...",
@@ -474,9 +474,9 @@ by one touch.") AFTER the footage.
 
 **Step 7 — Render.**
 ```bash
-.venv/bin/python make_shorts.py \
-    --channel channels/sportstoriesanimated.yaml \
-    --script data/intermediate/sportstoriesanimated/scripts/<slug>.json \
+.venv/bin/python scripts/make_shorts.py \
+    --channel sportstoriesanimated/config.yaml \
+    --script sportstoriesanimated/narrations/<slug>.json \
     --slug <slug>
 ```
 Time budget: ~30-45 min on M-series for a 14-16 beat short. Most
@@ -498,7 +498,7 @@ are expected — caches survive, retry the run.
 **Step 9 — Upload.**
 ```bash
 .venv/bin/python upload.py run \
-    --channel channels/sportstoriesanimated.yaml \
+    --channel sportstoriesanimated/config.yaml \
     --slug <slug> \
     --skip-critic        # the in-pipeline critic over-rejects sports
 ```
@@ -528,8 +528,8 @@ at least once before fixing.
 | Numeric clock displays render as gibberish ("I.4." instead of "88") | diffusion can't render digital displays | `pipeline/images.py:_TEXT_BAIT` includes `clock face`, `scoreboard`, `LED display`, `timer` — strip-text-bait pass rewrites the prompt |
 | "Football" in narration → American football trophy in image | model defaults to gridiron when it sees "football" | Channel `image_style_prefix` ends with `"association football soccer context (never american football or rugby)"` |
 | Wrong jersey number / wrong era kit on a player | LLM paraphrased the dossier's `visual.kit` and `shirt_number` | (Documented as class-of-bug; server-side cast-locked-tokens injection is the unimplemented future fix in `pipeline/prompts.py:author_beat_prompts`) |
-| Image #2 shows a trophy when narration says "Spain vs Netherlands" | image cache reuses `img_NN.png` by index even when prompts.json content shifted | `make_shorts.py` writes `img_NN.prompt.sha256` sidecar; cache-hit only when hash of `(key_visual, scene, character_description, seed)` matches |
-| Sports script_check fails because narration isn't AITA-style | `closer_format` opted us into AITA-class strict gating | `channels/sportstoriesanimated.yaml: script_check_strict: false` |
+| Image #2 shows a trophy when narration says "Spain vs Netherlands" | image cache reuses `img_NN.png` by index even when prompts.json content shifted | `scripts/make_shorts.py` writes `img_NN.prompt.sha256` sidecar; cache-hit only when hash of `(key_visual, scene, character_description, seed)` matches |
+| Sports script_check fails because narration isn't AITA-style | `closer_format` opted us into AITA-class strict gating | `sportstoriesanimated/config.yaml: script_check_strict: false` |
 | Random "analyst" face appearing between players | sports cast.json had narrator persona description; prompts.py prepended it | `narrator_visual_mode: voice_only` in channel YAML; make_shorts clears `character_description`; prompts.py uses voice-only authoring preamble that lists supporting[] and forbids "the character" / "the narrator" wording |
 
 ### `footage` array — schema
@@ -574,10 +574,10 @@ respelling so Kokoro doesn't mangle "Aguero" / "Dzeko" / "Mbappé".
 
 ```bash
 .venv/bin/python -m pipeline.wiki_research \
-    --raw data/intermediate/sportstoriesanimated/raw/<slug>.json \
-    --out data/intermediate/sportstoriesanimated/dossier/<slug>.json \
+    --raw sportstoriesanimated/raw/<slug>.json \
+    --out sportstoriesanimated/dossier/<slug>.json \
     --wiki-query "Manchester City 3-2 Queens Park Rangers 2012" \
-    --channel-yaml channels/sportstoriesanimated.yaml
+    --channel-yaml sportstoriesanimated/config.yaml
 ```
 
 Output schema (excerpt):
@@ -607,7 +607,7 @@ Output schema (excerpt):
 
 `cast.cast_from_dossier` then transforms `people[]` into the
 cast.json `supporting[]` schema verbatim — no second LLM call. The
-pronunciation_dict is loaded by `make_shorts.py` and passed to
+pronunciation_dict is loaded by `scripts/make_shorts.py` and passed to
 `audio.synthesize` via the new `pronunciation_dict` parameter; the
 respellings apply ONLY to the TTS-input string, so captions and ASR
 source-text alignment continue to see the original spelling.
@@ -620,11 +620,11 @@ Combine the script + raw + channel template into a per-Short spec.
 
 ```bash
 .venv/bin/python make_spec.py \
-    --channel channels/aita_cooking.yaml \
+    --channel mystoriesanimated/variants/aita_cooking.yaml \
     --script  data/intermediate/aita_cooking/scripts/<slug>.json
 ```
 
-Output: `data/intermediate/<channel>/specs/<slug>.yaml`.
+Output: `<channel>/specs/<slug>.yaml`.
 
 `make_spec.py` walks the channel's `spec_template` block recursively,
 substituting only `${script.<path>}`, `${raw.<path>}`, and
@@ -659,7 +659,7 @@ and compose the mp4.
     --spec data/intermediate/aita_cooking/specs/<slug>.yaml
 ```
 
-Output: `data/shorts/<slug>.mp4`.
+Output: `<slug>.mp4`.
 
 What happens internally (5 sub-stages, each cached under
 `data/cache/<slug>/`):
@@ -738,7 +738,7 @@ upload:
   privacy: private             # private | unlisted | public
   made_for_kids: false
   category_id: "24"            # 24 = Entertainment
-  auto_upload: false           # true → make_shorts.py uploads at the end
+  auto_upload: false           # true → scripts/make_shorts.py uploads at the end
   min_score: 0                 # only auto-upload when critic.score ≥ this
   tags: [aita, reddit, shorts]
   description_template: |
@@ -755,13 +755,13 @@ Missing keys render as empty.
 ```bash
 # upload one rendered short to the YouTube channel for mystoriesanimated
 .venv/bin/python upload.py run \
-    --channel channels/mystoriesanimated.yaml \
+    --channel mystoriesanimated/config.yaml \
     --slug aita02 \
     --privacy private
 
 # schedule a public release (YouTube requires privacy=private under the hood)
 .venv/bin/python upload.py run \
-    --channel channels/mystoriesanimated.yaml \
+    --channel mystoriesanimated/config.yaml \
     --slug aita02 \
     --publish-at 2026-05-02T13:00:00Z
 
@@ -769,25 +769,25 @@ Missing keys render as empty.
 .venv/bin/python upload.py status
 ```
 
-### Auto-upload at the end of `make_shorts.py`
+### Auto-upload at the end of `scripts/make_shorts.py`
 
 Set `upload.auto_upload: true` in the channel YAML. After the critic
-passes (and `score >= upload.min_score`), `make_shorts.py` calls
+passes (and `score >= upload.min_score`), `scripts/make_shorts.py` calls
 `pipeline.upload.upload_short`. CLI overrides:
 
 ```bash
 # force-upload even if YAML says auto_upload: false
-.venv/bin/python make_shorts.py --upload --channel channels/mystoriesanimated.yaml --script ...
+.venv/bin/python scripts/make_shorts.py --upload --channel mystoriesanimated/config.yaml --script ...
 
 # skip upload even if YAML says auto_upload: true
-.venv/bin/python make_shorts.py --no-upload --channel channels/mystoriesanimated.yaml --script ...
+.venv/bin/python scripts/make_shorts.py --no-upload --channel mystoriesanimated/config.yaml --script ...
 ```
 
 ### Idempotency
 
 After a successful upload, ytFactory writes
 `data/uploads/<channel_dir>/<slug>.json` with the YouTube `video_id`.
-Subsequent `upload.py run` (or `make_shorts.py` with `auto_upload`)
+Subsequent `upload.py run` (or `scripts/make_shorts.py` with `auto_upload`)
 calls for the same slug short-circuit and do nothing. Pass `--force`
 to re-upload (creates a second video on YouTube — there's no in-place
 replacement).
@@ -861,10 +861,10 @@ Worked example: a hypothetical `wiki_oddities` channel that puts a
 
 1. **Source adapter** — already exists for Wikipedia
    (`sources/wikipedia.py`). If you needed a new source, write one.
-2. **Backgrounds** — produce loops in `assets/wiki_oddities_loops/`
+2. **Backgrounds** — produce loops in `mystoriesanimated/wiki_oddities_loops/`
    somehow (could write a `pull_backgrounds.py --query "..."`).
-3. **Channel YAML** — copy `channels/aita_cooking.yaml` to
-   `channels/wiki_oddities.yaml`, change:
+3. **Channel YAML** — copy `mystoriesanimated/variants/aita_cooking.yaml` to
+   `mystoriesanimated/variants/wiki_oddities.yaml`, change:
    - top-level `name`/`source` to point at Wikipedia,
    - `spec_template.background.source_dir` to your loops dir,
    - `spec_template.audio.narration.tts.voice` if you want a
@@ -904,7 +904,7 @@ system can't express (e.g. an animated countdown ring), edit
 
 ```bash
 # pull 5 fresh AITA stories
-.venv/bin/python pull_stories.py reddit \
+.venv/bin/python scripts/pull_stories.py reddit \
     --subreddit AmItheAsshole --limit 5 --channel aita_cooking
 
 # write scripts for them via the skill
@@ -912,7 +912,7 @@ system can't express (e.g. an animated countdown ring), edit
 
 # turn one script into a spec
 .venv/bin/python make_spec.py \
-    --channel channels/aita_cooking.yaml \
+    --channel mystoriesanimated/variants/aita_cooking.yaml \
     --script  data/intermediate/aita_cooking/scripts/<slug>.json
 
 # render
@@ -920,28 +920,28 @@ system can't express (e.g. an animated countdown ring), edit
     --spec data/intermediate/aita_cooking/specs/<slug>.yaml
 
 # view (macOS)
-open data/shorts/<slug>.mp4
+open <slug>.mp4
 
 # react to a rendered Short like a viewer
 # (in the Claude Code session) /critique-video <slug>
 
 # pull fresh cooking backgrounds — pick a top recommended entry from
-# data/cooking_bg_queue.yaml (vertical-native first, then chapter-derived
+# mystoriesanimated/cooking_bg_queue.yaml (vertical-native first, then chapter-derived
 # chop count, then view count) and pass its url
-.venv/bin/python pull_backgrounds.py \
+.venv/bin/python scripts/pull_backgrounds.py \
     --url "https://www.youtube.com/watch?v=<id>" \
     --num-clips 5 --clip-len 25 --check-faces
 ```
 
-The queue at `data/cooking_bg_queue.yaml` is the source-of-truth for
+The queue at `mystoriesanimated/cooking_bg_queue.yaml` is the source-of-truth for
 "what cooking source video to use next." It's populated by
-`data/_cooking_bg_research.py` (yt-dlp metadata only — no video
+`scripts/_cooking_bg_research.py` (yt-dlp metadata only — no video
 downloads, so disk stays small). Each entry records duration,
 vertical-native flag, pace/fit scores, and a `chops:` list of
 seconds-windows derived from chapters where available. Move an entry
 to `status: rejected` (with `rejection_reason`) once you've ruled it
 out, or comment it out of the queue once its loops are in
-`assets/cooking_loops/`. Re-run the helper to add fresh candidates.
+`mystoriesanimated/cooking_loops/`. Re-run the helper to add fresh candidates.
 
 ---
 
@@ -960,7 +960,7 @@ Cheap to nuke and rebuild:
 
 ```bash
 rm -rf data/cache/<slug>
-.venv/bin/python render_from_spec.py --spec data/intermediate/<channel>/specs/<slug>.yaml
+.venv/bin/python render_from_spec.py --spec <channel>/specs/<slug>.yaml
 ```
 
 ---
@@ -991,11 +991,11 @@ part lives in the spec.
 
 ---
 
-# Path 2 — `make_shorts.py` (slideshow / animation with LLM autonomy)
+# Path 2 — `scripts/make_shorts.py` (slideshow / animation with LLM autonomy)
 
 The spec-driven path above is for channels whose visual format is "text
 overlay on a background loop" (cooking, etc.). The other path,
-`make_shorts.py`, renders **per-beat illustrated** Shorts: the LLM
+`scripts/make_shorts.py`, renders **per-beat illustrated** Shorts: the LLM
 authors a recurring narrator + per-beat image prompts, the renderer
 makes one image (or animation clip) per beat, ffmpeg crossfades them
 with karaoke captions. The autonomy is heavier — three LLM stages
@@ -1013,12 +1013,12 @@ with karaoke captions. The autonomy is heavier — three LLM stages
 Run it like the spec-driven path's stages 1-2, then:
 
 ```bash
-.venv/bin/python make_shorts.py \
+.venv/bin/python scripts/make_shorts.py \
     --script  data/intermediate/aita_animated/scripts/<slug>.json \
-    --channel channels/aita_animated.yaml
+    --channel mystoriesanimated/variants/aita_animated.yaml
 ```
 
-`make_shorts.py` reads the channel YAML for provider knobs (TTS, ASR,
+`scripts/make_shorts.py` reads the channel YAML for provider knobs (TTS, ASR,
 image, motion) and runs the autonomous chain end-to-end.
 
 ---
@@ -1066,7 +1066,7 @@ profession, and emotional tone. Output:
 }
 ```
 
-Lives at `data/intermediate/<channel>/cast/<slug>.json`. Falls back to
+Lives at `<channel>/cast/<slug>.json`. Falls back to
 the channel YAML's `character_description` if the file is missing.
 
 `load_cast(path)` returns the dict or `None` (missing/malformed —
@@ -1190,7 +1190,7 @@ These run inside the Claude Code session, not as Python CLIs.
 | `/critique-video` | Pretends to be a Shorts viewer scrolling past your rendered mp4. Samples frames at 1 fps, reads each, builds a second-by-second reaction with timestamped complaints, writes `data/critiques/<slug>.md`. Read-only. |
 
 The `/make-movie-short` shotlist lives at
-`data/intermediate/<channel>/shotlist/<slug>.json` and `make_shorts.py`
+`<channel>/shotlist/<slug>.json` and `scripts/make_shorts.py`
 picks it up the same way it picks up cast.json + prompts.json — every
 hand-off is a JSON file on disk.
 
@@ -1203,12 +1203,12 @@ silent cooking footage. Curating sources is an ongoing research task,
 so the project keeps a queue file rather than just trusting yt-dlp's
 top search hit.
 
-- **`data/cooking_bg_queue.yaml`** — schema-versioned queue. Each entry
+- **`mystoriesanimated/cooking_bg_queue.yaml`** — schema-versioned queue. Each entry
   records `video_id`, `url`, `duration_s`, `view_count`,
   `vertical_native`, `pace_score`, `fit_score`, a list of `chops:`
   (seconds-windows, chapter-derived where possible), `status:
   recommended | rejected | used`, and a free-text `notes:` field.
-- **`data/_cooking_bg_research.py`** — minimal yt-dlp wrapper. Two
+- **`scripts/_cooking_bg_research.py`** — minimal yt-dlp wrapper. Two
   subcommands: `search <query> [n]` (returns flat metadata) and
   `deep <id1,id2,...>` (per-video chapters, dimensions, tags). Both
   run with `skip_download: True` — no video bytes hit disk during

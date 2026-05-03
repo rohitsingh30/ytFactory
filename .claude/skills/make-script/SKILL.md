@@ -40,18 +40,18 @@ Always use ``.venv/bin/python``.
 
 ```bash
 # Reddit
-.venv/bin/python pull_stories.py reddit --subreddit AmItheAsshole --limit 5
+.venv/bin/python scripts/pull_stories.py reddit --subreddit AmItheAsshole --limit 5
 
 # Wikipedia oddities
-.venv/bin/python pull_stories.py wiki --page unusual_deaths_21c --limit 5
-.venv/bin/python pull_stories.py wiki --page misconceptions_history --limit 5
+.venv/bin/python scripts/pull_stories.py wiki --page unusual_deaths_21c --limit 5
+.venv/bin/python scripts/pull_stories.py wiki --page misconceptions_history --limit 5
 
 # Today in history
-.venv/bin/python pull_stories.py tih --limit 5
+.venv/bin/python scripts/pull_stories.py tih --limit 5
 
 # YouTube long-form video (returns ONE raw story = full transcript;
 # you're responsible for finding ~5-15 story boundaries inside it)
-.venv/bin/python pull_stories.py youtube "<url>" --channel reddit_video
+.venv/bin/python scripts/pull_stories.py youtube "<url>" --channel reddit_video
 ```
 
 Default ``--limit`` is 10. Cut it down if the user only asked for a few.
@@ -122,7 +122,7 @@ uvicorn if it isn't already up.)
 ```
 
 **The user is on the website now, not the CLI.** Don't suggest
-``.venv/bin/python make_shorts.py …`` as the follow-up — the website
+``.venv/bin/python scripts/make_shorts.py …`` as the follow-up — the website
 spawns it as a subprocess and adds live SSE progress, audio preview,
 and per-beat thumbnails. Pipeline edits in ``pipeline/*`` flow through
 the website automatically (no web restart needed; the subprocess

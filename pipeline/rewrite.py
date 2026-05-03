@@ -113,7 +113,7 @@ of pauses, emphasis, and breath):
 
       Turns out Dave is my brother. I sat in my car and stared.
 
-      I packed a bag that night. AITA?
+      I packed a bag that night. Am I wrong here?
 
   Each blank line is a held silence — that's where the listener
   catches up emotionally. Use them on the SEAMS, not within a beat.
@@ -129,11 +129,23 @@ of pauses, emphasis, and breath):
   destroying the line. Get emphasis from WORD CHOICE and SENTENCE
   LENGTH instead: a punchy 2-word sentence after a long set-up
   ("She lied. Every time.") lands the kicker harder than any
-  capitalisation could. The only ALL-CAPS tokens that should ever
-  appear in narration are AITA-style acronyms (AITA, WIBTA, YTA,
-  NTA, MIL, FIL, SIL, BIL, DIL, OOP, NC) — those are whitelisted
-  and get correctly read letter-by-letter. Everything else: regular
-  case.
+  capitalisation could.
+
+- DO NOT use AITA-class verdict acronyms in narration: AITA, WIBTA,
+  YTA, NTA, NAH, ESH. User feedback 2026-05-03 — the channel never
+  pronounces these. Use natural English instead: "Am I wrong for…",
+  "Was I out of line?", "Am I the one in the wrong here?". The
+  visual closer panel still displays "LIKE if YTA / COMMENT if NTA"
+  on screen — that lives in pixels, never in narration. The
+  audio-path defensive layer (pipeline/audio.py) will STRIP any
+  sentence still containing these acronyms before TTS, so
+  authoring them anyway just deletes that sentence from the
+  spoken output. Don't author them in the first place.
+
+- Reddit-class relationship/meta abbreviations stay allowed and
+  read correctly letter-by-letter: MIL, FIL, SIL, BIL, DIL, OOP,
+  NC, TIFU, TIL. These are the ONLY all-caps tokens that should
+  appear in narration. Everything else: regular case.
 
 - EM-DASH (—) BETWEEN sentences for a hard interruption beat,
   not inside a sentence. "I told her no — she lost it." Read as two
@@ -181,9 +193,11 @@ LENGTH (NON-NEGOTIABLE — short narrations under-deliver on this format):
 - Spoken duration ~22–32 seconds at typical TTS pace.
 
 OPENING:
-- Hook in the first ~8 words: a curiosity-gap question, an AITA
-  frame, OR a strong-claim verb (refused, told, caught, left, threw,
-  etc.). NEVER "Hi guys" or "today's story is".
+- Hook in the first ~8 words: a curiosity-gap question, an
+  "Am I wrong for…" / "Was I out of line for…" frame, OR a strong-
+  claim verb (refused, told, caught, left, threw, etc.). NEVER use
+  the AITA acronym in the spoken hook (rule above) — phrase the
+  question in natural English. NEVER "Hi guys" or "today's story is".
 - Inciting wedge in the first ~30 words: a number, a name, a
   specific prop ("four thousand two hundred dollars", "my SIL
   Megan", "the second wedding cake", "the group chat"). Always
@@ -372,10 +386,12 @@ def _cliffhanger_closer_block() -> str:
         "  - \"Part 2 has the verdict — and the receipts. "
         "Subscribe.\"\n\n"
         "BAD — DO NOT use:\n"
-        "  - \"AITA?\" or \"Am I the asshole?\" (that question lives "
-        "in Part 2, NOT here)\n"
-        "  - \"LIKE if YTA, COMMENT if NTA\" (Part 2's closer, not "
-        "this one)\n"
+        "  - \"AITA?\" or \"Am I the asshole?\" (verdict acronyms / "
+        "the literal phrase are BANNED across all spoken narration on "
+        "this channel — visual panel handles them, audio never says "
+        "them)\n"
+        "  - \"LIKE if YTA, COMMENT if NTA\" (every token here is "
+        "banned in audio; visual panel only)\n"
         "  - \"Smash that subscribe button\" or \"Don't forget to "
         "subscribe\" (robotic creator voice)\n"
         "  - Resolving the story (no verdict, no how-it-ended, no "
@@ -394,20 +410,27 @@ def _closer_block(closer_format: str | None) -> str:
             "End with a question or twist that drives comments — but "
             "any vote-prompt CTA is fine here."
         )
-    # Operator feedback 2026-05-03: the closer should ALSO verbally ask
-    # the viewer to subscribe — but in a HUMAN, conversational way (not
-    # the robotic "smash that subscribe button" cliché). The like icon
-    # is embedded in the last beat's image, but the spoken subscribe
-    # ask still drives action. Three components in the audio close,
-    # 2-3 sentences max:
-    #   1. The question ("Am I the asshole?" / "AITA?")
-    #   2. A natural prompt for comments
-    #   3. A natural ask to subscribe (one short conversational line)
+    # User feedback 2026-05-03: the spoken closer must NEVER include
+    # AITA-class verdict acronyms (AITA, WIBTA, YTA, NTA, NAH, ESH) or
+    # the phrase "am I the asshole". The visual closer panel — rendered
+    # separately from cfg["closer_format"] via compose.render_closer_panel —
+    # carries those tokens on-screen as the engagement ask; the audio
+    # path stays clean. Three components in the audio close, 2-3
+    # sentences max:
+    #   1. A natural verdict question phrased in plain English
+    #      ("Am I wrong here?" / "Was I out of line?" — never AITA)
+    #   2. A natural prompt for comments (real podcaster register)
+    #   3. A short conversational subscribe ask (no "smash that…")
     return (
         "End the narration with a NATURAL HUMAN three-part CTA, "
         "2-3 short sentences max:\n"
-        "  (a) The question — for AITA channels: "
-        "\"Am I the asshole?\" or \"AITA?\"\n"
+        "  (a) A verdict question phrased in plain English — "
+        "\"Am I wrong here?\", \"Was I out of line?\", "
+        "\"Am I the one in the wrong?\". DO NOT use AITA-class "
+        "acronyms (AITA, WIBTA, YTA, NTA, NAH, ESH) or the literal "
+        "phrase \"am I the asshole\" anywhere in the spoken closer. "
+        "The audio path strips any sentence containing those tokens; "
+        "authoring them just loses the closer.\n"
         "  (b) An invitation for comments — a real podcaster's line, "
         "not a YouTube-preset.\n"
         "  (c) A short conversational subscribe ask — phrased the way "
@@ -416,17 +439,21 @@ def _closer_block(closer_format: str | None) -> str:
         "\"hit the bell\". Examples below.\n\n"
         "GOOD examples (this is what we want — sounds like a real "
         "person ending a story):\n"
-        "  - \"Am I the asshole? Drop your verdict below — and stick "
+        "  - \"Am I wrong here? Drop your verdict below — and stick "
         "around if you want more stories like this one.\"\n"
         "  - \"What would you have done? Tell me in the comments. "
         "Subscribe and I'll see you on the next one.\"\n"
-        "  - \"AITA? You decide. Subscribe for one of these every day.\"\n"
-        "  - \"Am I wrong here? Comment below. And follow along — I "
-        "post more of these.\"\n"
+        "  - \"Was I out of line? You decide. Subscribe for one of "
+        "these every day.\"\n"
+        "  - \"Am I the one in the wrong? Comment below. And follow "
+        "along — I post more of these.\"\n"
         "  - \"Tell me what you would have done. Subscribe if you want "
         "more — there's another one tomorrow.\"\n\n"
-        "BAD — DO NOT use this robotic YouTube-preset format:\n"
-        "  - \"LIKE if YTA, COMMENT if NTA. AITA?\"\n"
+        "BAD — DO NOT use any of these:\n"
+        "  - \"AITA?\" / \"Am I the asshole?\" (verdict acronyms / "
+        "phrase banned in spoken narration; visual panel handles it)\n"
+        "  - \"LIKE if YTA, COMMENT if NTA. AITA?\" (every token here "
+        "is banned in audio)\n"
         "  - \"Like if you think yes, comment if you think no.\"\n"
         "  - \"Smash that like button and subscribe.\"\n"
         "  - \"Don't forget to subscribe and hit the bell.\"\n\n"

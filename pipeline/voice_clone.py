@@ -116,7 +116,10 @@ def clone_from_youtube(
         ref_wav = out_wav
         voice_json = out_json
     elif channel and slug:
-        out_dir = Path("data/intermediate") / channel / "voices"
+        # Per the 2026-05-03 reorg, channel state lives at <repo_root>/<channel>/
+        # directly (no more data/intermediate/ wrapper). `channel` may itself be
+        # a compound path like "mystoriesanimated/reddit_amitheasshole".
+        out_dir = Path(channel) / "voices"
         ref_wav = out_dir / f"{slug}.wav"
         voice_json = out_dir / f"{slug}.json"
     else:

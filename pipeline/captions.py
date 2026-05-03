@@ -35,13 +35,45 @@ from PIL import Image, ImageDraw, ImageFont
 from .beats import Beat
 
 
-def _find_font(size: int) -> ImageFont.ImageFont:
-    candidates = [
+_DEVANAGARI_RANGE = (0x0900, 0x097F)
+
+
+def _has_devanagari(text: str) -> bool:
+    if not text:
+        return False
+    lo, hi = _DEVANAGARI_RANGE
+    return any(lo <= ord(ch) <= hi for ch in text)
+
+
+def _find_font(size: int, text: str = "") -> ImageFont.ImageFont:
+    """Pick a font that covers the script of ``text``.
+
+    Class-of-bug fix per critique 2026-05-03 (abhimanyu-chakravyuh.video.md):
+    the previous implementation always used Latin-only fonts (Arial Bold,
+    Impact) which silently render Devanagari as empty boxes. Now we
+    detect Devanagari in the text and prefer macOS' Devanagari Sangam MN
+    when present, falling back to the Latin-bold candidates for English.
+
+    Pass ``text`` whenever you have it so font selection matches the
+    actual content. Callers that don't pass it default to Latin
+    candidates (back-compat).
+    """
+    devanagari_candidates = [
+        "/System/Library/Fonts/Supplemental/Devanagari Sangam MN.ttc",
+        "/System/Library/Fonts/Supplemental/DevanagariMT.ttc",
+        "/System/Library/Fonts/Supplemental/ITFDevanagari.ttc",
+    ]
+    latin_candidates = [
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "/System/Library/Fonts/Supplemental/Impact.ttf",
         "/System/Library/Fonts/HelveticaNeue.ttc",
         "/System/Library/Fonts/Helvetica.ttc",
     ]
+    candidates = (
+        devanagari_candidates + latin_candidates
+        if _has_devanagari(text)
+        else latin_candidates
+    )
     for c in candidates:
         if Path(c).exists():
             try:
@@ -88,7 +120,7 @@ def render_beat_caption(
     # count, never fixed — long captions used to clip ("birth?" cut off
     # the bottom of the hook on aita-birth-pool v2 because canvas_h was
     # hardcoded at 320 and 4 lines × 100px overflowed the PNG).
-    font = _find_font(font_size)
+    font = _find_font(font_size, text=beat.text)
     lines = _wrap(beat.text.strip(), font, canvas_w - 2 * padding)
     line_h = font_size + 16
     block_h = line_h * len(lines)
@@ -157,7 +189,7 @@ def render_word_caption(
     word_text = (word_text or "").strip()
     if not word_text:
         word_text = " "
-    font = _find_font(font_size)
+    font = _find_font(font_size, text=word_text)
     bbox = font.getbbox(word_text)
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
@@ -231,12 +263,16 @@ def _split_closer_format(closer_format: str) -> list[str]:
     s = closer_format.strip()
     # Drop the trailing AITA?/WIBTA? if present.
     s = re.sub(r"[.!]?\s*(AITA|WIBTA)\??\s*$", "", s, flags=re.IGNORECASE).strip()
-    s = s.rstrip(".!? ")
+    # Strip only trailing space + comma; preserve author-intended end
+    # punctuation like "!" so devotional closers can read with emphasis
+    # ("जय श्री कृष्णा!"). The AITA?/WIBTA? regex above already handled
+    # the verdict-acronym tail.
+    s = s.rstrip(", ")
 
     # Split on the strongest divider available.
     for sep in [",", "—", " - ", " vs ", " / "]:
         if sep in s:
-            parts = [p.strip(",.!? ").strip() for p in s.split(sep) if p.strip()]
+            parts = [p.strip(", ").strip() for p in s.split(sep) if p.strip()]
             return [p for p in parts if p][:3]
 
     # Fallback — treat as a single row.
@@ -414,7 +450,7 @@ def render_closer_panel(
     draw.rectangle([0, 0, canvas_w, canvas_h], fill=bg_color)
 
     rows = _split_closer_format(closer_format)
-    title_font = _find_font(title_font_size)
+    title_font = _find_font(title_font_size, text=closer_format)
 
     line_gap = 32
     total_h = len(rows) * title_font.size + max(0, len(rows) - 1) * line_gap

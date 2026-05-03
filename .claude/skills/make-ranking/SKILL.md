@@ -32,7 +32,7 @@ If the user named a dimension ("worst PL refereeing decisions",
 Need 10-15 candidates so you can pick the strongest 5.
 
 For sports rankings, raw stories already exist in
-`data/intermediate/sportstoriesanimated/raw/` — list them and pick.
+`sportstoriesanimated/raw/` — list them and pick.
 If the user wants a topic the existing pool doesn't cover, hand-author
 new raw JSON files (one per moment) — schema is the same as
 `/make-script`'s output. Optionally run `pipeline/wiki_research` per
@@ -41,7 +41,7 @@ moment to get pronunciation + cast dossier.
 For Reddit-flavoured rankings, pull more than usual:
 
 ```bash
-.venv/bin/python pull_stories.py reddit --subreddit AmItheAsshole --limit 15 --no-llm
+.venv/bin/python scripts/pull_stories.py reddit --subreddit AmItheAsshole --limit 15 --no-llm
 ```
 
 `--no-llm` skips per-story rewrite (you don't want individual scripts
@@ -242,7 +242,7 @@ Path: `data/intermediate/<channel>/cast/<slug>.json`.
 ### 9. Report back
 
 ```
-✓ wrote ranking script to data/intermediate/sportstoriesanimated_ranked/scripts/top5-pl-ref-decisions.json
+✓ wrote ranking script to sportstoriesanimated_ranked/scripts/top5-pl-ref-decisions.json
   hook: "Most of these refs should never work again."
   ranks: #5 Sterling-vs-France · #4 ... · #3 ... · #2 ... · #1 Lampard-ghost-goal
   duration target: ~58s
@@ -266,7 +266,7 @@ If any rank is missing footage, flag it explicitly in the summary —
   rank chips drift off the wrong beats.
 - Sports ranking without 5 footage cuts is incomplete — never ship it
   to the user as "done."
-- For Reddit/AITA rankings, copy `channels/sportstoriesanimated_ranked.yaml`
+- For Reddit/AITA rankings, copy `sportstoriesanimated/variants/ranked.yaml`
   to a new file (swap the image_style_prefix, TTS voice, and upload
   account); keep `ranked_chips: true` and the `closer_format` line.
 

@@ -23,11 +23,20 @@ from .beats import Beat
 
 
 # Closing CTA — must appear in the LAST sentence/clause.
+# AITA-class verdict acronyms (AITA, WIBTA, YTA, NTA) and the literal
+# phrase "am I the asshole" are BANNED in spoken narration as of
+# 2026-05-03 (user feedback). They're stripped from the audio path by
+# pipeline.audio.normalize_for_tts; the rewriter is also instructed
+# never to author them. The CTA detector accepts the natural-English
+# replacements ("am I wrong", "was I wrong", "out of line") plus the
+# generic question/verdict/comment-prompt patterns. The visual closer
+# panel still renders the engagement ask via cfg["closer_format"] —
+# that lives in pixels, never in audio.
 _CTA_PATTERNS = [
-    r"\baita\??\b",
-    r"\bwibta\??\b",
-    r"\bam i (the )?(asshole|wrong)\b",
-    r"\bwas i (the )?(wrong|asshole)\b",
+    r"\bam i (the )?wrong\b",
+    r"\bam i the one (in the wrong|wrong here)\b",
+    r"\bwas i (the )?wrong\b",
+    r"\b(was i|am i) out of line\b",
     r"\bwhat would you (have )?(do|done)\b",
     r"\bwhat do you think\b",
     r"\bcomment[s]? (below|your)\b",
@@ -258,11 +267,17 @@ def check_script_text(
             )
         else:
             cta_examples = (
-                '"AITA?", "WIBTA?", "Was I wrong?", "What would you do?"'
+                '"Am I wrong here?", "Was I out of line?", '
+                '"What would you have done?"'
             )
+        # Severity follows soft_sev: AITA-class channels fail the gate
+        # (they live and die on the comment-section pile-on); channels
+        # that opt out via script_check_strict: false (sports, war,
+        # rhymes) only get a warning — their formats end on a hanging
+        # beat or a chant rather than a verdict question.
         issues.append(
             ScriptIssue(
-                "error",
+                soft_sev,
                 "missing_cta",
                 f"last sentence has no closing CTA "
                 f"(e.g. {cta_examples}). "
@@ -282,19 +297,32 @@ def check_script_text(
     # The visual panel still renders independently from
     # cfg["closer_format"] via compose.py:render_closer_panel.
 
-    # #5a Hook in first ~8 words: must contain a question, AITA frame,
-    #     a strong claim verb, OR a structural opener pattern (subject +
-    #     verb / relationship phrase). The verb-allowlist approach
-    #     keeps producing false positives on every new rewriter output
-    #     (each narration uses verbs we haven't catalogued — "found",
-    #     "cornered", "calls", etc.). The structural-pattern fallback
-    #     catches "My MIL calls me a whale", "She refuses to come to
-    #     the wedding", "He packed a bag" — all structurally strong
-    #     openings regardless of the specific verb stem.
+    # #5a Hook in first ~8 words: must contain a question, an
+    #     "Am I wrong" frame (the natural-English replacement for AITA
+    #     framing per 2026-05-03 user feedback), a strong claim verb,
+    #     OR a structural opener pattern (subject + verb / relationship
+    #     phrase). The verb-allowlist approach keeps producing false
+    #     positives on every new rewriter output (each narration uses
+    #     verbs we haven't catalogued — "found", "cornered", "calls",
+    #     etc.). The structural-pattern fallback catches "My MIL calls
+    #     me a whale", "She refuses to come to the wedding", "He
+    #     packed a bag" — all structurally strong openings regardless
+    #     of the specific verb stem.
     head_words = text.split()[:8]
     head = " ".join(head_words)
     has_question = "?" in head
-    has_aita_frame = re.search(r"\b(aita|wibta)\b", head, flags=re.IGNORECASE)
+    # Natural-English wrong-frame replaces the older AITA acronym frame.
+    # Detects "Am I wrong", "Was I wrong", "Was I the asshole" (still
+    # catches the legacy phrase even though the rewriter no longer
+    # produces it, so old hand-edited scripts validate), "Am I out
+    # of line", "Was I out of line", and the variant "the one in
+    # the wrong here".
+    has_wrong_frame = re.search(
+        r"\b(am i (the )?(wrong|asshole)|was i (the )?(wrong|asshole)|"
+        r"(am i|was i) out of line|the one in the wrong)\b",
+        head,
+        flags=re.IGNORECASE,
+    )
     # "My MIL ...", "Her sister ...", "His ex ...", "My husband Carol ..."
     has_relationship_subject = re.search(
         r"^\s*(my|her|his|our|their)\s+\w+",
@@ -375,7 +403,7 @@ def check_script_text(
     )
     if not (
         has_question
-        or has_aita_frame
+        or has_wrong_frame
         or has_claim_verb
         or has_relationship_subject
         or has_subject_verb
@@ -384,9 +412,10 @@ def check_script_text(
             ScriptIssue(
                 soft_sev,
                 "weak_hook",
-                f"first ~8 words don't contain a question, AITA frame, "
-                f"claim verb, or subject-verb opener. Hook is the "
-                f"highest-leverage 1.5s. Head: {head!r}",
+                f"first ~8 words don't contain a question, "
+                f"\"Am I wrong\"-frame, claim verb, or subject-verb "
+                f"opener. Hook is the highest-leverage 1.5s. "
+                f"Head: {head!r}",
             )
         )
 

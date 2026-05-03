@@ -15,9 +15,9 @@ os.environ["YTFACTORY_QUEUE_BACKEND"] = "memory"
 _TMP = tempfile.mkdtemp(prefix="ytf-light-test-")
 os.environ["YTFACTORY_SCRATCH_ROOT"] = _TMP
 
-from agent.runner import TaskContext  # noqa: E402
+from workers.agent.runner import TaskContext  # noqa: E402
 from control.queue import get_queue, reset_queue  # noqa: E402
-from shared.schema import TaskEnvelope, TaskKind, TaskStatus  # noqa: E402
+from control.schema import TaskEnvelope, TaskKind, TaskStatus  # noqa: E402
 
 
 def _ctx(kind: TaskKind, payload: dict) -> TaskContext:

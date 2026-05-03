@@ -27,7 +27,7 @@ A user opens `http://<host>:8765/`, picks a niche, picks a voice (38 voices acro
 - **sse-starlette** for the live event stream
 - No DB. Job state is in-memory (`JOBS: dict[str, Job]`); cached artifacts on disk under `data/cache/<slug>/` (the same paths the pipeline already uses)
 - No background queue. One asyncio task per job. Multiple jobs can run in parallel, but on this Mac the Flux model serializes anyway because it holds MPS — keep job concurrency = 1 for now
-- **No DB migrations to worry about.** Restart the server → in-memory job dict resets. Past mp4s persist on disk so you can still serve `data/shorts/<slug>.mp4` directly.
+- **No DB migrations to worry about.** Restart the server → in-memory job dict resets. Past mp4s persist on disk so you can still serve `<slug>.mp4` directly.
 
 ### Frontend stack (deliberately minimal)
 

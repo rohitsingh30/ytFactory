@@ -23,11 +23,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from agent.runner import TaskContext, register
+from workers.agent.runner import TaskContext, register
 from control import jobs as jobs_mod
 from control import storage
 from control.queue import get_queue, new_task_id
-from shared.schema import TaskEnvelope, TaskKind
+from control.schema import TaskEnvelope, TaskKind
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +36,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # Mapping from chat-side channel keys → channel YAML path on disk.
 # Update when the channel reorg (#4) lands; keys stay stable.
 _CHANNEL_YAML: dict[str, str] = {
-    "mystoriesanimated": "channels/mystoriesanimated.yaml",
-    "sportstoriesanimated": "channels/sportstoriesanimated.yaml",
-    "warhistory": "channels/warhistory.yaml",
-    "mahabharathindi": "channels/mahabharat_hindi.yaml",  # legacy, kept for back-compat
-    "auto": "channels/mystoriesanimated.yaml",  # default fallback
+    "mystoriesanimated": "mystoriesanimated/config.yaml",
+    "sportstoriesanimated": "sportstoriesanimated/config.yaml",
+    "historyrecapped": "historyrecapped/config.yaml",
+    "mahabharathindi": "hindutavaanimated/config.yaml",  # legacy, kept for back-compat
+    "auto": "mystoriesanimated/config.yaml",  # default fallback
 }
 
 
@@ -53,7 +53,7 @@ def _channel_dir_from_yaml(channel_yaml: Path) -> str:
     """data/intermediate/<channel_dir>/ — inferred from YAML stem.
 
     Matches the existing pipeline convention: mystoriesanimated.yaml →
-    data/intermediate/mystoriesanimated/.
+    mystoriesanimated/.
     """
     return channel_yaml.stem
 
@@ -223,7 +223,7 @@ async def render_short(ctx: TaskContext) -> str | None:
     jobs_mod.mark_stage(job_id, status=jobs_mod.STATUS_UPLOADING, stage="gcs_upload")
     mp4_path, thumb_path = _find_outputs(slug, channel_dir)
     if mp4_path is None:
-        err = f"render reported success but no mp4 found at data/shorts/{slug}.mp4"
+        err = f"render reported success but no mp4 found at {slug}.mp4"
         jobs_mod.mark_failed(job_id, stage="gcs_upload", error=err)
         raise RuntimeError(err)
 

@@ -99,7 +99,7 @@ listener stop after 5 seconds?>
 | category | timestamp | what's wrong | class | the fix |
 |---|---|---|---|---|
 | pronunciation | 12.4s | source "AITA?" → transcript "Aira?". Acronym phoneticised as a word. | **CLASS-OF-BUG** | `pipeline/audio.py:_ACRONYM_PHRASES` already maps AITA→"am I the asshole" but the case-insensitive matcher missed lowercase variants. Fix landed; verify on next render. |
-| pacing | – | 257 WPM total — way above 130-180 storytelling zone. | **CLASS-OF-BUG** | Drop `tts_speed` to 0.90 in `channels/aita_animated.yaml`. Combined with the per-paragraph 0.55s pause stitching this lands ~150 WPM. |
+| pacing | – | 257 WPM total — way above 130-180 storytelling zone. | **CLASS-OF-BUG** | Drop `tts_speed` to 0.90 in `mystoriesanimated/variants/aita_animated.yaml`. Combined with the per-paragraph 0.55s pause stitching this lands ~150 WPM. |
 | ... |
 
 ## Class-of-bug fixes for the next 100 Shorts

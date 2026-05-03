@@ -55,9 +55,9 @@ NICHES: list[dict] = [
         "channel_key_for_chat": "sportstoriesanimated",
     },
     {
-        "key": "warhistory",
-        "label": "WarHistory",
-        "tagline": "Illustrated war-history shorts with real broadcast cut-ins",
+        "key": "historyrecapped",
+        "label": "History Recapped",
+        "tagline": "100% archival war footage with documentary narration + word captions",
         "emoji": "⚔️",
         "color_from": "from-amber-700",
         "color_to": "to-stone-900",
@@ -68,7 +68,7 @@ NICHES: list[dict] = [
             "How a single Polish cipher clerk broke Enigma in 1932",
         ],
         "prefill": "",
-        "channel_key_for_chat": "warhistory",
+        "channel_key_for_chat": "historyrecapped",
     },
     {
         "key": "open",

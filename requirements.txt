@@ -35,3 +35,4 @@ openai>=1.50  # Azure OpenAI client used by control/chat_service.py
 # parakeet-mlx>=0.2     # asr_provider: parakeet_mlx        (~600 MB on first use)
 # f5-tts-mlx>=0.2       # tts_provider: f5_tts              (~1.35 GB on first use)
 # imageio>=2.34         # only if you switch animation.py to diffusers' export_to_video
+# fal-client>=0.5       # image_provider: z_image_turbo_fal (hosted z-image-turbo on fal.ai)

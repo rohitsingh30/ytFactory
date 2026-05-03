@@ -99,15 +99,29 @@ def _wipe_stale_per_beat_artefacts(cache_dir: Path, n_beats: int) -> None:
     if not cache_dir.exists():
         return
     n_dropped = 0
+    # Class-of-bug guard (2026-05-03 hathi-raja render): the caption
+    # prerender runs on a background thread (make_shorts.py:1286) while
+    # compose's wipe runs on the main thread when compose() starts.
+    # Race: glob lists word_NN.png that the prerender thread has
+    # written, but the prerender keeps churning so file timing is loose;
+    # unlink() can race with PIL's atomic-replace save and surface a
+    # FileNotFoundError. Treat unlink errors as "already gone" — that's
+    # the wipe's intent anyway. Same defensive pattern for img_*.png.
     for pat in ("caption_*.png", "word_*.png", "rank_chip_*.png", "closer_row_*.png"):
         for f in cache_dir.glob(pat):
-            f.unlink()
-            n_dropped += 1
+            try:
+                f.unlink()
+                n_dropped += 1
+            except FileNotFoundError:
+                pass
     for f in cache_dir.glob("img_*.png"):
         m = re.search(r"img_(\d+)\.png$", f.name)
         if m and int(m.group(1)) >= n_beats:
-            f.unlink()
-            n_dropped += 1
+            try:
+                f.unlink()
+                n_dropped += 1
+            except FileNotFoundError:
+                pass
     # closer_panel.png is regenerated from cfg["closer_format"] on every
     # render; leaving the prior version in place was the path that let
     # an old/buggy panel persist into a re-compose. Wipe unconditionally

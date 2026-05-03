@@ -19,10 +19,10 @@ import httpx  # noqa: E402
 from control.agent_routes import router as agent_router  # noqa: E402
 from control.agent_routes import _LAST_SEEN  # noqa: E402
 from control.queue import get_queue, new_task_id, reset_queue  # noqa: E402
-from agent import runner  # noqa: E402
-from agent.config import AgentConfig  # noqa: E402
-from agent.main import _lease_one  # noqa: E402
-from shared.schema import TaskEnvelope, TaskKind, TaskStatus  # noqa: E402
+from workers.agent import runner  # noqa: E402
+from workers.agent.config import AgentConfig  # noqa: E402
+from workers.agent.main import _lease_one  # noqa: E402
+from control.schema import TaskEnvelope, TaskKind, TaskStatus  # noqa: E402
 
 
 def _make_app():
@@ -84,7 +84,7 @@ class AgentLeaseProtocolTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_heartbeat_records_resources(self) -> None:
         from control.agent_routes import get_last_seen, _LAST_SEEN
-        from shared.schema import AgentResources, HeartbeatRequest
+        from control.schema import AgentResources, HeartbeatRequest
 
         _LAST_SEEN.clear()
         body = HeartbeatRequest(

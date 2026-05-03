@@ -27,8 +27,8 @@ graph TB
     subgraph Laptop["Laptop (intermittent, holds GPU + models)"]
         AG[agent/main.py]
         WORKERS[workers/heavy + workers/light]
-        PIPE[pipeline/* + make_shorts.py<br/>Kokoro / mflux / whisper / ffmpeg]
-        DISK["data/cache + data/intermediate<br/>(transient, sweepable)"]
+        PIPE[pipeline/* + scripts/make_shorts.py<br/>Kokoro / mflux / whisper / ffmpeg]
+        DISK["<channel>/cache (per-slug intermediate)<br/>(transient, sweepable)"]
     end
 
     subgraph External["External services"]
@@ -69,7 +69,7 @@ ASCII shorthand:
                     │
                     ├──► workers/heavy (render)
                     ├──► workers/light (yt upload, research handoff)
-                    └──► data/cache + data/intermediate (transient)
+                    └──► <channel>/cache (per-slug intermediate) (transient)
                               │
                               └──► Reddit / Wikipedia / YouTube (external)
 ```
@@ -220,37 +220,37 @@ sequenceDiagram
 ## 4. Render — heavy worker on laptop
 
 The big one. RENDER_SHORT mega-task wraps the existing
-`make_shorts.py` pipeline so we didn't have to split each stage into
+`scripts/make_shorts.py` pipeline so we didn't have to split each stage into
 its own task.
 
 ```mermaid
 flowchart TB
     Start([RENDER_SHORT leased]) --> A[build raw story from payload]
-    A --> B[resolve channel YAML<br/>mystoriesanimated → channels/mystoriesanimated.yaml]
+    A --> B[resolve channel YAML<br/>mystoriesanimated → mystoriesanimated/config.yaml]
     B --> C[mark stage=rewrite_cast]
     C --> D[claude rewrite + cast<br/>parallel asyncio.to_thread]
     D --> E[mark stage=render]
-    E --> F[subprocess<br/>python make_shorts.py --script ...]
+    E --> F[subprocess<br/>python scripts/make_shorts.py --script ...]
     F --> G{rc == 0?}
     G -- no --> X[mark_failed stage=render]
     X --> X2[ack error → re-queued or FAILED]
-    G -- yes --> H[find data/shorts/&lt;slug&gt;.mp4]
+    G -- yes --> H[find &lt;slug&gt;.mp4]
     H --> I[mark stage=gcs_upload]
     I --> J[upload mp4 + thumb + proposal to GCS]
     J --> K[mark_done short_uri set]
     K --> L[enqueue YOUTUBE_UPLOAD]
-    L --> M[cleanup data/intermediate/&lt;channel&gt;/&lt;slug&gt;]
+    L --> M[cleanup <channel>/&lt;slug&gt;]
     M --> End([ack ok])
 ```
 
-`make_shorts.py` itself is a separate world — it loads Kokoro, mflux,
+`scripts/make_shorts.py` itself is a separate world — it loads Kokoro, mflux,
 Whisper, runs ffmpeg, hits 8 internal stages. The render worker
 treats it as a black box and just owns the file-level contract:
 
-- **input**: data/intermediate/&lt;channel&gt;/scripts/&lt;slug&gt;.json
-- **output**: data/shorts/&lt;slug&gt;.mp4 + (optional) thumb png
+- **input**: <channel>/narrations/&lt;slug&gt;.json
+- **output**: &lt;slug&gt;.mp4 + (optional) thumb png
 
-If you want to know what happens *inside* make_shorts.py, see
+If you want to know what happens *inside* scripts/make_shorts.py, see
 `docs/legacy_pipeline.md`.
 
 ### Per-task scratch + cleanup
@@ -415,5 +415,5 @@ If `azure_spend_pct > 90` → chat is about to start returning 503s.
 
 - `docs/architecture.md` — components, deployment, IAM, repo layout
 - `docs/user_flows.md` — three user types and their journeys
-- `docs/legacy_pipeline.md` — what `make_shorts.py` does internally
+- `docs/legacy_pipeline.md` — what `scripts/make_shorts.py` does internally
 - `README.md` — top-level overview and runtime instructions

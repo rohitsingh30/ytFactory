@@ -13,7 +13,7 @@ import httpx  # noqa: E402
 from control import jobs as jobs_mod, rate_limit  # noqa: E402
 from control.queue import get_queue, reset_queue  # noqa: E402
 from control.render_routes import router as render_router  # noqa: E402
-from shared.schema import TaskKind, TaskStatus  # noqa: E402
+from control.schema import TaskKind, TaskStatus  # noqa: E402
 
 
 def _make_app():

@@ -31,7 +31,7 @@ _VIDEO_ID_RE = re.compile(
     r"(?:v=|/shorts/|youtu\.be/|/embed/|/v/)([A-Za-z0-9_-]{11})"
 )
 
-DEFAULT_CACHE_DIR = Path("data/intermediate/sportstoriesanimated/footage/sources")
+DEFAULT_CACHE_DIR = Path("sportstoriesanimated/footage/sources")
 
 
 def _extract_video_id(url: str) -> str:

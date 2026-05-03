@@ -25,20 +25,20 @@ Not a checklist score. A reaction PLUS engineering.
 ### 1. Pick the video
 
 - If the user passed a path or slug, use it.
-- Otherwise pick the most recently modified ``data/shorts/*.mp4``.
+- Otherwise pick the most recently modified ``*.mp4``.
   State which one in one line before continuing.
 
 The user is on the website (``http://127.0.0.1:8765``) for generation
-now, but the website writes to the same ``data/shorts/<slug>.mp4`` and
+now, but the website writes to the same ``<slug>.mp4`` and
 ``data/cache/<slug>/`` paths the CLI uses, so this skill needs no
 website-specific path logic. If the user pastes a job URL like
 ``/api/jobs/<id>/short`` or ``/api/jobs/<id>/short/<i>``, look up the
 slug from ``JOBS[<id>]`` (logged in uvicorn stdout) or just resolve to
-the most recent mp4 in ``data/shorts/``.
+the most recent mp4 in ````.
 
 From the slug, locate (best-effort — keep going if any are missing):
 
-- ``data/shorts/<slug>.mp4`` — the video
+- ``<slug>.mp4`` — the video
 - ``data/cache/<slug>/`` — narration.wav, beats.json (word-level
   timestamps), prompts.json, ``img_NN.png``, ``caption_NN.png``,
   ``closer_panel.png``
@@ -61,7 +61,7 @@ arrives.
 Get duration first:
 
 ```bash
-ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 data/shorts/<slug>.mp4
+ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 <slug>.mp4
 ```
 
 Then extract one frame per second from t=0 to the end, **plus** an
@@ -71,9 +71,9 @@ extra frame at t=0.3 and t=0.8 (the hook is decided in the first
 ```bash
 mkdir -p data/critiques/<slug>/frames
 
-ffmpeg -y -i data/shorts/<slug>.mp4 -vf fps=1 -q:v 2 data/critiques/<slug>/frames/t_%02d.png
-ffmpeg -y -ss 0.3 -i data/shorts/<slug>.mp4 -frames:v 1 -q:v 2 data/critiques/<slug>/frames/t_hook_03.png
-ffmpeg -y -ss 0.8 -i data/shorts/<slug>.mp4 -frames:v 1 -q:v 2 data/critiques/<slug>/frames/t_hook_08.png
+ffmpeg -y -i <slug>.mp4 -vf fps=1 -q:v 2 data/critiques/<slug>/frames/t_%02d.png
+ffmpeg -y -ss 0.3 -i <slug>.mp4 -frames:v 1 -q:v 2 data/critiques/<slug>/frames/t_hook_03.png
+ffmpeg -y -ss 0.8 -i <slug>.mp4 -frames:v 1 -q:v 2 data/critiques/<slug>/frames/t_hook_08.png
 ```
 
 A 16s short → ~17 frames + 2 hook frames. ``Read`` every PNG in order.

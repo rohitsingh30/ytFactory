@@ -45,7 +45,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from sources.base import RawStory, save_raw
+from pipeline.sources.base import RawStory, save_raw
 from pipeline import niches as _niches
 from pipeline import telemetry as tlm
 
@@ -762,7 +762,7 @@ async def run_subprocess(
     a uvicorn restart (or pkill on the parent) does NOT cascade into the
     pipeline subprocess. The mp4 still finishes writing to disk; the new
     server just can't stream live events for it. Combined with on-disk
-    artifacts (data/cache/<slug>/, data/shorts/<slug>.mp4), the worst-case
+    artifacts (data/cache/<slug>/, <slug>.mp4), the worst-case
     after a restart is "Short is on disk but my browser thinks it died" —
     not "I lost 5 minutes of Flux work".
 
@@ -1029,9 +1029,9 @@ async def run_job(job: Job) -> None:
         ))
 
     # ---- Step 2: render ----
-    script_path = PROJECT_ROOT / "data" / "intermediate" / niche_cfg["channel_dir"] / "scripts" / f"{slug}.json"
+    script_path = PROJECT_ROOT / niche_cfg["channel_dir"] / "narrations" / f"{slug}.json"
     render_args = [
-        str(PYTHON_BIN), "make_shorts.py",
+        str(PYTHON_BIN), "scripts/make_shorts.py",
         "--script", str(script_path),
         "--channel", niche_cfg["channel"],
         # Stage 8 — every website-initiated render auto-uploads to YouTube.
@@ -1111,7 +1111,7 @@ async def _riff_render_one_seed(
     for one ideated seed. Returns the produced mp4 path, or None on
     failure (already emitted as an error event with seed_idx)."""
     channel_dir = profile.get("channel_dir") or "reddit_amitheasshole"
-    channel_yaml = profile.get("channel_yaml") or "channels/aita_animated.yaml"
+    channel_yaml = profile.get("channel_yaml") or "mystoriesanimated/variants/aita_animated.yaml"
     job.slug = seed.slug  # so /api/jobs/{id}/audio etc. work for the active seed
 
     inter_root = PROJECT_ROOT / "data" / "intermediate" / channel_dir
@@ -1177,7 +1177,7 @@ async def _riff_render_one_seed(
     # Auto-critique fires inline (principle #23 — never opt out).
     # Stage 8 auto-upload — every website render ships to YouTube.
     render_args = [
-        str(PYTHON_BIN), "make_shorts.py",
+        str(PYTHON_BIN), "scripts/make_shorts.py",
         "--script", str(script_path),
         "--channel", channel_yaml,
         "--upload",
@@ -2358,7 +2358,7 @@ def _do_upload_blocking(
         if "upload" not in chan_yaml:
             raise RuntimeError(
                 f"{channel_yaml_path.name} has no `upload:` block. "
-                f"Add one — see channels/mystoriesanimated.yaml."
+                f"Add one — see mystoriesanimated/config.yaml."
             )
 
         script_path = PROJECT_ROOT / "data" / "intermediate" / channel_dir / "scripts" / f"{slug}.json"

@@ -23,7 +23,7 @@ Don't skip a hat. Each one feeds the next.
 If the user gave you a Reddit URL or an existing slug, use it. Otherwise:
 
 ```bash
-.venv/bin/python pull_stories.py reddit --subreddit AmItheAsshole --limit 1 --channel aita_animated
+.venv/bin/python scripts/pull_stories.py reddit --subreddit AmItheAsshole --limit 1 --channel aita_animated
 ```
 
 (Or any subreddit they named.) Then ``Read``
@@ -314,7 +314,7 @@ progress, per-beat thumbnails, and a final mp4 preview.
 
 (CLI fallback if the website is down: see web/README.md to start
 uvicorn, or run
-  .venv/bin/python make_shorts.py --script data/intermediate/<channel>/scripts/<slug>.json --channel channels/<channel>.yaml --slug <slug>
+  .venv/bin/python scripts/make_shorts.py --script data/intermediate/<channel>/scripts/<slug>.json --channel channels/<channel>.yaml --slug <slug>
 directly. Both paths use the same pipeline, so any pipeline edit
 propagates to both — but the website is the user's primary path.)
 ```

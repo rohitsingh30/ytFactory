@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Protocol
 
-from shared.schema import HEAVY_KINDS, TaskEnvelope, TaskKind, TaskStatus
+from control.schema import HEAVY_KINDS, TaskEnvelope, TaskKind, TaskStatus
 
 _TASKS = "tasks"
 

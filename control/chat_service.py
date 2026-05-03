@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-from shared.schema import ShortProposal
+from control.schema import ShortProposal
 
 logger = logging.getLogger(__name__)
 
