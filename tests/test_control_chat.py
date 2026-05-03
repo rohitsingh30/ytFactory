@@ -17,7 +17,7 @@ os.environ["YTFACTORY_QUEUE_BACKEND"] = "memory"
 
 import httpx  # noqa: E402
 
-from control import chat_routes, chat_service as cs_module  # noqa: E402
+from control import chat_routes, chat_service as cs_module, rate_limit  # noqa: E402
 from control.chat_service import _extract_proposal, ChatResult  # noqa: E402
 from control.queue import get_queue, reset_queue  # noqa: E402
 from shared.schema import ShortProposal, TaskKind, TaskStatus  # noqa: E402
@@ -71,6 +71,7 @@ class ExtractProposalTest(unittest.TestCase):
 class ChatRoutesTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         reset_queue()
+        rate_limit.reset_backend()
 
     async def test_chat_returns_not_configured_when_azure_missing(self) -> None:
         # Force chat_service to look unconfigured.

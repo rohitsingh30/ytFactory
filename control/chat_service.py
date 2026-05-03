@@ -156,6 +156,19 @@ class ChatService:
                 return ChatResult(response="The message was filtered by content policy. Please rephrase.")
             return ChatResult(response=f"Chat error: {detail[:200]}")
 
+        # Best-effort spend tracking (real billing comes from Azure; this just
+        # feeds the daily cap circuit breaker in control/rate_limit.py).
+        try:
+            from control import rate_limit  # noqa: PLC0415 — avoid import cycle
+            usage = getattr(resp, "usage", None)
+            if usage is not None:
+                rate_limit.record_token_usage(
+                    int(getattr(usage, "prompt_tokens", 0) or 0),
+                    int(getattr(usage, "completion_tokens", 0) or 0),
+                )
+        except Exception:  # noqa: BLE001 — telemetry must never fail the chat
+            logger.warning("token-usage tracking failed", exc_info=True)
+
         sess.messages.append({"role": "assistant", "content": assistant_text})
 
         proposal = _extract_proposal(assistant_text)

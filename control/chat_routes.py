@@ -11,9 +11,10 @@ import logging
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from control import rate_limit
 from control.chat_service import ChatService, new_session_id
 from control.queue import get_queue, new_task_id
 from shared.schema import (
@@ -41,8 +42,12 @@ class ChatResponse(BaseModel):
 
 
 @router.post("", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
+async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     sid = req.session_id or new_session_id()
+    # Anti-abuse: per-IP daily quota + global Azure spend cap.
+    rate_limit.check_spend_cap()
+    rate_limit.check_and_increment(request, "chat")
+
     if not chat_service.is_configured:
         return ChatResponse(
             response=(
@@ -73,7 +78,8 @@ class ConfirmResponse(BaseModel):
 
 
 @router.post("/confirm", response_model=ConfirmResponse)
-async def confirm(req: ConfirmRequest) -> ConfirmResponse:
+async def confirm(req: ConfirmRequest, request: Request) -> ConfirmResponse:
+    rate_limit.check_and_increment(request, "confirm")
     proposal = chat_service.get_proposal(req.session_id)
     if proposal is None:
         raise HTTPException(status_code=404, detail="no proposal in session — keep chatting first")
