@@ -4,8 +4,56 @@
 (Cloud Run, project `ytfactory-prod`, region us-central1, revision auto-deployed
 from this repo via `gcloud run deploy --source .`).
 
-The target design after migration. See `legacy_pipeline.md` for what
-still runs while the migration is in progress.
+For complementary perspectives see:
+- `docs/user_flows.md` — what each user type does
+- `docs/data_flows.md` — how data moves through the system
+- `docs/legacy_pipeline.md` — what `make_shorts.py` does internally
+
+## At a glance
+
+```mermaid
+graph TB
+    subgraph Browser
+        UI[index.html<br/>niche reel + edit page + chat panel]
+    end
+
+    subgraph Cloud["Cloud (always-on, scale-to-zero)"]
+        CR[Cloud Run<br/>FastAPI control plane]
+        FS[(Firestore<br/>jobs · tasks · ratelimits)]
+        GCS[(Cloud Storage<br/>jobs/&lt;id&gt;/...)]
+        SM[(Secret Manager)]
+    end
+
+    subgraph Laptop["Laptop (intermittent, holds GPU + ML)"]
+        AG[agent/main.py]
+        WH[workers/heavy<br/>render_short]
+        WL[workers/light<br/>youtube_upload · research_handoff]
+        MS[make_shorts.py + pipeline/*]
+    end
+
+    subgraph External
+        AZ[Azure OpenAI]
+        YT[YouTube Data API]
+    end
+
+    UI -->|POST /api/chat<br/>/api/render<br/>GET /api/jobs/&lt;id&gt;| CR
+    CR --> FS
+    CR --> GCS
+    CR --> AZ
+    CR --> SM
+    AG -->|outbound HTTPS<br/>heartbeat · lease · ack| CR
+    AG --> WH
+    AG --> WL
+    WH --> MS
+    WH --> GCS
+    WL --> YT
+    WL --> GCS
+```
+
+The split is forced by economics: GPU on Cloud Run would dwarf
+everything else in this stack. So MLX-bound rendering stays on the
+laptop (free), and the cloud handles only chat, queue, storage, and
+public surface.
 
 ## Goals
 

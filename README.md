@@ -30,11 +30,18 @@ the supported workflow. No local server needed.
 
 ## Architecture
 
-> **Migration in progress.** The repo is being split from a monolithic
-> laptop-only pipeline into a hybrid cloud + laptop architecture. See
-> `docs/architecture.md` for the target design and `docs/legacy_pipeline.md`
-> for how the legacy monolithic pipeline still works while the migration
-> is in flight.
+Cloud control plane on Cloud Run + Firestore + GCS, fronted by a public
+chat UI; light I/O work runs on Cloud Run jobs; heavy MLX rendering runs
+on the laptop via a pull-based agent over outbound HTTPS.
+
+### Documentation
+
+| Doc | Audience | What it covers |
+|---|---|---|
+| [`docs/architecture.md`](./docs/architecture.md) | engineers | Components, deployment, IAM, repo layout, mermaid system diagram |
+| [`docs/user_flows.md`](./docs/user_flows.md) | designers / PMs / new contributors | Three user types (visitor, owner, operator), state machine, anti-abuse perimeter — sequence diagrams |
+| [`docs/data_flows.md`](./docs/data_flows.md) | backend engineers, debuggers | Where data lives, chat extraction, lease protocol, render pipeline, lifecycle GC, polling — flowcharts + sequence diagrams |
+| [`docs/legacy_pipeline.md`](./docs/legacy_pipeline.md) | rendering engineers | What `make_shorts.py` does internally — the ~7-min render, stage by stage |
 
 | Layer | Where | What |
 |---|---|---|
@@ -89,17 +96,29 @@ open https://ytfactory-control-767262167641.us-central1.run.app
 ### Laptop agent (so renders actually run)
 
 The laptop agent leases tasks from the live Cloud Run service. It needs
-the same bearer token the service expects.
+the same bearer token the service expects, plus a **Cartesia API key**
+(production TTS for AITA / sports / war / Mahabharat).
 
 ```bash
 # Pull the agent token from Secret Manager (one-time)
 gcloud secrets versions access latest --secret=ytfactory-agent-token \
   --project=ytfactory-prod > .agent-token
 
+# Cartesia narration backbone — required for any channel with
+# tts_provider: cartesia (currently every production channel; see
+# channels/*.yaml). Get a key at https://play.cartesia.ai/keys —
+# Sonic Starter $9/mo covers ~100 shorts. Without this set,
+# pipeline.audio raises RuntimeError at synth time.
+export CARTESIA_API_KEY=sk_car_...
+
 # Run the agent — points at production by default
 YTFACTORY_AGENT_TOKEN=$(cat .agent-token) \
   .venv/bin/python -m agent.main
 ```
+
+To fall back to free local TTS (no Cartesia bill), flip the channel YAML's
+`tts_provider: cartesia` back to `tts_provider: kokoro` and pick a Kokoro
+voice id (e.g. `af_bella`). Quality drops; cost goes to zero.
 
 ### Local dev (rare — only when changing control plane code)
 
