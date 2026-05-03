@@ -23,8 +23,13 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
+
+# Make `from pipeline import ...` resolve when we're run from scripts/.
+# Project root is the parent of the directory holding this file.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml
 
@@ -709,6 +714,7 @@ def make_short(
     run_critic: bool = True,
     tts_voice_override: str | None = None,
     upload_override: bool | None = None,
+    require_critic: bool = False,
 ) -> Path:
     cfg = yaml.safe_load(channel_path.read_text())
     # An override that contains no path separator is a Kokoro voice id
@@ -1931,11 +1937,23 @@ def make_short(
         do_upload = upload_override
     if do_upload:
         min_upload_score = int(upload_cfg.get("min_score", 0))
-        if score is not None and score < min_upload_score:
+        if require_critic and score is None:
+            # Cron / agent path: critique must succeed before any upload.
+            # Refuse to ship a video that hasn't been graded by /critique-video,
+            # because YouTube's algo punishes low-quality early uploads on
+            # a channel and we'd rather skip than ship blind.
+            print(
+                f"[upload] skipped — --require-critic was set but the "
+                f"critic produced no score (run_critic={run_critic}, "
+                f"critique={'authored' if score is not None else 'missing'})"
+            )
+            do_upload = False
+        elif score is not None and score < min_upload_score:
             print(
                 f"[upload] skipped — critic score {score} < "
                 f"upload.min_score {min_upload_score} (channel YAML)"
             )
+            do_upload = False
         else:
             try:
                 from pipeline import upload as up_mod
@@ -2005,6 +2023,15 @@ def main() -> None:
         help="Skip the post-render critique loop (for fast iteration).",
     )
     ap.add_argument(
+        "--require-critic",
+        action="store_true",
+        help=(
+            "Refuse to upload to YouTube if the critic didn't run or didn't "
+            "produce a score. Cron-triggered renders pass this so we never "
+            "ship an ungraded Short."
+        ),
+    )
+    ap.add_argument(
         "--tts-voice",
         default=None,
         help="Override channel YAML's tts_voice (e.g. 'af_bella', 'bm_george').",
@@ -2036,6 +2063,10 @@ def main() -> None:
     elif args.no_upload:
         upload_override = False
 
+    # --require-critic implies --no-critic is invalid (refuse to bypass).
+    if args.require_critic and args.no_critic:
+        ap.error("--require-critic and --no-critic are mutually exclusive")
+
     make_short(
         text=text,
         channel_path=Path(args.channel),
@@ -2043,6 +2074,7 @@ def main() -> None:
         slug=slug,
         source_story=source_story,
         run_critic=not args.no_critic,
+        require_critic=args.require_critic,
         tts_voice_override=args.tts_voice,
         upload_override=upload_override,
     )

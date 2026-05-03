@@ -124,11 +124,18 @@ async def _rewrite_and_cast(raw: dict, channel_yaml: Path, slug: str, channel_di
 
 
 async def _run_make_shorts(script_path: Path, channel_yaml: Path, log_path: Path) -> int:
-    """Subprocess call to make_shorts.py. Streams output to log_path."""
+    """Subprocess call to scripts/make_shorts.py. Streams output to log_path.
+
+    `--require-critic` is ALWAYS passed for cron-triggered renders so the
+    upload step refuses to ship if the post-render critique didn't run or
+    didn't produce a score (per the user's "never auto-upload without a
+    critic check" rule).
+    """
     cmd = [
-        sys.executable, str(PROJECT_ROOT / "make_shorts.py"),
+        sys.executable, str(PROJECT_ROOT / "scripts" / "make_shorts.py"),
         "--script", str(script_path),
         "--channel", str(channel_yaml),
+        "--require-critic",
     ]
     logger.info("running %s", " ".join(cmd))
     log_f = log_path.open("w", encoding="utf-8")
