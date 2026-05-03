@@ -65,25 +65,46 @@ def _enumerate_uploads() -> list[tuple[str, str, str, dict]]:
     return out
 
 
+_LAST_FETCH_ERROR: str | None = None
+
+
 def _fetch_stats(video_ids: list[str]) -> dict[str, dict[str, Any]]:
     """Hit YouTube Data API v3 with API key. Returns {video_id: {...}}.
 
-    Empty dict if no API key is configured or the call fails. The dashboard
-    falls back to whatever's in cache, so the page still renders.
+    Records last-error to ``_LAST_FETCH_ERROR`` (surfaced in the dashboard
+    response) so silent auth/quota/restriction failures aren't invisible.
+
+    Videos missing from the response are marked ``api_visible=False`` —
+    typically means the video is private/unlisted/deleted (API-key auth
+    only sees public videos). The caller can then render a "private on
+    YouTube" chip instead of an empty stats row.
     """
+    global _LAST_FETCH_ERROR
+    _LAST_FETCH_ERROR = None
     api_key = os.environ.get("YOUTUBE_API_KEY")
-    if not api_key or not video_ids:
+    if not api_key:
+        _LAST_FETCH_ERROR = "YOUTUBE_API_KEY not set"
+        return {}
+    if not video_ids:
         return {}
 
     import urllib.parse
     import urllib.request
+    import urllib.error
 
     out: dict[str, dict[str, Any]] = {}
-    # YouTube Data API caps `id` list at 50 per request.
+    # Pre-mark every requested id as not-yet-seen; we'll flip api_visible
+    # when the response includes the id.
+    for vid in video_ids:
+        out[vid] = {
+            "viewCount": None, "likeCount": None, "commentCount": None,
+            "api_visible": False, "privacy_live": None,
+        }
+
     for i in range(0, len(video_ids), 50):
         chunk = video_ids[i : i + 50]
         params = urllib.parse.urlencode({
-            "part": "statistics",
+            "part": "statistics,status",
             "id": ",".join(chunk),
             "key": api_key,
         })
@@ -91,14 +112,27 @@ def _fetch_stats(video_ids: list[str]) -> dict[str, dict[str, Any]]:
         try:
             with urllib.request.urlopen(url, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-        except Exception:
+        except urllib.error.HTTPError as e:
+            try:
+                body = json.loads(e.read().decode("utf-8"))
+                msg = (body.get("error") or {}).get("message") or str(e)
+            except Exception:
+                msg = str(e)
+            _LAST_FETCH_ERROR = f"HTTP {e.code}: {msg[:200]}"
             continue
+        except Exception as e:
+            _LAST_FETCH_ERROR = f"{type(e).__name__}: {str(e)[:200]}"
+            continue
+
         for item in data.get("items") or []:
             stats = item.get("statistics") or {}
+            status = item.get("status") or {}
             out[item["id"]] = {
                 "viewCount":    int(stats["viewCount"])    if "viewCount"    in stats else None,
                 "likeCount":    int(stats["likeCount"])    if "likeCount"    in stats else None,
                 "commentCount": int(stats["commentCount"]) if "commentCount" in stats else None,
+                "api_visible":  True,
+                "privacy_live": status.get("privacyStatus"),
             }
     return out
 
@@ -207,6 +241,8 @@ async def dashboard_videos(refresh: bool = Query(False)) -> dict:
         like = cached.get("likeCount")
         comment = cached.get("commentCount")
         fetched_at = cached.get("fetched_at")
+        api_visible = cached.get("api_visible")
+        privacy_live = cached.get("privacy_live")
         if fetched_at and (latest_fetch_epoch is None or fetched_at > latest_fetch_epoch):
             latest_fetch_epoch = fetched_at
 
@@ -217,12 +253,26 @@ async def dashboard_videos(refresh: bool = Query(False)) -> dict:
             else rec.get("url") or f"https://youtu.be/{vid}"
         )
 
+        # Privacy resolution: prefer YouTube's live status. If the API
+        # didn't return the video at all (api_visible=False), it's
+        # private/unlisted/deleted as far as the public API can tell —
+        # mark it explicitly so the upload-record's stale "public" doesn't
+        # mislead the viewer.
+        if privacy_live:
+            privacy = privacy_live
+        elif api_visible is False and api_key_set:
+            privacy = "private/unlisted"
+        else:
+            privacy = rec.get("privacy")
+
         by_channel.setdefault(account, []).append({
             "slug": slug,
             "video_id": vid,
             "title": rec.get("title") or slug,
             "uploaded_at": rec.get("uploaded_at"),
-            "privacy": rec.get("privacy"),
+            "privacy": privacy,
+            "privacy_record": rec.get("privacy"),  # original upload-time value, for context
+            "api_visible": api_visible,
             "watch_url": watch_url,
             "studio_url": rec.get("studio_url") or f"https://studio.youtube.com/video/{vid}/edit",
             "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
@@ -267,4 +317,6 @@ async def dashboard_videos(refresh: bool = Query(False)) -> dict:
             "YOUTUBE_API_KEY not set in this environment — stats will be "
             "empty until configured. Set it in Cloud Run env vars."
         )
+    elif _LAST_FETCH_ERROR:
+        payload["warning"] = f"YouTube API error: {_LAST_FETCH_ERROR}"
     return payload

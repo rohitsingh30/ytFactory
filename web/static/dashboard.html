@@ -126,13 +126,23 @@ function videoCard(v) {
   const date = v.uploaded_at ? new Date(v.uploaded_at).toLocaleDateString(undefined, {
     year: 'numeric', month: 'short', day: 'numeric'
   }) : "";
-  const privacy = v.privacy ? `<span class="chip text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300">${v.privacy}</span>` : "";
+  const PRIVACY_STYLE = {
+    public:           "bg-emerald-700/40 text-emerald-200 ring-emerald-500/30",
+    unlisted:         "bg-amber-700/40  text-amber-200  ring-amber-500/30",
+    private:          "bg-rose-700/40   text-rose-200   ring-rose-500/30",
+    "private/unlisted": "bg-slate-700/40 text-slate-200 ring-slate-500/30",
+  };
+  const pCls = PRIVACY_STYLE[v.privacy] || "bg-slate-800 text-slate-300";
+  const privacy = v.privacy ? `<span class="text-[10px] px-2 py-0.5 rounded ring-1 ${pCls}">${v.privacy}</span>` : "";
+  const drift = (v.privacy && v.privacy_record && v.privacy !== v.privacy_record)
+    ? `<span class="text-[10px] text-amber-400/80" title="Upload record said '${v.privacy_record}' but YouTube reports '${v.privacy}' now">⚠</span>`
+    : "";
   return `
     <a href="${v.watch_url}" target="_blank" rel="noopener"
        class="video-card block rounded-xl border border-slate-800 bg-slate-900/40 overflow-hidden hover:border-slate-600">
       <div class="aspect-video bg-slate-800 relative">
         <img src="${v.thumbnail}" alt="" class="w-full h-full object-cover" loading="lazy" />
-        <div class="absolute top-2 right-2">${privacy}</div>
+        <div class="absolute top-2 right-2 flex items-center gap-1">${drift}${privacy}</div>
       </div>
       <div class="p-3">
         <div class="text-sm font-medium leading-snug line-clamp-2 mb-2">${v.title}</div>
