@@ -1,0 +1,183 @@
+"""GCS-backed artifact storage. Single source of truth for all media.
+
+URI scheme: gs://<bucket>/jobs/<job_id>/<relpath>
+
+Helpers:
+- upload(local_path, uri)        — push a file to GCS
+- download(uri, local_path)      — pull a file from GCS
+- upload_bytes(data, uri)        — push raw bytes
+- download_bytes(uri)            — pull raw bytes
+- signed_url(uri, ttl_s, method) — pre-signed URL for browser upload/download
+- delete_prefix(uri_prefix)      — recursive delete (used by post-upload GC)
+- list_prefix(uri_prefix)        — iterate URIs under a prefix
+
+Bucket comes from YTFACTORY_BUCKET env (default: ytfactory-prod-artifacts).
+"""
+from __future__ import annotations
+
+import io
+import os
+from datetime import timedelta
+from pathlib import Path
+from typing import Iterator
+
+DEFAULT_BUCKET = "ytfactory-prod-artifacts"
+
+
+def bucket_name() -> str:
+    return os.environ.get("YTFACTORY_BUCKET", DEFAULT_BUCKET)
+
+
+def job_uri(job_id: str, relpath: str = "") -> str:
+    base = f"gs://{bucket_name()}/jobs/{job_id}"
+    return f"{base}/{relpath.lstrip('/')}" if relpath else base
+
+
+def parse_uri(uri: str) -> tuple[str, str]:
+    """`gs://bucket/path/to/file` → (`bucket`, `path/to/file`)."""
+    if not uri.startswith("gs://"):
+        raise ValueError(f"not a gs:// URI: {uri!r}")
+    rest = uri[len("gs://"):]
+    if "/" not in rest:
+        return rest, ""
+    bucket, key = rest.split("/", 1)
+    return bucket, key
+
+
+# Lazily build the singleton GCS client — keeps in-memory tests free of GCP auth.
+_CLIENT = None
+
+
+def _client():
+    global _CLIENT
+    if _CLIENT is None:
+        from google.cloud import storage  # noqa: PLC0415 — lazy
+        _CLIENT = storage.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod"))
+    return _CLIENT
+
+
+def _blob(uri: str):
+    bucket, key = parse_uri(uri)
+    return _client().bucket(bucket).blob(key)
+
+
+# ---------------------------------------------------------------------------
+# Upload / download
+# ---------------------------------------------------------------------------
+
+
+def upload(local_path: str | Path, uri: str, *, content_type: str | None = None) -> str:
+    """Push a local file to GCS. Returns the gs:// URI."""
+    blob = _blob(uri)
+    if content_type:
+        blob.content_type = content_type
+    blob.upload_from_filename(str(local_path))
+    return uri
+
+
+def download(uri: str, local_path: str | Path) -> Path:
+    """Pull a GCS object to disk. Returns the local Path."""
+    p = Path(local_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _blob(uri).download_to_filename(str(p))
+    return p
+
+
+def upload_bytes(data: bytes, uri: str, *, content_type: str | None = None) -> str:
+    blob = _blob(uri)
+    if content_type:
+        blob.content_type = content_type
+    blob.upload_from_file(io.BytesIO(data), size=len(data), rewind=True)
+    return uri
+
+
+def download_bytes(uri: str) -> bytes:
+    return _blob(uri).download_as_bytes()
+
+
+# ---------------------------------------------------------------------------
+# Signed URLs (browser-side upload/download)
+# ---------------------------------------------------------------------------
+
+
+def signed_url(uri: str, *, ttl_s: int = 600, method: str = "GET") -> str:
+    """Browser-usable URL. ttl_s capped at 7 days by GCS."""
+    return _blob(uri).generate_signed_url(
+        version="v4",
+        expiration=timedelta(seconds=ttl_s),
+        method=method,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Listing + delete (post-upload GC)
+# ---------------------------------------------------------------------------
+
+
+def list_prefix(uri_prefix: str) -> Iterator[str]:
+    """Yield all gs:// URIs under the prefix."""
+    bucket, key_prefix = parse_uri(uri_prefix)
+    for blob in _client().list_blobs(bucket, prefix=key_prefix):
+        yield f"gs://{bucket}/{blob.name}"
+
+
+def delete_prefix(uri_prefix: str, *, dry_run: bool = False) -> list[str]:
+    """Delete every object under the prefix. Returns the list of deleted URIs.
+
+    Used by the post-upload GC to wipe `jobs/<id>/beats/`, `jobs/<id>/voice.wav`,
+    etc. once a Short is on YouTube.
+    """
+    bucket_name_, key_prefix = parse_uri(uri_prefix)
+    bucket = _client().bucket(bucket_name_)
+    deleted: list[str] = []
+    for blob in _client().list_blobs(bucket_name_, prefix=key_prefix):
+        uri = f"gs://{bucket_name_}/{blob.name}"
+        deleted.append(uri)
+        if not dry_run:
+            bucket.blob(blob.name).delete()
+    return deleted
+
+
+def delete_one(uri: str) -> bool:
+    """Delete a single object. Returns True if it existed."""
+    blob = _blob(uri)
+    if not blob.exists():
+        return False
+    blob.delete()
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Convenience: per-job paths
+# ---------------------------------------------------------------------------
+
+
+# Heavy artifacts that get GC'd after a successful YouTube upload.
+HEAVY_ARTIFACT_RELPATHS: tuple[str, ...] = (
+    "beats/",
+    "voice.wav",
+    "captions.srt",
+    "prompts.json",
+    "script.json",
+    "cast.json",
+    "footage/",
+)
+
+# Light artifacts kept for 7–30 days via lifecycle rules.
+LIGHT_ARTIFACT_RELPATHS: tuple[str, ...] = (
+    "short.mp4",
+    "thumb.png",
+    "proposal.json",
+)
+
+
+def gc_heavy_artifacts(job_id: str, *, dry_run: bool = False) -> list[str]:
+    """Wipe heavy intermediates for a job after YT upload succeeds.
+
+    Lifecycle rules handle short.mp4 + thumb.png expiry on a longer horizon.
+    """
+    deleted: list[str] = []
+    for rel in HEAVY_ARTIFACT_RELPATHS:
+        prefix = job_uri(job_id, rel)
+        deleted.extend(delete_prefix(prefix, dry_run=dry_run))
+    return deleted
