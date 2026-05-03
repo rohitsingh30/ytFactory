@@ -72,7 +72,7 @@
   /* --- Niche reel: horizontally-scrolling 9:16 cards --- */
   .reel-scroll {
     display: flex; gap: 18px; overflow-x: auto; overflow-y: visible;
-    padding: 6px 24px 28px;
+    padding: 6px 4px 28px;
     scroll-snap-type: x mandatory;
     scrollbar-width: thin;
     scrollbar-color: rgb(71 85 105) transparent;
@@ -193,7 +193,7 @@
         <h2 class="text-sm uppercase tracking-wider text-slate-400">Channels</h2>
         <div id="niche-selected-label" class="text-sm text-slate-300"></div>
       </div>
-      <div id="niche-reel" class="reel-scroll -mx-6">
+      <div id="niche-reel" class="reel-scroll">
         <div class="reel-empty" id="niche-empty">Loading channels…</div>
       </div>
       <!-- Legacy grid kept hidden for back-compat with any code that probes for it. -->
