@@ -134,6 +134,44 @@ async def dashboard_page() -> FileResponse:
     return FileResponse(p)
 
 
+# ---- 404-silencers for legacy index.html JS ----------------------------
+# index.html (the operator UI) was written against web/server.py and
+# fetches /api/telemetry/* + /api/research/* + /favicon.ico on load.
+# Those routes don't exist on the cloud control plane (the data lives on
+# the laptop). Return empty payloads so the page renders clean instead
+# of spamming the console with 404s. The matching telemetry/research
+# UI buttons in index.html are already `class="hidden"`.
+
+@router.get("/favicon.ico")
+async def favicon() -> Any:
+    from fastapi.responses import Response
+    # 204 No Content — browsers stop asking. Cheap, no static file needed.
+    return Response(status_code=204)
+
+
+@router.get("/api/telemetry/overview")
+@router.get("/api/telemetry/stages")
+@router.get("/api/telemetry/timeline")
+@router.get("/api/telemetry/llm")
+@router.get("/api/telemetry/errors")
+@router.get("/api/telemetry/latency")
+async def telemetry_stub() -> dict:
+    """Empty telemetry — pipeline runs on the laptop, not the cloud."""
+    return {"events": [], "rows": [], "stages": [], "warning": "telemetry only available on the laptop UI"}
+
+
+@router.get("/api/research/videos")
+@router.get("/api/research/channels")
+@router.get("/api/research/learnings")
+async def research_stub() -> dict:
+    return {"items": [], "warning": "research dashboard data lives on the laptop"}
+
+
+@router.post("/api/research/rebuild")
+async def research_rebuild_stub() -> dict:
+    return {"ok": False, "warning": "rebuild runs on the laptop pipeline"}
+
+
 @router.get("/api/dashboard/videos")
 async def dashboard_videos(refresh: bool = Query(False)) -> dict:
     """Aggregate every uploaded video with live YouTube stats.
