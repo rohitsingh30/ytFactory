@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from control.agent_routes import router as agent_router
 from control.chat_routes import router as chat_router
+from control.niche_routes import router as niche_router
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "web" / "static"
@@ -26,6 +27,7 @@ STATIC_DIR = PROJECT_ROOT / "web" / "static"
 app = FastAPI(title="ytFactory control (dev)")
 app.include_router(agent_router)
 app.include_router(chat_router)
+app.include_router(niche_router)
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
