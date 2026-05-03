@@ -67,7 +67,13 @@ def _token_path(account: str) -> Path:
 
 
 def _record_path(project_root: Path, channel_dir: str, slug: str) -> Path:
-    return project_root / "data" / "uploads" / channel_dir / f"{slug}.json"
+    """Per-reorg layout: <project_root>/<channel_dir>/uploads/<slug>.json.
+
+    ``channel_dir`` may be a compound path (e.g. ``mystoriesanimated/reddit_amitheasshole``)
+    for niche-nested layouts; the result is
+    ``mystoriesanimated/reddit_amitheasshole/uploads/<slug>.json``.
+    """
+    return project_root / channel_dir / "uploads" / f"{slug}.json"
 
 
 class UploadError(RuntimeError):
@@ -787,7 +793,7 @@ def upload_short(
     record["tags"] = meta["tags"]
 
     write_upload_record(project_root, channel_dir, slug, record)
-    print(f"[upload] ✓ {record['url']}  (record: data/uploads/{channel_dir}/{slug}.json)")
+    print(f"[upload] ✓ {record['url']}  (record: {channel_dir}/uploads/{slug}.json)")
 
     # Cliffhanger Part-1 → drop a pending sidecar so the Part-2 watcher
     # can auto-render the finale once subscribers cross the threshold.
