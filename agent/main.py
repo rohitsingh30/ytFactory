@@ -16,6 +16,7 @@ import signal
 import httpx
 
 from agent import resources, runner
+import workers.heavy  # noqa: F401 — registers heavy worker functions
 from agent.config import AgentConfig
 from shared.schema import (
     AckRequest,
