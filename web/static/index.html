@@ -281,6 +281,85 @@
     <button id="generate-btn" class="hidden" disabled></button>
   </section>
 
+  <!-- ============ STEP 2: PER-NICHE EDIT PAGE ============ -->
+  <section id="edit-section" class="hidden space-y-6">
+    <div class="flex items-center gap-3">
+      <button id="edit-back" class="text-sm text-slate-400 hover:text-slate-100 flex items-center gap-1">
+        <span>←</span> Back to channels
+      </button>
+    </div>
+
+    <!-- Niche identity banner — gradient + emoji + label, mirrors the card -->
+    <div id="edit-banner" class="relative overflow-hidden rounded-2xl border border-slate-800">
+      <div id="edit-banner-gradient" class="absolute inset-0 bg-gradient-to-br"></div>
+      <div id="edit-banner-emoji" class="absolute right-6 top-1/2 -translate-y-1/2 text-[120px] opacity-15 select-none rotate-[-12deg]"></div>
+      <div class="absolute inset-0 bg-gradient-to-r from-black/30 via-transparent to-transparent"></div>
+      <div class="relative px-6 py-7">
+        <div class="text-[10px] uppercase tracking-[0.18em] text-white/70 font-bold">make a short for</div>
+        <div id="edit-banner-title" class="text-3xl font-extrabold mt-1"></div>
+        <div id="edit-banner-tagline" class="text-sm text-white/85 mt-1 max-w-lg"></div>
+      </div>
+    </div>
+
+    <!-- Form -->
+    <form id="edit-form" class="space-y-5">
+      <div>
+        <label class="block text-xs uppercase tracking-wider text-slate-400 mb-2">Topic <span class="text-rose-400">*</span></label>
+        <textarea id="edit-topic" required rows="2" placeholder="One sentence: what's the Short about?"
+          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-violet-500 resize-none"></textarea>
+        <div id="edit-topic-suggestions" class="flex flex-wrap gap-2 mt-2"></div>
+      </div>
+
+      <div>
+        <label class="block text-xs uppercase tracking-wider text-slate-400 mb-2">Notes <span class="text-slate-600 normal-case font-normal">(optional)</span></label>
+        <textarea id="edit-notes" rows="3" placeholder="Any direction — characters, mood, beats, references…"
+          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-violet-500 resize-none"></textarea>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs uppercase tracking-wider text-slate-400 mb-2">
+            Length <span id="edit-length-display" class="text-slate-200 normal-case ml-1">55s</span>
+          </label>
+          <input id="edit-length" type="range" min="30" max="90" value="55" step="5"
+            class="w-full accent-violet-500"/>
+          <div class="flex justify-between text-[10px] text-slate-500 mt-1 px-0.5">
+            <span>30s</span><span>50–60s sweet spot</span><span>90s</span>
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs uppercase tracking-wider text-slate-400 mb-2">Source</label>
+          <select id="edit-source-kind"
+            class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-violet-500">
+            <option value="auto">AI picks (default)</option>
+            <option value="user_text">My text — use the topic + notes verbatim</option>
+            <option value="reddit_url">Reddit URL</option>
+            <option value="wikipedia_topic">Wikipedia topic</option>
+            <option value="youtube_video">YouTube video</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="edit-source-ref-wrap" class="hidden">
+        <label class="block text-xs uppercase tracking-wider text-slate-400 mb-2">Source reference</label>
+        <input id="edit-source-ref" type="text"
+          placeholder="https://reddit.com/r/AmItheAsshole/comments/... or 'Sergio Agüero'"
+          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-sm font-mono focus:outline-none focus:border-violet-500"/>
+      </div>
+
+      <div class="flex items-center justify-between pt-3 border-t border-slate-800">
+        <div class="text-xs text-slate-500">Cost: ~$0 (cloud is just orchestration; render runs free on your laptop).</div>
+        <button id="edit-submit" type="submit"
+          class="px-6 py-3 bg-gradient-to-r from-rose-500 to-violet-500 rounded-xl font-bold text-white disabled:opacity-40 disabled:cursor-not-allowed hover:shadow-xl hover:shadow-violet-500/30 transition">
+          Generate Short →
+        </button>
+      </div>
+    </form>
+
+    <!-- Job status (shown after submit) -->
+    <div id="edit-job-status" class="hidden space-y-4 mt-6"></div>
+  </section>
+
   <!-- ============ STEP 1.5: RIFF — analyze + per-seed lobby ============ -->
   <section id="riff-lobby" class="hidden space-y-6">
     <div class="flex items-center justify-between">
@@ -930,16 +1009,23 @@ async function loadNiches() {
 }
 
 /**
- * Clicking a niche card opens the chat panel + pre-fills it. The chat
- * extraction system prompt already knows about every channel — by
- * pre-typing the prefill we just bias the conversation.
+ * Click a niche card → if it's the "open prompt" card, open the chat
+ * panel (free-form conversation). Any other card opens the per-niche
+ * editing page so the user gets a structured form for that genre.
  */
 function selectNiche(n) {
   state.niche = n.key;
+  state.activeNiche = n;
   document.querySelectorAll('.niche-reel-card').forEach(c => c.classList.toggle('selected', c.dataset.key === n.key));
   document.getElementById('niche-selected-label').textContent = `Selected: ${n.label}`;
 
-  // Open the chat panel if it's collapsed.
+  if (n.key === 'open') {
+    return openChatPanelForNiche(n);
+  }
+  openEditPageForNiche(n);
+}
+
+function openChatPanelForNiche(n) {
   const panel = document.getElementById('chat-panel');
   if (panel && panel.classList.contains('collapsed')) {
     panel.classList.remove('collapsed');
@@ -948,8 +1034,6 @@ function selectNiche(n) {
     const btn = document.getElementById('chat-panel-toggle');
     if (btn) { btn.textContent = '›'; btn.title = 'Close chat'; }
   }
-
-  // Inject a soft synthetic bot message so the user knows the channel locked in.
   const log = document.getElementById('chat-log');
   if (log) {
     const row = document.createElement('div');
@@ -961,21 +1045,235 @@ function selectNiche(n) {
     log.appendChild(row);
     log.scrollTop = log.scrollHeight;
   }
-
-  // Pre-fill the chat input with the niche's prefill prefix and focus.
   const input = document.getElementById('chat-input');
   if (input) {
     if (n.prefill) {
       input.value = n.prefill;
       input.focus();
-      // Place caret at the end so the user can keep typing.
       const len = input.value.length;
       try { input.setSelectionRange(len, len); } catch (_) {}
-    } else {
-      input.focus();
-    }
+    } else { input.focus(); }
   }
 }
+
+// ====================================================================
+//   PER-NICHE EDIT PAGE
+// ====================================================================
+
+function openEditPageForNiche(n) {
+  // Hide picker, show edit section.
+  document.getElementById('picker').classList.add('hidden');
+  const edit = document.getElementById('edit-section');
+  edit.classList.remove('hidden');
+
+  // Banner styling — reuse the card gradient + emoji.
+  const grad = document.getElementById('edit-banner-gradient');
+  grad.className = `absolute inset-0 bg-gradient-to-br ${n.color_from} ${n.color_to}`;
+  document.getElementById('edit-banner-emoji').textContent = n.emoji || '✦';
+  document.getElementById('edit-banner-title').textContent = n.label;
+  document.getElementById('edit-banner-tagline').textContent = n.tagline || n.description || '';
+
+  // Reset form state.
+  document.getElementById('edit-form').classList.remove('hidden');
+  document.getElementById('edit-job-status').classList.add('hidden');
+  document.getElementById('edit-job-status').innerHTML = '';
+  document.getElementById('edit-topic').value = '';
+  document.getElementById('edit-notes').value = '';
+  document.getElementById('edit-length').value = '55';
+  document.getElementById('edit-length-display').textContent = '55s';
+  document.getElementById('edit-source-kind').value = 'auto';
+  document.getElementById('edit-source-ref').value = '';
+  document.getElementById('edit-source-ref-wrap').classList.add('hidden');
+  document.getElementById('edit-submit').disabled = false;
+
+  // Topic suggestions = the niche's sample hooks (clickable to pre-fill).
+  const suggestionsBox = document.getElementById('edit-topic-suggestions');
+  suggestionsBox.innerHTML = '';
+  (n.sample_hooks || []).forEach((h) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'text-[11px] px-2.5 py-1 rounded-full bg-slate-800/70 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-slate-100 transition';
+    btn.textContent = h;
+    btn.addEventListener('click', () => {
+      document.getElementById('edit-topic').value = h;
+      document.getElementById('edit-topic').focus();
+    });
+    suggestionsBox.appendChild(btn);
+  });
+
+  // Scroll to top so the user sees the banner first.
+  window.scrollTo({top: 0, behavior: 'smooth'});
+  document.getElementById('edit-topic').focus();
+}
+
+function closeEditPage() {
+  document.getElementById('edit-section').classList.add('hidden');
+  document.getElementById('picker').classList.remove('hidden');
+  // Clear job-poll if it's running.
+  if (state.jobPollTimer) { clearTimeout(state.jobPollTimer); state.jobPollTimer = null; }
+}
+
+// ---- form interactions ----
+function _editInit() {
+  const lenInput = document.getElementById('edit-length');
+  const lenDisplay = document.getElementById('edit-length-display');
+  if (lenInput && lenDisplay) {
+    lenInput.addEventListener('input', () => { lenDisplay.textContent = `${lenInput.value}s`; });
+  }
+
+  const srcSel = document.getElementById('edit-source-kind');
+  if (srcSel) {
+    srcSel.addEventListener('change', () => {
+      const wrap = document.getElementById('edit-source-ref-wrap');
+      const needsRef = srcSel.value === 'reddit_url' || srcSel.value === 'wikipedia_topic' || srcSel.value === 'youtube_video';
+      wrap.classList.toggle('hidden', !needsRef);
+    });
+  }
+
+  const back = document.getElementById('edit-back');
+  if (back) back.addEventListener('click', closeEditPage);
+
+  const form = document.getElementById('edit-form');
+  if (form) form.addEventListener('submit', onEditSubmit);
+}
+
+async function onEditSubmit(ev) {
+  ev.preventDefault();
+  const niche = state.activeNiche;
+  if (!niche) return;
+  const topic = document.getElementById('edit-topic').value.trim();
+  if (!topic) return;
+  const notes = document.getElementById('edit-notes').value.trim();
+  const length_s = parseInt(document.getElementById('edit-length').value, 10);
+  const source_kind = document.getElementById('edit-source-kind').value;
+  const source_ref = document.getElementById('edit-source-ref').value.trim() || null;
+
+  document.getElementById('edit-submit').disabled = true;
+
+  let body;
+  try {
+    const r = await fetch('/api/render', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        channel: niche.channel_key_for_chat || niche.key,
+        topic, notes, length_s, source_kind, source_ref,
+        format: niche.default_format || 'animated',
+      }),
+    });
+    if (!r.ok) {
+      const errText = (await r.text()).slice(0, 300);
+      if (r.status === 429) throw new Error('Daily render limit hit. Try again after UTC midnight.');
+      throw new Error(`HTTP ${r.status}: ${errText}`);
+    }
+    body = await r.json();
+  } catch (e) {
+    document.getElementById('edit-submit').disabled = false;
+    showJobError(e.message);
+    return;
+  }
+
+  // Hide the form, show the live status panel + start polling.
+  document.getElementById('edit-form').classList.add('hidden');
+  startJobStatusPoll(body.job_id, niche);
+}
+
+// ---- live job status ----
+const STAGE_LABELS = {
+  queued:           ['⏳', 'Queued — waiting for the laptop agent to lease the task'],
+  rewrite_cast:     ['✍️',  'Rewriting narration + casting characters via Claude'],
+  render:           ['🎬', 'Rendering scenes (image gen → TTS → captions → ffmpeg compose)'],
+  gcs_upload:       ['☁️',  'Uploading mp4 to cloud storage'],
+  youtube_upload:   ['📺', 'Publishing to YouTube'],
+  research_handoff: ['📊', 'Handing off to the research / analytics pipeline'],
+  done:             ['✅', 'Done — your Short is ready'],
+};
+
+function startJobStatusPoll(jobId, niche) {
+  const wrap = document.getElementById('edit-job-status');
+  wrap.classList.remove('hidden');
+  wrap.innerHTML = `
+    <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-5 space-y-4">
+      <div class="flex items-baseline justify-between">
+        <div>
+          <div class="text-xs uppercase tracking-wider text-slate-400">Job</div>
+          <div class="font-mono text-sm" id="js-job-id">${jobId.slice(0, 8)}…</div>
+        </div>
+        <div class="text-xs text-slate-400">Polls every 3s · keep this tab open</div>
+      </div>
+      <div id="js-stage" class="flex items-center gap-3">
+        <div class="text-3xl" id="js-emoji">⏳</div>
+        <div class="flex-1">
+          <div class="text-sm font-medium" id="js-label">Queued — waiting for the laptop agent</div>
+          <div class="text-xs text-slate-500 mt-0.5" id="js-substage"></div>
+        </div>
+      </div>
+      <div class="rounded-lg bg-slate-950 border border-slate-800 p-3 hidden" id="js-error"></div>
+      <div id="js-result" class="hidden space-y-2"></div>
+    </div>
+  `;
+
+  const tick = async () => {
+    try {
+      const r = await fetch(`/api/jobs/${jobId}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const job = await r.json();
+      renderJobStatus(job, niche);
+      if (job.status === 'done' || job.status === 'failed') return;  // stop polling
+    } catch (e) {
+      console.warn('job poll failed', e);
+    }
+    state.jobPollTimer = setTimeout(tick, 3000);
+  };
+  state.jobPollTimer = setTimeout(tick, 1500);
+}
+
+function renderJobStatus(job, niche) {
+  const stage = job.stage || 'queued';
+  const [emoji, label] = STAGE_LABELS[stage] || ['🔄', stage];
+  document.getElementById('js-emoji').textContent = emoji;
+  document.getElementById('js-label').textContent = label;
+  document.getElementById('js-substage').textContent = job.status === 'failed' ? 'failed' : `status: ${job.status}`;
+
+  if (job.status === 'failed') {
+    const err = document.getElementById('js-error');
+    err.classList.remove('hidden');
+    err.innerHTML = `<div class="text-xs text-rose-300 font-mono whitespace-pre-wrap">${escapeHtml(job.error || 'unknown error')}</div>`;
+  }
+
+  if (job.status === 'done') {
+    const result = document.getElementById('js-result');
+    result.classList.remove('hidden');
+    const yt = job.youtube_url
+      ? `<a href="${escapeAttr(job.youtube_url)}" target="_blank" rel="noopener" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-semibold">▶ Watch on YouTube</a>`
+      : '';
+    const dl = job.short_signed_url
+      ? `<a href="${escapeAttr(job.short_signed_url)}" target="_blank" rel="noopener" download class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-semibold">⬇ Download mp4</a>`
+      : '';
+    result.innerHTML = `
+      <div class="flex flex-wrap gap-3 items-center">${yt}${dl}</div>
+      <button id="js-make-another" class="text-sm text-slate-400 hover:text-slate-100 underline-offset-2 hover:underline">← Make another for ${escapeHtml(niche.label)}</button>
+    `;
+    const again = document.getElementById('js-make-another');
+    if (again) again.addEventListener('click', () => openEditPageForNiche(niche));
+  }
+}
+
+function showJobError(msg) {
+  const wrap = document.getElementById('edit-job-status');
+  wrap.classList.remove('hidden');
+  wrap.innerHTML = `
+    <div class="rounded-2xl border border-rose-500/40 bg-rose-500/10 p-4">
+      <div class="text-sm font-semibold text-rose-300 mb-1">Couldn't queue render</div>
+      <div class="text-xs text-rose-200/80 font-mono whitespace-pre-wrap">${escapeHtml(msg)}</div>
+    </div>
+  `;
+}
+
+// Initialize edit-page bindings once the DOM has loaded.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _editInit);
+} else { _editInit(); }
 
 function renderVoiceGrid() {
   const grid = document.getElementById('voice-grid');

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.runner import TaskContext, register
+from control import jobs as jobs_mod
 from control import storage
 from control.queue import get_queue, new_task_id
 from shared.schema import TaskEnvelope, TaskKind
@@ -40,24 +41,30 @@ async def youtube_upload(ctx: TaskContext) -> str | None:
     if not short_uri:
         _fail("payload missing 'short_uri' (the rendered mp4 in GCS)")
 
+    jobs_mod.mark_stage(job_id, status=jobs_mod.STATUS_UPLOADING, stage="youtube_upload")
+
     # 1. Pull the mp4 from GCS to scratch.
     local_mp4 = ctx.scratch / "short.mp4"
     storage.download(short_uri, local_mp4)
     logger.info("YOUTUBE_UPLOAD job=%s downloaded %s → %s", job_id, short_uri, local_mp4)
 
     # 2. Upload to YouTube via the existing module.
-    # pipeline.upload.upload_video has the auth + retry logic already.
     from pipeline import upload as upload_mod  # noqa: PLC0415 — lazy
 
     title = payload.get("topic") or "Untitled"
     description = payload.get("notes") or ""
     channel_key = payload.get("channel", "auto")
 
-    video_id = await _do_youtube_upload(upload_mod, local_mp4, title, description, channel_key)
+    try:
+        video_id = await _do_youtube_upload(upload_mod, local_mp4, title, description, channel_key)
+    except Exception as e:
+        jobs_mod.mark_failed(job_id, stage="youtube_upload", error=f"{type(e).__name__}: {e}")
+        raise
     youtube_url = f"https://youtu.be/{video_id}"
     logger.info("YOUTUBE_UPLOAD job=%s published %s", job_id, youtube_url)
 
-    # 3. Update the job doc in Firestore.
+    # 3. Update the job doc — youtube_url now visible to the UI.
+    jobs_mod.get_jobs().update(job_id, youtube_url=youtube_url, youtube_video_id=video_id)
     _record_published(job_id, video_id, youtube_url)
 
     # 4. Post-upload GC — explicit deletion of heavy intermediates.

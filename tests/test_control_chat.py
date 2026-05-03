@@ -129,7 +129,7 @@ class ChatRoutesTest(unittest.IsolatedAsyncioTestCase):
             task = q.get(confirm["task_id"])
             self.assertIsNotNone(task)
             assert task is not None
-            self.assertEqual(task.kind, TaskKind.PULL_STORY)
+            self.assertEqual(task.kind, TaskKind.RENDER_SHORT)
             self.assertEqual(task.status, TaskStatus.QUEUED)
             self.assertEqual(task.job_id, confirm["job_id"])
             self.assertEqual(task.payload["channel"], "sportstoriesanimated")

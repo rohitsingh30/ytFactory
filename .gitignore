@@ -33,3 +33,4 @@ data/sources/*.mkv
 .mypy_cache/
 .ruff_cache/
 node_modules/
+.agent-token

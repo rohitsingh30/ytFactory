@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.runner import TaskContext, register
+from control import jobs as jobs_mod
 from control import storage
 from control.queue import get_queue, new_task_id
 from shared.schema import TaskEnvelope, TaskKind
@@ -37,7 +38,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _CHANNEL_YAML: dict[str, str] = {
     "mystoriesanimated": "channels/mystoriesanimated.yaml",
     "sportstoriesanimated": "channels/sportstoriesanimated.yaml",
-    "mahabharathindi": "channels/mahabharat_hindi.yaml",
+    "warhistory": "channels/warhistory.yaml",
+    "mahabharathindi": "channels/mahabharat_hindi.yaml",  # legacy, kept for back-compat
     "auto": "channels/mystoriesanimated.yaml",  # default fallback
 }
 
@@ -194,38 +196,56 @@ async def render_short(ctx: TaskContext) -> str | None:
     channel_dir = _channel_dir_from_yaml(channel_yaml)
 
     logger.info("RENDER_SHORT job=%s slug=%s channel=%s", job_id, slug, channel_yaml.name)
+    jobs_mod.mark_stage(job_id, status=jobs_mod.STATUS_RENDERING, stage="rewrite_cast", slug=slug)
 
     # 1. Rewrite + cast (claude CLI, in-process).
-    script_path, cast_path = await _rewrite_and_cast(raw, channel_yaml, slug, channel_dir)
+    try:
+        script_path, cast_path = await _rewrite_and_cast(raw, channel_yaml, slug, channel_dir)
+    except Exception as e:
+        jobs_mod.mark_failed(job_id, stage="rewrite_cast", error=f"{type(e).__name__}: {e}")
+        raise
 
     # 2. Heavy render via subprocess.
+    jobs_mod.mark_stage(job_id, status=jobs_mod.STATUS_RENDERING, stage="render")
     log_path = ctx.scratch / "make_shorts.log"
     rc = await _run_make_shorts(script_path, channel_yaml, log_path)
     if rc != 0:
-        # Surface the last 40 lines of the log so Firestore.error has context.
         tail = ""
         try:
             tail = "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-40:])
         except OSError:
             pass
-        raise RuntimeError(f"make_shorts.py exited {rc}\n--- last 40 log lines ---\n{tail}")
+        err = f"make_shorts.py exited {rc}\n--- last 40 log lines ---\n{tail}"
+        jobs_mod.mark_failed(job_id, stage="render", error=err)
+        raise RuntimeError(err)
 
     # 3. Upload outputs to GCS.
+    jobs_mod.mark_stage(job_id, status=jobs_mod.STATUS_UPLOADING, stage="gcs_upload")
     mp4_path, thumb_path = _find_outputs(slug, channel_dir)
     if mp4_path is None:
-        raise RuntimeError(f"render reported success but no mp4 found at data/shorts/{slug}.mp4")
+        err = f"render reported success but no mp4 found at data/shorts/{slug}.mp4"
+        jobs_mod.mark_failed(job_id, stage="gcs_upload", error=err)
+        raise RuntimeError(err)
 
     short_uri = storage.job_uri(job_id, "short.mp4")
     storage.upload(mp4_path, short_uri, content_type="video/mp4")
 
+    thumb_uri: str | None = None
     if thumb_path:
-        storage.upload(thumb_path, storage.job_uri(job_id, "thumb.png"), content_type="image/png")
+        thumb_uri = storage.job_uri(job_id, "thumb.png")
+        storage.upload(thumb_path, thumb_uri, content_type="image/png")
 
     storage.upload_bytes(
         json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         storage.job_uri(job_id, "proposal.json"),
         content_type="application/json",
     )
+
+    # Mark the render itself done — YT upload/research happen on follow-up
+    # tasks and update the job further. Surface short_uri now so the UI
+    # can offer a download link as soon as render finishes, even if YT
+    # upload is still in flight.
+    jobs_mod.mark_done(job_id, short_uri=short_uri, thumb_uri=thumb_uri)
 
     # 4. Wipe per-slug intermediates so the laptop disk stays bounded.
     _cleanup_intermediate(slug, channel_dir)

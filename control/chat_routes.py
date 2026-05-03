@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from control import rate_limit
+from control import jobs as jobs_mod
 from control.chat_service import ChatService, new_session_id
 from control.queue import get_queue, new_task_id
 from shared.schema import (
@@ -84,11 +85,14 @@ async def confirm(req: ConfirmRequest, request: Request) -> ConfirmResponse:
     if proposal is None:
         raise HTTPException(status_code=404, detail="no proposal in session — keep chatting first")
 
+    return _enqueue_render_job(proposal)
+
+
+def _enqueue_render_job(proposal: ShortProposal) -> ConfirmResponse:
+    """Shared path for chat-confirm AND form-driven /api/render."""
     job_id = uuid.uuid4().hex
     task_id = new_task_id()
 
-    # The first task on the path: pull the source story (or use the user-provided text).
-    # Light worker — runs in the cloud, not on the laptop.
     payload = {
         "job_id": job_id,
         "channel": proposal.channel,
@@ -99,16 +103,30 @@ async def confirm(req: ConfirmRequest, request: Request) -> ConfirmResponse:
         "length_s": proposal.length_s,
         "notes": proposal.notes,
     }
+
+    # Job state lives in jobs/<job_id> for the UI to poll.
+    jobs_mod.create_job(
+        job_id,
+        channel=proposal.channel,
+        topic=proposal.topic,
+        proposal=proposal.model_dump(),
+    )
+
+    # Initial work unit: the heavy RENDER_SHORT mega-task. Light fan-out
+    # workers (YOUTUBE_UPLOAD, RESEARCH_HANDOFF) get enqueued by the
+    # render worker on success.
     task = TaskEnvelope(
         task_id=task_id,
         job_id=job_id,
-        kind=TaskKind.PULL_STORY,
+        kind=TaskKind.RENDER_SHORT,
         payload=payload,
     )
     get_queue().enqueue(task)
-    logger.info("confirmed proposal session=%s → job=%s task=%s", req.session_id, job_id, task_id)
+    logger.info("enqueued render job=%s task=%s channel=%s", job_id, task_id, proposal.channel)
 
     return ConfirmResponse(job_id=job_id, task_id=task_id, proposal=proposal.model_dump())
+
+
 
 
 # ---------------------------------------------------------------------------
