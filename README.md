@@ -141,6 +141,32 @@ Current monthly burn estimate: **~$3–8** at low traffic
 (Cloud Run free tier + Firestore free tier + ~10–20 GiB GCS + Azure
 OpenAI gpt-5.3-chat at <100 chat sessions).
 
+## Migration status
+
+| ✅ done | what |
+|---|---|
+| ✅ | git init + safety baseline |
+| ✅ | docs trimmed (5 → 2 files, −1.6K LOC) |
+| ✅ | dead spec-render path deleted (−2K LOC) |
+| ✅ | GCP project provisioned (ytfactory-prod) |
+| ✅ | laptop agent + lease protocol over outbound HTTPS |
+| ✅ | GCS storage adapter + bucket lifecycle rules |
+| ✅ | per-task scratch dir with unconditional cleanup |
+| ✅ | chat ported from trading project, Azure OpenAI, ShortProposal extraction |
+| ✅ | chat UI at `/`, vanilla JS, proposal preview + confirm |
+| ✅ | per-IP daily rate limits + global Azure spend cap |
+| ✅ | control plane deployed to Cloud Run, prod URL canonical |
+| ✅ | RENDER_SHORT mega-task (wraps make_shorts.py) |
+| ✅ | YOUTUBE_UPLOAD light worker (post-upload GC inside) |
+| ✅ | RESEARCH_HANDOFF light worker (calls into pipeline/research.py) |
+| ✅ | scripts/laptop_cleanup.py (dry-run reclaims ~1.9 GiB) |
+
+| 🟡 deferred | why |
+|---|---|
+| 🟡 channels reorg by target | parallel session still adding flat YAMLs; do after monolith decom |
+| 🟡 move llm/cast_router/prompts → shared/ | every legacy import would need updating; do after monolith decom |
+| 🟡 decommission monolith | needs first successful prod render to verify the new chain |
+
 ## Tests
 
 ```bash
