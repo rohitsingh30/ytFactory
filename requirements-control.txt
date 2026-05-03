@@ -1,0 +1,22 @@
+# Control-plane only dependencies — slim image for Cloud Run.
+# The laptop venv installs the full requirements.txt (which includes
+# torch/diffusers/kokoro/whisper); the cloud doesn't need any of that.
+
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.10
+httpx>=0.28
+psutil>=6.0
+pyyaml>=6.0
+
+# GCP clients
+google-cloud-firestore>=2.27
+google-cloud-storage>=3.10
+
+# Azure OpenAI for the chat backend
+openai>=1.50
+
+# YouTube Data API (used by the upload + research workers)
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.2
+google-auth-httplib2>=0.2

@@ -1,0 +1,29 @@
+# ytFactory control plane — slim Cloud Run image.
+# The control plane is a stateless FastAPI service. Heavy ML deps live
+# on the laptop only; this image stays under ~200 MB.
+
+FROM python:3.13-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+COPY requirements-control.txt ./
+RUN pip install -r requirements-control.txt
+
+# Copy only what the control plane needs.
+COPY control/ ./control/
+COPY shared/ ./shared/
+COPY web/static/ ./web/static/
+
+# Cloud Run sets PORT; default to 8080 for local docker run.
+ENV PORT=8080
+EXPOSE 8080
+
+# server_dev.py is the prod entry point (one app, dev/prod parity).
+# Use 1 worker — multiple workers would split the in-memory rate-limit
+# state. Concurrency comes from async, not multi-process.
+CMD exec uvicorn control.server_dev:app --host 0.0.0.0 --port ${PORT} --workers 1

@@ -7,34 +7,114 @@ system produces a finished 1080×1920 mp4 — script, voice, illustrations,
 captions, broadcast cut-ins where applicable. Owner accounts can also
 publish the result directly to a connected YouTube channel.
 
-> **Status: mid-migration.** The repo is being split from a monolithic
+## Live
+
+**Production URL:** https://ytfactory-control-767262167641.us-central1.run.app
+
+That URL is the canonical entry point for everything. The chat UI, the
+agent lease protocol, and the eventual job-status endpoints all live
+behind it. Local dev still works, but **the deployed Cloud Run service is
+the source of truth** — never run a parallel local server in production
+mode.
+
+| Endpoint | What |
+|---|---|
+| `GET  /` | Public chat UI (web/static/chat.html) |
+| `POST /api/chat` | Chat with the assistant — extracts a `short_proposal` JSON when it has enough info |
+| `POST /api/chat/confirm` | Turn the latest proposal into a Job + first Task in the Firestore queue |
+| `GET  /docs` | FastAPI auto-generated API docs |
+| `POST /agent/heartbeat` `lease` `ack/{id}` | Laptop agent lease protocol (bearer-token auth) |
+
+Hitting the live URL directly (curl / browser / Playwright MCP) is now
+the supported workflow. No local server needed.
+
+## Architecture
+
+> **Migration in progress.** The repo is being split from a monolithic
 > laptop-only pipeline into a hybrid cloud + laptop architecture. See
 > `docs/architecture.md` for the target design and `docs/legacy_pipeline.md`
-> for how the current monolithic pipeline still works while the migration
-> is in progress.
+> for how the legacy monolithic pipeline still works while the migration
+> is in flight.
 
-## Architecture in one line
+| Layer | Where | What |
+|---|---|---|
+| Control plane | **Cloud Run** (deployed) | FastAPI app: chat, queue, agent endpoints, static UI |
+| Queue + state | **Firestore** (native, us-central1) | tasks, jobs, chat sessions |
+| Artifacts | **Cloud Storage** (`gs://ytfactory-prod-artifacts`) | scripts, images, audio, mp4s, thumbnails |
+| Secrets | **Secret Manager** | Azure OpenAI key, agent bearer token |
+| Heavy workers | **Laptop agent** (outbound HTTPS) | image gen, TTS, ASR, ffmpeg compose, footage trim |
 
-Cloud control plane on Cloud Run + Firestore + GCS, fronted by a public
-chat UI; light I/O work runs on Cloud Run jobs; heavy MLX rendering runs
-on the laptop via a pull-based agent over outbound HTTPS.
+Lifecycle rules on the bucket auto-delete heavy intermediates after 1 day,
+finished mp4s after 7 days, metadata after 30. After a successful YouTube
+upload the worker also explicitly GCs heavy artifacts and hands off to the
+research pipeline (analytics-only mode for the published video).
 
-## Repo layout (target)
+## Repo layout
 
 ```
-control/   # Cloud Run service: chat, queue, scheduler, telemetry, auth
+control/              # Cloud Run service (deployed)
+  server_dev.py         # FastAPI app entry point (also used in prod)
+  chat_service.py       # Azure OpenAI chat with proposal extraction
+  chat_routes.py        # /api/chat + /api/chat/confirm
+  agent_routes.py       # /agent/heartbeat /lease /ack
+  queue.py              # Firestore + InMemory queue backends
+  storage.py            # GCS adapter
+  auth.py               # bearer-token agent auth (Firebase user auth in #12)
+shared/
+  schema.py             # cross-side: TaskEnvelope, JobEnvelope, ShortProposal
+agent/                  # laptop daemon (outbound-only HTTPS)
+  main.py               # heartbeat + lease loops
+  config.py runner.py resources.py
 workers/
-  light/     # Cloud Run jobs: claude CLI, scrapers, YT upload
-  heavy/     # invoked by laptop agent: images, tts, asr, compose, footage
-agent/     # laptop daemon (launchd) — heartbeat, lease, runner
-shared/    # llm wrapper, schema, channel resolver, prompts
-channels/  # nested by target YT channel + per-format YAMLs
-web/static/ # chat UI + operator UI
+  heavy/                # registered with agent runner; runs on laptop
+    render_short.py     # (in progress) wraps make_short() as one mega-task
+  light/                # (later) Cloud Run jobs for fan-out
+web/static/
+  chat.html             # public chat UI (vanilla JS, no framework)
+  index.html            # legacy operator UI
+
+# Legacy monolith — still works today, gets decommissioned at the end:
+make_shorts.py  pipeline/  pull_stories.py  upload.py  channels/  web/server.py
 ```
 
-The legacy flat layout (`pipeline/`, `make_shorts.py`, `web/server.py`,
-`pull_stories.py`, `upload.py`) still exists during the migration and
-will be torn down step by step.
+## Running
+
+### Production (canonical)
+
+```bash
+# That's it. Open:
+open https://ytfactory-control-767262167641.us-central1.run.app
+```
+
+### Laptop agent (so renders actually run)
+
+The laptop agent leases tasks from the live Cloud Run service. It needs
+the same bearer token the service expects.
+
+```bash
+# Pull the agent token from Secret Manager (one-time)
+gcloud secrets versions access latest --secret=ytfactory-agent-token \
+  --project=ytfactory-prod > .agent-token
+
+# Run the agent — points at production by default
+YTFACTORY_AGENT_TOKEN=$(cat .agent-token) \
+  .venv/bin/python -m agent.main
+```
+
+### Local dev (rare — only when changing control plane code)
+
+```bash
+# 1. Set env (chat needs Azure keys, agent endpoints need a token)
+source .env
+
+# 2. Run the control plane locally
+.venv/bin/uvicorn control.server_dev:app --host 127.0.0.1 --port 8765
+
+# 3. Point the agent at localhost
+YTFACTORY_CONTROL_URL=http://127.0.0.1:8765 \
+YTFACTORY_AGENT_TOKEN=$YTFACTORY_AGENT_TOKEN \
+  .venv/bin/python -m agent.main
+```
 
 ## Production targets
 
@@ -44,24 +124,31 @@ will be torn down step by step.
 | **SportsStoriesAnimated** | Football moments | Tifo line-art + real broadcast cut-ins at the climactic moment |
 | **MahabharatHindi** | Mahabharat episodes | Amar Chitra Katha comic-book, Hindi narration |
 
-Other channel YAMLs are research / variant configs that may share a
-target channel.
+Other channel YAMLs are research / variant configs that share a target.
 
-## Running locally (legacy path, current default)
+## Cost
+
+Hard ceiling: **<$10/month at low traffic.** Hard rules to keep it there:
+
+- No GKE, no persistent VM, no Vertex, no GPU on cloud, ever.
+- Cloud Run scales to zero. Min instances = 0.
+- Firestore queue, not Pub/Sub.
+- No Cloud SQL.
+- Lifecycle rules wipe artifacts on a short clock.
+- Per-IP, per-user, per-session, daily Azure spend caps in code (#12).
+
+Current monthly burn estimate: **~$3–8** at low traffic
+(Cloud Run free tier + Firestore free tier + ~10–20 GiB GCS + Azure
+OpenAI gpt-5.3-chat at <100 chat sessions).
+
+## Tests
 
 ```bash
-./scripts/serve.sh   # FastAPI on :8765, web UI at /
+.venv/bin/python -m unittest discover tests/
 ```
 
-This launches the monolithic web/server.py which spawns subprocesses
-for `pull_stories.py` → `make_shorts.py` → `upload.py`. It works today
-and stays working until the migration is complete.
-
-## Cost target
-
-<$10/month at low traffic. Hard caps in code from day 1: per-IP +
-per-user rate limits, $5/day Azure OpenAI spend cap, scale-to-zero
-on every cloud component, no GPU on cloud (ever).
+22 control-plane / agent / chat / storage tests run in ~100ms. Existing
+pipeline tests run alongside.
 
 ## License
 

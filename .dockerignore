@@ -1,0 +1,36 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.env
+.env.*
+.DS_Store
+.vscode/
+.claude/
+.playwright-mcp/
+
+# Heavy data — never ship to Cloud Run
+data/
+assets/
+sources/
+pipeline/
+agent/
+workers/
+make_shorts.py
+clone_voice.py
+pull_stories.py
+pull_backgrounds.py
+upload.py
+scripts/
+tests/
+docs/
+
+# Models
+*.onnx
+*.bin
+*.safetensors
+
+# Old docs
+*.md
+!README.md

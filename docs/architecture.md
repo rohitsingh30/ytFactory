@@ -1,5 +1,9 @@
 # ytFactory Architecture
 
+**Production URL:** https://ytfactory-control-767262167641.us-central1.run.app
+(Cloud Run, project `ytfactory-prod`, region us-central1, revision auto-deployed
+from this repo via `gcloud run deploy --source .`).
+
 The target design after migration. See `legacy_pipeline.md` for what
 still runs while the migration is in progress.
 
@@ -175,6 +179,50 @@ Hard rules to keep it there:
 - No Pub/Sub (use Firestore queue — simpler, free).
 - No Cloud SQL (Firestore is the only state store).
 - No always-on minimum instances on Cloud Run.
+
+## Deployment
+
+The control plane image is built from `Dockerfile` (slim Python 3.13, only
+`requirements-control.txt` deps — no torch/diffusers/kokoro). Cloud Build
+buildpack handles the build + push to `cloud-run-source-deploy` Artifact
+Registry repo.
+
+Deploy command (idempotent, re-run for updates):
+
+```bash
+gcloud run deploy ytfactory-control \
+  --source . \
+  --region us-central1 \
+  --project ytfactory-prod \
+  --allow-unauthenticated \
+  --port 8080 \
+  --max-instances 3 \
+  --min-instances 0 \
+  --memory 512Mi \
+  --cpu 1 \
+  --concurrency 40 \
+  --timeout 60 \
+  --set-env-vars "YTFACTORY_QUEUE_BACKEND=firestore,YTFACTORY_BUCKET=ytfactory-prod-artifacts,GOOGLE_CLOUD_PROJECT=ytfactory-prod,AZURE_OPENAI_ENDPOINT=...,AZURE_OPENAI_API_VERSION=...,AZURE_OPENAI_MODEL=..." \
+  --set-secrets "AZURE_OPENAI_API_KEY=azure-openai-api-key:latest,YTFACTORY_AGENT_TOKEN=ytfactory-agent-token:latest"
+```
+
+Secrets (`azure-openai-api-key`, `ytfactory-agent-token`) live in Secret
+Manager. The default compute SA (`<project_number>-compute@developer.gserviceaccount.com`)
+has the IAM roles needed:
+
+- `roles/datastore.user` — Firestore queue
+- `roles/storage.objectAdmin` — GCS bucket
+- `roles/secretmanager.secretAccessor` — both secrets
+
+## Operating principle: cloud is canonical
+
+Everything runs against the deployed Cloud Run URL. Do not run a parallel
+local production server. Local dev is only for iterating on control-plane
+code; once it lands, redeploy.
+
+This makes Playwright MCP automation straightforward: point the browser
+at the production URL, drive the chat UI, observe the proposal + queued
+job. No tunnels, no localhost, no port forwards.
 
 ## Trade-offs we accepted
 

@@ -24,7 +24,10 @@ class AgentConfig:
             )
         # Default agent_id to the laptop's hostname so multi-machine setups Just Work.
         agent_id = os.environ.get("YTFACTORY_AGENT_ID") or socket.gethostname()
-        url = os.environ.get("YTFACTORY_CONTROL_URL", "http://127.0.0.1:8765").rstrip("/")
+        url = os.environ.get(
+            "YTFACTORY_CONTROL_URL",
+            "https://ytfactory-control-767262167641.us-central1.run.app",
+        ).rstrip("/")
         caps = tuple(
             c.strip() for c in os.environ.get(
                 "YTFACTORY_AGENT_CAPS",
