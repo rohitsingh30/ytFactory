@@ -1553,11 +1553,12 @@ async def dashboard_videos(refresh: bool = False) -> dict:
             if refresh_summary and refresh_summary.get("missing_auth"):
                 refresh_error = (
                     f"{refresh_summary['missing_auth']} videos skipped — "
-                    "no YouTube auth or API error (re-auth via /auth/youtube)"
+                    "no YouTube auth or API error "
+                    "(re-auth: `python -m pipeline.upload auth --account <channel>`)"
                 )
 
     by_channel: dict[str, list[dict]] = {}
-    totals = {"videos": 0, "views": 0, "likes": 0, "comments": 0}
+    totals = {"videos": 0, "views": 0, "likes": 0, "comments": 0, "subscribers": 0}
     latest_fetch: str | None = None
 
     for account, slug, vid, rec_path in _yt._enumerate_uploads():
@@ -1606,9 +1607,15 @@ async def dashboard_videos(refresh: bool = False) -> dict:
         c_views = sum(v["stats"]["views"] or 0 for v in vids)
         c_likes = sum(v["stats"]["likes"] or 0 for v in vids)
         c_comments = sum(v["stats"]["comments"] or 0 for v in vids)
+        chan_stats = _yt.load_channel_for_account(account) or {}
+        subs = chan_stats.get("subscriber_count")
+        if subs is not None:
+            totals["subscribers"] += subs
         channels.append({
             "account": account,
             "video_count": len(vids),
+            "subscribers": subs,
+            "subscribers_hidden": chan_stats.get("hidden_subscribers", False),
             "totals": {"views": c_views, "likes": c_likes, "comments": c_comments},
             "videos": vids,
         })

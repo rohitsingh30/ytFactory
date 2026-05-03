@@ -64,7 +64,7 @@
   ],
   "suno_prompt": {
     "style": "Cheerful upbeat children's nursery rhyme. WARM INDIAN FEMALE LEAD VOCALIST FLUENT IN HINDI, authentic desi accent on Hindi words, no English accent on Devanagari. Kids choir on chorus, gentle acoustic guitar + tabla, 120 BPM, warm Hinglish bilingual, picture-book joyful tone.",
-    "lyrics": "[Verse 1]\nहाथी राजा कहाँ चले\nसुंदर सुंदर बेले लाले\n\n[Verse 2]\nमेरे घर भी आते जाना\nकेले खाना दूध पीना\n\n[Bridge — English]\nWalking down the marigold lane\nTrunk that sways just like a chain\nCome on home for milk and bun\nHathi raja, join the fun\n\n[Story Beat — English]\nTuk-Tuk barks from the rooftop high\nPug-pug paws beneath blue sky\nJalebi smiles and Laddu waves\nDadi sings as the elephant plays\n\n[Chorus]\nहाथी राजा कहाँ चले\nसुंदर सुंदर बेले लाले\nLaddu, Jalebi, Tuk-Tuk sing\nहाथी राजा our friend, our king",
+    "lyrics": "[Intro — sung warmly, calling the kids in]\nSuno bachcho, Junction par hathi raja aaye!\n\n[Verse]\nहाथी राजा कहाँ चले\nसुंदर सुंदर बेले लाले\nमेरे घर भी आते जाना\nकेले खाना दूध पीना\n\n[Bridge — English]\nWalking down the marigold lane\nTrunk that sways just like a chain\nCome on home for milk and bun\nHathi raja, join the fun\n\n[Chorus]\nहाथी राजा कहाँ चले\nसुंदर सुंदर बेले लाले\nLaddu, Jalebi, Tuk-Tuk sing\nहाथी राजा our friend, our king\n\n[Outro — sung warmly, ends with a clean hold]\nLike karo, subscribe karo, bachcho!\nPhir milenge agle station par!\nSee you at the next junction!",
     "notes": "Skip the Dadi spoken bridges from this lyrics block — the pipeline TTS's those separately via Cartesia Arushi (Hinglish female) and stitches them around the Suno song. Suno song should only contain the SUNG verses + chorus."
   },
   "title_options": [

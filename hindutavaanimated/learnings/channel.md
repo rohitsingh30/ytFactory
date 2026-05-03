@@ -12,11 +12,11 @@ keys off it). Channel scope EXPANDED 2026-05-03 from "Mahabharat-only" to
 ॐ icon was chosen specifically for this brand-flexibility.
 
 ## Status (2026-05-03)
-- 3 episodes SHIPPED, all public:
+- 4 episodes SHIPPED, all public:
   - **abhimanyu-chakravyuh** — https://youtu.be/Tf92NmOA0lw — "जब 16 साल के लड़के ने कौरवों के 7 महारथियों को धूल चटाई" — 41s, Mahabharat. First viral signal — user reports it "did well."
-  - **hanuman-sanjivani-parvat** — https://youtu.be/nIEq7zKUg9E — "हनुमान ने पूरा हिमालय उठा लिया | संजीवनी बूटी की कथा" — 44s, Ramayan, with **Suno-generated devotional BGM** under narration at 12% + LIKE/COMMENT/SUBSCRIBE closer panel. No traction yet (user: "not yet").
-  - **eklavya-guru-dakshina** — https://youtu.be/-JXKUhb39tE — "एकलव्य ने अपना अँगूठा काट कर गुरु-दक्षिणा दी | महाभारत की सबसे मार्मिक कथा" — 60.7s, Mahabharat, BGM + closer panel. Just shipped.
-- **Karna kavach-kundal**: image render in flight as of 2026-05-03. ~50s estimated, 13 beats.
+  - **hanuman-sanjivani-parvat** — https://youtu.be/nIEq7zKUg9E — "हनुमान ने पूरा हिमालय उठा लिया | संजीवनी बूटी की कथा" — 44s, Ramayan, BGM + closer panel. No traction yet.
+  - **eklavya-guru-dakshina** — https://youtu.be/-JXKUhb39tE — "एकलव्य ने अपना अँगूठा काट कर गुरु-दक्षिणा दी | महाभारत की सबसे मार्मिक कथा" — 60.7s, Mahabharat.
+  - **karna-kavach-kundal** — https://youtu.be/z1x_0cIa2nU — "कर्ण ने अपना कवच काट कर दान कर दिया | जानबूझकर मौत खरीदी 🌅" — 54s, Mahabharat. **First episode shipped with chunked Hindi-forced Whisper** — 180 words of Devanagari captions throughout (vs ~80 from plain Whisper). See `whisper_chunked_hindi_forced.md`.
 - 1 subscriber
 
 ## Owner / Auth

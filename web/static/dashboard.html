@@ -51,7 +51,11 @@
 
 <main class="max-w-7xl mx-auto px-6 py-8 space-y-10">
   <!-- ROLLUP -->
-  <section id="rollup" class="grid grid-cols-2 md:grid-cols-4 gap-4">
+  <section id="rollup" class="grid grid-cols-2 md:grid-cols-5 gap-4">
+    <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+      <div class="text-xs uppercase tracking-wider text-slate-400">Subscribers</div>
+      <div class="text-3xl font-semibold mt-1 stat-num text-violet-300" id="rollup-subs">—</div>
+    </div>
     <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
       <div class="text-xs uppercase tracking-wider text-slate-400">Videos shipped</div>
       <div class="text-3xl font-semibold mt-1 stat-num" id="rollup-videos">—</div>
@@ -108,26 +112,38 @@ const CHANNEL_COLORS = {
   sportstoriesanimated:  "from-emerald-600 to-teal-700 ring-emerald-300/40",
 };
 
-function renderRollup(d) {
-  document.getElementById("rollup-videos").textContent = fmt(d.totals.videos);
-  document.getElementById("rollup-views").textContent = fmt(d.totals.views);
-  document.getElementById("rollup-likes").textContent = fmt(d.totals.likes);
-  document.getElementById("rollup-comments").textContent = fmt(d.totals.comments);
+// Last successful fetch state — kept on the module so a 5s ticker can
+// re-render the relative-time string without waiting for the next /api
+// round-trip. Without this, the "Xs ago" label looked frozen between
+// 60s polls and made auto-refresh appear broken.
+let lastState = { latest_fetch: null, err: null };
+
+function paintLastFetched() {
   const lf = document.getElementById("last-fetched");
-  // Local server returns `refresh_error`; prod control plane returns
-  // `warning`. Either means stats may be stale — surface to the user.
-  const err = d.refresh_error || d.warning;
+  const { latest_fetch, err } = lastState;
   if (err) {
     lf.textContent = "⚠ " + err
-      + (d.latest_fetch ? " · cache last updated " + fmtRel(d.latest_fetch) : "");
+      + (latest_fetch ? " · cache last updated " + fmtRel(latest_fetch) : "");
     lf.className = "text-xs text-amber-400";
-  } else if (d.latest_fetch) {
-    lf.textContent = "live YouTube data · last refreshed " + fmtRel(d.latest_fetch);
+  } else if (latest_fetch) {
+    lf.textContent = "live YouTube data · last refreshed " + fmtRel(latest_fetch);
     lf.className = "text-xs text-slate-400";
   } else {
     lf.textContent = "no stats cached yet — click refresh";
     lf.className = "text-xs text-slate-400";
   }
+}
+
+function renderRollup(d) {
+  document.getElementById("rollup-subs").textContent = fmt(d.totals.subscribers);
+  document.getElementById("rollup-videos").textContent = fmt(d.totals.videos);
+  document.getElementById("rollup-views").textContent = fmt(d.totals.views);
+  document.getElementById("rollup-likes").textContent = fmt(d.totals.likes);
+  document.getElementById("rollup-comments").textContent = fmt(d.totals.comments);
+  // Local server returns `refresh_error`; prod control plane returns
+  // `warning`. Either means stats may be stale — surface to the user.
+  lastState = { latest_fetch: d.latest_fetch || null, err: d.refresh_error || d.warning || null };
+  paintLastFetched();
 }
 
 function videoCard(v) {
@@ -183,6 +199,10 @@ function videoCard(v) {
 function channelSection(c) {
   const label = CHANNEL_LABELS[c.account] || c.account;
   const grad = CHANNEL_COLORS[c.account] || "from-slate-700 to-slate-900 ring-slate-400/30";
+  // Subs: hidden-by-creator → "subs hidden"; null → "—" (not yet fetched).
+  const subText = c.subscribers_hidden
+    ? "subs hidden"
+    : (c.subscribers == null ? "— subs" : fmt(c.subscribers) + " sub" + (c.subscribers === 1 ? "" : "s"));
   return `
     <div>
       <div class="flex items-end justify-between mb-4 pb-3 border-b border-slate-800">
@@ -191,7 +211,10 @@ function channelSection(c) {
             ${label.split(/\s+/).map(w => w[0]).slice(0,2).join('')}
           </div>
           <div>
-            <h2 class="text-lg font-semibold">${label}</h2>
+            <div class="flex items-center gap-2">
+              <h2 class="text-lg font-semibold">${label}</h2>
+              <span class="channel-pill bg-violet-700/40 text-violet-200 ring-1 ring-violet-500/30">👥 ${subText}</span>
+            </div>
             <div class="text-xs text-slate-500">${c.video_count} video${c.video_count===1?'':'s'} · ${fmt(c.totals.views)} views · ${fmt(c.totals.likes)} likes · ${fmt(c.totals.comments)} comments</div>
           </div>
         </div>
@@ -203,7 +226,16 @@ function channelSection(c) {
   `;
 }
 
+const REFRESH_MS = 60_000;
+let inflight = false;
+let pollTimer = null;
+
 async function load(refresh = false) {
+  // Drop overlapping calls — if a previous fetch is still running, skip.
+  // Without this, a stalled YouTube API call could pile up duplicate
+  // requests every 60s.
+  if (inflight) return;
+  inflight = true;
   const btn = document.getElementById("refresh-btn");
   btn.disabled = true;
   if (refresh) btn.textContent = "Refreshing…";
@@ -222,19 +254,51 @@ async function load(refresh = false) {
     }
   } catch (e) {
     console.error("dashboard load failed", e);
-    document.getElementById("last-fetched").textContent = "load failed: " + e.message;
+    lastState = { ...lastState, err: "load failed: " + e.message };
+    paintLastFetched();
   } finally {
+    inflight = false;
     btn.disabled = false;
     btn.textContent = "Refresh from YouTube";
   }
 }
 
-document.getElementById("refresh-btn").addEventListener("click", () => load(true));
+function schedulePoll() {
+  if (pollTimer) clearTimeout(pollTimer);
+  // Don't poll while the tab is hidden — the user can't see updates and
+  // we'd waste YouTube API quota. visibilitychange resumes us on return.
+  if (document.hidden) { pollTimer = null; return; }
+  pollTimer = setTimeout(async () => {
+    await load(true);
+    schedulePoll();
+  }, REFRESH_MS);
+}
+
+document.getElementById("refresh-btn").addEventListener("click", async () => {
+  await load(true);
+  schedulePoll();
+});
+
+// Pause when hidden; force-refresh + restart polling when the tab comes
+// back into focus so users coming back to the dashboard see live numbers
+// immediately, not whatever was cached 60s ago.
+document.addEventListener("visibilitychange", async () => {
+  if (document.hidden) {
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  } else {
+    await load(true);
+    schedulePoll();
+  }
+});
+
+// Tick the "Xs ago" label every 5s so the user can see auto-refresh
+// progressing between actual fetches. Doesn't hit the network.
+setInterval(paintLastFetched, 5_000);
+
 // Always hit YouTube on page load + every 60s so view/like/comment counts
 // stay live. videos.list?part=statistics is 1 quota unit per batched call
 // (≤50 ids), so refreshing every minute is well under the 10k daily cap.
-load(true);
-setInterval(() => load(true), 60_000);
+(async () => { await load(true); schedulePoll(); })();
 </script>
 </body>
 </html>

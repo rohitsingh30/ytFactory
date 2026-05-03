@@ -43,6 +43,14 @@
 
 name: History Recapped
 source_adapter: historyrecapped_manual  # manual curator flow, no auto-pull
+
+# render_style: footage_only — workers/heavy/render_short.py routes this
+# channel through scripts/historyrecapped/render_footage_only.py instead
+# of the standard image-gen path. 100% archival footage with our narrator
+# on top + word captions + inline flag emojis. Image-gen is skipped.
+# Each slug needs a sidecar at historyrecapped/shotlist/<slug>.json with
+# source_url + windows[] (each {in_s, out_s}).
+render_style: footage_only
 # Branding assets at historyrecapped/branding/
 #   icon_800.png         — 800x800 channel avatar (circular medal mark + name)
 #   banner_2560x1440.png — 2560x1440 banner, content fitted to mobile-safe 1546x423

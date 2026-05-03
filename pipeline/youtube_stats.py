@@ -125,6 +125,47 @@ def _fetch_for_account(account: str, video_ids: list[str]) -> dict[str, dict]:
     return out
 
 
+def _fetch_channel_for_account(account: str) -> dict | None:
+    """Returns {subscriberCount, viewCount, videoCount, channel_id, fetched_at}
+    for the OAuth-bound channel, or None if auth/API fails.
+
+    Uses ``channels.list?part=statistics&mine=true`` — 1 quota unit per
+    call, hidden subscriber counts come back as 0.
+    """
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+
+    from pipeline.upload import authenticate
+
+    try:
+        creds = authenticate(account=account, interactive=False)
+    except Exception:
+        return None
+
+    youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
+    try:
+        resp = youtube.channels().list(part="statistics,snippet", mine=True).execute()
+    except HttpError:
+        return None
+    items = resp.get("items") or []
+    if not items:
+        return None
+    item = items[0]
+    stats = item.get("statistics") or {}
+    snippet = item.get("snippet") or {}
+    return {
+        "channel_id": item.get("id"),
+        "title": snippet.get("title"),
+        "subscriber_count": (
+            int(stats["subscriberCount"]) if "subscriberCount" in stats else None
+        ),
+        "view_count": int(stats["viewCount"]) if "viewCount" in stats else None,
+        "video_count": int(stats["videoCount"]) if "videoCount" in stats else None,
+        "hidden_subscribers": bool(stats.get("hiddenSubscriberCount")),
+        "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
 def fetch_all(*, quiet: bool = False) -> dict[str, int]:
     """Refresh analytics/<slug>.json for every uploaded video.
 
@@ -155,6 +196,13 @@ def fetch_all(*, quiet: bool = False) -> dict[str, int]:
                 print(f"[stats] {account}: skipped ({len(ids)} videos) — no auth or API error")
             continue
 
+        # Subscriber + total-channel stats, written alongside per-video files.
+        channel_stats = _fetch_channel_for_account(account)
+        if channel_stats:
+            (ANALYTICS_DIR / f"_channel_{account}.json").write_text(
+                json.dumps(channel_stats, ensure_ascii=False, indent=2)
+            )
+
         for slug, vid in items:
             raw = stats_by_id.get(vid) or {}
             row = VideoStats(
@@ -179,6 +227,16 @@ def fetch_all(*, quiet: bool = False) -> dict[str, int]:
 
 def load_for_slug(slug: str) -> dict | None:
     p = ANALYTICS_DIR / f"{slug}.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def load_channel_for_account(account: str) -> dict | None:
+    p = ANALYTICS_DIR / f"_channel_{account}.json"
     if not p.exists():
         return None
     try:

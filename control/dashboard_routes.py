@@ -37,6 +37,16 @@ STATIC_DIR = PROJECT_ROOT / "web" / "static"
 _STATS_CACHE: dict[str, dict[str, Any]] = {}
 _STATS_TTL_S = 600  # 10 min — refresh button bypasses this
 
+# {channel_id: {"subscriber_count": int, "view_count": int,
+#               "video_count": int, "title": str, "fetched_at": float}}
+# Subscriber counts barely move between refreshes, so we keep this
+# parallel cache and refresh it together with video stats.
+_CHANNEL_STATS_CACHE: dict[str, dict[str, Any]] = {}
+# Maps OAuth-account slug → channelId, populated lazily from videos.list
+# snippet.channelId. Without OAuth the cloud has no other way to learn
+# the channel id for `<account>/uploads/`.
+_ACCOUNT_TO_CHANNEL_ID: dict[str, str] = {}
+
 
 def _enumerate_uploads() -> list[tuple[str, str, str, dict]]:
     """Yield (channel, slug, video_id, full_record) for every upload.
@@ -101,10 +111,11 @@ def _fetch_stats(video_ids: list[str]) -> dict[str, dict[str, Any]]:
             "api_visible": False, "privacy_live": None,
         }
 
+    seen_channel_ids: set[str] = set()
     for i in range(0, len(video_ids), 50):
         chunk = video_ids[i : i + 50]
         params = urllib.parse.urlencode({
-            "part": "statistics,status",
+            "part": "statistics,status,snippet",
             "id": ",".join(chunk),
             "key": api_key,
         })
@@ -127,14 +138,70 @@ def _fetch_stats(video_ids: list[str]) -> dict[str, dict[str, Any]]:
         for item in data.get("items") or []:
             stats = item.get("statistics") or {}
             status = item.get("status") or {}
+            snippet = item.get("snippet") or {}
+            cid = snippet.get("channelId")
             out[item["id"]] = {
                 "viewCount":    int(stats["viewCount"])    if "viewCount"    in stats else None,
                 "likeCount":    int(stats["likeCount"])    if "likeCount"    in stats else None,
                 "commentCount": int(stats["commentCount"]) if "commentCount" in stats else None,
                 "api_visible":  True,
                 "privacy_live": status.get("privacyStatus"),
+                "channel_id":   cid,
             }
+            if cid:
+                seen_channel_ids.add(cid)
+
+    # Fold any newly-seen channelIds into channel stats so subscribers
+    # land in the same payload as the videos.
+    if seen_channel_ids:
+        _refresh_channel_stats(sorted(seen_channel_ids), api_key)
     return out
+
+
+def _refresh_channel_stats(channel_ids: list[str], api_key: str) -> None:
+    """Populate _CHANNEL_STATS_CACHE for the given channel ids.
+
+    Best-effort — silent on errors (the per-video stats path already
+    surfaces API errors via _LAST_FETCH_ERROR).
+    """
+    if not channel_ids:
+        return
+    import urllib.parse
+    import urllib.request
+    import urllib.error
+
+    now = time.time()
+    for i in range(0, len(channel_ids), 50):
+        chunk = channel_ids[i : i + 50]
+        params = urllib.parse.urlencode({
+            "part": "statistics,snippet",
+            "id": ",".join(chunk),
+            "key": api_key,
+        })
+        url = f"https://www.googleapis.com/youtube/v3/channels?{params}"
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+            continue
+        except Exception:
+            continue
+        for item in data.get("items") or []:
+            stats = item.get("statistics") or {}
+            snippet = item.get("snippet") or {}
+            cid = item.get("id")
+            if not cid:
+                continue
+            _CHANNEL_STATS_CACHE[cid] = {
+                "subscriber_count": (
+                    int(stats["subscriberCount"]) if "subscriberCount" in stats else None
+                ),
+                "view_count":  int(stats["viewCount"])  if "viewCount"  in stats else None,
+                "video_count": int(stats["videoCount"]) if "videoCount" in stats else None,
+                "hidden_subscribers": bool(stats.get("hiddenSubscriberCount")),
+                "title": snippet.get("title"),
+                "fetched_at": now,
+            }
 
 
 def _refresh(video_ids: list[str]) -> None:
@@ -218,7 +285,7 @@ async def dashboard_videos(refresh: bool = Query(False)) -> dict:
     if not uploads:
         return {
             "channels": [],
-            "totals": {"videos": 0, "views": 0, "likes": 0, "comments": 0},
+            "totals": {"videos": 0, "views": 0, "likes": 0, "comments": 0, "subscribers": 0},
             "latest_fetch": None,
             "warning": "No upload records on disk. Did you bake them into the image?",
         }
@@ -232,7 +299,8 @@ async def dashboard_videos(refresh: bool = Query(False)) -> dict:
     api_key_set = bool(os.environ.get("YOUTUBE_API_KEY"))
 
     by_channel: dict[str, list[dict]] = {}
-    totals = {"videos": 0, "views": 0, "likes": 0, "comments": 0}
+    account_channel_id: dict[str, str] = {}
+    totals = {"videos": 0, "views": 0, "likes": 0, "comments": 0, "subscribers": 0}
     latest_fetch_epoch: float | None = None
 
     for account, slug, vid, rec in uploads:
@@ -243,6 +311,9 @@ async def dashboard_videos(refresh: bool = Query(False)) -> dict:
         fetched_at = cached.get("fetched_at")
         api_visible = cached.get("api_visible")
         privacy_live = cached.get("privacy_live")
+        cid = cached.get("channel_id")
+        if cid and account not in account_channel_id:
+            account_channel_id[account] = cid
         if fetched_at and (latest_fetch_epoch is None or fetched_at > latest_fetch_epoch):
             latest_fetch_epoch = fetched_at
 
@@ -297,9 +368,16 @@ async def dashboard_videos(refresh: bool = Query(False)) -> dict:
         c_views = sum(v["stats"]["views"] or 0 for v in vids)
         c_likes = sum(v["stats"]["likes"] or 0 for v in vids)
         c_comments = sum(v["stats"]["comments"] or 0 for v in vids)
+        cid = account_channel_id.get(account)
+        chan_stats = _CHANNEL_STATS_CACHE.get(cid, {}) if cid else {}
+        subs = chan_stats.get("subscriber_count")
+        if subs is not None:
+            totals["subscribers"] += subs
         channels.append({
             "account": account,
             "video_count": len(vids),
+            "subscribers": subs,
+            "subscribers_hidden": chan_stats.get("hidden_subscribers", False),
             "totals": {"views": c_views, "likes": c_likes, "comments": c_comments},
             "videos": vids,
         })

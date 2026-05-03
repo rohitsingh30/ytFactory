@@ -202,6 +202,51 @@ async def render_short(ctx: TaskContext) -> str | None:
     channel_yaml = _resolve_channel_yaml(payload.get("channel", "auto"))
     channel_dir = _channel_dir_from_yaml(channel_yaml)
 
+    # Per-channel render style. footage_only channels (historyrecapped) skip
+    # image-gen entirely and run the dedicated render_footage_only.py path.
+    import yaml as _yaml  # noqa: PLC0415
+    cfg = _yaml.safe_load(channel_yaml.read_text()) if channel_yaml.exists() else {}
+    render_style = cfg.get("render_style", "image_gen")
+    if render_style == "footage_only":
+        # The cron's payload is "topic + channel". For footage_only, the
+        # actual slug is whatever the scheduler picked (a pre-authored
+        # narration). Pass it through via topic — the slug is already on
+        # disk under <channel>/narrations/.
+        scheduled_slug = payload.get("topic") or slug
+        logger.info("RENDER_SHORT (footage_only) job=%s channel=%s slug=%s",
+                    job_id, channel_dir, scheduled_slug)
+        jobs_mod.mark_stage(job_id, status=jobs_mod.STATUS_RENDERING,
+                            stage="footage_render", slug=scheduled_slug)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / channel_dir / "render_footage_only.py"),
+            "--channel", channel_dir,
+            "--slug", scheduled_slug,
+            "--upload",
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env={**os.environ},
+        )
+        log_path = ctx.scratch / "render_footage_only.log"
+        with log_path.open("wb") as f:
+            async for line in proc.stdout:
+                f.write(line)
+        rc = await proc.wait()
+        if rc != 0:
+            tail = ""
+            try:
+                tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-40:])
+            except OSError:
+                pass
+            err = f"render_footage_only.py exited {rc}\n--- last 40 lines ---\n{tail}"
+            jobs_mod.mark_failed(job_id, stage="footage_render", error=err)
+            raise RuntimeError(err)
+        out = PROJECT_ROOT / channel_dir / "shorts" / f"{scheduled_slug}.mp4"
+        jobs_mod.mark_done(job_id, short_uri=str(out))
+        logger.info("RENDER_SHORT (footage_only) done job=%s out=%s", job_id, out)
+        return str(out)
+
     logger.info("RENDER_SHORT job=%s slug=%s channel=%s", job_id, slug, channel_yaml.name)
     jobs_mod.mark_stage(job_id, status=jobs_mod.STATUS_RENDERING, stage="rewrite_cast", slug=slug)
 
