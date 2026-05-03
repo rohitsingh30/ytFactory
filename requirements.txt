@@ -20,6 +20,15 @@ google-api-python-client>=2.100
 google-auth-oauthlib>=1.2
 google-auth-httplib2>=0.2
 
+# Control plane + laptop agent (cloud migration)
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.10
+httpx>=0.28
+psutil>=6.0
+google-cloud-firestore>=2.27
+google-cloud-storage>=3.10
+
 # Optional — opt-in providers (install only when switching the
 # corresponding channel YAML knob)
 # parakeet-mlx>=0.2     # asr_provider: parakeet_mlx        (~600 MB on first use)
