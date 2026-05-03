@@ -29,10 +29,19 @@ logger = logging.getLogger(__name__)
 
 
 # Default per-action quotas. Override via env if needed.
+# Default is "modest but workable" — designed so the operator's own
+# testing isn't blocked while still keeping a public URL safe.
 _DEFAULTS: dict[str, int] = {
-    "chat": int(os.environ.get("YTFACTORY_LIMIT_CHAT_PER_IP", "20")),
-    "confirm": int(os.environ.get("YTFACTORY_LIMIT_CONFIRM_PER_IP", "1")),
+    "chat": int(os.environ.get("YTFACTORY_LIMIT_CHAT_PER_IP", "100")),
+    "confirm": int(os.environ.get("YTFACTORY_LIMIT_CONFIRM_PER_IP", "20")),
 }
+
+# Comma-separated list of IPs that bypass the per-IP daily quota entirely.
+# Use this for the operator's own laptop / dev tunnel. Spend cap still
+# applies — only the per-IP counter is bypassed.
+_OWNER_IPS: frozenset[str] = frozenset(
+    ip.strip() for ip in os.environ.get("YTFACTORY_OWNER_IPS", "").split(",") if ip.strip()
+)
 
 _AZURE_DAILY_CAP_USD = float(os.environ.get("YTFACTORY_AZURE_DAILY_CAP_USD", "5.0"))
 
@@ -174,16 +183,20 @@ def quota_for(action: Literal["chat", "confirm"]) -> int:
     return _DEFAULTS[action]
 
 
+def is_owner_ip(ip: str) -> bool:
+    return ip in _OWNER_IPS
+
+
 def check_and_increment(request: Request, action: Literal["chat", "confirm"]) -> None:
     """Raises 429 if the IP is over its daily quota; else increments and returns.
 
-    Note: get_spend() is checked separately via `check_spend_cap`. Splitting
-    means a chat call doesn't get charged for a confirm enqueue, and a 429
-    spend-cap response still gets returned cleanly without an unrelated 429
-    rate-limit response landing first.
+    Owner IPs (YTFACTORY_OWNER_IPS env) bypass the per-IP counter entirely
+    — the spend cap still applies via `check_spend_cap`.
     """
-    backend = get_backend()
     ip = client_ip(request)
+    if is_owner_ip(ip):
+        return
+    backend = get_backend()
     quota = quota_for(action)
     used = backend.get(ip, action)
     if used >= quota:

@@ -96,13 +96,16 @@ class PostRenderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lengths, [20, 120])
 
     async def test_post_render_429_after_quota(self) -> None:
-        # Confirm quota defaults to 1 per IP per day.
+        # Force the confirm quota to 1 for this test — production default
+        # bumped to 20 so the operator can iterate, but we still want to
+        # cover the 429 path.
         rate_limit.reset_backend()
-        app = _make_app()
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            r1 = await client.post("/api/render", json={"channel": "auto", "topic": "x", "length_s": 55})
-            r2 = await client.post("/api/render", json={"channel": "auto", "topic": "x", "length_s": 55})
+        with patch.dict(rate_limit._DEFAULTS, {"confirm": 1}):
+            app = _make_app()
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                r1 = await client.post("/api/render", json={"channel": "auto", "topic": "x", "length_s": 55})
+                r2 = await client.post("/api/render", json={"channel": "auto", "topic": "x", "length_s": 55})
         self.assertEqual(r1.status_code, 200)
         self.assertEqual(r2.status_code, 429)
 

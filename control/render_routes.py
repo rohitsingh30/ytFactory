@@ -13,7 +13,8 @@ from pydantic import BaseModel
 from control import jobs as jobs_mod
 from control import rate_limit
 from control.chat_routes import ConfirmResponse, _enqueue_render_job
-from shared.schema import ShortProposal
+from control.queue import get_queue
+from shared.schema import ShortProposal, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -95,3 +96,96 @@ async def get_job(job_id: str) -> JobView:
         thumb_uri=doc.get("thumb_uri"),
         error=doc.get("error"),
     )
+
+
+class CancelResponse(BaseModel):
+    job_id: str
+    cancelled_tasks: int
+    job_status: str
+
+
+@router.post("/api/jobs/{job_id}/cancel", response_model=CancelResponse)
+async def cancel_job(job_id: str) -> CancelResponse:
+    """Mark a job cancelled + drain any of its tasks still in the queue.
+
+    Already-running tasks (status=LEASED) finish on the agent side; we
+    flip the job doc to 'cancelled' so the UI stops polling and the
+    YT-upload follow-up will short-circuit on cancelled status.
+    Already-done tasks are left alone.
+    """
+    doc = jobs_mod.get_job(job_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    cancelled = 0
+    q = get_queue()
+
+    # In-memory queue: walk the dict directly. Firestore: query.
+    from control.queue import InMemoryQueue, FirestoreQueue, _TASKS  # noqa: PLC0415
+    if isinstance(q, InMemoryQueue):
+        for t in list(q._tasks.values()):  # type: ignore[attr-defined]
+            if t.job_id == job_id and t.status == TaskStatus.QUEUED:
+                t.status = TaskStatus.FAILED
+                t.error = "cancelled by operator"
+                cancelled += 1
+    elif isinstance(q, FirestoreQueue):
+        try:
+            from google.cloud import firestore  # noqa: PLC0415
+
+            db = firestore.Client(project=q._db.project)  # type: ignore[attr-defined]
+            qref = (db.collection(_TASKS)
+                      .where("job_id", "==", job_id)
+                      .where("status", "==", TaskStatus.QUEUED.value))
+            for snap in qref.stream():
+                snap.reference.update({
+                    "status": TaskStatus.FAILED.value,
+                    "error": "cancelled by operator",
+                })
+                cancelled += 1
+        except Exception:  # noqa: BLE001
+            logger.warning("firestore cancel failed for job %s", job_id, exc_info=True)
+
+    jobs_mod.get_jobs().update(
+        job_id, status="cancelled", stage="cancelled", error="cancelled by operator",
+    )
+
+    new_doc = jobs_mod.get_job(job_id) or {}
+    return CancelResponse(
+        job_id=job_id,
+        cancelled_tasks=cancelled,
+        job_status=new_doc.get("status", "cancelled"),
+    )
+
+
+@router.get("/api/health")
+async def health() -> dict:
+    """Operator health: deployment + agent presence + spend usage.
+
+    Useful for debugging "why isn't my agent picking up tasks" without
+    cracking open the Cloud Run logs.
+    """
+    from control.agent_routes import get_last_seen  # noqa: PLC0415
+    import time
+
+    now = time.time()
+    agents = []
+    for agent_id, (ts, snap) in get_last_seen().items():
+        agents.append({
+            "agent_id": agent_id,
+            "seconds_ago": int(now - ts),
+            "mlx_free_pct": snap.mlx_free_pct,
+            "kokoro_warm": snap.kokoro_warm,
+            "mflux_warm": snap.mflux_warm,
+            "on_battery": snap.on_battery,
+        })
+
+    spent = rate_limit.daily_spend_usd()
+    cap = rate_limit.daily_cap_usd()
+
+    return {
+        "ok": True,
+        "agents": agents,
+        "azure_spend_usd_today": round(spent, 4),
+        "azure_spend_cap_usd": cap,
+        "azure_spend_pct": round(100.0 * spent / cap, 2) if cap else None,
+    }

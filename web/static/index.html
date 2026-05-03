@@ -861,14 +861,84 @@
       if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
       const body = await r.json();
       setStatus(`queued — job ${body.job_id.slice(0, 8)}`, "ok");
-      const note = document.createElement("p");
-      note.className = "ok mt-2 text-xs text-emerald-400";
-      note.textContent = `Queued (job ${body.job_id.slice(0, 8)}). The laptop agent will pick this up next.`;
-      card.appendChild(note);
+      // Spawn an inline status card under this proposal that polls /api/jobs/{id}.
+      const status = makeChatStatusCard(body.job_id);
+      card.appendChild(status.node);
+      pollChatJobStatus(body.job_id, status);
     } catch (e) {
       setStatus(`error: ${e.message}`, "err");
       btn.disabled = false;
     }
+  }
+
+  // Inline status node that lives inside the chat-log proposal card.
+  function makeChatStatusCard(jobId) {
+    const node = document.createElement("div");
+    node.className = "mt-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5 text-[12px] space-y-1";
+    node.innerHTML = `
+      <div class="flex items-center gap-2">
+        <span class="js-emoji">⏳</span>
+        <span class="js-label flex-1 text-emerald-200">Queued — waiting for the laptop agent</span>
+      </div>
+      <div class="js-substage text-[10px] text-slate-400 font-mono">job ${jobId.slice(0, 8)}…</div>
+      <div class="js-result hidden mt-2 flex flex-wrap gap-2"></div>
+      <div class="js-error hidden text-[11px] text-rose-300 font-mono whitespace-pre-wrap"></div>
+    `;
+    return {node, jobId};
+  }
+
+  async function pollChatJobStatus(jobId, panel) {
+    const STAGE_LABELS = {
+      queued: ["⏳", "Queued — waiting for the laptop agent"],
+      rewrite_cast: ["✍️", "Rewriting + casting via Claude"],
+      render: ["🎬", "Rendering scenes locally"],
+      gcs_upload: ["☁️", "Uploading to cloud storage"],
+      youtube_upload: ["📺", "Publishing to YouTube"],
+      research_handoff: ["📊", "Handing off to analytics"],
+      done: ["✅", "Done — your Short is ready"],
+      cancelled: ["🚫", "Cancelled"],
+    };
+    let timer = null;
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/jobs/${jobId}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const job = await r.json();
+        const stage = job.stage || "queued";
+        const [emoji, label] = STAGE_LABELS[stage] || ["🔄", stage];
+        panel.node.querySelector(".js-emoji").textContent = emoji;
+        panel.node.querySelector(".js-label").textContent = label;
+        panel.node.querySelector(".js-substage").textContent =
+          `job ${jobId.slice(0, 8)} · status ${job.status}`;
+        if (job.status === "failed" || job.status === "cancelled") {
+          const err = panel.node.querySelector(".js-error");
+          err.classList.remove("hidden");
+          err.textContent = job.error || "(no error message)";
+          return;  // stop polling
+        }
+        if (job.status === "done") {
+          const res = panel.node.querySelector(".js-result");
+          res.classList.remove("hidden");
+          if (job.youtube_url) {
+            const a = document.createElement("a");
+            a.href = job.youtube_url; a.target = "_blank"; a.rel = "noopener";
+            a.className = "px-2.5 py-1 rounded bg-red-600 hover:bg-red-500 text-white text-[11px] font-semibold";
+            a.textContent = "▶ YouTube"; res.appendChild(a);
+          }
+          if (job.short_signed_url) {
+            const a = document.createElement("a");
+            a.href = job.short_signed_url; a.target = "_blank"; a.rel = "noopener"; a.download = "";
+            a.className = "px-2.5 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-semibold";
+            a.textContent = "⬇ mp4"; res.appendChild(a);
+          }
+          return;  // stop polling
+        }
+      } catch (e) {
+        console.warn("chat job poll failed", e);
+      }
+      timer = setTimeout(tick, 3000);
+    };
+    timer = setTimeout(tick, 1500);
   }
 
   $("chat-form").addEventListener("submit", (ev) => {
