@@ -25,7 +25,8 @@ from typing import Any
 
 from agent.runner import TaskContext, register
 from control import storage
-from shared.schema import TaskKind
+from control.queue import get_queue, new_task_id
+from shared.schema import TaskEnvelope, TaskKind
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +230,18 @@ async def render_short(ctx: TaskContext) -> str | None:
     # 4. Wipe per-slug intermediates so the laptop disk stays bounded.
     _cleanup_intermediate(slug, channel_dir)
 
-    logger.info("RENDER_SHORT done job=%s short=%s", job_id, short_uri)
+    # 5. Enqueue YOUTUBE_UPLOAD so the next stage takes over once acked.
+    #    Light workers run on the laptop in v1 (same caps registry); they
+    #    move to Cloud Run jobs when the migration finishes.
+    handoff_payload = {**payload, "slug": slug, "short_uri": short_uri}
+    get_queue().enqueue(TaskEnvelope(
+        task_id=new_task_id(),
+        job_id=job_id,
+        kind=TaskKind.YOUTUBE_UPLOAD,
+        payload=handoff_payload,
+    ))
+
+    logger.info("RENDER_SHORT done job=%s short=%s → enqueued YOUTUBE_UPLOAD", job_id, short_uri)
     return short_uri
 
 

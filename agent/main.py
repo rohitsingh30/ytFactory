@@ -17,6 +17,7 @@ import httpx
 
 from agent import resources, runner
 import workers.heavy  # noqa: F401 — registers heavy worker functions
+import workers.light  # noqa: F401 — registers light worker functions (v1: laptop runs both)
 from agent.config import AgentConfig
 from shared.schema import (
     AckRequest,

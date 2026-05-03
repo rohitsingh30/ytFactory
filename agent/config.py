@@ -31,7 +31,9 @@ class AgentConfig:
         caps = tuple(
             c.strip() for c in os.environ.get(
                 "YTFACTORY_AGENT_CAPS",
-                "images,tts,asr,compose,footage,noop",
+                # v1: laptop runs both heavy AND light tasks. Once light
+                # workers move to Cloud Run jobs, drop them from this list.
+                "render_short,youtube_upload,research_handoff,images,tts,asr,compose,footage,noop",
             ).split(",") if c.strip()
         )
         return cls(
