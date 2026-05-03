@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ytFactory — AI Shorts that ship to YouTube</title>
+<meta name="description" content="One chat → AI-generated YouTube Short. Five live channels. Real archival footage, real narration, real growth." />
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif; background: #020617; }
+  .stat-num { font-variant-numeric: tabular-nums; }
+
+  /* Animated mesh gradient — subtle, shifts every 15s */
+  .hero-bg {
+    position: absolute; inset: 0; overflow: hidden; z-index: 0;
+    background:
+      radial-gradient(circle at 15% 20%, rgba(244, 63, 94, .35) 0%, transparent 35%),
+      radial-gradient(circle at 85% 30%, rgba(124, 58, 237, .35) 0%, transparent 35%),
+      radial-gradient(circle at 50% 80%, rgba(14, 165, 233, .30) 0%, transparent 40%),
+      #020617;
+    animation: drift 18s ease-in-out infinite alternate;
+  }
+  @keyframes drift {
+    0%   { background-position: 0% 0%, 100% 0%, 50% 100%; }
+    100% { background-position: 10% 20%, 90% 10%, 60% 90%; }
+  }
+
+  /* Floating particles for hero */
+  .particles { position: absolute; inset: 0; pointer-events: none; }
+  .particle {
+    position: absolute; width: 4px; height: 4px; border-radius: 9999px;
+    background: rgba(255,255,255,.4);
+    animation: rise linear infinite;
+  }
+  @keyframes rise {
+    from { transform: translateY(110vh) scale(.5); opacity: 0; }
+    10%  { opacity: 1; }
+    90%  { opacity: 1; }
+    to   { transform: translateY(-10vh) scale(1.2); opacity: 0; }
+  }
+
+  /* Channel card hover lift */
+  .channel-card { transition: transform .25s ease, box-shadow .25s ease; }
+  .channel-card:hover { transform: translateY(-4px); box-shadow: 0 20px 50px -10px rgba(0,0,0,.6); }
+
+  /* Counter roll-in */
+  .counter {
+    background: linear-gradient(135deg, #fff 0%, #cbd5e1 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* Marquee for video tickers */
+  @keyframes scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+  .marquee { animation: scroll 60s linear infinite; }
+  .marquee-pause:hover .marquee { animation-play-state: paused; }
+</style>
+</head>
+<body class="text-slate-100 min-h-screen">
+
+<!-- ─── HERO ──────────────────────────────────────────────────────── -->
+<section class="relative min-h-[640px] flex items-center justify-center overflow-hidden">
+  <div class="hero-bg"></div>
+  <div class="particles" id="particles"></div>
+
+  <div class="relative z-10 max-w-5xl mx-auto px-6 py-20 text-center">
+    <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 ring-1 ring-white/10 text-xs text-slate-300 mb-8">
+      <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+      <span><span id="live-count" class="stat-num font-medium text-white">—</span> Shorts live across 5 YouTube channels</span>
+    </div>
+
+    <h1 class="text-5xl md:text-7xl font-bold tracking-tight mb-6 leading-[1.05]">
+      One chat → an AI Short<br/>
+      <span class="bg-gradient-to-r from-rose-400 via-fuchsia-400 to-sky-400 bg-clip-text text-transparent">live on YouTube in minutes.</span>
+    </h1>
+
+    <p class="text-lg md:text-xl text-slate-400 max-w-2xl mx-auto mb-10 leading-relaxed">
+      Five themed channels — war history, sports moments, Reddit drama, Mahabharat
+      kathas, kids rhymes — all running on the same engine. Real archival
+      footage where it matters, real narration on top, ready to publish.
+    </p>
+
+    <div class="flex flex-col sm:flex-row items-center justify-center gap-3">
+      <a href="/studio"
+         class="px-7 py-3.5 rounded-xl bg-white text-slate-950 font-semibold hover:bg-slate-100 transition shadow-lg shadow-white/10">
+        Make a Short →
+      </a>
+      <a href="/dashboard"
+         class="px-7 py-3.5 rounded-xl bg-white/5 hover:bg-white/10 ring-1 ring-white/15 text-white font-semibold transition">
+        Live Dashboard
+      </a>
+    </div>
+
+    <!-- Live counter row -->
+    <div class="mt-16 grid grid-cols-2 md:grid-cols-4 gap-6 max-w-3xl mx-auto">
+      <div>
+        <div class="text-3xl md:text-4xl font-bold counter stat-num" id="rollup-videos">—</div>
+        <div class="text-xs uppercase tracking-wider text-slate-500 mt-1">Videos shipped</div>
+      </div>
+      <div>
+        <div class="text-3xl md:text-4xl font-bold counter stat-num" id="rollup-views">—</div>
+        <div class="text-xs uppercase tracking-wider text-slate-500 mt-1">Total views</div>
+      </div>
+      <div>
+        <div class="text-3xl md:text-4xl font-bold counter stat-num" id="rollup-likes">—</div>
+        <div class="text-xs uppercase tracking-wider text-slate-500 mt-1">Likes</div>
+      </div>
+      <div>
+        <div class="text-3xl md:text-4xl font-bold counter stat-num" id="rollup-comments">—</div>
+        <div class="text-xs uppercase tracking-wider text-slate-500 mt-1">Comments</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── CHANNEL CARDS ─────────────────────────────────────────────── -->
+<section class="max-w-7xl mx-auto px-6 py-20">
+  <div class="text-center mb-12">
+    <h2 class="text-3xl md:text-4xl font-bold mb-3">The five channels</h2>
+    <p class="text-slate-400">Each runs the same engine. Different stories, different aesthetics, one factory.</p>
+  </div>
+
+  <div id="channel-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+    <!-- filled by JS -->
+  </div>
+</section>
+
+<!-- ─── HOW IT WORKS ──────────────────────────────────────────────── -->
+<section class="max-w-5xl mx-auto px-6 pb-20">
+  <div class="text-center mb-12">
+    <h2 class="text-3xl font-bold mb-3">How it ships a Short</h2>
+    <p class="text-slate-400">Roughly the time it takes to brew a coffee.</p>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+    <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-6">
+      <div class="text-2xl mb-3">💬</div>
+      <div class="font-semibold mb-1">1. Tell the chat</div>
+      <div class="text-sm text-slate-400">"Make me a Battle of Britain short" — that's all.</div>
+    </div>
+    <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-6">
+      <div class="text-2xl mb-3">🧠</div>
+      <div class="font-semibold mb-1">2. AI scripts + voices it</div>
+      <div class="text-sm text-slate-400">Cartesia narration, hook-first script, footage cut-ins where it pays off.</div>
+    </div>
+    <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-6">
+      <div class="text-2xl mb-3">🎬</div>
+      <div class="font-semibold mb-1">3. Renders 9:16 mp4</div>
+      <div class="text-sm text-slate-400">Word-by-word captions, branding overlays, channel-locked aesthetic.</div>
+    </div>
+    <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-6">
+      <div class="text-2xl mb-3">🚀</div>
+      <div class="font-semibold mb-1">4. Auto-uploads</div>
+      <div class="text-sm text-slate-400">Direct to the right YouTube channel, public, ready to scroll past.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── FOOTER ────────────────────────────────────────────────────── -->
+<footer class="border-t border-slate-800 py-8">
+  <div class="max-w-7xl mx-auto px-6 flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-slate-500">
+    <div class="flex items-center gap-3">
+      <div class="w-7 h-7 rounded-md bg-gradient-to-br from-rose-500 to-violet-500 grid place-items-center text-white font-black text-sm">y</div>
+      <span>ytFactory</span>
+    </div>
+    <div class="flex items-center gap-6">
+      <a href="/studio" class="hover:text-slate-300">Studio</a>
+      <a href="/dashboard" class="hover:text-slate-300">Dashboard</a>
+      <a href="https://github.com/rohitsingh30/ytFactory" target="_blank" rel="noopener" class="hover:text-slate-300">GitHub ↗</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+const fmt = (n) => (n == null) ? "—" : n.toLocaleString();
+
+const CHANNEL_META = {
+  historyrecapped: {
+    label: "History Recapped",
+    tagline: "Real war footage. Real stories. 60s.",
+    grad:  "from-amber-700 to-stone-900",
+    accent: "text-amber-300",
+    emoji: "🎖️",
+  },
+  hindutavaanimated: {
+    label: "HindutavaAnimated",
+    tagline: "Mahabharat kathāyen, illustrated.",
+    grad:  "from-orange-600 to-rose-900",
+    accent: "text-orange-300",
+    emoji: "🕉️",
+  },
+  mystoriesanimated: {
+    label: "MyStoriesAnimated",
+    tagline: "Reddit drama, animated daily.",
+    grad:  "from-rose-500 to-orange-500",
+    accent: "text-rose-300",
+    emoji: "🎭",
+  },
+  rhymetimejunction: {
+    label: "Rhyme Time Junction",
+    tagline: "Hinglish nursery rhymes for kids.",
+    grad:  "from-fuchsia-500 to-purple-600",
+    accent: "text-fuchsia-300",
+    emoji: "🎵",
+  },
+  sportstoriesanimated: {
+    label: "SportsStoriesAnimated",
+    tagline: "Iconic football moments, the long story.",
+    grad:  "from-emerald-600 to-teal-700",
+    accent: "text-emerald-300",
+    emoji: "⚽",
+  },
+};
+
+function renderChannelCard(c) {
+  const meta = CHANNEL_META[c.account] || { label: c.account, tagline: "", grad: "from-slate-700 to-slate-900", accent: "text-slate-300", emoji: "📺" };
+  const top = (c.videos || [])[0];  // most recent
+  const thumb = top ? `<img src="${top.thumbnail}" class="w-full h-full object-cover opacity-60 group-hover:opacity-90 transition" loading="lazy" />` : "";
+  return `
+    <a href="/dashboard" class="channel-card group block rounded-2xl bg-gradient-to-br ${meta.grad} ring-1 ring-white/10 overflow-hidden">
+      <div class="aspect-[16/9] relative bg-black/30">
+        ${thumb}
+        <div class="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent"></div>
+        <div class="absolute bottom-3 left-4 right-4">
+          <div class="flex items-center gap-2 mb-1">
+            <span class="text-xl">${meta.emoji}</span>
+            <h3 class="text-lg font-bold drop-shadow-md">${meta.label}</h3>
+          </div>
+          <div class="text-xs text-white/80 drop-shadow-md">${meta.tagline}</div>
+        </div>
+      </div>
+      <div class="grid grid-cols-3 gap-1 p-3 bg-black/20 backdrop-blur">
+        <div class="text-center">
+          <div class="text-base font-bold stat-num ${meta.accent}">${fmt(c.video_count)}</div>
+          <div class="text-[10px] uppercase tracking-wider text-white/60">videos</div>
+        </div>
+        <div class="text-center border-l border-white/10">
+          <div class="text-base font-bold stat-num ${meta.accent}">${fmt(c.totals.views)}</div>
+          <div class="text-[10px] uppercase tracking-wider text-white/60">views</div>
+        </div>
+        <div class="text-center border-l border-white/10">
+          <div class="text-base font-bold stat-num ${meta.accent}">${fmt(c.totals.likes)}</div>
+          <div class="text-[10px] uppercase tracking-wider text-white/60">likes</div>
+        </div>
+      </div>
+    </a>
+  `;
+}
+
+function emptyChannelCard(slug) {
+  const meta = CHANNEL_META[slug];
+  return `
+    <div class="channel-card group block rounded-2xl bg-gradient-to-br ${meta.grad} ring-1 ring-white/10 overflow-hidden opacity-50">
+      <div class="aspect-[16/9] relative bg-black/30 grid place-items-center">
+        <div class="text-center">
+          <div class="text-3xl mb-2">${meta.emoji}</div>
+          <h3 class="text-lg font-bold">${meta.label}</h3>
+          <div class="text-xs text-white/70 mt-1">${meta.tagline}</div>
+          <div class="text-[11px] text-white/50 mt-3 italic">no videos yet</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function loadStats() {
+  try {
+    const r = await fetch("/api/dashboard/videos");
+    const d = await r.json();
+    document.getElementById("live-count").textContent = (d.totals.videos || 0).toLocaleString();
+    document.getElementById("rollup-videos").textContent = fmt(d.totals.videos);
+    document.getElementById("rollup-views").textContent = fmt(d.totals.views);
+    document.getElementById("rollup-likes").textContent = fmt(d.totals.likes);
+    document.getElementById("rollup-comments").textContent = fmt(d.totals.comments);
+
+    const grid = document.getElementById("channel-grid");
+    const accountsWithData = new Set((d.channels || []).map(c => c.account));
+    const cards = [];
+    // Render ALL 5 — even ones with no uploads yet, as placeholder cards.
+    for (const slug of Object.keys(CHANNEL_META)) {
+      const c = (d.channels || []).find(x => x.account === slug);
+      cards.push(c ? renderChannelCard(c) : emptyChannelCard(slug));
+    }
+    grid.innerHTML = cards.join("");
+  } catch (e) {
+    console.error("landing stats failed", e);
+  }
+}
+
+// Spawn floating particles in hero
+function spawnParticles() {
+  const root = document.getElementById("particles");
+  const N = 25;
+  for (let i = 0; i < N; i++) {
+    const p = document.createElement("div");
+    p.className = "particle";
+    p.style.left = Math.random() * 100 + "%";
+    p.style.animationDuration = (10 + Math.random() * 12) + "s";
+    p.style.animationDelay = (Math.random() * 10) + "s";
+    p.style.opacity = (0.2 + Math.random() * 0.5);
+    root.appendChild(p);
+  }
+}
+spawnParticles();
+loadStats();
+</script>
+</body>
+</html>

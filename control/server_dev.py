@@ -44,10 +44,14 @@ async def healthz() -> dict[str, str]:
 
 @app.get("/")
 async def index() -> FileResponse:
-    """Default landing page = the operator UI with the right-docked chat panel.
+    """Public landing page — hero, live stats, channel cards, CTAs to
+    /studio + /dashboard. Marketing surface for the project."""
+    return FileResponse(STATIC_DIR / "landing.html")
 
-    The standalone chat-only page is still reachable at /chat for embed use.
-    """
+
+@app.get("/studio")
+async def studio() -> FileResponse:
+    """Operator UI (the legacy /, with right-docked chat panel + render flow)."""
     return FileResponse(STATIC_DIR / "index.html")
 
 
