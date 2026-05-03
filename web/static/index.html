@@ -19,6 +19,55 @@
   .seed-card.done   { border-color: rgba(16,185,129,.45); background: rgba(16,185,129,.06); }
   .seed-card.error  { border-color: rgba(244,63,94,.6); background: rgba(244,63,94,.08); }
   .chip { display:inline-block; padding:2px 8px; border-radius:9999px; background:rgb(30 41 59); font-size:11px; color:rgb(203 213 225); margin:2px; }
+
+  /* --- right-docked AI chat panel --- */
+  #chat-panel {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 380px;
+    background: rgb(15 23 42 / .98); border-left: 1px solid rgb(30 41 59);
+    display: flex; flex-direction: column; z-index: 30;
+    transition: transform .25s ease;
+  }
+  #chat-panel.collapsed { transform: translateX(360px); }
+  #chat-panel-toggle {
+    position: absolute; top: 50%; left: -28px; transform: translateY(-50%);
+    width: 28px; height: 56px;
+    background: rgb(30 41 59); border-right: 0;
+    border: 1px solid rgb(51 65 85); border-radius: 8px 0 0 8px;
+    color: rgb(203 213 225); cursor: pointer;
+    display: grid; place-items: center; font-size: 14px;
+  }
+  #chat-panel-toggle:hover { background: rgb(51 65 85); }
+  #chat-log { flex: 1; overflow-y: auto; padding: 12px; }
+  #chat-log .msg { margin-bottom: 10px; display: flex; }
+  #chat-log .msg .bubble { padding: 8px 12px; border-radius: 12px; max-width: 88%;
+    line-height: 1.4; white-space: pre-wrap; word-wrap: break-word; font-size: 13px; }
+  #chat-log .msg.user { justify-content: flex-end; }
+  #chat-log .msg.user .bubble { background: rgb(99 102 241); color: white; }
+  #chat-log .msg.bot .bubble { background: rgb(30 41 59); color: rgb(226 232 240); }
+  #chat-log .proposal-card { border: 1px solid rgb(245 158 11 / .5); border-radius: 10px;
+    padding: 10px 12px; margin: 6px 0; background: rgb(245 158 11 / .06); font-size: 12px; }
+  #chat-log .proposal-card h4 { color: rgb(252 211 77); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .05em; margin: 0 0 6px; font-weight: 700; }
+  #chat-log .proposal-card dl { display: grid; grid-template-columns: max-content 1fr;
+    gap: 3px 8px; margin: 0; }
+  #chat-log .proposal-card dt { color: rgb(148 163 184); }
+  #chat-log .proposal-card dd { margin: 0; color: rgb(226 232 240); word-break: break-word; }
+  #chat-log .proposal-card button { margin-top: 8px; background: rgb(252 211 77); color: rgb(30 41 59);
+    border: 0; padding: 6px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  #chat-log .proposal-card button:hover { filter: brightness(1.05); }
+  #chat-log .proposal-card button:disabled { opacity: .5; cursor: not-allowed; }
+  #chat-form { display: flex; gap: 6px; padding: 10px; border-top: 1px solid rgb(30 41 59); }
+  #chat-input { flex: 1; padding: 8px 12px; background: rgb(15 23 42); color: rgb(226 232 240);
+    border: 1px solid rgb(51 65 85); border-radius: 8px; font: inherit; font-size: 13px; }
+  #chat-input:focus { outline: 0; border-color: rgb(99 102 241); }
+  #chat-send { background: rgb(99 102 241); color: white; border: 0;
+    padding: 8px 14px; border-radius: 8px; font-weight: 600; font-size: 13px; cursor: pointer; }
+  #chat-send:disabled { opacity: .5; cursor: not-allowed; }
+  #chat-status { font-size: 11px; color: rgb(148 163 184); padding: 2px 12px; min-height: 16px; }
+  #chat-status.ok { color: rgb(34 197 94); }
+  #chat-status.err { color: rgb(248 113 113); }
+  /* Nudge main content in so the right panel doesn't cover it on wide screens. */
+  @media (min-width: 1280px) { body { padding-right: 380px; } body.chat-collapsed { padding-right: 20px; } }
 </style>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen">
@@ -535,6 +584,153 @@
   </section>
 
 </main>
+
+<!-- =================== AI CHAT PANEL (right-docked) =================== -->
+<aside id="chat-panel">
+  <button id="chat-panel-toggle" title="Toggle chat" aria-label="Toggle chat">›</button>
+  <div class="px-3 py-2 border-b border-slate-800 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <div class="w-6 h-6 rounded-md bg-gradient-to-br from-indigo-500 to-purple-500 grid place-items-center text-xs font-black">✦</div>
+      <div class="text-sm font-semibold">AI assistant</div>
+    </div>
+    <div id="chat-session" class="text-[10px] text-slate-500 font-mono"></div>
+  </div>
+  <div id="chat-log"></div>
+  <div id="chat-status">Describe a Short you want to make.</div>
+  <form id="chat-form" autocomplete="off">
+    <input id="chat-input" type="text" placeholder='e.g. "AITA short — burned my SIL\'s cake"' required>
+    <button id="chat-send" type="submit">Send</button>
+  </form>
+</aside>
+
+<script>
+// =================== AI chat panel — wires /api/chat ===================
+(function () {
+  let sessionId = "";
+  const PROD_PROXY = "";   // same-origin
+
+  const $ = (id) => document.getElementById(id);
+  const log = () => $("chat-log");
+
+  function setStatus(text, kind = "") {
+    const s = $("chat-status");
+    s.textContent = text;
+    s.className = kind || "";
+  }
+
+  function appendMsg(role, text) {
+    const row = document.createElement("div");
+    row.className = `msg ${role}`;
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = text;
+    row.appendChild(bubble);
+    log().appendChild(row);
+    log().scrollTop = log().scrollHeight;
+  }
+
+  function appendProposal(p) {
+    const card = document.createElement("div");
+    card.className = "proposal-card";
+    const h = document.createElement("h4");
+    h.textContent = "draft proposal";
+    card.appendChild(h);
+    const dl = document.createElement("dl");
+    for (const [k, v] of Object.entries(p)) {
+      if (v === null || v === undefined || v === "") continue;
+      const dt = document.createElement("dt");
+      dt.textContent = k;
+      const dd = document.createElement("dd");
+      dd.textContent = String(v);
+      dl.append(dt, dd);
+    }
+    card.appendChild(dl);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Make this Short";
+    btn.onclick = () => confirmProposal(btn, card);
+    card.appendChild(btn);
+    log().appendChild(card);
+    log().scrollTop = log().scrollHeight;
+  }
+
+  async function send(message) {
+    appendMsg("user", message);
+    setStatus("thinking…");
+    $("chat-send").disabled = true;
+    try {
+      const r = await fetch(PROD_PROXY + "/api/chat", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({message, session_id: sessionId}),
+      });
+      if (!r.ok) {
+        if (r.status === 429) throw new Error("Daily limit reached. Try again after UTC midnight.");
+        if (r.status === 503) throw new Error("AI budget for today is used up. Service resumes after UTC midnight.");
+        throw new Error(`HTTP ${r.status}`);
+      }
+      const body = await r.json();
+      sessionId = body.session_id;
+      $("chat-session").textContent = "session " + sessionId.slice(0, 8);
+      appendMsg("bot", body.response);
+      if (body.proposal) appendProposal(body.proposal);
+      setStatus(body.configured ? "" : "Azure not configured", body.configured ? "" : "err");
+    } catch (e) {
+      setStatus(`error: ${e.message}`, "err");
+    } finally {
+      $("chat-send").disabled = false;
+    }
+  }
+
+  async function confirmProposal(btn, card) {
+    btn.disabled = true;
+    setStatus("queueing render…");
+    try {
+      const r = await fetch(PROD_PROXY + "/api/chat/confirm", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({session_id: sessionId}),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+      const body = await r.json();
+      setStatus(`queued — job ${body.job_id.slice(0, 8)}`, "ok");
+      const note = document.createElement("p");
+      note.className = "ok mt-2 text-xs text-emerald-400";
+      note.textContent = `Queued (job ${body.job_id.slice(0, 8)}). The laptop agent will pick this up next.`;
+      card.appendChild(note);
+    } catch (e) {
+      setStatus(`error: ${e.message}`, "err");
+      btn.disabled = false;
+    }
+  }
+
+  $("chat-form").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const inp = $("chat-input");
+    const v = inp.value.trim();
+    if (!v) return;
+    inp.value = "";
+    send(v);
+  });
+
+  // Toggle / restore from localStorage so the user's preference persists.
+  function applyCollapsed(collapsed) {
+    const panel = $("chat-panel");
+    const btn = $("chat-panel-toggle");
+    panel.classList.toggle("collapsed", collapsed);
+    document.body.classList.toggle("chat-collapsed", collapsed);
+    btn.textContent = collapsed ? "‹" : "›";
+    btn.title = collapsed ? "Open chat" : "Close chat";
+  }
+  let collapsed = localStorage.getItem("ytf-chat-collapsed") === "1";
+  applyCollapsed(collapsed);
+  $("chat-panel-toggle").addEventListener("click", () => {
+    collapsed = !collapsed;
+    localStorage.setItem("ytf-chat-collapsed", collapsed ? "1" : "0");
+    applyCollapsed(collapsed);
+  });
+})();
+</script>
 
 <script>
 // ====================================================================

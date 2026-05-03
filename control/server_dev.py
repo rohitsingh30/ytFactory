@@ -38,8 +38,14 @@ async def healthz() -> dict[str, str]:
 
 @app.get("/")
 async def index() -> FileResponse:
-    """Default landing page = the public chat UI."""
-    chat_html = STATIC_DIR / "chat.html"
-    if chat_html.exists():
-        return FileResponse(chat_html)
+    """Default landing page = the operator UI with the right-docked chat panel.
+
+    The standalone chat-only page is still reachable at /chat for embed use.
+    """
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/chat")
+async def chat_only_page() -> FileResponse:
+    """Standalone chat-only page (no operator UI). Useful for embeds."""
+    return FileResponse(STATIC_DIR / "chat.html")
