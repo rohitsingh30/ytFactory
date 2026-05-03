@@ -17,7 +17,7 @@ os.environ["YTFACTORY_QUEUE_BACKEND"] = "memory"
 
 import httpx  # noqa: E402
 
-from control import chat_routes, chat_service as cs_module, rate_limit  # noqa: E402
+from control import chat_routes, chat_service as cs_module, jobs as jobs_mod, rate_limit  # noqa: E402
 from control.chat_service import _extract_proposal, ChatResult  # noqa: E402
 from control.queue import get_queue, reset_queue  # noqa: E402
 from shared.schema import ShortProposal, TaskKind, TaskStatus  # noqa: E402
@@ -72,6 +72,7 @@ class ChatRoutesTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         reset_queue()
         rate_limit.reset_backend()
+        jobs_mod.reset_jobs()
 
     async def test_chat_returns_not_configured_when_azure_missing(self) -> None:
         # Force chat_service to look unconfigured.
@@ -130,6 +131,14 @@ class ChatRoutesTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(task)
             assert task is not None
             self.assertEqual(task.kind, TaskKind.RENDER_SHORT)
+            # Confirm path also creates a job doc (the UI polls /api/jobs/{id}).
+            job = jobs_mod.get_job(confirm["job_id"])
+            self.assertIsNotNone(job)
+            assert job is not None
+            self.assertEqual(job["channel"], "sportstoriesanimated")
+            self.assertEqual(job["topic"], "Aguero's stoppage-time goal vs QPR, May 2012")
+            self.assertEqual(job["status"], jobs_mod.STATUS_PENDING)
+            self.assertEqual(job["stage"], "queued")
             self.assertEqual(task.status, TaskStatus.QUEUED)
             self.assertEqual(task.job_id, confirm["job_id"])
             self.assertEqual(task.payload["channel"], "sportstoriesanimated")

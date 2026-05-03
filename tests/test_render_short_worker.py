@@ -18,7 +18,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 _TMP = tempfile.mkdtemp(prefix="ytf-render-test-")
 os.environ["YTFACTORY_SCRATCH_ROOT"] = _TMP
 
+os.environ["YTFACTORY_QUEUE_BACKEND"] = "memory"
+
 from agent.runner import TaskContext  # noqa: E402
+from control import jobs as jobs_mod  # noqa: E402
+from control.queue import reset_queue  # noqa: E402
 from shared.schema import TaskEnvelope, TaskKind  # noqa: E402
 
 
@@ -155,6 +159,87 @@ class OrchestrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(proposal_uploads[0][2], "application/json")
         # 3. cleanup ran.
         mock_cleanup.assert_called_once()
+
+    async def test_writes_stage_progression_to_job_doc(self) -> None:
+        """Each stage (rewrite_cast → render → gcs_upload → done) must
+        update the job doc so the UI's poll surfaces progress."""
+        from workers.heavy import render_short as rs
+
+        env = _envelope()
+        ctx = _ctx(env)
+        job_id = env.payload["job_id"]
+
+        # Pre-create the job doc the way chat_routes/render_routes does.
+        jobs_mod.reset_jobs()
+        reset_queue()
+        jobs_mod.create_job(job_id, channel=env.payload["channel"],
+                            topic=env.payload["topic"], proposal=env.payload)
+
+        stages_seen: list[tuple[str, str]] = []
+        original_mark_stage = jobs_mod.mark_stage
+
+        def spy_mark_stage(j, *, status, stage, **extra):
+            stages_seen.append((status, stage))
+            original_mark_stage(j, status=status, stage=stage, **extra)
+
+        async def fake_rewrite_and_cast(raw, yaml_path, slug, ch_dir):
+            return Path("/tmp/script.json"), Path("/tmp/cast.json")
+
+        async def fake_run_make_shorts(script_path, channel_yaml, log_path):
+            slug = script_path.stem if script_path.suffix == ".json" else "x"
+            mp4 = rs.PROJECT_ROOT / "data" / "shorts" / f"{env.payload.get('topic')[:5]}.mp4"
+            return 0
+
+        # The mp4-finding step uses _find_outputs; mock that too so we
+        # don't depend on real disk state.
+        with patch.object(rs, "_rewrite_and_cast", new=fake_rewrite_and_cast), \
+             patch.object(rs, "_run_make_shorts", new=fake_run_make_shorts), \
+             patch.object(rs, "_find_outputs", return_value=(Path("/tmp/fake.mp4"), None)), \
+             patch.object(rs.storage, "upload"), \
+             patch.object(rs.storage, "upload_bytes"), \
+             patch.object(rs.storage, "job_uri", side_effect=lambda jid, rel="": f"gs://test/jobs/{jid}/{rel}".rstrip("/")), \
+             patch.object(rs, "_cleanup_intermediate"), \
+             patch.object(jobs_mod, "mark_stage", side_effect=spy_mark_stage):
+            await rs.render_short(ctx)
+
+        # Assert the order: rewrite_cast → render → gcs_upload (then mark_done writes status=done).
+        stage_names = [s[1] for s in stages_seen]
+        self.assertEqual(stage_names[:3], ["rewrite_cast", "render", "gcs_upload"])
+        # First two are RENDERING status, third is UPLOADING.
+        self.assertEqual(stages_seen[0][0], jobs_mod.STATUS_RENDERING)
+        self.assertEqual(stages_seen[1][0], jobs_mod.STATUS_RENDERING)
+        self.assertEqual(stages_seen[2][0], jobs_mod.STATUS_UPLOADING)
+        # Final state on the job doc must be DONE with a short_uri.
+        doc = jobs_mod.get_job(job_id)
+        assert doc is not None
+        self.assertEqual(doc["status"], jobs_mod.STATUS_DONE)
+        self.assertTrue(doc["short_uri"].endswith("/short.mp4"))
+
+    async def test_failure_in_rewrite_marks_job_failed(self) -> None:
+        from workers.heavy import render_short as rs
+
+        env = _envelope()
+        ctx = _ctx(env)
+        job_id = env.payload["job_id"]
+        jobs_mod.reset_jobs()
+        reset_queue()
+        jobs_mod.create_job(job_id, channel=env.payload["channel"],
+                            topic=env.payload["topic"], proposal=env.payload)
+
+        async def boom_rewrite(raw, yaml_path, slug, ch_dir):
+            raise RuntimeError("claude offline")
+
+        with patch.object(rs, "_rewrite_and_cast", new=boom_rewrite), \
+             patch.object(rs.storage, "upload"), patch.object(rs.storage, "upload_bytes"), \
+             patch.object(rs, "_cleanup_intermediate"):
+            with self.assertRaises(RuntimeError):
+                await rs.render_short(ctx)
+
+        doc = jobs_mod.get_job(job_id)
+        assert doc is not None
+        self.assertEqual(doc["status"], jobs_mod.STATUS_FAILED)
+        self.assertEqual(doc["stage"], "rewrite_cast")
+        self.assertIn("claude offline", doc["error"])
 
     async def test_make_shorts_failure_propagates(self) -> None:
         from workers.heavy import render_short as rs
