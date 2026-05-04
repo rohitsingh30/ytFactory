@@ -2,10 +2,15 @@
 
 Cloud-friendly: uses a YouTube Data API v3 key (set ``YOUTUBE_API_KEY``
 env var) to fetch public stats — no per-channel OAuth refresh tokens
-needed in the deployed control plane. The list of videos to fetch
-stats for is read from each channel's ``<channel>/uploads/**/*.json``
-record on disk; those records get baked into the Docker image so the
-cloud has them.
+needed in the deployed control plane.
+
+The list of videos to fetch stats for comes from
+``gs://<bucket>/upload-records/<channel>/[<niche>/]<slug>.json``. The
+laptop's ``pipeline.upload.write_upload_record`` mirrors every record
+to that bucket on every successful upload, so the cloud dashboard
+stays fresh without redeploying the image. If GCS is unavailable
+(local dev with no creds) or empty, falls back to walking
+``<channel>/uploads/**/*.json`` on disk.
 
 Routes:
     GET  /api/dashboard/videos              — cached payload (no API hit)
@@ -48,14 +53,46 @@ _CHANNEL_STATS_CACHE: dict[str, dict[str, Any]] = {}
 _ACCOUNT_TO_CHANNEL_ID: dict[str, str] = {}
 
 
+_LAST_ENUMERATE_SOURCE: str | None = None  # surfaced in the API payload
+
+
 def _enumerate_uploads() -> list[tuple[str, str, str, dict]]:
     """Yield (channel, slug, video_id, full_record) for every upload.
 
-    Walks each channel folder (any top-level dir with a config.yaml) and
-    its `uploads/` subtree. Handles both flat (`uploads/<slug>.json`)
-    and nested (`uploads/<niche>/<slug>.json`) layouts.
+    Reads from GCS first (``gs://<bucket>/upload-records/``) so new
+    uploads appear without redeploying the image. Falls back to walking
+    ``<channel>/uploads/**/*.json`` on disk if GCS is empty or
+    unreachable. Records present in BOTH places dedupe by (channel, slug).
+    Handles both flat (``uploads/<slug>.json``) and nested
+    (``uploads/<niche>/<slug>.json``) on-disk layouts.
     """
+    global _LAST_ENUMERATE_SOURCE
     out: list[tuple[str, str, str, dict]] = []
+    seen: set[tuple[str, str]] = set()  # (channel, slug)
+    sources: list[str] = []
+
+    # 1. GCS — laptop pushes records here on every upload.
+    try:
+        from control import storage as _gcs
+        gcs_count = 0
+        for channel, slug, rec in _gcs.list_upload_records():
+            vid = rec.get("video_id")
+            if not vid:
+                continue
+            key = (channel, slug)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((channel, slug, vid, rec))
+            gcs_count += 1
+        if gcs_count:
+            sources.append(f"gcs:{gcs_count}")
+    except Exception as e:
+        sources.append(f"gcs:err({type(e).__name__})")
+
+    # 2. Disk fallback — picks up anything baked into the image but not
+    # yet mirrored, plus everything on the laptop when running locally.
+    disk_count = 0
     for chan_dir in sorted(PROJECT_ROOT.iterdir()):
         if not chan_dir.is_dir() or not (chan_dir / "config.yaml").exists():
             continue
@@ -71,7 +108,16 @@ def _enumerate_uploads() -> list[tuple[str, str, str, dict]]:
             slug = rec.get("slug") or f.stem
             if not vid:
                 continue
+            key = (chan_dir.name, slug)
+            if key in seen:
+                continue
+            seen.add(key)
             out.append((chan_dir.name, slug, vid, rec))
+            disk_count += 1
+    if disk_count:
+        sources.append(f"disk:{disk_count}")
+
+    _LAST_ENUMERATE_SOURCE = " ".join(sources) if sources else "empty"
     return out
 
 
@@ -392,6 +438,7 @@ async def dashboard_videos(refresh: bool = Query(False)) -> dict:
             None if latest_fetch_epoch is None
             else __import__("datetime").datetime.fromtimestamp(latest_fetch_epoch).isoformat()
         ),
+        "record_source": _LAST_ENUMERATE_SOURCE,
     }
     if not api_key_set:
         payload["warning"] = (

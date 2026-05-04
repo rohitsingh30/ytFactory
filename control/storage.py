@@ -181,3 +181,74 @@ def gc_heavy_artifacts(job_id: str, *, dry_run: bool = False) -> list[str]:
         prefix = job_uri(job_id, rel)
         deleted.extend(delete_prefix(prefix, dry_run=dry_run))
     return deleted
+
+
+# ---------------------------------------------------------------------------
+# Upload-record mirror — keeps the cloud dashboard fresh without redeploys
+# ---------------------------------------------------------------------------
+#
+# The Cloud Run dashboard reads `<channel>/uploads/**/*.json` to know which
+# videos to display. Those files only exist on the laptop where uploads
+# actually run, so without a mirror the cloud dashboard stays frozen at the
+# image's build-time snapshot.
+#
+# Layout: gs://<bucket>/upload-records/<channel>/[<niche>/]<slug>.json
+# (mirrors the local <channel>/uploads/[<niche>/]<slug>.json layout, minus
+# the literal `/uploads/` segment which is implicit in the prefix).
+
+
+UPLOAD_RECORDS_PREFIX = "upload-records"
+
+
+def upload_record_uri(rel_key: str) -> str:
+    """Build the gs:// URI for an upload record under upload-records/.
+
+    ``rel_key`` is the on-disk path with `/uploads/` collapsed out — e.g.
+    ``"historyrecapped/foo.json"`` or
+    ``"mystoriesanimated/reddit_amitheasshole/bar.json"``.
+    """
+    return f"gs://{bucket_name()}/{UPLOAD_RECORDS_PREFIX}/{rel_key.lstrip('/')}"
+
+
+def upload_record_rel_key(local_path: Path, project_root: Path) -> str:
+    """Translate a local upload-record path to its GCS rel_key.
+
+    Strips the project root and the literal `/uploads/` middle segment, so:
+        <root>/historyrecapped/uploads/foo.json
+            → "historyrecapped/foo.json"
+        <root>/mystoriesanimated/uploads/reddit_amitheasshole/bar.json
+            → "mystoriesanimated/reddit_amitheasshole/bar.json"
+    """
+    rel = Path(local_path).resolve().relative_to(Path(project_root).resolve())
+    parts = list(rel.parts)
+    # find the FIRST "uploads" segment (channel-level) and drop it
+    if "uploads" in parts:
+        idx = parts.index("uploads")
+        parts = parts[:idx] + parts[idx + 1 :]
+    return "/".join(parts)
+
+
+def list_upload_records():
+    """Yield (channel, slug, record_dict) for every record in the bucket.
+
+    ``channel`` is the top-level segment (e.g. "mystoriesanimated"); for
+    nested layouts the niche segment is preserved in the GCS path but the
+    dashboard groups by top-level channel anyway.
+    """
+    import json as _json
+
+    prefix = f"gs://{bucket_name()}/{UPLOAD_RECORDS_PREFIX}/"
+    for uri in list_prefix(prefix):
+        if not uri.endswith(".json"):
+            continue
+        _, key = parse_uri(uri)
+        rel = key[len(UPLOAD_RECORDS_PREFIX) + 1 :]  # strip "upload-records/"
+        if "/" not in rel:
+            continue
+        channel = rel.split("/", 1)[0]
+        slug = rel.rsplit("/", 1)[1][: -len(".json")]
+        try:
+            rec = _json.loads(download_bytes(uri).decode("utf-8"))
+        except Exception:
+            continue
+        yield channel, slug, rec

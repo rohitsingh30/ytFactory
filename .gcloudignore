@@ -1,0 +1,85 @@
+# Files Cloud Build should NOT upload as part of `gcloud run deploy --source .`
+#
+# Strategy: mirror .gitignore + add a couple of cloud-specific exclusions.
+# The control-plane image (see Dockerfile) only needs control/, web/static/,
+# requirements-control.txt, and per-channel config.yaml + uploads/ +
+# narrations/ + raw/. Everything else is dead weight in the build context.
+
+# === Python / venvs (huge) ===
+.venv/
+.venv-*/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# === Env / secrets ===
+.env
+.agent-token
+
+# === OS / IDE ===
+.DS_Store
+.vscode/
+.idea/
+.git/
+
+# === Build artifacts ===
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+dist/
+build/
+
+# === Model weights ===
+*.onnx
+*.bin
+*.safetensors
+*.pt
+*.ckpt
+
+# === Heavy regenerable per-channel dirs ===
+# Footage source mp4s — biggest offender (10+ GB on historyrecapped).
+# The cloud has no use for these; render workers download fresh.
+**/footage/
+**/cache/
+**/scratch/
+**/emoji/
+**/tts_tests/
+**/cooking_loops/
+**/critiques/
+**/branding/*.png
+**/branding/*.jpg
+**/songs/
+**/shorts/*.mp4
+
+# Heavy media in narrations/ (the .json files we DO want; .wav we don't).
+**/narrations/*.wav
+**/narrations/*.mp3
+
+# === Per-slug regenerables (LLM-authored, regen in seconds) ===
+**/cast/**/*.json
+**/prompts/**/*.json
+**/dossier/**/*.json
+**/shotlist/**/*.json
+**/footage/transcripts/**/*.json
+**/specs/**/*.yaml
+
+# === Cross-channel runtime / scratch state ===
+data/_jobs/
+data/telemetry/
+data/cache/
+data/scratch/
+data/intermediate/
+data/research/youtube/
+
+# === Logs / temp ===
+*.log
+*.tmp
+.tmp/
+*.bak
+*~
+
+# === Docs / screenshots / large image assets ===
+docs/screenshots/
+docs/diagrams/*.png

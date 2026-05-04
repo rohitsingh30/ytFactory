@@ -5,7 +5,9 @@ delete_prefix for each heavy relpath. The actual GCS client is mocked.
 """
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from control import storage
@@ -96,6 +98,69 @@ class DeletePrefixTest(unittest.TestCase):
 
         self.assertEqual(len(deleted), 1)
         fake_bucket.blob.assert_not_called()
+
+
+class UploadRecordHelpersTest(unittest.TestCase):
+    """The dashboard mirrors <channel>/uploads/[<niche>/]<slug>.json to
+    gs://<bucket>/upload-records/<channel>/[<niche>/]<slug>.json — verify
+    the rel_key / uri builders survive both flat and niched layouts.
+    """
+
+    def test_rel_key_flat_layout(self):
+        root = Path("/tmp/repo")
+        local = root / "historyrecapped" / "uploads" / "battle.json"
+        self.assertEqual(
+            storage.upload_record_rel_key(local, root),
+            "historyrecapped/battle.json",
+        )
+
+    def test_rel_key_niched_layout(self):
+        root = Path("/tmp/repo")
+        local = root / "mystoriesanimated" / "uploads" / "reddit_amitheasshole" / "foo.json"
+        self.assertEqual(
+            storage.upload_record_rel_key(local, root),
+            "mystoriesanimated/reddit_amitheasshole/foo.json",
+        )
+
+    def test_upload_record_uri_uses_bucket(self):
+        with patch.dict("os.environ", {"YTFACTORY_BUCKET": "test-bucket"}, clear=False):
+            self.assertEqual(
+                storage.upload_record_uri("historyrecapped/foo.json"),
+                "gs://test-bucket/upload-records/historyrecapped/foo.json",
+            )
+
+    def test_list_upload_records_parses_keys(self):
+        """Yields (channel, slug, record) — channel = first path segment."""
+        flat_blob = MagicMock()
+        flat_blob.name = "upload-records/historyrecapped/foo.json"
+        niched_blob = MagicMock()
+        niched_blob.name = "upload-records/mystoriesanimated/reddit_amitheasshole/bar.json"
+        non_json_blob = MagicMock()  # should be skipped
+        non_json_blob.name = "upload-records/historyrecapped/notes.txt"
+
+        fake_client = MagicMock()
+        fake_client.list_blobs.return_value = [flat_blob, niched_blob, non_json_blob]
+
+        rec_flat = {"video_id": "abc", "title": "battle"}
+        rec_niched = {"video_id": "xyz", "title": "aita"}
+
+        def _download(uri):
+            if uri.endswith("foo.json"):
+                return json.dumps(rec_flat).encode()
+            if uri.endswith("bar.json"):
+                return json.dumps(rec_niched).encode()
+            raise AssertionError(f"unexpected uri: {uri}")
+
+        with patch.dict("os.environ", {"YTFACTORY_BUCKET": "test-bucket"}, clear=False):
+            with patch.object(storage, "_client", return_value=fake_client):
+                with patch.object(storage, "download_bytes", side_effect=_download):
+                    out = list(storage.list_upload_records())
+
+        self.assertEqual(len(out), 2)
+        channels = {row[0] for row in out}
+        self.assertEqual(channels, {"historyrecapped", "mystoriesanimated"})
+        slugs = {row[1] for row in out}
+        self.assertEqual(slugs, {"foo", "bar"})
 
 
 if __name__ == "__main__":

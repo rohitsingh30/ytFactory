@@ -750,7 +750,33 @@ def write_upload_record(
     p = _record_path(project_root, channel_dir, slug)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(record, indent=2))
+    _mirror_record_to_gcs(p, project_root, record)
     return p
+
+
+def _mirror_record_to_gcs(local_path: Path, project_root: Path, record: dict) -> None:
+    """Push the upload record to GCS so the Cloud Run dashboard sees it.
+
+    Best-effort: any failure (no ADC, no network, package missing) just
+    logs a warning. The local-disk write above is the source of truth —
+    a backfill script can re-sync later. Disable with
+    ``YTFACTORY_DASHBOARD_GCS_SYNC=0`` (e.g. for offline laptop work).
+    """
+    if os.environ.get("YTFACTORY_DASHBOARD_GCS_SYNC", "1") == "0":
+        return
+    try:
+        from control import storage as _gcs
+        rel_key = _gcs.upload_record_rel_key(local_path, project_root)
+        uri = _gcs.upload_record_uri(rel_key)
+        _gcs.upload_bytes(
+            json.dumps(record, indent=2).encode("utf-8"),
+            uri,
+            content_type="application/json",
+        )
+        print(f"[upload] mirrored record → {uri}")
+    except Exception as e:
+        # Don't fail the upload over a mirror miss; the record is on disk.
+        print(f"[upload] warn: failed to mirror record to GCS ({type(e).__name__}: {e})")
 
 
 # ---- the orchestrator entry point --------------------------------------
