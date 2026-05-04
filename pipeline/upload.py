@@ -139,26 +139,56 @@ def authenticate(account: str = "default", *, interactive: bool = True) -> Any:
 
     tp = _token_path(account)
     creds = None
+    # Read raw JSON first — `Credentials.scopes` reflects the SCOPES we'd
+    # pass in, not what's actually in the file, so we can't detect drift
+    # via the credentials object. Also preserves prior_refresh_token in
+    # case the next OAuth flow omits it (Google deduplicates).
+    prior_refresh_token: str | None = None
     if tp.exists():
+        cached_scopes: set[str] = set()
         try:
-            creds = Credentials.from_authorized_user_file(str(tp), SCOPES)
-        except Exception as e:
-            print(f"[upload] cached token unreadable ({e}); re-auth required")
-            creds = None
-
-    # Scope-set drift: token was minted before SCOPES grew (e.g. the
-    # `youtube` write scope added for cross-engagement). Discard the
-    # cached creds so we fall through to the browser flow.
-    if creds is not None:
-        cached = set(getattr(creds, "scopes", None) or [])
+            blob = json.loads(tp.read_text())
+            cached_scopes = set(blob.get("scopes") or [])
+            prior_refresh_token = blob.get("refresh_token") or None
+        except Exception:
+            pass
         needed = set(SCOPES)
-        if not cached.issuperset(needed):
-            missing = needed - cached
+        if cached_scopes and not cached_scopes.issuperset(needed):
+            missing = needed - cached_scopes
             print(
                 f"[upload] cached token for {account!r} missing scopes "
                 f"{sorted(missing)}; re-auth required"
             )
-            creds = None
+        else:
+            try:
+                creds = Credentials.from_authorized_user_file(str(tp), SCOPES)
+            except Exception as e:
+                # `from_authorized_user_file` rejects tokens missing
+                # `refresh_token`. If the access_token is still valid we
+                # can keep operating for ~1h — construct Credentials
+                # manually so the caller gets a usable creds object,
+                # warn loudly so they re-OAuth before expiry.
+                try:
+                    blob = json.loads(tp.read_text())
+                    creds = Credentials(
+                        token=blob.get("token"),
+                        refresh_token=blob.get("refresh_token"),
+                        token_uri=blob.get("token_uri", "https://oauth2.googleapis.com/token"),
+                        client_id=blob.get("client_id"),
+                        client_secret=blob.get("client_secret"),
+                        scopes=blob.get("scopes") or SCOPES,
+                    )
+                    if not creds.refresh_token:
+                        print(
+                            f"[upload] WARN: token for {account!r} has no "
+                            f"refresh_token — using access_token only "
+                            f"(expires ~1h after issue). Fix: revoke at "
+                            f"https://myaccount.google.com/connections , "
+                            f"then re-run OAuth."
+                        )
+                except Exception as e2:
+                    print(f"[upload] cached token unreadable ({e}; fallback also failed: {e2}); re-auth required")
+                    creds = None
 
     if creds and creds.valid:
         return creds
@@ -1008,12 +1038,64 @@ def _cmd_auth_refresh(args) -> int:
                 print("aborted.")
                 return 1
 
+    import errno
+    import socket
+    import time
+
+    callback_port = int(os.environ.get("YTFACTORY_OAUTH_PORT") or 8089)
+
+    def _wait_for_port_free(port: int, max_wait_s: int = 90) -> bool:
+        """Poll until ``port`` accepts a fresh bind. The OAuth callback
+        server binds without SO_REUSEADDR so the kernel holds the port
+        in TIME_WAIT (~30s on macOS) after the previous auth completes.
+        Probing via SO_REUSEADDR=1 lets the kernel tell us the port is
+        actually claimable by the next ``run_local_server`` call.
+        """
+        deadline = time.time() + max_wait_s
+        while time.time() < deadline:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.bind(("localhost", port))
+                s.close()
+                return True
+            except OSError:
+                s.close()
+                time.sleep(2)
+        return False
+
     failed: list[tuple[str, str]] = []
     for i, account in enumerate(targets, 1):
+        if i > 1:
+            print(f"[auth] waiting for port {callback_port} to clear (TIME_WAIT)…")
+            if not _wait_for_port_free(callback_port):
+                print(
+                    f"[auth] port {callback_port} still busy after 90s; aborting"
+                )
+                failed.append((account, "port still busy"))
+                break
         print(
             f"\n================ [{i}/{len(targets)}] re-authing "
             f"{account!r} ================"
         )
+        # If the cached token is in a state where authenticate() would
+        # use it instead of running the browser flow (e.g. no_refresh_token
+        # but access_token still valid for ~1h), move it aside first so
+        # the interactive path actually fires. The .pre-reauth-* sidecar
+        # is keepable in case anything goes wrong.
+        pre_status = inspect_token_status(account)
+        if pre_status["state"] in ("no_refresh_token", "missing_scopes", "unreadable"):
+            tp = _token_path(account)
+            backup = tp.with_suffix(
+                tp.suffix + f".pre-reauth-{int(time.time())}"
+            )
+            try:
+                tp.rename(backup)
+                print(
+                    f"[auth] moved stale token aside → {backup.name} "
+                    f"(state was {pre_status['state']})"
+                )
+            except OSError:
+                pass
         try:
             authenticate(account=account, interactive=True)
             print(f"[auth] {account}: OK")
@@ -1021,6 +1103,19 @@ def _cmd_auth_refresh(args) -> int:
             print("\n[auth] interrupted by user")
             failed.append((account, "interrupted"))
             break
+        except OSError as e:
+            if e.errno == errno.EADDRINUSE:
+                # Port wasn't released between auths — most likely the
+                # last grant timed out before the WSGI server shut down.
+                # Surface a clear hint instead of the cryptic Errno 48.
+                print(
+                    f"[auth] {account}: FAILED — port {callback_port} busy "
+                    f"(retry: rerun this command, or wait 60s)"
+                )
+                failed.append((account, "port busy"))
+            else:
+                print(f"[auth] {account}: FAILED — {e}")
+                failed.append((account, str(e)))
         except Exception as e:
             print(f"[auth] {account}: FAILED — {e}")
             failed.append((account, str(e)))
