@@ -485,13 +485,18 @@ const AUTH_STATE_LABELS = {
 };
 
 async function loadAuthHealth() {
+  // Hide the tile entirely on backends that don't expose the endpoint
+  // (e.g. Cloud Run prod, which only ships the control plane). The
+  // laptop dashboard at :8765 wires the routes; prod doesn't.
+  const section = document.getElementById("auth-health");
   try {
     const r = await fetch("/api/youtube/auth/status");
+    if (!r.ok) { section.classList.add("hidden"); return; }
     const d = await r.json();
+    section.classList.remove("hidden");
     paintAuthHealth(d.accounts || []);
   } catch (e) {
-    document.getElementById("auth-health-grid").innerHTML =
-      `<div class="text-rose-300">auth status fetch failed: ${e.message}</div>`;
+    section.classList.add("hidden");
   }
 }
 
