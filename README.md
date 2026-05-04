@@ -96,29 +96,81 @@ open https://ytfactory-control-767262167641.us-central1.run.app
 ### Laptop agent (so renders actually run)
 
 The laptop agent leases tasks from the live Cloud Run service. It needs
-the same bearer token the service expects, plus a **Cartesia API key**
-(production TTS for AITA / sports / war / Mahabharat).
+the bearer token the service expects, plus the optional TTS dependencies
+matching whichever providers the channel YAMLs declare.
 
 ```bash
 # Pull the agent token from Secret Manager (one-time)
 gcloud secrets versions access latest --secret=ytfactory-agent-token \
   --project=ytfactory-prod > .agent-token
 
-# Cartesia narration backbone — required for any channel with
-# tts_provider: cartesia (currently every production channel; see
-# channels/*.yaml). Get a key at https://play.cartesia.ai/keys —
-# Sonic Starter $9/mo covers ~100 shorts. Without this set,
-# pipeline.audio raises RuntimeError at synth time.
-export CARTESIA_API_KEY=sk_car_...
+# Install free local TTS providers (one-time per provider, per laptop).
+# All production channels default to free local TTS as of 2026-05-04 —
+# no API key needed for rendering. See "TTS providers" section below
+# for the full per-channel mapping.
+.venv/bin/pip install f5-tts-mlx                                       # historyrecapped Shorts + sportstoriesanimated
+.venv/bin/pip install --no-deps chatterbox-tts                         # mystoriesanimated (AITA)
+
+# StyleTTS2 (0.1.6) and Indic Parler-TTS are wired in pipeline/audio.py
+# but BOTH are incompatible with this venv:
+#
+# - StyleTTS2 0.1.6 hard-pins huggingface_hub<0.20 / librosa<0.11 /
+#   networkx<3 — conflicts with everything else.
+# - parler-tts is unmaintained against transformers ≥ 4.49 (which
+#   diffusers 0.38 requires for image-gen). Its Config API uses the
+#   removed PreTrainedConfig attribute.
+#
+# Both stay wired so anyone with a separate venv can use them; the
+# default channel YAMLs route around them:
+#   - hindutavaanimated → Kokoro hf_alpha (Hindi female)
+#   - historyrecapped long-form → Kokoro bf_isabella + atempo
+
+# Cartesia is now an OPTIONAL ship-quality fallback (per-render override
+# in the channel YAML). Set the key only if you choose to flip a channel
+# back to tts_provider: cartesia for a one-off premium render:
+# export CARTESIA_API_KEY=sk_car_...
 
 # Run the agent — points at production by default
 YTFACTORY_AGENT_TOKEN=$(cat .agent-token) \
   .venv/bin/python -m agent.main
 ```
 
-To fall back to free local TTS (no Cartesia bill), flip the channel YAML's
-`tts_provider: cartesia` back to `tts_provider: kokoro` and pick a Kokoro
-voice id (e.g. `af_bella`). Quality drops; cost goes to zero.
+### TTS providers
+
+Each channel declares its TTS provider in `<channel>/config.yaml`. The
+production defaults as of 2026-05-04 are all **free, local, and
+commercial-licensed** — `$0/render`, no per-character caps:
+
+| Channel | Provider | Voice / config | License |
+|---|---|---|---|
+| historyrecapped (Shorts) | `f5_tts` | clones from `pipeline/voice_refs/theo.wav` | MIT |
+| historyrecapped (long-form sleep) | `kokoro` | `bf_isabella` + atempo 0.6 | Apache 2.0 |
+| mystoriesanimated | `chatterbox` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
+| sportstoriesanimated | `f5_tts` | clones from `pipeline/voice_refs/theo.wav` | MIT |
+| hindutavaanimated | `kokoro` | `hf_alpha` (Hindi female) | Apache 2.0 |
+| airecap | `kokoro` | `af_bella` | Apache 2.0 |
+| rhymetimejunction | n/a (sung audio via Suno) | external_song | n/a |
+
+**Why this changed:** Cartesia Sonic-2 was the production backbone from
+2026-05-03 to 2026-05-04. The user's $5 prepay exhausted in <1h on a
+10-pack of historyrecapped Shorts + a long-form sleep render — Cartesia
+charges $50–100 per million characters, which compounds fast at our
+cadence. The 4 production channels were migrated to free local
+equivalents on 2026-05-04. Cartesia is retained as a per-channel
+fallback (the previous YAML config is preserved in the comments above
+each `tts_provider:` line) for one-off ship-quality renders.
+
+**Voice cloning details:** F5-TTS-MLX and Chatterbox both clone from a
+9.5s reference WAV. The reference clips at `pipeline/voice_refs/{theo,
+sarah}.wav` were captured from the original Cartesia renders so the
+cloned voices preserve the documentary/narrator identity the channels
+were originally tuned for. To refresh a clip see
+`pipeline/voice_refs/README.md`.
+
+**Indic Parler-TTS interface differs:** It is description-conditioned,
+not voice-cloned. The hindutavaanimated YAML's `tts_voice` field is a
+natural-language description (e.g. "Sneha speaks in a calm…") rather
+than a UUID or ref-WAV path.
 
 ### Local dev (rare — only when changing control plane code)
 
@@ -142,8 +194,31 @@ YTFACTORY_AGENT_TOKEN=$YTFACTORY_AGENT_TOKEN \
 | **MyStoriesAnimated** | Reddit (AITA / TIFU / etc.) | Flat 2D crayon, pastel fills |
 | **SportsStoriesAnimated** | Football moments | Tifo line-art + real broadcast cut-ins at the climactic moment |
 | **HindutavaAnimated** | Mahabharat episodes | Amar Chitra Katha comic-book, Hindi narration |
+| **History Recapped** | War/military stories | 100% archival footage with documentary narration |
+| **Rhyme Time Junction** | Bilingual nursery rhymes | Continuous animation, Hinglish lyrics, recurring mascots |
+| **AI Recap** *(X-first, scaffolded 2026-05-03)* | Daily AI/tech announcements | Clean isometric editorial illustration |
 
 Other channel YAMLs are research / variant configs that share a target.
+
+### Cross-posting to X (Twitter)
+
+Each channel can opt into cross-posting to X by adding an `x:` block to
+its `config.yaml` (see `airecap/config.yaml` for the canonical shape).
+The X uploader sits at Stage 8b and reuses the same rendered mp4 the
+YouTube uploader ships:
+
+- `pipeline/x_upload.py` — chunked-upload + tweet-create via tweepy.
+  CLI: `python -m pipeline.x_upload --channel <channel> --slug <slug>`.
+  Idempotent record at `<channel>/uploads/<slug>.x.json` (sidecar to
+  the YouTube `<slug>.json`).
+- `scripts/setup_x_credentials.py` — interactive installer with hidden
+  input + live verification against X's API. Run once per X handle.
+- See [`docs/X_SETUP.md`](./docs/X_SETUP.md) for the full per-handle
+  bring-up flow.
+
+X is the **primary** monetization platform for AI Recap (highest-RPM
+niche after crypto on X creator revenue sharing); a secondary
+cross-post path for the other channels.
 
 ## Cost
 
@@ -179,6 +254,7 @@ OpenAI gpt-5.3-chat at <100 chat sessions).
 | ✅ | YOUTUBE_UPLOAD light worker (post-upload GC inside) |
 | ✅ | RESEARCH_HANDOFF light worker (calls into pipeline/research.py) |
 | ✅ | scripts/laptop_cleanup.py (dry-run reclaims ~1.9 GiB) |
+| ✅ | X (Twitter) cross-post — pipeline/x_upload.py + airecap channel scaffold |
 
 | 🟡 deferred | why |
 |---|---|

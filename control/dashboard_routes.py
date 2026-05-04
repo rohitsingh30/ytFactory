@@ -232,7 +232,10 @@ async def dashboard_page() -> FileResponse:
     p = STATIC_DIR / "dashboard.html"
     if not p.exists():
         raise HTTPException(404, "dashboard.html missing from static dir")
-    return FileResponse(p)
+    # no-cache forces the browser to revalidate every load via ETag/304 —
+    # without this, a fresh Cloud Run deploy doesn't reach users until
+    # they hard-reload (⌘⇧R). The 304 path is bandwidth-cheap.
+    return FileResponse(p, headers={"Cache-Control": "no-cache"})
 
 
 # ---- 404-silencers for legacy index.html JS ----------------------------

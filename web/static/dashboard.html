@@ -6,112 +6,237 @@
 <title>ytFactory — live dashboard</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif; }
-  .stat-num { font-variant-numeric: tabular-nums; }
-  .video-card { transition: transform .15s ease, box-shadow .15s ease; }
-  .video-card:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(0,0,0,.45); }
-  .pulse-dot { animation: pulse 1.4s infinite; }
-  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+    background: #020617;
+  }
+  .stat-num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+  /* Subtle ambient gradient behind the header */
+  .header-glow {
+    background:
+      radial-gradient(circle at 10% 0%, rgba(124, 58, 237, .18) 0%, transparent 40%),
+      radial-gradient(circle at 90% 0%, rgba(14, 165, 233, .14) 0%, transparent 40%),
+      rgba(2, 6, 23, .85);
+    backdrop-filter: blur(12px);
+  }
+
+  /* Rollup tiles — subtle gradient ring + lift on hover */
+  .stat-tile {
+    background:
+      linear-gradient(180deg, rgba(15, 23, 42, .9), rgba(2, 6, 23, .9));
+    transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease;
+  }
+  .stat-tile:hover {
+    transform: translateY(-2px);
+    border-color: rgba(148, 163, 184, .25);
+    box-shadow: 0 12px 30px -8px rgba(0, 0, 0, .6);
+  }
+
+  .video-card { transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease; }
+  .video-card:hover {
+    transform: translateY(-2px);
+    border-color: rgba(148, 163, 184, .35);
+    box-shadow: 0 16px 36px -10px rgba(0, 0, 0, .55);
+  }
+
+  .pulse-dot {
+    position: relative;
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 9999px;
+    background: #34d399;
+    box-shadow: 0 0 0 0 rgba(52, 211, 153, .55);
+    animation: pulse 1.8s ease-out infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(52, 211, 153, .55); }
+    70%  { box-shadow: 0 0 0 9px rgba(52, 211, 153, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+  }
+
   .channel-pill {
     display: inline-flex; align-items: center; gap: 6px;
-    padding: 4px 12px; border-radius: 9999px;
+    padding: 4px 10px; border-radius: 9999px;
     font-size: 12px; font-weight: 500;
+    line-height: 1;
   }
+
+  .channel-divider {
+    background: linear-gradient(90deg, rgba(148, 163, 184, .25) 0%, rgba(148, 163, 184, 0) 80%);
+  }
+
+  /* Skeleton shimmer for first paint */
   .skeleton {
     background: linear-gradient(90deg, rgb(30 41 59), rgb(51 65 85), rgb(30 41 59));
     background-size: 200% 100%;
     animation: shimmer 1.5s infinite;
   }
   @keyframes shimmer {
-    0% { background-position: 200% 0; }
+    0%   { background-position: 200% 0; }
     100% { background-position: -200% 0; }
   }
 </style>
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen">
+<body class="text-slate-100 min-h-screen">
 
-<header class="border-b border-slate-800 bg-slate-900/60 backdrop-blur sticky top-0 z-10">
+<!-- ─── HEADER ──────────────────────────────────────────────────────── -->
+<header class="header-glow border-b border-slate-800/80 sticky top-0 z-20">
   <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-    <div class="flex items-center gap-3">
-      <div class="text-xl">📊</div>
+    <div class="flex items-center gap-4">
+      <a href="/" class="w-9 h-9 rounded-xl bg-gradient-to-br from-rose-500 via-fuchsia-500 to-violet-500 grid place-items-center text-white font-black text-lg shadow-lg shadow-fuchsia-500/30">
+        y
+      </a>
       <div>
-        <h1 class="text-lg font-semibold">ytFactory · Live Dashboard</h1>
-        <div class="text-xs text-slate-400" id="last-fetched">…</div>
+        <h1 class="text-lg font-semibold tracking-tight">ytFactory · Live Dashboard</h1>
+        <div class="flex items-center gap-2 text-xs mt-0.5" id="last-fetched-row">
+          <span class="pulse-dot" id="status-dot"></span>
+          <span id="last-fetched" class="text-slate-400">Connecting to YouTube…</span>
+        </div>
       </div>
     </div>
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-sm text-slate-400 hover:text-slate-200">← back to studio</a>
+    <div class="flex items-center gap-2">
+      <a href="/" class="hidden sm:inline-flex px-3 py-2 rounded-lg text-sm text-slate-400 hover:text-slate-100 hover:bg-white/5 transition">
+        ← Studio
+      </a>
       <button id="refresh-btn"
-        class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm font-medium transition disabled:opacity-50 disabled:cursor-wait">
-        Refresh from YouTube
+        class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm font-medium transition disabled:opacity-50 disabled:cursor-wait shadow-lg shadow-indigo-500/20">
+        <svg id="refresh-icon" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
+          <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/>
+        </svg>
+        <span id="refresh-label">Refresh</span>
       </button>
     </div>
   </div>
 </header>
 
-<main class="max-w-7xl mx-auto px-6 py-8 space-y-10">
-  <!-- ROLLUP -->
-  <section id="rollup" class="grid grid-cols-2 md:grid-cols-5 gap-4">
-    <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
-      <div class="text-xs uppercase tracking-wider text-slate-400">Subscribers</div>
-      <div class="text-3xl font-semibold mt-1 stat-num text-violet-300" id="rollup-subs">—</div>
+<main class="max-w-7xl mx-auto px-6 py-10 space-y-12">
+
+  <!-- ─── ROLLUP ──────────────────────────────────────────────────── -->
+  <section>
+    <div class="flex items-end justify-between mb-5">
+      <div>
+        <h2 class="text-sm uppercase tracking-[.18em] text-slate-500 font-medium">Cross-channel overview</h2>
+        <div class="text-xs text-slate-600 mt-1">Aggregated across every uploaded Short</div>
+      </div>
     </div>
-    <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
-      <div class="text-xs uppercase tracking-wider text-slate-400">Videos shipped</div>
-      <div class="text-3xl font-semibold mt-1 stat-num" id="rollup-videos">—</div>
-    </div>
-    <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
-      <div class="text-xs uppercase tracking-wider text-slate-400">Total views</div>
-      <div class="text-3xl font-semibold mt-1 stat-num text-sky-300" id="rollup-views">—</div>
-    </div>
-    <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
-      <div class="text-xs uppercase tracking-wider text-slate-400">Total likes</div>
-      <div class="text-3xl font-semibold mt-1 stat-num text-pink-300" id="rollup-likes">—</div>
-    </div>
-    <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
-      <div class="text-xs uppercase tracking-wider text-slate-400">Total comments</div>
-      <div class="text-3xl font-semibold mt-1 stat-num text-emerald-300" id="rollup-comments">—</div>
+    <div id="rollup" class="grid grid-cols-2 md:grid-cols-5 gap-3 md:gap-4">
+      <!-- Subscribers -->
+      <div class="stat-tile rounded-2xl border border-slate-800 p-5">
+        <div class="flex items-center justify-between mb-3 text-violet-300">
+          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+            <path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+          <span class="text-[10px] uppercase tracking-wider text-slate-500">Subs</span>
+        </div>
+        <div class="text-3xl font-semibold stat-num text-violet-200" id="rollup-subs">—</div>
+        <div class="text-[11px] text-slate-500 mt-1" id="rollup-subs-full"></div>
+      </div>
+      <!-- Videos shipped -->
+      <div class="stat-tile rounded-2xl border border-slate-800 p-5">
+        <div class="flex items-center justify-between mb-3 text-slate-300">
+          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+          </svg>
+          <span class="text-[10px] uppercase tracking-wider text-slate-500">Shipped</span>
+        </div>
+        <div class="text-3xl font-semibold stat-num" id="rollup-videos">—</div>
+        <div class="text-[11px] text-slate-500 mt-1">videos live</div>
+      </div>
+      <!-- Views -->
+      <div class="stat-tile rounded-2xl border border-slate-800 p-5">
+        <div class="flex items-center justify-between mb-3 text-sky-300">
+          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+          </svg>
+          <span class="text-[10px] uppercase tracking-wider text-slate-500">Views</span>
+        </div>
+        <div class="text-3xl font-semibold stat-num text-sky-200" id="rollup-views">—</div>
+        <div class="text-[11px] text-slate-500 mt-1" id="rollup-views-full"></div>
+      </div>
+      <!-- Likes -->
+      <div class="stat-tile rounded-2xl border border-slate-800 p-5">
+        <div class="flex items-center justify-between mb-3 text-pink-300">
+          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+          </svg>
+          <span class="text-[10px] uppercase tracking-wider text-slate-500">Likes</span>
+        </div>
+        <div class="text-3xl font-semibold stat-num text-pink-200" id="rollup-likes">—</div>
+        <div class="text-[11px] text-slate-500 mt-1" id="rollup-likes-full"></div>
+      </div>
+      <!-- Comments -->
+      <div class="stat-tile rounded-2xl border border-slate-800 p-5">
+        <div class="flex items-center justify-between mb-3 text-emerald-300">
+          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          <span class="text-[10px] uppercase tracking-wider text-slate-500">Comments</span>
+        </div>
+        <div class="text-3xl font-semibold stat-num text-emerald-200" id="rollup-comments">—</div>
+        <div class="text-[11px] text-slate-500 mt-1" id="rollup-comments-full"></div>
+      </div>
     </div>
   </section>
 
-  <!-- CHANNEL SECTIONS -->
-  <section id="channels" class="space-y-12">
+  <!-- ─── CHANNEL SECTIONS ────────────────────────────────────────── -->
+  <section id="channels" class="space-y-14">
     <!-- filled by JS -->
   </section>
 
-  <div id="empty" class="hidden text-center py-20 text-slate-500">
-    <div class="text-4xl mb-3">📭</div>
-    <div>No uploads yet.</div>
+  <div id="empty" class="hidden text-center py-24 text-slate-500">
+    <div class="text-5xl mb-3">📭</div>
+    <div class="font-medium">No uploads yet.</div>
+    <div class="text-xs mt-2">Ship your first Short from the Studio to see it here.</div>
+    <a href="/" class="inline-block mt-5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm font-medium text-white transition">Go to Studio</a>
   </div>
 </main>
 
+<footer class="max-w-7xl mx-auto px-6 py-10 text-xs text-slate-600 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-slate-900 mt-10">
+  <div>ytFactory · auto-refresh every 60s · pauses when tab hidden</div>
+  <div class="flex items-center gap-4">
+    <a href="/" class="hover:text-slate-400">Studio</a>
+    <a href="https://github.com/rohitsingh30/ytFactory" target="_blank" rel="noopener" class="hover:text-slate-400">GitHub ↗</a>
+  </div>
+</footer>
+
 <script>
 const fmt = (n) => (n == null) ? "—" : n.toLocaleString();
+
+// Compact form for big tile numbers — 1.2M / 12.3K / 1,234.
+// Keeps the tile visually clean while the full number lives below.
+const fmtCompact = (n) => {
+  if (n == null) return "—";
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1).replace(/\.0$/, "") + "M";
+  if (abs >= 10_000)    return (n / 1_000).toFixed(0) + "K";
+  if (abs >= 1_000)     return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
+  return n.toLocaleString();
+};
+
 const fmtRel = (iso) => {
   if (!iso) return "";
   const t = new Date(iso).getTime();
   const diff = Math.max(0, (Date.now() - t) / 1000);
-  if (diff < 60) return Math.round(diff) + "s ago";
-  if (diff < 3600) return Math.round(diff / 60) + "m ago";
+  if (diff < 60)    return Math.round(diff) + "s ago";
+  if (diff < 3600)  return Math.round(diff / 60) + "m ago";
   if (diff < 86400) return Math.round(diff / 3600) + "h ago";
   return Math.round(diff / 86400) + "d ago";
 };
 
-const CHANNEL_LABELS = {
-  historyrecapped: "History Recapped",
-  hindutavaanimated: "HindutavaAnimated",
-  mystoriesanimated: "MyStoriesAnimated",
-  rhymetimejunction: "Rhyme Time Junction",
-  sportstoriesanimated: "SportsStoriesAnimated",
-};
-const CHANNEL_COLORS = {
-  historyrecapped:       "from-amber-700 to-stone-900 ring-amber-300/40",
-  hindutavaanimated:     "from-orange-600 to-rose-900 ring-orange-300/40",
-  mystoriesanimated:     "from-rose-500 to-orange-500 ring-rose-300/40",
-  rhymetimejunction:     "from-fuchsia-500 to-purple-600 ring-fuchsia-300/40",
-  sportstoriesanimated:  "from-emerald-600 to-teal-700 ring-emerald-300/40",
+// Channel branding — kept in sync with landing.html CHANNEL_META.
+const CHANNEL_META = {
+  historyrecapped:      { label: "History Recapped",      tagline: "War history · archival footage",     emoji: "🎖️", grad: "from-amber-700 to-stone-900",   ring: "ring-amber-300/30",   accent: "text-amber-300"   },
+  hindutavaanimated:    { label: "HindutavaAnimated",     tagline: "Mahabharat kathāyen · illustrated",  emoji: "🕉️", grad: "from-orange-600 to-rose-900",    ring: "ring-orange-300/30",  accent: "text-orange-300"  },
+  mystoriesanimated:    { label: "MyStoriesAnimated",     tagline: "Reddit drama · daily",                emoji: "🎭", grad: "from-rose-500 to-orange-500",    ring: "ring-rose-300/30",    accent: "text-rose-300"    },
+  rhymetimejunction:    { label: "Rhyme Time Junction",   tagline: "Hinglish nursery rhymes",             emoji: "🎵", grad: "from-fuchsia-500 to-purple-600", ring: "ring-fuchsia-300/30", accent: "text-fuchsia-300" },
+  sportstoriesanimated: { label: "SportsStoriesAnimated", tagline: "Football moments · the long story",  emoji: "⚽", grad: "from-emerald-600 to-teal-700",   ring: "ring-emerald-300/30", accent: "text-emerald-300" },
 };
 
+// ─── Last-fetched ticker ──────────────────────────────────────────────
 // Last successful fetch state — kept on the module so a 5s ticker can
 // re-render the relative-time string without waiting for the next /api
 // round-trip. Without this, the "Xs ago" label looked frozen between
@@ -120,75 +245,98 @@ let lastState = { latest_fetch: null, err: null };
 
 function paintLastFetched() {
   const lf = document.getElementById("last-fetched");
+  const dot = document.getElementById("status-dot");
   const { latest_fetch, err } = lastState;
   if (err) {
     lf.textContent = "⚠ " + err
-      + (latest_fetch ? " · cache last updated " + fmtRel(latest_fetch) : "");
-    lf.className = "text-xs text-amber-400";
+      + (latest_fetch ? " · cache " + fmtRel(latest_fetch) : "");
+    lf.className = "text-amber-400";
+    dot.style.background = "#f59e0b";
+    dot.style.animation = "none";
   } else if (latest_fetch) {
-    lf.textContent = "live YouTube data · last refreshed " + fmtRel(latest_fetch);
-    lf.className = "text-xs text-slate-400";
+    lf.innerHTML = `<span class="text-slate-300">Live</span> <span class="text-slate-600">·</span> <span class="text-slate-500">refreshed ${fmtRel(latest_fetch)}</span>`;
+    dot.style.background = "#34d399";
+    dot.style.animation = "";
   } else {
-    lf.textContent = "no stats cached yet — click refresh";
-    lf.className = "text-xs text-slate-400";
+    lf.textContent = "no stats cached yet";
+    lf.className = "text-slate-500";
+    dot.style.background = "#64748b";
+    dot.style.animation = "none";
   }
 }
 
+// ─── Render ───────────────────────────────────────────────────────────
 function renderRollup(d) {
-  document.getElementById("rollup-subs").textContent = fmt(d.totals.subscribers);
-  document.getElementById("rollup-videos").textContent = fmt(d.totals.videos);
-  document.getElementById("rollup-views").textContent = fmt(d.totals.views);
-  document.getElementById("rollup-likes").textContent = fmt(d.totals.likes);
-  document.getElementById("rollup-comments").textContent = fmt(d.totals.comments);
-  // Local server returns `refresh_error`; prod control plane returns
-  // `warning`. Either means stats may be stale — surface to the user.
+  const t = d.totals || {};
+  document.getElementById("rollup-subs").textContent     = fmtCompact(t.subscribers);
+  document.getElementById("rollup-videos").textContent   = fmt(t.videos);
+  document.getElementById("rollup-views").textContent    = fmtCompact(t.views);
+  document.getElementById("rollup-likes").textContent    = fmtCompact(t.likes);
+  document.getElementById("rollup-comments").textContent = fmtCompact(t.comments);
+
+  // Full numbers under the compact form, since "1.2M" hides the precision
+  // for someone double-checking against YouTube Studio.
+  const setFull = (id, v) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = (v == null) ? "" : v.toLocaleString() + " total";
+  };
+  setFull("rollup-subs-full",     t.subscribers);
+  setFull("rollup-views-full",    t.views);
+  setFull("rollup-likes-full",    t.likes);
+  setFull("rollup-comments-full", t.comments);
+
   lastState = { latest_fetch: d.latest_fetch || null, err: d.refresh_error || d.warning || null };
   paintLastFetched();
 }
 
+const PRIVACY_STYLE = {
+  public:             "bg-emerald-700/30 text-emerald-200 ring-emerald-500/30",
+  unlisted:           "bg-amber-700/30  text-amber-200  ring-amber-500/30",
+  private:            "bg-rose-700/30   text-rose-200   ring-rose-500/30",
+  "private/unlisted": "bg-slate-700/40  text-slate-200  ring-slate-500/30",
+};
+
 function videoCard(v) {
   const date = v.uploaded_at ? new Date(v.uploaded_at).toLocaleDateString(undefined, {
-    year: 'numeric', month: 'short', day: 'numeric'
+    year: "numeric", month: "short", day: "numeric"
   }) : "";
-  const PRIVACY_STYLE = {
-    public:           "bg-emerald-700/40 text-emerald-200 ring-emerald-500/30",
-    unlisted:         "bg-amber-700/40  text-amber-200  ring-amber-500/30",
-    private:          "bg-rose-700/40   text-rose-200   ring-rose-500/30",
-    "private/unlisted": "bg-slate-700/40 text-slate-200 ring-slate-500/30",
-  };
   const pCls = PRIVACY_STYLE[v.privacy] || "bg-slate-800 text-slate-300";
-  const privacy = v.privacy ? `<span class="text-[10px] px-2 py-0.5 rounded ring-1 ${pCls}">${v.privacy}</span>` : "";
+  const privacy = v.privacy
+    ? `<span class="text-[10px] px-2 py-0.5 rounded-full ring-1 ${pCls} font-medium uppercase tracking-wide">${v.privacy}</span>`
+    : "";
   const drift = (v.privacy && v.privacy_record && v.privacy !== v.privacy_record)
-    ? `<span class="text-[10px] text-amber-400/80" title="Upload record said '${v.privacy_record}' but YouTube reports '${v.privacy}' now">⚠</span>`
+    ? `<span class="text-[10px] text-amber-400" title="Upload record said '${v.privacy_record}' but YouTube reports '${v.privacy}' now">⚠</span>`
     : "";
   return `
     <a href="${v.watch_url}" target="_blank" rel="noopener"
-       class="video-card block rounded-xl border border-slate-800 bg-slate-900/40 overflow-hidden hover:border-slate-600">
+       class="video-card block rounded-2xl border border-slate-800 bg-slate-900/40 overflow-hidden">
       <div class="aspect-video bg-slate-800 relative">
         <img src="${v.thumbnail}" alt="" class="w-full h-full object-cover" loading="lazy" />
-        <div class="absolute top-2 right-2 flex items-center gap-1">${drift}${privacy}</div>
+        <div class="absolute top-2 right-2 flex items-center gap-1.5">${drift}${privacy}</div>
+        <div class="absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-black/70 to-transparent"></div>
       </div>
-      <div class="p-3">
-        <div class="text-sm font-medium leading-snug line-clamp-2 mb-2">${v.title}</div>
-        <div class="flex items-center gap-3 text-xs text-slate-400 mb-2">
+      <div class="p-3.5">
+        <div class="text-sm font-medium leading-snug line-clamp-2 mb-2 min-h-[2.5em]">${v.title}</div>
+        <div class="flex items-center gap-2 text-xs text-slate-500 mb-3">
           <span>${date}</span>
-          <span class="opacity-50">·</span>
+          <span class="opacity-40">·</span>
           <a href="${v.studio_url}" target="_blank" rel="noopener"
              onclick="event.stopPropagation()"
-             class="hover:text-slate-200 underline-offset-2 hover:underline">Studio</a>
+             class="hover:text-slate-300 underline-offset-2 hover:underline">Studio</a>
         </div>
-        <div class="grid grid-cols-3 gap-2 text-center">
-          <div class="rounded bg-slate-800/60 py-1.5">
-            <div class="text-base stat-num font-semibold text-sky-300">${fmt(v.stats.views)}</div>
-            <div class="text-[10px] text-slate-500 uppercase tracking-wide">Views</div>
+        <div class="grid grid-cols-3 gap-2">
+          <div class="rounded-lg bg-slate-800/60 py-1.5 text-center">
+            <div class="text-sm stat-num font-semibold text-sky-300">${fmtCompact(v.stats.views)}</div>
+            <div class="text-[10px] text-slate-500 uppercase tracking-wide mt-0.5">Views</div>
           </div>
-          <div class="rounded bg-slate-800/60 py-1.5">
-            <div class="text-base stat-num font-semibold text-pink-300">${fmt(v.stats.likes)}</div>
-            <div class="text-[10px] text-slate-500 uppercase tracking-wide">Likes</div>
+          <div class="rounded-lg bg-slate-800/60 py-1.5 text-center">
+            <div class="text-sm stat-num font-semibold text-pink-300">${fmtCompact(v.stats.likes)}</div>
+            <div class="text-[10px] text-slate-500 uppercase tracking-wide mt-0.5">Likes</div>
           </div>
-          <div class="rounded bg-slate-800/60 py-1.5">
-            <div class="text-base stat-num font-semibold text-emerald-300">${fmt(v.stats.comments)}</div>
-            <div class="text-[10px] text-slate-500 uppercase tracking-wide">Comments</div>
+          <div class="rounded-lg bg-slate-800/60 py-1.5 text-center">
+            <div class="text-sm stat-num font-semibold text-emerald-300">${fmtCompact(v.stats.comments)}</div>
+            <div class="text-[10px] text-slate-500 uppercase tracking-wide mt-0.5">Comments</div>
           </div>
         </div>
       </div>
@@ -197,28 +345,46 @@ function videoCard(v) {
 }
 
 function channelSection(c) {
-  const label = CHANNEL_LABELS[c.account] || c.account;
-  const grad = CHANNEL_COLORS[c.account] || "from-slate-700 to-slate-900 ring-slate-400/30";
+  const meta = CHANNEL_META[c.account] || {
+    label: c.account, tagline: "", emoji: "📺",
+    grad: "from-slate-700 to-slate-900", ring: "ring-slate-400/30", accent: "text-slate-300",
+  };
   // Subs: hidden-by-creator → "subs hidden"; null → "—" (not yet fetched).
   const subText = c.subscribers_hidden
     ? "subs hidden"
-    : (c.subscribers == null ? "— subs" : fmt(c.subscribers) + " sub" + (c.subscribers === 1 ? "" : "s"));
+    : (c.subscribers == null
+        ? "— subs"
+        : fmtCompact(c.subscribers) + " sub" + (c.subscribers === 1 ? "" : "s"));
   return `
     <div>
-      <div class="flex items-end justify-between mb-4 pb-3 border-b border-slate-800">
-        <div class="flex items-center gap-3">
-          <div class="w-10 h-10 rounded-lg bg-gradient-to-br ${grad} ring-2 grid place-items-center text-white font-bold text-lg shadow-lg">
-            ${label.split(/\s+/).map(w => w[0]).slice(0,2).join('')}
+      <div class="flex items-start gap-4 mb-5">
+        <div class="w-14 h-14 rounded-2xl bg-gradient-to-br ${meta.grad} ring-2 ${meta.ring} grid place-items-center text-2xl shadow-lg flex-shrink-0">
+          ${meta.emoji}
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <h2 class="text-xl font-semibold tracking-tight">${meta.label}</h2>
+            <span class="channel-pill bg-violet-700/30 text-violet-200 ring-1 ring-violet-500/30">
+              <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+                <path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+              </svg>
+              ${subText}
+            </span>
           </div>
-          <div>
-            <div class="flex items-center gap-2">
-              <h2 class="text-lg font-semibold">${label}</h2>
-              <span class="channel-pill bg-violet-700/40 text-violet-200 ring-1 ring-violet-500/30">👥 ${subText}</span>
-            </div>
-            <div class="text-xs text-slate-500">${c.video_count} video${c.video_count===1?'':'s'} · ${fmt(c.totals.views)} views · ${fmt(c.totals.likes)} likes · ${fmt(c.totals.comments)} comments</div>
+          <div class="text-xs text-slate-500 mt-1">${meta.tagline || ""}</div>
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-xs">
+            <span class="text-slate-400">${c.video_count} video${c.video_count === 1 ? "" : "s"}</span>
+            <span class="text-slate-700">·</span>
+            <span><span class="stat-num font-semibold text-sky-300">${fmtCompact(c.totals.views)}</span> <span class="text-slate-500">views</span></span>
+            <span class="text-slate-700">·</span>
+            <span><span class="stat-num font-semibold text-pink-300">${fmtCompact(c.totals.likes)}</span> <span class="text-slate-500">likes</span></span>
+            <span class="text-slate-700">·</span>
+            <span><span class="stat-num font-semibold text-emerald-300">${fmtCompact(c.totals.comments)}</span> <span class="text-slate-500">comments</span></span>
           </div>
         </div>
       </div>
+      <div class="channel-divider h-px mb-5"></div>
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         ${c.videos.map(videoCard).join("")}
       </div>
@@ -226,6 +392,7 @@ function channelSection(c) {
   `;
 }
 
+// ─── Polling loop ─────────────────────────────────────────────────────
 const REFRESH_MS = 60_000;
 let inflight = false;
 let pollTimer = null;
@@ -237,8 +404,13 @@ async function load(refresh = false) {
   if (inflight) return;
   inflight = true;
   const btn = document.getElementById("refresh-btn");
+  const lbl = document.getElementById("refresh-label");
+  const icon = document.getElementById("refresh-icon");
   btn.disabled = true;
-  if (refresh) btn.textContent = "Refreshing…";
+  if (refresh) {
+    lbl.textContent = "Refreshing…";
+    icon.style.animation = "spin 0.8s linear infinite";
+  }
   try {
     const url = "/api/dashboard/videos" + (refresh ? "?refresh=true" : "");
     const r = await fetch(url);
@@ -259,7 +431,8 @@ async function load(refresh = false) {
   } finally {
     inflight = false;
     btn.disabled = false;
-    btn.textContent = "Refresh from YouTube";
+    lbl.textContent = "Refresh";
+    icon.style.animation = "";
   }
 }
 
@@ -295,10 +468,113 @@ document.addEventListener("visibilitychange", async () => {
 // progressing between actual fetches. Doesn't hit the network.
 setInterval(paintLastFetched, 5_000);
 
+// Spin keyframes for the refresh icon (we trigger via inline style above
+// so we don't need a Tailwind plugin).
+const _spinSheet = document.createElement("style");
+_spinSheet.textContent = "@keyframes spin { to { transform: rotate(360deg); } }";
+document.head.appendChild(_spinSheet);
+
+// ---- YouTube OAuth auth health (cross-engagement) ----------------------
+
+const AUTH_STATE_LABELS = {
+  ok:               { label: "ready",            color: "text-emerald-300" },
+  no_refresh_token: { label: "no refresh token", color: "text-amber-300" },
+  missing_scopes:   { label: "missing scopes",   color: "text-amber-300" },
+  unreadable:       { label: "unreadable",       color: "text-rose-300" },
+  missing:          { label: "no token",         color: "text-rose-300" },
+};
+
+async function loadAuthHealth() {
+  try {
+    const r = await fetch("/api/youtube/auth/status");
+    const d = await r.json();
+    paintAuthHealth(d.accounts || []);
+  } catch (e) {
+    document.getElementById("auth-health-grid").innerHTML =
+      `<div class="text-rose-300">auth status fetch failed: ${e.message}</div>`;
+  }
+}
+
+function paintAuthHealth(accounts) {
+  const grid = document.getElementById("auth-health-grid");
+  if (!accounts.length) {
+    grid.innerHTML = `<div class="text-slate-400">No OAuth accounts found in ~/.config/ytfactory/.</div>`;
+    return;
+  }
+  grid.innerHTML = accounts.map(a => {
+    const meta = AUTH_STATE_LABELS[a.state] || { label: a.state, color: "text-slate-400" };
+    const title = a.channel_title ? ` · ${a.channel_title}` : "";
+    const detail = a.state === "missing_scopes"
+      ? `<span class="text-xs text-slate-500">missing: ${(a.missing||[]).join(", ")}</span>`
+      : "";
+    const inflight = a.reauth_in_flight && a.reauth_url
+      ? `<a href="${a.reauth_url}" target="_blank" class="text-xs text-sky-300 underline">↗ open auth URL</a>`
+      : "";
+    const btn = a.state === "ok"
+      ? `<button data-account="${a.account}" class="reauth-btn text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700">Re-auth</button>`
+      : `<button data-account="${a.account}" class="reauth-btn text-xs px-2 py-1 rounded bg-amber-700 hover:bg-amber-600">Re-auth</button>`;
+    return `
+      <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 flex items-center justify-between gap-3">
+        <div>
+          <div class="font-medium">${a.account}${title}</div>
+          <div class="${meta.color} text-xs">${meta.label}</div>
+          ${detail}
+          ${inflight}
+        </div>
+        ${btn}
+      </div>`;
+  }).join("");
+
+  for (const b of grid.querySelectorAll(".reauth-btn")) {
+    b.addEventListener("click", async (e) => {
+      e.preventDefault();
+      const account = b.dataset.account;
+      b.disabled = true; b.textContent = "starting…";
+      try {
+        const r = await fetch("/api/youtube/auth/start/" + encodeURIComponent(account), { method: "POST" });
+        const d = await r.json();
+        if (d.url) {
+          window.open(d.url, "_blank", "noopener");
+          b.textContent = "URL opened — click Allow";
+        } else if (d.status === "done" && d.ok) {
+          b.textContent = "✓ done"; await loadAuthHealth();
+        } else {
+          b.textContent = "started";
+        }
+        // Poll until subprocess exits, then refresh.
+        const poll = setInterval(async () => {
+          const pr = await fetch("/api/youtube/auth/poll/" + encodeURIComponent(account)).then(r => r.json());
+          if (pr.status === "completed" || pr.status === "failed") {
+            clearInterval(poll);
+            await loadAuthHealth();
+          }
+        }, 3000);
+      } catch (err) {
+        b.disabled = false; b.textContent = "Re-auth (err)";
+        console.error(err);
+      }
+    });
+  }
+}
+
+document.getElementById("cross-subscribe-btn").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true; btn.textContent = "subscribing…";
+  try {
+    const r = await fetch("/api/youtube/cross_engage/subscribe_all", { method: "POST" });
+    const d = await r.json();
+    btn.textContent = `subscribed ${(d.results||[]).length} pairs ✓`;
+  } catch (err) {
+    btn.textContent = "failed";
+  }
+  setTimeout(() => { btn.disabled = false; btn.textContent = "Cross-subscribe all"; }, 4000);
+});
+
 // Always hit YouTube on page load + every 60s so view/like/comment counts
 // stay live. videos.list?part=statistics is 1 quota unit per batched call
 // (≤50 ids), so refreshing every minute is well under the 10k daily cap.
-(async () => { await load(true); schedulePoll(); })();
+(async () => { await load(true); await loadAuthHealth(); schedulePoll(); })();
+setInterval(loadAuthHealth, 30_000);
 </script>
 </body>
 </html>

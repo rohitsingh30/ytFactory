@@ -33,12 +33,19 @@ source_adapter: sports_moments_manual  # adapter ID (internal); not the channel 
 # preventing.
 narrator_visual_mode: voice_only
 
-# TTS — Cartesia Sonic-2 + "Theo" (steady, enunciating, confident young
-# male). Migrated 2026-05-03 from kokoro/am_michael. Tifo's vibe is
-# measured, not hype, so we run a hair under 1.0 (maps to Cartesia
-# "slow"). Requires CARTESIA_API_KEY env var at render time.
-tts_provider: cartesia
-tts_voice: 79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e  # Theo, US male narrator
+# TTS — F5-TTS-MLX with a 9.5s ref clip of the original Cartesia "Theo"
+# narration (cloned voice). Migrated 2026-05-04 from cartesia/Theo
+# after the $5 prepay exhausted in <1h. Free, no API cap, MLX-native on
+# Apple Silicon. Tifo's vibe is measured, not hype, so we keep tts_speed
+# a hair under 1.0; F5-TTS honours speed natively.
+#
+# Cartesia fallback (paid, ship-quality): re-enable by reverting these
+# lines to:
+#   tts_provider: cartesia
+#   tts_voice: 79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e  # Theo
+tts_provider: f5_tts
+tts_voice: pipeline/voice_refs/theo.wav
+tts_ref_text: "May 1940. The German blitzkrieg has cut through France in three weeks. Three hundred and thirty-eight thousand British and French soldiers"
 tts_speed: 0.98
 
 # Visuals — static-image-per-beat slideshow path (Ken Burns zoom in

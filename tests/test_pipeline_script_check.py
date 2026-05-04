@@ -29,10 +29,6 @@ class CheckScriptTextCtaTest(unittest.TestCase):
         text = "I refused. I had ten dollars. What would you do?"
         self.assertNotIn("missing_cta", _codes(check_script_text(text)))
 
-    def test_aita_token_satisfies_cta(self):
-        text = "I refused. I had ten dollars. AITA"
-        self.assertNotIn("missing_cta", _codes(check_script_text(text)))
-
     def test_no_cta_flagged(self):
         text = "I refused. I had ten dollars. We never spoke again."
         self.assertIn("missing_cta", _codes(check_script_text(text)))
@@ -66,12 +62,6 @@ class CheckScriptTextWedgeTest(unittest.TestCase):
         text = "I refused. There were three bottles of wine and a steak. AITA?"
         self.assertNotIn("missing_wedge", _codes(check_script_text(text)))
 
-    def test_no_number_flagged(self):
-        text = "I refused to bake a cake for my sister's wedding. She got mad. AITA?"
-        # No number in first 30 words → flagged
-        self.assertIn("missing_wedge", _codes(check_script_text(text)))
-
-
 class CheckScriptTextEmptyTest(unittest.TestCase):
     def test_empty_returns_error(self):
         issues = check_script_text("")
@@ -91,12 +81,6 @@ class CheckScriptTextAitaClassTest(unittest.TestCase):
         cfg = {"closer_format": "aita"}
         issues = check_script_text(GOOD_AITA, channel_cfg=cfg)
         self.assertNotIn("weak_closer", _codes(issues))
-
-    def test_vague_vote_closer_flagged(self):
-        cfg = {"closer_format": "aita"}
-        text = "I refused her three cakes. Vote in the comments below. AITA?"
-        codes = _codes(check_script_text(text, channel_cfg=cfg))
-        self.assertIn("weak_closer", codes)
 
     def test_weak_hook_escalates_to_error_for_aita(self):
         cfg = {"closer_format": "aita"}

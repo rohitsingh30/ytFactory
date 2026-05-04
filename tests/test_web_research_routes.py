@@ -45,13 +45,18 @@ class ResearchRoutesTest(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         body = r.json()
         self.assertIn("videos", body)
-        self.assertEqual(len(body["videos"]), 3)
+        # 3 sports YouTube videos + 1 history = 4 (matches the new fixture).
+        self.assertEqual(len(body["videos"]), 4)
 
-    def test_channels_route_returns_three_kinds(self):
+    def test_channels_route_returns_one_row_per_config(self):
         r = self.client.get("/api/research/channels")
         self.assertEqual(r.status_code, 200)
-        kinds = {row["kind"] for row in r.json()["channels"]}
-        self.assertEqual(kinds, {"yaml", "intermediate", "account"})
+        rows = r.json()["channels"]
+        self.assertEqual({row["kind"] for row in rows}, {"channel"})
+        self.assertEqual(
+            {row["channel"] for row in rows},
+            {"sportstoriesanimated", "historyrecapped"},
+        )
 
     def test_learnings_route_returns_memory_and_critique(self):
         r = self.client.get("/api/research/learnings")
@@ -63,7 +68,7 @@ class ResearchRoutesTest(unittest.TestCase):
         r = self.client.post("/api/research/rebuild")
         self.assertEqual(r.status_code, 200)
         body = r.json()
-        self.assertEqual(body["videos"], 3)
+        self.assertEqual(body["videos"], 4)
         self.assertGreater(body["channels"], 0)
         self.assertGreater(body["learnings"], 0)
         self.assertNotIn("analytics", body)  # default: no network call

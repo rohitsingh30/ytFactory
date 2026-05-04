@@ -11,6 +11,8 @@ keys off it). Channel scope EXPANDED 2026-05-03 from "Mahabharat-only" to
 "any Hindu mythology" after the Hanuman/Ramayan story shipped well; the
 ॐ icon was chosen specifically for this brand-flexibility.
 
+Caption-emoji density rule (one emoji per 3-5 spoken words): see `/docs/shorts_caption_emoji_density.md` (cross-channel).
+
 ## Status (2026-05-03)
 - 4 episodes SHIPPED, all public:
   - **abhimanyu-chakravyuh** — https://youtu.be/Tf92NmOA0lw — "जब 16 साल के लड़के ने कौरवों के 7 महारथियों को धूल चटाई" — 41s, Mahabharat. First viral signal — user reports it "did well."

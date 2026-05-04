@@ -2,18 +2,40 @@
 
 Backends:
 
-    * ``kokoro`` (default) — Kokoro 82M via ``kokoro-onnx``.
-      ~169 MB model + 26 MB voices, fast on CPU, fixed voice library.
-      Channel ``tts_voice`` is one of the Kokoro voice IDs (``af_bella``
-      etc.).
+    * ``kokoro`` — Kokoro 82M via ``kokoro-onnx``. ~169 MB model + 26 MB
+      voices, fast on CPU, fixed voice library. Channel ``tts_voice``
+      is one of the Kokoro voice IDs (``af_bella`` etc.). Default for
+      airecap and historyrecapped long-form (Apache 2.0).
 
-    * ``f5_tts`` (opt-in) — F5-TTS-MLX. ~1.35 GB. Zero-shot voice cloning
-      from a 5–15s reference clip. Channel ``tts_voice`` is interpreted
-      as the path to that reference WAV; ``tts_ref_text`` is required.
+    * ``f5_tts`` — F5-TTS-MLX. ~1.35 GB. Zero-shot voice cloning from a
+      5-15s reference WAV. Apple-Silicon-native (MLX). Channel
+      ``tts_voice`` is the ref-WAV path; ``tts_ref_text`` is required.
+      Default for sober English narration (historyrecapped Shorts,
+      sportstoriesanimated). MIT.
 
-The ``kokoro`` model is downloaded eagerly on first synth. ``f5_tts``
-requires the optional ``f5-tts-mlx`` PyPI package and downloads its
-model from HF on first use.
+    * ``chatterbox`` — Resemble AI Chatterbox. ~3 GB. Zero-shot voice
+      cloning + emotion-exaggeration control. Channel ``tts_voice`` is
+      the ref-WAV path. Default for emotional narration
+      (mystoriesanimated AITA). MIT.
+
+    * ``styletts2`` — StyleTTS2. Best open-source long-form prosody.
+      Channel ``tts_voice`` is the ref-WAV path. Opt-in upgrade for
+      long-form sleep narration. MIT.
+
+    * ``indic_parler`` — AI4Bharat Indic Parler-TTS. Description-
+      conditioned (NOT voice-cloned). Covers 20 Indic languages
+      including Hindi. Channel ``tts_voice`` is a natural-language
+      description of the desired voice. Default for hindutavaanimated.
+      Apache 2.0.
+
+    * ``cartesia`` — Cartesia Sonic-2 (paid API). Pre-2026-05-04 default;
+      now retained as a per-channel override for ship-quality renders
+      where the cost is justified. Requires ``CARTESIA_API_KEY``.
+
+All local providers download their model on first synth into the HF
+cache (or ``~/.cache/ytfactory/`` for kokoro). The optional providers
+require the matching pip-install; see ``requirements.txt`` for the
+opt-in install lines.
 """
 
 from __future__ import annotations
@@ -843,6 +865,330 @@ def _synth_f5_tts(
     return out_path
 
 
+# ---------- chatterbox (Resemble AI, MIT, voice cloning, opt-in) -----------
+#
+# Chatterbox is Resemble AI's open-source TTS — MIT-licensed, free for
+# commercial use, runs locally on Apple Silicon via PyTorch MPS. Beat
+# ElevenLabs in blind A/B tests (63.75% preference, 2026 benchmarks) and
+# has built-in emotion-exaggeration control which makes it the right
+# fit for AITA-style emotional storytelling on mystoriesanimated.
+#
+# Channel `tts_voice` is interpreted as the path to a 5-15s reference WAV
+# of the target voice (same convention as f5_tts). `ref_audio_text` is
+# NOT required by Chatterbox (it does not need the transcript — unlike
+# F5-TTS — because its zero-shot path conditions on audio embeddings only).
+#
+# Output watermark: Chatterbox embeds Resemble's perceptually-inaudible
+# Perth watermark for AI-detection traceability. It does not affect
+# listening quality or YouTube monetization.
+
+_CHATTERBOX_MODEL = None  # lazy global, lives across synth calls
+
+
+def _chatterbox_model():
+    """Lazy-load + cache the Chatterbox model singleton.
+
+    First call: ~3 GB checkpoint download into the HF cache. Subsequent
+    calls reuse the in-memory model — costs ~6 GB of RAM, fine on M2 Max.
+    """
+    global _CHATTERBOX_MODEL
+    if _CHATTERBOX_MODEL is None:
+        try:
+            from chatterbox.tts import ChatterboxTTS  # type: ignore
+        except ImportError as e:
+            raise RuntimeError(
+                "TTS provider 'chatterbox' requires the chatterbox-tts package.\n"
+                "  install: .venv/bin/pip install chatterbox-tts\n"
+                f"  underlying error: {e}"
+            ) from e
+        # Apple Silicon → MPS; falls back to CPU on other hardware.
+        # The lib's from_pretrained handles device routing internally.
+        import torch  # type: ignore
+
+        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        _CHATTERBOX_MODEL = ChatterboxTTS.from_pretrained(device=device)
+    return _CHATTERBOX_MODEL
+
+
+def _synth_chatterbox(
+    text: str,
+    ref_audio_path: str,
+    out_path: Path,
+    speed: float,
+    exaggeration: float = 0.5,
+    cfg_weight: float = 0.5,
+) -> Path:
+    """Zero-shot voice cloning via Chatterbox.
+
+    Requires::
+
+        .venv/bin/pip install chatterbox-tts
+
+    `ref_audio_path` should be a 5-15s WAV of the target voice. `speed`
+    is mapped to the post-synth atempo factor — Chatterbox's generator
+    runs at native rate; we ffmpeg-stretch the output to match the
+    channel's `tts_speed`. `exaggeration` (0.0-1.0) controls emotion
+    intensity — 0.5 is the library default and the right neutral for
+    AITA conversational; bump toward 0.7 for high-drama stories.
+    """
+    import numpy as _np
+    import soundfile as _sf
+
+    model = _chatterbox_model()
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    wav = model.generate(
+        text,
+        audio_prompt_path=ref_audio_path,
+        exaggeration=exaggeration,
+        cfg_weight=cfg_weight,
+    )
+    # Chatterbox returns a torch.Tensor at model.sr (24kHz typically).
+    sr = int(model.sr)
+    audio_np = wav.detach().cpu().numpy().squeeze()
+
+    # Apply speed via post-synth atempo if requested. atempo accepts
+    # 0.5-2.0 in a single pass; outside that range it'd need chaining,
+    # but channel tts_speed is always within 0.85-1.2 in practice.
+    if abs(speed - 1.0) > 0.01:
+        raw_path = out_path.with_suffix(".raw.wav")
+        _sf.write(raw_path, audio_np, sr)
+        import subprocess as _sp
+
+        cmd = [
+            "ffmpeg", "-y", "-i", str(raw_path),
+            "-filter:a", f"atempo={speed:.4f}",
+            "-ar", str(sr), "-ac", "1",
+            str(out_path),
+        ]
+        _sp.run(cmd, check=True, capture_output=True)
+        raw_path.unlink(missing_ok=True)
+    else:
+        _sf.write(out_path, audio_np, sr)
+
+    return out_path
+
+
+# ---------- styletts2 (best long-form prosody, opt-in) ---------------------
+#
+# StyleTTS2 (Aaron (Yinghao) Li, MIT) is the best open-source model for
+# long-form narration prosody — used here as the upgrade path for the
+# historyrecapped long-form sleep videos. The default Kokoro+atempo
+# pipeline at the top of this file is fully sufficient for most
+# narrations; switch to StyleTTS2 only when prosody quality is the
+# bottleneck (e.g. a 60-min sleep video where micro-pauses and rhythm
+# carry the listener through).
+#
+# Channel `tts_voice` is the path to a 5-15s reference WAV.
+#
+# Why not the default for short channels: StyleTTS2's PyTorch path is
+# slower than F5-TTS-MLX or Kokoro on M2 Max, and the prosody lift is
+# most audible past ~30s of continuous narration. For Shorts the cost
+# isn't worth it; F5-TTS-MLX is the pick.
+
+_STYLETTS2_MODEL = None
+
+
+def _styletts2_model():
+    global _STYLETTS2_MODEL
+    if _STYLETTS2_MODEL is None:
+        try:
+            from styletts2 import tts as _styletts2_tts  # type: ignore
+        except ImportError as e:
+            raise RuntimeError(
+                "TTS provider 'styletts2' requires the styletts2 package.\n"
+                "  install: .venv/bin/pip install styletts2\n"
+                f"  underlying error: {e}"
+            ) from e
+        _STYLETTS2_MODEL = _styletts2_tts.StyleTTS2()
+    return _STYLETTS2_MODEL
+
+
+def _synth_styletts2(
+    text: str,
+    ref_audio_path: str,
+    out_path: Path,
+    speed: float,
+    alpha: float = 0.3,
+    beta: float = 0.7,
+    diffusion_steps: int = 7,
+    embedding_scale: float = 1.0,
+) -> Path:
+    """Long-form-tuned synthesis via StyleTTS2.
+
+    Requires::
+
+        .venv/bin/pip install styletts2
+
+    `alpha`/`beta` blend timbre vs prosody from the reference clip; the
+    library's recommended defaults (0.3/0.7) preserve speaker identity
+    while leaning on the model's own prosody style — exactly the right
+    balance for sleep narration where consistency matters more than
+    mimicking every micro-inflection of the ref.
+    """
+    import soundfile as _sf
+
+    model = _styletts2_model()
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    audio = model.inference(
+        text,
+        target_voice_path=ref_audio_path,
+        alpha=alpha,
+        beta=beta,
+        diffusion_steps=diffusion_steps,
+        embedding_scale=embedding_scale,
+    )
+    # StyleTTS2 returns a numpy array at 24kHz.
+    sr = 24000
+    _sf.write(out_path, audio, sr)
+
+    if abs(speed - 1.0) > 0.01:
+        raw_path = out_path.with_suffix(".raw.wav")
+        out_path.rename(raw_path)
+        import subprocess as _sp
+
+        cmd = [
+            "ffmpeg", "-y", "-i", str(raw_path),
+            "-filter:a", f"atempo={speed:.4f}",
+            "-ar", str(sr), "-ac", "1",
+            str(out_path),
+        ]
+        _sp.run(cmd, check=True, capture_output=True)
+        raw_path.unlink(missing_ok=True)
+
+    return out_path
+
+
+# ---------- indic_parler (AI4Bharat, Apache 2.0, Hindi + 19 Indic langs) ---
+#
+# Indic Parler-TTS is the AI4Bharat + HuggingFace audio team's
+# Apache-2.0 model covering 20 Indic languages including Hindi. Free,
+# commercial-safe, and the only credible open-source path for Hindi
+# narration on hindutavaanimated.
+#
+# DIFFERENT INTERFACE: Parler-TTS is description-conditioned, not
+# voice-cloned. Channel `tts_voice` is interpreted as a NATURAL-LANGUAGE
+# DESCRIPTION of the target voice (e.g. "A female speaker delivers a
+# slightly expressive and animated speech with a moderate speed and
+# pitch. The recording is of very high quality, with the speaker's
+# voice sounding clear and very close up."). The library has named
+# voices (Rohit, Divya, Sneha, etc.) — name them in the description
+# and the model conditions on that identity.
+#
+# Reference: https://huggingface.co/ai4bharat/indic-parler-tts
+
+_INDIC_PARLER_MODEL = None
+_INDIC_PARLER_TOKENIZER = None
+_INDIC_PARLER_DESC_TOKENIZER = None
+
+
+def _indic_parler_model():
+    global _INDIC_PARLER_MODEL, _INDIC_PARLER_TOKENIZER, _INDIC_PARLER_DESC_TOKENIZER
+    if _INDIC_PARLER_MODEL is None:
+        try:
+            from parler_tts import ParlerTTSForConditionalGeneration  # type: ignore
+            from transformers import AutoTokenizer  # type: ignore
+        except ImportError as e:
+            raise RuntimeError(
+                "TTS provider 'indic_parler' requires the parler-tts package.\n"
+                "  install: .venv/bin/pip install git+https://github.com/huggingface/parler-tts.git\n"
+                f"  underlying error: {e}"
+            ) from e
+        import torch  # type: ignore
+
+        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        repo = "ai4bharat/indic-parler-tts"
+        try:
+            _INDIC_PARLER_MODEL = ParlerTTSForConditionalGeneration.from_pretrained(
+                repo
+            ).to(device)
+        except OSError as e:
+            if "gated" in str(e).lower() or "403" in str(e):
+                raise RuntimeError(
+                    "TTS provider 'indic_parler' needs HuggingFace gated-repo access.\n"
+                    f"  1. Visit https://huggingface.co/{repo}\n"
+                    "  2. Click 'Agree and access repository' (one-time, free)\n"
+                    "  3. Ensure your HF token is logged in: huggingface-cli login\n"
+                    f"  underlying error: {e}"
+                ) from e
+            raise
+        _INDIC_PARLER_TOKENIZER = AutoTokenizer.from_pretrained(repo)
+        # Parler uses a SEPARATE tokenizer for the description prompt
+        # (the description encoder is a t5-class model, the prompt
+        # encoder is the model's own tokenizer).
+        _INDIC_PARLER_DESC_TOKENIZER = AutoTokenizer.from_pretrained(
+            _INDIC_PARLER_MODEL.config.text_encoder._name_or_path
+        )
+    return _INDIC_PARLER_MODEL, _INDIC_PARLER_TOKENIZER, _INDIC_PARLER_DESC_TOKENIZER
+
+
+_INDIC_PARLER_DEFAULT_DESCRIPTION = (
+    "Sneha speaks in a calm, gentle, expressive Hindi storytelling tone "
+    "with a moderate speed and warm pitch. The recording is of very high "
+    "quality, with the speaker's voice sounding clear and very close up, "
+    "no background noise."
+)
+
+
+def _synth_indic_parler(
+    text: str,
+    description: str,
+    out_path: Path,
+    speed: float,
+) -> Path:
+    """Hindi (and other Indic-language) synthesis via Indic Parler-TTS.
+
+    Requires::
+
+        .venv/bin/pip install git+https://github.com/huggingface/parler-tts.git
+
+    `description` is a natural-language description of the desired voice
+    (speaker name, emotion, pace, recording quality). The channel YAML
+    surfaces this via `tts_voice` — e.g. set `tts_voice: "Sneha speaks
+    calmly..."` to name the speaker. Empty/None falls back to the
+    default Sneha description above.
+    """
+    import soundfile as _sf
+    import torch  # type: ignore
+
+    model, tok, desc_tok = _indic_parler_model()
+    desc_text = description or _INDIC_PARLER_DEFAULT_DESCRIPTION
+
+    device = next(model.parameters()).device
+    desc_inputs = desc_tok(desc_text, return_tensors="pt").to(device)
+    prompt_inputs = tok(text, return_tensors="pt").to(device)
+
+    with torch.no_grad():
+        gen = model.generate(
+            input_ids=desc_inputs.input_ids,
+            attention_mask=desc_inputs.attention_mask,
+            prompt_input_ids=prompt_inputs.input_ids,
+            prompt_attention_mask=prompt_inputs.attention_mask,
+        )
+    audio = gen.cpu().numpy().squeeze()
+    sr = model.config.sampling_rate
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _sf.write(out_path, audio, sr)
+
+    if abs(speed - 1.0) > 0.01:
+        raw_path = out_path.with_suffix(".raw.wav")
+        out_path.rename(raw_path)
+        import subprocess as _sp
+
+        cmd = [
+            "ffmpeg", "-y", "-i", str(raw_path),
+            "-filter:a", f"atempo={speed:.4f}",
+            "-ar", str(sr), "-ac", "1",
+            str(out_path),
+        ]
+        _sp.run(cmd, check=True, capture_output=True)
+        raw_path.unlink(missing_ok=True)
+
+    return out_path
+
+
 # ---------- TTS-input normalisation ---------------------------------------
 #
 # Kokoro (and most neural TTS) reads "$2000" as "two zero zero zero" because
@@ -1516,6 +1862,33 @@ def synthesize(
             out_path=out_path,
             speed=speed,
         )
+    if provider == "chatterbox":
+        # `voice` = path to a 5-15s reference WAV. ref_audio_text not
+        # required — Chatterbox conditions on audio embeddings only.
+        return _synth_chatterbox(
+            text,
+            ref_audio_path=voice,
+            out_path=out_path,
+            speed=speed,
+        )
+    if provider == "styletts2":
+        # `voice` = path to a 5-15s reference WAV.
+        return _synth_styletts2(
+            text,
+            ref_audio_path=voice,
+            out_path=out_path,
+            speed=speed,
+        )
+    if provider == "indic_parler":
+        # `voice` = natural-language description of the target speaker
+        # (NOT a ref-WAV path). Empty → falls back to the default Sneha
+        # description in `_synth_indic_parler`.
+        return _synth_indic_parler(
+            text,
+            description=voice,
+            out_path=out_path,
+            speed=speed,
+        )
     if provider == "cartesia":
         # Channel YAML declares `tts_language: hi` (or es/fr/etc.) for
         # non-English narration; passes through here as the `language`
@@ -1529,5 +1902,5 @@ def synthesize(
         )
     raise ValueError(
         f"unknown TTS provider {provider!r} "
-        "(choices: kokoro, f5_tts, cartesia)"
+        "(choices: kokoro, f5_tts, chatterbox, styletts2, indic_parler, cartesia)"
     )

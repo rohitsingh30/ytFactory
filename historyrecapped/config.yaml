@@ -72,9 +72,12 @@ narrator_visual_mode: voice_only
 # Migrated 2026-05-03 from kokoro/am_michael. tts_speed=0.95 maps to
 # Cartesia "slow" — slightly slower than sports for gravitas; cadence
 # sells the weight of the moment. Requires CARTESIA_API_KEY env var.
-tts_provider: cartesia
-tts_voice: 79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e  # Theo, US male narrator
-tts_speed: 0.95
+# TEMP override 2026-05-03: Cartesia credits exhausted mid-batch; rendering
+# remaining 9 slugs on Kokoro/am_michael for human review only. Restore to
+# Cartesia/Theo (79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e) before any upload.
+tts_provider: kokoro
+tts_voice: am_michael
+tts_speed: 1.0
 
 # ---- Image gen — illustrated military-history-book aesthetic ----------
 # Reference: Osprey Publishing combat plates + period war-art (Howard
@@ -199,3 +202,107 @@ upload:
     ━━━━━━━━━━━━━━━━━━━━
 
     #shorts #history #ww2 #militaryhistory #warhistory #documentary #historyrecapped
+
+# ---- Long-form sleep mode -------------------------------------------------
+# History Recapped also publishes 60-120 min long-form sleep videos to the
+# SAME channel (rsinghtomar54@gmail.com / @HistoryRecapped). 16:9 horizontal,
+# soft narrator, ambient music bed, periodic inline like/sub asks.
+# Renderer: scripts/historyrecapped/render_long_form.py
+#   .venv/bin/python scripts/historyrecapped/render_long_form.py \
+#       --channel historyrecapped --slug <long-slug>
+# See learnings/long_form_channel.md, long_form_support_asks.md, long_form_sources.md
+long_form:
+  # Voice — Kokoro local (free, unlimited) / bf_isabella. Cartesia/Sarah is
+  # the premium fallback when paid credits are restored (see commented block).
+  # Kokoro speed=1.0 + ffmpeg atempo=0.6 → ~105 wpm sleep cadence.
+  # NEVER use af_nicole (rejected 2026-05-04 as too whispery).
+  tts_provider: kokoro
+  tts_voice: bf_isabella
+  tts_speed: 1.0
+  tts_post_atempo: 0.6
+  tts_chunk_target_chars: 380
+  tts_chunk_join_silence_s: 0.4
+  # Cartesia premium fallback (re-enable when credits restored):
+  #   tts_provider: cartesia
+  #   tts_voice: 694f9389-aac1-45b6-b726-9d9369183238  # Sarah, soft US female
+  #   tts_speed: 0.95
+  #   tts_post_atempo: 0.85
+
+  # Audio mix
+  audio_narration_db: -6
+  audio_music_bed_db: -28
+  audio_source_mix: 0.0     # mute the source film's narration + score (ContentID safety)
+
+  # Output
+  duration_target_s: [3600, 7200]
+  output_resolution: [1920, 1080]    # 16:9 horizontal — long-form, NOT Shorts
+  output_fps: 30
+  # captions_enabled: true was attempted on western-front-1914-1918-sleep
+  # (2026-05-04) and OOM-killed during whisper-align; flipping to false to
+  # ship the audio+video first, captions added in a follow-up pass once GPU/
+  # memory contention from parallel renders is cleared.
+  captions_enabled: false
+
+  # Periodic support asks are INLINE in the narration text — no animated
+  # screen, no video cut, no music dip. The script author embeds them at
+  # paragraph boundaries every ~15-20 min. See learnings/long_form_support_asks.md
+  # for the soft-voice template + cadence rules.
+
+  # Music bed — looped + crossfaded ambient track. Drop royalty-free wavs
+  # into historyrecapped/music/.
+  music_bed_default: aether-loop.wav
+
+  # Footage cache for long-form sources.
+  footage_dir: footage/long_sources
+
+# ---- Long-form sleep mode -------------------------------------------------
+# History Recapped also publishes 60-120 min long-form sleep videos to the
+# SAME channel (rsinghtomar54@gmail.com / @HistoryRecapped). Soft narrator
+# (Sarah, atempo 0.85), 16:9 horizontal, NO captions, ambient music bed,
+# periodic like/sub asks. Renderer: scripts/historyrecapped/render_long_form.py
+# Pick the right slug name (e.g. `pacific-war-1941-1942-sleep`) and call:
+#   .venv/bin/python scripts/historyrecapped/render_long_form.py \
+#       --channel historyrecapped --slug <long-slug>
+# See learnings/long_form_channel.md, long_form_support_asks.md, long_form_sources.md
+long_form:
+  # Voice — Cartesia Sonic-2 / Sarah (US female, intimate, soft) at "slow"
+  # bucket + ffmpeg atempo 0.85 → ~158 wpm sleep cadence. Validated 2026-05-03
+  # via 3-way A/B (samples at historyrecapped/cache/_voice_samples/), and re-
+  # confirmed 2026-05-04 after a Kokoro detour (af_nicole was rejected as too
+  # whispery). Premium quality is the user's stated requirement and Cartesia
+  # credits are now restored. Cost: ~30k chars per 50-min episode ≈ $1.50.
+  tts_provider: cartesia
+  tts_voice: 694f9389-aac1-45b6-b726-9d9369183238  # Sarah, soft US female
+  tts_speed: 0.95     # → Cartesia "slow" bucket; atempo below brings to sleep cadence
+  tts_post_atempo: 0.85
+  tts_chunk_target_chars: 380
+  tts_chunk_join_silence_s: 0.4
+  # Kokoro fallback (only when Cartesia credits are exhausted — see
+  # feedback_cartesia_402_resumable.md):
+  #   tts_provider: kokoro
+  #   tts_voice: bf_isabella   # NOT af_nicole (whispery, hard to hear)
+  #   tts_speed: 1.0
+  #   tts_post_atempo: 1.0
+
+  # Audio mix
+  audio_narration_db: -6
+  audio_music_bed_db: -28
+  audio_source_mix: 0.0     # mute the source film's narration + score (ContentID safety)
+
+  # Output
+  duration_target_s: [3600, 7200]
+  output_resolution: [1920, 1080]    # 16:9 horizontal — long-form, NOT Shorts
+  output_fps: 30
+  captions_enabled: true              # whisper-aligned ASS subtitle burn (sentence-level, sleep-friendly styling baked into the ASS file)
+
+  # Periodic support asks are INLINE in the narration text — no animated
+  # screen, no video cut, no music dip. The script author embeds them at
+  # paragraph boundaries every ~15-20 min. See learnings/long_form_support_asks.md
+  # for the soft-voice template + cadence rules.
+
+  # Music bed — looped + crossfaded ambient track. Drop royalty-free wavs
+  # into historyrecapped/music/.
+  music_bed_default: aether-loop.wav
+
+  # Footage cache for long-form sources (archive.org PD only).
+  footage_dir: footage/long_sources

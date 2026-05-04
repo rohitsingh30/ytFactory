@@ -88,7 +88,7 @@ https://ytfactory.<domain>           ← Cloud Run (control plane)
   │
   │   ◄─ HTTPS long-poll lease ─────  Laptop agent (heavy workers)
   │   (heartbeat 15s, lease 30s)      ├─ image gen (mflux / diffusers)
-  │                                   ├─ tts (Kokoro / F5)
+  │                                   ├─ tts (Kokoro / F5 / Chatterbox / StyleTTS2 / Indic Parler)
   │                                   ├─ asr (whisper_mlx)
   │                                   ├─ ffmpeg compose
   │                                   └─ footage trim
@@ -124,6 +124,10 @@ zero, ~$0–2/mo total.
 - `script.py` `critic.py` `cast.py` `rewrite.py` — claude CLI calls
 - `scripts/pull_stories.py` `wiki_research.py` — scrapers
 - `youtube_upload.py` — uses owner's stored OAuth refresh token
+- `pipeline/x_upload.py` — Stage 8b X (Twitter) cross-post; per-handle
+  OAuth 1.0a User Context credentials at
+  `~/.config/ytfactory/x_credentials_<account>.json`; idempotent
+  sidecar at `<channel>/uploads/<slug>.x.json`
 
 ### Heavy workers (`workers/heavy/`) — laptop only
 
@@ -131,7 +135,7 @@ Pure functions that take a payload from GCS and write outputs to GCS.
 Invoked exclusively by the laptop agent's runner.
 
 - `images.py` — mflux / Z-Image-Turbo / SDXL via diffusers
-- `tts.py` — Kokoro + F5-TTS-MLX
+- `tts.py` — Kokoro + F5-TTS-MLX + Chatterbox (free local) + Cartesia Sonic-2 (paid API, current production default). StyleTTS2 + Indic Parler-TTS dispatchers also live in `pipeline/audio.py` but are not installable in this venv (dep conflicts) — see `README.md` "Optional free local TTS providers". + Chatterbox + StyleTTS2 + Indic Parler-TTS (all free/local; Cartesia retained as opt-in paid fallback)
 - `asr.py` — whisper_mlx
 - `compose.py` — ffmpeg slideshow + Ken Burns
 - `footage.py` — broadcast clip trim + blurred-letterbox
@@ -285,8 +289,15 @@ job. No tunnels, no localhost, no port forwards.
   the laptop is offline the job sits in the queue and the user gets
   a "your render is queued, check back later" message. This is the
   cost of running render on free hardware.
-- **Single laptop = single render at a time.** Concurrency is bounded
-  by the laptop's GPU. Scaling out means buying a second machine.
-  Acceptable for a personal product.
+- **Single laptop, bounded concurrency.** Diffusion image-gen renders
+  (`make_shorts.py` on z_image_turbo / mflux / AnimateDiff channels)
+  are GPU-bound and capped at TWO concurrent on the M2 Max — beyond
+  that the Metal command queue thrashes and one process aborts. The
+  scheduler+agent commit `a578584` enforces that 2-render cap.
+  History Recapped's footage-only Shorts path and long-form sleep
+  path are pure Kokoro/F5-TTS + ffmpeg (no diffusion); they are
+  CPU/disk-bound and run alongside a GPU render or alongside each
+  other without Metal contention. Scaling beyond that mix means
+  buying a second machine. Acceptable for a personal product.
 - **Azure OpenAI is the chat dependency.** If their endpoint is down,
   chat is down. We could add Anthropic API as a fallback later.

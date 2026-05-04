@@ -16,13 +16,18 @@ name: MyStoriesAnimated
 source_adapter: reddit_video
 
 # ---- TTS ---------------------------------------------------------------
-# Cartesia Sonic-2 with the "Sarah" US-female narrator voice.
-# Migrated 2026-05-03 from kokoro/af_bella after A/B spike confirmed
-# Cartesia's natural prosody beats Kokoro on emotional AITA narration.
-# tts_speed=0.90 maps to Cartesia "slow" via audio._synth_cartesia.
-# Requires CARTESIA_API_KEY env var at render time.
-tts_provider: cartesia
-tts_voice: 694f9389-aac1-45b6-b726-9d9369183238  # Sarah, US female
+# Chatterbox (Resemble AI, MIT) with a 9.5s ref clip of the original
+# Cartesia "Sarah" narration. Chatterbox's emotion-exaggeration knob
+# is the right fit for AITA's escalating-drama narration arc.
+# Migrated 2026-05-04 from cartesia/Sarah after the $5 prepay
+# exhausted in <1h. Free, no API cap, runs locally on M2 Max via MPS.
+#
+# Cartesia fallback (paid, ship-quality): re-enable by reverting these
+# two lines to:
+#   tts_provider: cartesia
+#   tts_voice: 694f9389-aac1-45b6-b726-9d9369183238  # Sarah
+tts_provider: chatterbox
+tts_voice: pipeline/voice_refs/sarah.wav
 tts_speed: 0.90
 
 # ---- Image gen ---------------------------------------------------------

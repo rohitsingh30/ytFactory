@@ -44,20 +44,27 @@ async def healthz() -> dict[str, str]:
     return {"ok": "yes"}
 
 
+# no-cache forces ETag/304 revalidation on every load so a fresh
+# Cloud Run deploy reaches users on a normal reload — no ⌘⇧R needed.
+# Applied to every static-HTML entry point. Cheap: 304 responses are
+# tiny and the browser's disk cache still serves the body when valid.
+_NO_CACHE = {"Cache-Control": "no-cache"}
+
+
 @app.get("/")
 async def index() -> FileResponse:
     """Public landing page — hero, live stats, channel cards, CTAs to
     /studio + /dashboard. Marketing surface for the project."""
-    return FileResponse(STATIC_DIR / "landing.html")
+    return FileResponse(STATIC_DIR / "landing.html", headers=_NO_CACHE)
 
 
 @app.get("/studio")
 async def studio() -> FileResponse:
     """Operator UI (the legacy /, with right-docked chat panel + render flow)."""
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=_NO_CACHE)
 
 
 @app.get("/chat")
 async def chat_only_page() -> FileResponse:
     """Standalone chat-only page (no operator UI). Useful for embeds."""
-    return FileResponse(STATIC_DIR / "chat.html")
+    return FileResponse(STATIC_DIR / "chat.html", headers=_NO_CACHE)

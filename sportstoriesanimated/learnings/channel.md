@@ -10,6 +10,8 @@ Visual + tonal model is **Tifo Football** on YouTube — minimalist line-art ill
 
 **Key differentiator from Tifo:** at the climactic beat, cut from animation to the **actual broadcast clip** of the moment, frame-accurately matched to what the narrator just described. Tifo can't always do this for licensing reasons; we're treating takedowns as expected cost.
 
+Footage scrub + caption-emoji density rules: see `footage_scrub_watermarks.md` (channel-local) and `/docs/shorts_caption_emoji_density.md` (cross-channel).
+
 **Why:** user explicitly steered away from generic "bold sports comic" aesthetic toward Tifo's editorial/tactical style. The real-footage cut-in is "the main thing here" — animation is build-up; the footage is the payoff.
 
 **How to apply:**

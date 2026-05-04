@@ -1,21 +1,30 @@
 """Research index builder.
 
-Walks the pipeline's filesystem state and emits a flat, regenerable
-index at ``data/research/``:
+YouTube is the source of truth. Walks the per-account caches written by
+``pipeline.youtube_stats`` and LEFT-JOINs local artefacts (upload
+records, narration scripts, critique scores, rendered mp4s) by
+``video_id``. Channels are discovered via ``<channel>/config.yaml`` —
+nothing here depends on the legacy ``data/shorts/`` or ``channels/``
+layout.
 
-    videos.jsonl    — one row per rendered short
-    channels.jsonl  — one row per channel YAML
-    learnings.jsonl — promoted from memory feedback_*.md + critique class-of-bug
+Outputs at ``data/research/``:
+
+    videos.jsonl    — one row per YouTube video (slug + local fields
+                      may be None when no local artefact matches)
+    channels.jsonl  — one row per <channel>/config.yaml, joined with
+                      its YouTube channel meta + per-video rollup
+    learnings.jsonl — promoted from memory feedback_*.md + critique
+                      class-of-bug findings
 
 The index is a derived view; nothing here owns truth. Re-run any time
-to refresh. Single user, single host — JSONL beats SQLite for now
-(grep-able, diff-able, no schema migrations).
+to refresh the offline rollup. Pass ``refresh_analytics=True`` to also
+hit the YouTube API first.
 
 CLI::
 
     python -m pipeline.research              # rebuild all three
     python -m pipeline.research videos       # one slice
-    python -m pipeline.research --quiet
+    python -m pipeline.research --refresh-analytics
 """
 
 from __future__ import annotations
@@ -25,7 +34,6 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -34,14 +42,10 @@ import yaml
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CHANNELS_DIR = PROJECT_ROOT / "channels"
 DATA_DIR = PROJECT_ROOT / "data"
-SHORTS_DIR = DATA_DIR / "shorts"
-INTERMEDIATE_DIR = DATA_DIR / "intermediate"
-UPLOADS_DIR = DATA_DIR / "uploads"
 CRITIQUES_DIR = DATA_DIR / "critiques"
 RESEARCH_DIR = DATA_DIR / "research"
-ANALYTICS_DIR = RESEARCH_DIR / "analytics"
+YOUTUBE_DIR = RESEARCH_DIR / "youtube"
 
 MEMORY_DIR = Path(
     os.environ.get(
@@ -52,6 +56,12 @@ MEMORY_DIR = Path(
 
 # Locked by `project_two_production_channels.md` — anything else is a variant.
 PRODUCTION_CHANNELS = {"mystoriesanimated", "sportstoriesanimated"}
+
+# Top-level dirs that are NOT channel dirs.
+_NON_CHANNEL_DIRS = {
+    "pipeline", "web", "data", "docs", "tests", "scripts",
+    "workers", "control", "node_modules", "venv", ".venv", ".git",
+}
 
 
 # ---- helpers ------------------------------------------------------------
@@ -77,35 +87,72 @@ def _mtime_iso(path: Path) -> str | None:
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
 
 
-def _channel_for_slug(slug: str) -> str | None:
-    """Find which channel owns a slug by checking intermediate/<channel>/scripts."""
-    if not INTERMEDIATE_DIR.exists():
-        return None
-    for ch in INTERMEDIATE_DIR.iterdir():
-        if not ch.is_dir():
+def _iter_channel_dirs() -> list[Path]:
+    """Top-level dirs that contain a ``config.yaml``."""
+    out: list[Path] = []
+    if not PROJECT_ROOT.exists():
+        return out
+    for d in sorted(PROJECT_ROOT.iterdir()):
+        if not d.is_dir() or d.name in _NON_CHANNEL_DIRS or d.name.startswith("."):
             continue
-        if (ch / "scripts" / f"{slug}.json").exists():
-            return ch.name
-    return None
+        if (d / "config.yaml").exists():
+            out.append(d)
+    return out
 
 
-def _upload_for_slug(slug: str) -> tuple[Path | None, dict | None]:
-    """Return (upload_path, upload_dict) for the first channel-dir match."""
-    if not UPLOADS_DIR.exists():
-        return None, None
-    for ch in UPLOADS_DIR.iterdir():
-        if not ch.is_dir():
+def _channel_account(chan_dir: Path) -> str:
+    cfg = _read_yaml(chan_dir / "config.yaml") or {}
+    return ((cfg.get("upload") or {}).get("account")) or chan_dir.name
+
+
+def _index_local_uploads() -> dict[str, dict]:
+    """Scan every ``<channel>/uploads/**/*.json`` once and return a
+    ``{video_id: {channel, slug, path, record}}`` index. Missing or
+    malformed records are skipped; the YouTube row stays without a
+    local join.
+    """
+    out: dict[str, dict] = {}
+    for chan_dir in _iter_channel_dirs():
+        uploads_dir = chan_dir / "uploads"
+        if not uploads_dir.exists():
             continue
-        p = ch / f"{slug}.json"
+        for f in sorted(uploads_dir.rglob("*.json")):
+            rec = _read_json(f)
+            if not rec:
+                continue
+            vid = rec.get("video_id")
+            if not vid:
+                continue
+            out[vid] = {
+                "channel": chan_dir.name,
+                "slug": rec.get("slug") or f.stem,
+                "path": f,
+                "record": rec,
+            }
+    return out
+
+
+def _local_script(chan_dir: Path, slug: str) -> tuple[Path | None, dict | None]:
+    """Per-channel narration is the canonical script for the dashboard.
+
+    Falls back to ``<chan>/scripts/<slug>.json`` if narrations don't
+    have one (some channels keep the script there).
+    """
+    for sub in ("narrations", "scripts"):
+        p = chan_dir / sub / f"{slug}.json"
         if p.exists():
-            return p, _read_json(p)
+            data = _read_json(p)
+            if data:
+                return p, data
     return None, None
 
 
+def _local_mp4(chan_dir: Path, slug: str) -> Path | None:
+    p = chan_dir / "shorts" / f"{slug}.mp4"
+    return p if p.exists() else None
+
+
 def _critique_for_slug(slug: str) -> tuple[Path | None, dict | None]:
-    """Match either <slug>/<slug>.score.json or top-level <slug>.md."""
-    if not CRITIQUES_DIR.exists():
-        return None, None
     score = CRITIQUES_DIR / slug / f"{slug}.score.json"
     if score.exists():
         return score, _read_json(score)
@@ -113,17 +160,8 @@ def _critique_for_slug(slug: str) -> tuple[Path | None, dict | None]:
 
 
 def _critique_md_for_slug(slug: str) -> Path | None:
-    if not CRITIQUES_DIR.exists():
-        return None
     p = CRITIQUES_DIR / f"{slug}.md"
     return p if p.exists() else None
-
-
-def _analytics_for_slug(slug: str) -> dict | None:
-    p = ANALYTICS_DIR / f"{slug}.json"
-    if not p.exists():
-        return None
-    return _read_json(p)
 
 
 def _classify_issues(issues: list[str] | None) -> tuple[int, int]:
@@ -139,95 +177,118 @@ def _classify_issues(issues: list[str] | None) -> tuple[int, int]:
 
 
 def build_videos() -> list[dict]:
-    """One row per .mp4 in , joined with script + upload + critique."""
+    """One row per YouTube video, LEFT JOINed with local artefacts.
+
+    Source-of-truth = ``data/research/youtube/<account>.json`` written
+    by :func:`pipeline.youtube_stats.fetch_account`. Videos with no
+    local upload record still appear (just with ``slug``, ``script``,
+    ``critique`` and ``local`` set to None).
+    """
     rows: list[dict] = []
-    if not SHORTS_DIR.exists():
+    if not YOUTUBE_DIR.exists():
         return rows
 
-    for mp4 in sorted(SHORTS_DIR.glob("*.mp4")):
-        slug = mp4.stem
-        # Skip "copy" duplicates that macOS finder leaves behind.
-        if " copy" in slug:
+    upload_index = _index_local_uploads()
+    chan_lookup = {d.name: d for d in _iter_channel_dirs()}
+
+    for cache_path in sorted(YOUTUBE_DIR.glob("*.json")):
+        cache = _read_json(cache_path)
+        if not cache:
             continue
+        account = cache.get("account") or cache_path.stem
+        for yt in cache.get("videos") or []:
+            vid = yt.get("video_id")
+            if not vid:
+                continue
+            local = upload_index.get(vid)
+            slug: str | None = None
+            channel: str | None = None
+            script_block: dict | None = None
+            crit_block: dict | None = None
+            crit_md_path: str | None = None
+            local_block: dict | None = None
 
-        channel = _channel_for_slug(slug)
-        script_path = (
-            INTERMEDIATE_DIR / channel / "scripts" / f"{slug}.json"
-            if channel
-            else None
-        )
-        script = _read_json(script_path) if script_path else None
+            if local:
+                slug = local["slug"]
+                channel = local["channel"]
+                chan_dir = chan_lookup.get(channel)
+                rec: dict = local["record"]
 
-        upload_path, upload = _upload_for_slug(slug)
-        crit_path, crit = _critique_for_slug(slug)
-        crit_md = _critique_md_for_slug(slug)
-        analytics = _analytics_for_slug(slug)
+                # Render artefact (may be missing — old slug, file deleted).
+                mp4 = _local_mp4(chan_dir, slug) if chan_dir else None
+                script_path, script = (
+                    _local_script(chan_dir, slug) if chan_dir else (None, None)
+                )
+                crit_path, crit = _critique_for_slug(slug)
+                crit_md = _critique_md_for_slug(slug)
 
-        cob, one_off = _classify_issues(crit.get("top_issues") if crit else None)
+                local_block = {
+                    "channel": channel,
+                    "upload_record_path": str(local["path"].relative_to(PROJECT_ROOT)),
+                    "uploaded_at": rec.get("uploaded_at"),
+                    "title": rec.get("title"),
+                    "thumbnail_set": rec.get("thumbnail_set"),
+                    "thumbnail_error": rec.get("thumbnail_error"),
+                    "mp4_path": (
+                        str(mp4.relative_to(PROJECT_ROOT)) if mp4 else None
+                    ),
+                    "mp4_size_bytes": (mp4.stat().st_size if mp4 else None),
+                    "rendered_at": _mtime_iso(mp4) if mp4 else None,
+                }
 
-        row = {
-            "slug": slug,
-            "channel": channel,
-            "mp4_path": str(mp4.relative_to(PROJECT_ROOT)),
-            "mp4_size_bytes": mp4.stat().st_size,
-            "rendered_at": _mtime_iso(mp4),
-            "script": (
-                {
-                    "hook": script.get("hook"),
-                    "source": script.get("source"),
-                    "source_url": script.get("source_url"),
-                    "narration_chars": len(script.get("narration") or ""),
-                    "title_options": script.get("title_options") or [],
-                    "footage_count": len(script.get("footage") or []),
-                    "path": str(script_path.relative_to(PROJECT_ROOT)),
-                }
-                if script and script_path
-                else None
-            ),
-            "upload": (
-                {
-                    "video_id": upload.get("video_id"),
-                    "url": upload.get("url"),
-                    "uploaded_at": upload.get("uploaded_at"),
-                    "title": upload.get("title"),
-                    "privacy": upload.get("privacy"),
-                    "account": upload.get("account"),
-                    "thumbnail_set": upload.get("thumbnail_set"),
-                    "thumbnail_error": upload.get("thumbnail_error"),
-                    "path": str(upload_path.relative_to(PROJECT_ROOT)),
-                }
-                if upload and upload_path
-                else None
-            ),
-            "critique": (
-                {
-                    "score": crit.get("score"),
-                    "one_line_take": crit.get("one_line_take"),
-                    "top_issue_count": len(crit.get("top_issues") or []),
-                    "class_of_bug_count": cob,
-                    "one_off_count": one_off,
-                    "highest_leverage_change": crit.get("highest_leverage_change"),
-                    "system_correction_count": len(crit.get("system_corrections") or []),
-                    "path": str(crit_path.relative_to(PROJECT_ROOT)),
-                }
-                if crit and crit_path
-                else None
-            ),
-            "critique_md_path": (
-                str(crit_md.relative_to(PROJECT_ROOT)) if crit_md else None
-            ),
-            "analytics": (
-                {
-                    "view_count": analytics.get("view_count"),
-                    "like_count": analytics.get("like_count"),
-                    "comment_count": analytics.get("comment_count"),
-                    "fetched_at": analytics.get("fetched_at"),
-                }
-                if analytics
-                else None
-            ),
-        }
-        rows.append(row)
+                if script and script_path:
+                    script_block = {
+                        "hook": script.get("hook"),
+                        "source": script.get("source"),
+                        "source_url": script.get("source_url"),
+                        "narration_chars": len(script.get("narration") or ""),
+                        "title_options": script.get("title_options") or [],
+                        "footage_count": len(script.get("footage") or []),
+                        "path": str(script_path.relative_to(PROJECT_ROOT)),
+                    }
+
+                if crit and crit_path:
+                    cob, one_off = _classify_issues(crit.get("top_issues"))
+                    crit_block = {
+                        "score": crit.get("score"),
+                        "one_line_take": crit.get("one_line_take"),
+                        "top_issue_count": len(crit.get("top_issues") or []),
+                        "class_of_bug_count": cob,
+                        "one_off_count": one_off,
+                        "highest_leverage_change": crit.get("highest_leverage_change"),
+                        "system_correction_count": len(crit.get("system_corrections") or []),
+                        "path": str(crit_path.relative_to(PROJECT_ROOT)),
+                    }
+
+                if crit_md:
+                    crit_md_path = str(crit_md.relative_to(PROJECT_ROOT))
+
+            rows.append({
+                "video_id": vid,
+                "account": account,
+                "slug": slug,
+                "channel": channel,
+                "title": yt.get("title"),
+                "description": yt.get("description"),
+                "published_at": yt.get("published_at"),
+                "privacy": yt.get("privacy"),
+                "duration_s": yt.get("duration_s"),
+                "thumbnail_url": yt.get("thumbnail_url"),
+                "url": yt.get("url"),
+                "youtube_channel_id": yt.get("channel_id"),
+                "youtube_channel_title": yt.get("channel_title"),
+                "stats": {
+                    "view_count": yt.get("view_count"),
+                    "like_count": yt.get("like_count"),
+                    "comment_count": yt.get("comment_count"),
+                    "favorite_count": yt.get("favorite_count"),
+                    "fetched_at": cache.get("fetched_at"),
+                },
+                "local": local_block,
+                "script": script_block,
+                "critique": crit_block,
+                "critique_md_path": crit_md_path,
+            })
 
     return rows
 
@@ -236,120 +297,76 @@ def build_videos() -> list[dict]:
 
 
 def _aggregate(videos_for: list[dict]) -> dict:
-    """Numeric rollup shared between the YAML and account aggregations."""
     scores = [
         v["critique"]["score"]
         for v in videos_for
         if v.get("critique") and v["critique"].get("score") is not None
     ]
-    uploaded = [v for v in videos_for if v.get("upload")]
-    rendered_dates = [v.get("rendered_at") for v in videos_for if v.get("rendered_at")]
+    views = [
+        (v.get("stats") or {}).get("view_count") or 0
+        for v in videos_for
+        if (v.get("stats") or {}).get("view_count") is not None
+    ]
+    published = [v.get("published_at") for v in videos_for if v.get("published_at")]
+    locally_rendered = [v for v in videos_for if v.get("local") and v["local"].get("mp4_path")]
     return {
-        "video_count": len(videos_for),
-        "uploaded_count": len(uploaded),
+        "video_count_local": len(videos_for),  # videos joined to this channel via upload record
+        "locally_rendered_count": len(locally_rendered),
         "avg_score": (round(sum(scores) / len(scores), 2) if scores else None),
         "score_count": len(scores),
-        "last_render_at": (max(rendered_dates) if rendered_dates else None),
-        "slugs": [v["slug"] for v in videos_for],
+        "total_views": sum(views) if views else 0,
+        "last_published_at": (max(published) if published else None),
+        "slugs": [v["slug"] for v in videos_for if v.get("slug")],
     }
 
 
 def build_channels(videos: list[dict]) -> list[dict]:
-    """Two complementary views, both written into channels.jsonl:
+    """One row per ``<channel>/config.yaml``, joined with YouTube cache.
 
-      kind="yaml"     → one row per channels/*.yaml (recipe definition)
-      kind="account"  → one row per distinct upload.account (where it ships)
-
-    The mismatch matters: e.g. ``mystoriesanimated.yaml`` and
-    ``aita_animated.yaml`` both ship to the YouTube account
-    ``mystoriesanimated``, but the rendered intermediate dir is
-    ``reddit_amitheasshole``. The two-row-kinds layout makes that
-    explicit instead of forcing a single join key.
+    The row carries authoritative numbers from YouTube
+    (subscriber_count, total view_count, total video_count) plus a
+    rollup over the videos this index already joined to the channel
+    (which may be a subset if some videos were posted manually and
+    have no local upload record).
     """
     rows: list[dict] = []
 
-    # Group videos two ways.
-    by_intermediate: dict[str, list[dict]] = {}
-    by_account: dict[str, list[dict]] = {}
+    by_channel: dict[str, list[dict]] = {}
     for v in videos:
         ch = v.get("channel")
         if ch:
-            by_intermediate.setdefault(ch, []).append(v)
-        acct = (v.get("upload") or {}).get("account")
-        if acct:
-            by_account.setdefault(acct, []).append(v)
+            by_channel.setdefault(ch, []).append(v)
 
-    # ---- kind=yaml ------------------------------------------------------
-    # "production" on a yaml row means this YAML *is* the canonical
-    # production recipe — i.e. its filename matches a production channel.
-    # Sibling YAMLs that happen to share an upload account are variants,
-    # not production recipes (per project_two_production_channels.md).
-    if CHANNELS_DIR.exists():
-        for yml in sorted(CHANNELS_DIR.glob("*.yaml")):
-            cfg = _read_yaml(yml) or {}
-            channel_id = cfg.get("channel_dir") or cfg.get("name") or yml.stem
-            upload_account = ((cfg.get("upload") or {}).get("account")) or None
+    for chan_dir in _iter_channel_dirs():
+        cfg = _read_yaml(chan_dir / "config.yaml") or {}
+        account = ((cfg.get("upload") or {}).get("account")) or chan_dir.name
 
-            videos_for = by_intermediate.get(channel_id, [])
-            row = {
-                "kind": "yaml",
-                "channel": channel_id,
-                "yaml_path": str(yml.relative_to(PROJECT_ROOT)),
-                "yaml_filename": yml.name,
-                "name": cfg.get("name"),
-                "production": yml.stem in PRODUCTION_CHANNELS,
-                "source_adapter": cfg.get("source_adapter"),
-                "upload_account": upload_account,
-                **_aggregate(videos_for),
-            }
-            rows.append(row)
+        cache = _read_json(YOUTUBE_DIR / f"{account}.json")
+        yt_channel = (cache or {}).get("channel") or {}
+        yt_videos = (cache or {}).get("videos") or []
 
-    # ---- kind=intermediate-orphan --------------------------------------
-    # Render dirs that no YAML claims (e.g. legacy `reddit_amitheasshole`
-    # backing `aita_animated.yaml`). Surface them so their videos aren't
-    # invisible just because the YAML uses a different channel_id.
-    seen_intermediate = {
-        v.get("channel")
-        for r in rows
-        for v in by_intermediate.get(r["channel"], [])
-    }
-    if INTERMEDIATE_DIR.exists():
-        for ch_dir in sorted(INTERMEDIATE_DIR.iterdir()):
-            if not ch_dir.is_dir() or ch_dir.name in seen_intermediate:
-                continue
-            videos_for = by_intermediate.get(ch_dir.name, [])
-            if not videos_for:
-                continue  # empty dir, nothing to surface
-            rows.append(
-                {
-                    "kind": "intermediate",
-                    "channel": ch_dir.name,
-                    "yaml_path": None,
-                    "yaml_filename": None,
-                    "name": None,
-                    "production": False,
-                    "source_adapter": None,
-                    "upload_account": None,
-                    "note": "no YAML claims this intermediate dir",
-                    **_aggregate(videos_for),
-                }
-            )
+        videos_for = by_channel.get(chan_dir.name, [])
+        rollup = _aggregate(videos_for)
 
-    # ---- kind=account ---------------------------------------------------
-    for acct, videos_for in sorted(by_account.items()):
-        rows.append(
-            {
-                "kind": "account",
-                "channel": acct,
-                "yaml_path": None,
-                "yaml_filename": None,
-                "name": acct,
-                "production": acct in PRODUCTION_CHANNELS,
-                "source_adapter": None,
-                "upload_account": acct,
-                **_aggregate(videos_for),
-            }
-        )
+        rows.append({
+            "kind": "channel",
+            "channel": chan_dir.name,
+            "name": cfg.get("name") or chan_dir.name,
+            "production": chan_dir.name in PRODUCTION_CHANNELS,
+            "account": account,
+            "config_path": str((chan_dir / "config.yaml").relative_to(PROJECT_ROOT)),
+            "source_adapter": cfg.get("source_adapter"),
+            # Live YouTube numbers — None when cache is missing/auth failed.
+            "youtube_channel_id": yt_channel.get("id"),
+            "youtube_title": yt_channel.get("title"),
+            "subscriber_count": yt_channel.get("subscriber_count"),
+            "youtube_view_count": yt_channel.get("view_count"),
+            "youtube_video_count": yt_channel.get("video_count"),
+            "hidden_subscribers": yt_channel.get("hidden_subscribers"),
+            "youtube_fetched_at": (cache or {}).get("fetched_at"),
+            "youtube_uploads_seen": len(yt_videos),
+            **rollup,
+        })
 
     return rows
 
@@ -387,29 +404,22 @@ def _learnings_from_memory() -> list[dict]:
         if md.name == "MEMORY.md":
             continue
         meta, body = _parse_frontmatter_md(md)
-        rows.append(
-            {
-                "id": f"memory:{md.stem}",
-                "source": "memory",
-                "source_path": str(md.relative_to(MEMORY_DIR.parent)),
-                "type": meta.get("type") or "memory",
-                "title": meta.get("name") or md.stem,
-                "description": meta.get("description") or "",
-                "channel": None,
-                "body_excerpt": _excerpt(body),
-                "related_slugs": [],
-            }
-        )
+        rows.append({
+            "id": f"memory:{md.stem}",
+            "source": "memory",
+            "source_path": str(md.relative_to(MEMORY_DIR.parent)),
+            "type": meta.get("type") or "memory",
+            "title": meta.get("name") or md.stem,
+            "description": meta.get("description") or "",
+            "channel": None,
+            "body_excerpt": _excerpt(body),
+            "related_slugs": [],
+        })
     return rows
 
 
 def _learnings_from_critiques(videos: list[dict]) -> list[dict]:
-    """Promote each system_correction in a critique to its own learning row.
-
-    Class-of-bug fixes from the critic are the closest thing we have to
-    durable findings; one-offs are filtered out because they don't
-    generalise across future renders.
-    """
+    """Promote each system_correction in a critique to its own learning row."""
     rows: list[dict] = []
     for v in videos:
         crit_meta = v.get("critique")
@@ -418,32 +428,29 @@ def _learnings_from_critiques(videos: list[dict]) -> list[dict]:
         full = _read_json(PROJECT_ROOT / crit_meta["path"])
         if not full:
             continue
+        slug = v.get("slug")
         for sc in full.get("system_corrections") or []:
             issue_class = (sc.get("issue_class") or "").strip()
             if not issue_class:
                 continue
-            rows.append(
-                {
-                    "id": f"critique:{v['slug']}:{issue_class}",
-                    "source": "critique",
-                    "source_path": crit_meta["path"],
-                    "type": "class-of-bug",
-                    "title": issue_class,
-                    "description": (sc.get("principle") or "")[:200],
-                    "channel": v.get("channel"),
-                    "body_excerpt": _excerpt(
-                        (sc.get("fix") or "") + "\n\nWHERE: " + (sc.get("where") or "")
-                    ),
-                    "related_slugs": [v["slug"]],
-                }
-            )
+            rows.append({
+                "id": f"critique:{slug or v.get('video_id')}:{issue_class}",
+                "source": "critique",
+                "source_path": crit_meta["path"],
+                "type": "class-of-bug",
+                "title": issue_class,
+                "description": (sc.get("principle") or "")[:200],
+                "channel": v.get("channel"),
+                "body_excerpt": _excerpt(
+                    (sc.get("fix") or "") + "\n\nWHERE: " + (sc.get("where") or "")
+                ),
+                "related_slugs": [slug] if slug else [],
+            })
     return rows
 
 
 def build_learnings(videos: list[dict]) -> list[dict]:
     rows = _learnings_from_memory() + _learnings_from_critiques(videos)
-    # Stable order: memory first (durable), then critique findings sorted by
-    # issue_class so the same issue across multiple slugs sits adjacent.
     rows.sort(key=lambda r: (r["source"] != "memory", r.get("title") or ""))
     return rows
 
@@ -469,11 +476,10 @@ def rebuild(
 ) -> dict:
     """Rebuild the requested slices (or all). Returns counts.
 
-    When ``refresh_analytics`` is True, also calls
-    ``pipeline.youtube_stats.fetch_all`` first so videos.jsonl picks up
-    the latest viewCount/likeCount/commentCount. Network call — only
-    pass True when the user explicitly asks (CLI flag, "Refresh stats"
-    button).
+    When ``refresh_analytics`` is True, hits the YouTube API first via
+    :func:`pipeline.youtube_stats.fetch_all` so the cache reflects
+    current view/like/comment counts and any newly-published videos.
+    Otherwise the rebuild is purely offline (re-reads the cached JSON).
     """
     targets = set(slices or ["videos", "channels", "learnings"])
     out: dict[str, Any] = {"built_at": datetime.now(tz=timezone.utc).isoformat()}
@@ -535,7 +541,7 @@ def main() -> None:
     ap.add_argument(
         "--refresh-analytics",
         action="store_true",
-        help="Pull fresh YouTube view/like/comment counts before rebuilding (network).",
+        help="Hit the YouTube API to refresh per-channel caches before rebuilding.",
     )
     args = ap.parse_args()
 

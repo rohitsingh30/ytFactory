@@ -1,0 +1,154 @@
+# AI Recap — daily AI/tech news shorts.
+#
+# Channel slug `airecap`. Pivot rationale (2026-05-03 research):
+#   - X creator monetization ranks AI/tech RPM #2 after Finance/Crypto
+#     ($0.25-0.30/1M verified impressions vs $0.05-0.10 for entertainment)
+#   - AI/tech audience over-indexes on Premium subscribers — the only
+#     impressions that pay
+#   - The Rundown proved the daily-AI-recap format (567K X followers)
+#   - Animated 60s explainer is the wedge against text-thread incumbents
+#
+# Format: 60s daily recap. One AI announcement per Short. Hook (3s) →
+# what happened (10s) → why it matters (35s) → CTA (12s).
+#
+# Sourcing (handled by pipeline/sources/ai_news.py — TBD):
+#   - OpenAI / Anthropic / Google AI / Meta AI blog RSS
+#   - Hacker News top stories filtered for AI keywords
+#   - arXiv-sanity for the day's most-discussed papers
+#   - Press releases from major model labs
+#
+# X is the PRIMARY platform for this channel; YouTube is secondary
+# (cross-post). Most monetization comes from X verified impressions.
+
+name: AI Recap
+source_adapter: ai_news_daily   # pipeline/sources/ai_news.py — to build
+
+# render_style: image_gen (illustrated explainer, NOT footage).
+# AI news doesn't have broadcast footage to cut to — animation IS the
+# value. Each beat: clean tech illustration matching the moment.
+render_style: image_gen
+
+# Narrator visual mode — explainer voice-over, no on-screen narrator.
+# Suppresses any "the host" / "an AI explaining" beat depictions.
+# All beats depict the AI product / company / concept being explained.
+narrator_visual_mode: voice_only
+
+# ---- TTS — F5-TTS-MLX with theo.wav (male) -----------------------------
+# Bring-up trail 2026-05-04 (long story):
+#   1. Cartesia Sonic-2 + Sarah → Short #1 shipped, then 402 credits
+#   2. Kokoro `af_bella`        → killed before completion
+#   3. F5-TTS + custom sarah    → mlx::bad_cast (F5 unvalidated for sarah)
+#   4. Chatterbox + sarah       → broke venv (transformers 5.2.0 vs
+#                                 diffusers 0.29 vs mflux 0.17.5 conflicts)
+#   5. F5-TTS + theo (this)     → validated path used by historyrecapped
+#                                 + sportstoriesanimated. Male voice =
+#                                 deviation from Short #1's Sarah, but a
+#                                 working pipeline beats a non-shipping one.
+# Once airecap proves out and Cartesia top-up is justified, swap back to
+# Cartesia Sarah for voice consistency.
+tts_provider: f5_tts
+tts_voice: pipeline/voice_refs/theo.wav
+tts_ref_text: "May 1940. The German blitzkrieg has cut through France in three weeks. Three hundred and thirty-eight thousand British and French soldiers"
+tts_speed: 1.0
+
+# ---- Image gen — clean isometric tech-explainer aesthetic --------------
+# Reference: Stripe blog illustrations + Linear's marketing art + a16z
+# explainers. Flat geometric shapes, restrained palette, no photography.
+# Z-Image-Turbo via mflux (same provider as our other channels).
+#
+# CLASS-OF-BUG note (channel bring-up): the default "tech" style in
+# diffusion drifts toward "robot in server room" cliche. Pin the
+# aesthetic to "isometric editorial illustration" + "flat color
+# vector" tokens explicitly so we get clean shape language, not
+# stock-photo robots.
+#
+# CLASS-OF-BUG (diffusion negation trap): pure positive descriptors
+# only. Never "no photography", "no robots". Describe what we WANT
+# (isometric, vector, geometric, restrained palette).
+image_provider: z_image_turbo
+image_style_prefix: |
+  clean isometric editorial illustration, flat vector geometry,
+  restrained tech palette of indigo cobalt slate cream and accent
+  amber, soft drop shadows, clear focal subject on uncluttered
+  background, modern startup-blog aesthetic, single clear concept
+  per frame, no text
+image_seed: 4096          # power of two — keeps style consistent across renders
+image_steps: 4            # M2 Max compile-disabled path
+image_width: 768
+image_height: 1344
+
+# Tech-illustration palette renders bright; standard luminance gates apply.
+# (No need to relax like historyrecapped's chiaroscuro war-art.)
+
+# ---- Beat shape -------------------------------------------------------
+# Faster than war-history (3.0s) — tech news viewers expect momentum.
+# Mirrors AITA cadence (2.5s).
+beat_target_s: 2.5
+beat_max_s: 3.5
+
+# ---- Output -----------------------------------------------------------
+# 50-60s — the 2026 Shorts sweet spot.
+duration_target_s: [50, 60]
+output_resolution: [1080, 1920]
+
+closer_hold_s: 1.5
+
+# ---- Closer panel -----------------------------------------------------
+# X-optimized: drives engagement (replies/likes count toward verified
+# impressions ranking) AND drives YouTube subs as the secondary platform.
+closer_format: "FOLLOW for daily AI recaps\nLIKE if this saved you a tab"
+
+# Tech recaps are third-person explainer narration ("Today, OpenAI
+# announced…") — same as history/sports. Opt out of strict AITA
+# script_check; warnings only.
+script_check_strict: false
+
+# ---- Upload (Stage 8) — YouTube cross-post ----------------------------
+# YouTube is SECONDARY for this channel. Privacy: private until format
+# validated. Promote to public after first 5 shorts pass critic gate.
+# category_id 28 = Science & Technology.
+upload:
+  account: airecap
+  privacy: private          # promote to public after format validation
+  made_for_kids: false
+  category_id: "28"          # Science & Technology
+  auto_upload: false
+  min_score: 6
+  tags:
+    - ai
+    - ai news
+    - tech news
+    - artificial intelligence
+    - openai
+    - anthropic
+    - chatgpt
+    - claude
+    - gemini
+    - shorts
+    - tech shorts
+    - ai shorts
+  description_template: |
+    {script.hook}
+
+    🔗 Source: {raw.url}
+
+    ━━━━━━━━━━━━━━━━━━━━
+    🔔 SUBSCRIBE for daily AI recaps
+    ━━━━━━━━━━━━━━━━━━━━
+
+    #shorts #ai #technology #artificialintelligence #airecap
+
+# ---- X (Stage 8b) — PRIMARY platform ---------------------------------
+# Daily recap of the day's most important AI announcement, posted to X
+# with handle @airecap (TBD — register handle before first ship).
+# Eligibility bar: 500 followers + 5M impressions/90d for revenue share.
+# See docs/X_SETUP.md for credential setup.
+x:
+  account: airecap
+  enabled: true
+  tweet_template: |
+    {script.hook}
+
+    🔗 {raw.url}
+
+    #AI #AINews

@@ -1,8 +1,12 @@
 """Tests for pipeline.research — the research-dashboard index builder.
 
 We construct a fixture filesystem under a tempdir that mimics the real
-``data/`` + ``channels/`` + memory layouts, point the module's globals at
-it, and verify the three JSONL slices come out shaped right.
+per-channel layout (``<channel>/config.yaml`` + ``<channel>/uploads/``
++ ``<channel>/narrations/`` + ``<channel>/shorts/``) plus a fake
+``data/research/youtube/<account>.json`` that stands in for what
+``pipeline.youtube_stats.fetch_account`` would have written. We then
+point the module's globals at the tempdir and verify the three JSONL
+slices come out shaped right.
 
 No network, no subprocesses. Runs in <1s.
 """
@@ -34,38 +38,33 @@ def _write_text(path: Path, txt: str) -> None:
 
 
 def _build_fixture_tree(root: Path) -> None:
-    """Create a small but representative ytFactory data tree.
+    """Mimics the live ytFactory layout circa 2026-05.
 
-    Mirrors the schemas observed in the live repo: an mp4 under
-    , a script under intermediate/<channel>/scripts/, an
-    upload record under data/uploads/<channel>/, a critique with
-    system_corrections + class-of-bug top_issues, plus a YAML and a
-    couple of memory feedback files.
+    Two channel dirs (sportstoriesanimated = production,
+    historyrecapped = secondary, archived); a YouTube cache for each
+    written under ``data/research/youtube/`` describing the videos
+    currently live on the channels (more than what we have local
+    upload records for, to exercise the LEFT-JOIN path); upload
+    records, narrations, mp4s, critique scores, and a couple of
+    memory feedback files.
     """
-    # ---- channels yaml (one prod, one variant, one with no upload block)
-    (root / "channels").mkdir(parents=True)
-    (root / "channels" / "sportstoriesanimated.yaml").write_text(
+    # ---- channel: sportstoriesanimated ---------------------------------
+    chan = root / "sportstoriesanimated"
+    (chan / "shorts").mkdir(parents=True)
+    (chan / "uploads").mkdir(parents=True)
+    (chan / "narrations").mkdir(parents=True)
+    (chan / "config.yaml").write_text(
         "name: SportsStoriesAnimated\n"
         "source_adapter: sports_moments_manual\n"
         "upload:\n"
         "  account: sportstoriesanimated\n"
     )
-    (root / "channels" / "aita_animated.yaml").write_text(
-        "name: AITA Animated\n"
-        "source_adapter: reddit_video\n"
-        "upload:\n"
-        "  account: mystoriesanimated\n"
-    )
-    (root / "channels" / "wiki_oddities.yaml").write_text(
-        "name: Wiki Oddities\nsource_adapter: wikipedia\n"
-    )
-
-    # ---- a rendered short with full upload + critique --------------------
+    # Fully-joined: mp4 + narration + upload + critique + analytics.
     slug_full = "aguero-9320"
-    (root / "data" / "shorts").mkdir(parents=True)
-    (root / "data" / "shorts" / f"{slug_full}.mp4").write_bytes(b"\x00" * 128)
+    vid_full = "ABC123"
+    (chan / "shorts" / f"{slug_full}.mp4").write_bytes(b"\x00" * 128)
     _write_json(
-        root / "data" / "intermediate" / "sportstoriesanimated" / "scripts" / f"{slug_full}.json",
+        chan / "narrations" / f"{slug_full}.json",
         {
             "slug": slug_full,
             "hook": "Manchester City had not won a league in forty-four years.",
@@ -77,11 +76,11 @@ def _build_fixture_tree(root: Path) -> None:
         },
     )
     _write_json(
-        root / "data" / "uploads" / "sportstoriesanimated" / f"{slug_full}.json",
+        chan / "uploads" / f"{slug_full}.json",
         {
             "slug": slug_full,
-            "video_id": "ABC123",
-            "url": "https://youtu.be/ABC123",
+            "video_id": vid_full,
+            "url": f"https://youtu.be/{vid_full}",
             "uploaded_at": "2026-05-02T18:00:00+00:00",
             "title": "Aguero 93:20",
             "privacy": "public",
@@ -116,14 +115,15 @@ def _build_fixture_tree(root: Path) -> None:
             ],
         },
     )
-    # also write a markdown report next to the score
+    (root / "data" / "critiques" / f"{slug_full}.md").parent.mkdir(parents=True, exist_ok=True)
     (root / "data" / "critiques" / f"{slug_full}.md").write_text("# critique\nbody")
 
-    # ---- a rendered short with NO critique (the "needs attention" case) --
-    slug_bare = "no-critique-yet"
-    (root / "data" / "shorts" / f"{slug_bare}.mp4").write_bytes(b"\x00" * 64)
+    # No-critique render: mp4 + narration + upload but no critique.
+    slug_bare = "iniesta-2010"
+    vid_bare = "BARE99"
+    (chan / "shorts" / f"{slug_bare}.mp4").write_bytes(b"\x00" * 64)
     _write_json(
-        root / "data" / "intermediate" / "sportstoriesanimated" / "scripts" / f"{slug_bare}.json",
+        chan / "narrations" / f"{slug_bare}.json",
         {
             "slug": slug_bare,
             "hook": "fresh render",
@@ -132,46 +132,151 @@ def _build_fixture_tree(root: Path) -> None:
             "source": "manual:sports_moments",
         },
     )
-    # (no upload, no critique, no analytics)
-
-    # ---- a rendered short under a legacy intermediate dir (no YAML) -----
-    slug_legacy = "amitheasshole-test"
-    (root / "data" / "shorts" / f"{slug_legacy}.mp4").write_bytes(b"\x00" * 64)
     _write_json(
-        root / "data" / "intermediate" / "reddit_amitheasshole" / "scripts" / f"{slug_legacy}.json",
+        chan / "uploads" / f"{slug_bare}.json",
         {
-            "slug": slug_legacy,
-            "hook": "AITA legacy?",
-            "narration": "x",
-            "title_options": [],
-            "source": "reddit:AmItheAsshole",
-        },
-    )
-    _write_json(
-        root / "data" / "uploads" / "reddit_amitheasshole" / f"{slug_legacy}.json",
-        {
-            "slug": slug_legacy,
-            "video_id": "DEF456",
-            "url": "https://youtu.be/DEF456",
-            "uploaded_at": "2026-05-01T12:00:00+00:00",
-            "title": "AITA test",
+            "slug": slug_bare,
+            "video_id": vid_bare,
+            "url": f"https://youtu.be/{vid_bare}",
+            "uploaded_at": "2026-05-03T18:00:00+00:00",
+            "title": "Iniesta 2010 WC",
             "privacy": "public",
-            "account": "mystoriesanimated",
+            "account": "sportstoriesanimated",
         },
     )
 
-    # ---- analytics for one slug only -----------------------------------
+    # ---- channel: historyrecapped --------------------------------------
+    chan2 = root / "historyrecapped"
+    (chan2 / "shorts").mkdir(parents=True)
+    (chan2 / "uploads").mkdir(parents=True)
+    (chan2 / "narrations").mkdir(parents=True)
+    (chan2 / "config.yaml").write_text(
+        "name: History Recapped\n"
+        "source_adapter: archive_org\n"
+        "upload:\n"
+        "  account: historyrecapped\n"
+    )
+    slug_hist = "midway-1942"
+    vid_hist = "HIST01"
+    (chan2 / "shorts" / f"{slug_hist}.mp4").write_bytes(b"\x00" * 96)
     _write_json(
-        root / "data" / "research" / "analytics" / f"{slug_full}.json",
+        chan2 / "narrations" / f"{slug_hist}.json",
         {
-            "slug": slug_full,
-            "video_id": "ABC123",
+            "slug": slug_hist,
+            "hook": "Five minutes that changed the Pacific.",
+            "narration": "Midway, June 1942.",
+            "source": "archive.org",
+        },
+    )
+    _write_json(
+        chan2 / "uploads" / f"{slug_hist}.json",
+        {
+            "slug": slug_hist,
+            "video_id": vid_hist,
+            "url": f"https://youtu.be/{vid_hist}",
+            "uploaded_at": "2026-05-04T10:00:00+00:00",
+            "title": "Midway 1942 — five minutes",
+            "privacy": "public",
+            "account": "historyrecapped",
+        },
+    )
+
+    # ---- YouTube caches ------------------------------------------------
+    # sportstoriesanimated: 3 videos live on YouTube (one of which has
+    # NO local upload record — to exercise the unjoined path).
+    _write_json(
+        root / "data" / "research" / "youtube" / "sportstoriesanimated.json",
+        {
             "account": "sportstoriesanimated",
-            "view_count": 1234,
-            "like_count": 56,
-            "comment_count": 7,
-            "favorite_count": 0,
-            "fetched_at": "2026-05-03T00:00:00+00:00",
+            "fetched_at": "2026-05-04T12:00:00+00:00",
+            "channel": {
+                "id": "UC_sports",
+                "title": "SportsStoriesAnimated",
+                "subscriber_count": 100,
+                "view_count": 12345,
+                "video_count": 3,
+                "hidden_subscribers": False,
+                "uploads_playlist": "UU_sports",
+            },
+            "videos": [
+                {
+                    "video_id": vid_full,
+                    "title": "Aguero 93:20",
+                    "published_at": "2026-05-02T18:16:41Z",
+                    "channel_id": "UC_sports",
+                    "channel_title": "SportsStoriesAnimated",
+                    "thumbnail_url": "https://img/abc.jpg",
+                    "duration_s": 58,
+                    "privacy": "public",
+                    "url": f"https://youtu.be/{vid_full}",
+                    "view_count": 1234,
+                    "like_count": 56,
+                    "comment_count": 7,
+                    "favorite_count": 0,
+                },
+                {
+                    "video_id": vid_bare,
+                    "title": "Iniesta 2010 WC",
+                    "published_at": "2026-05-03T18:00:00Z",
+                    "channel_id": "UC_sports",
+                    "thumbnail_url": "https://img/bare.jpg",
+                    "duration_s": 55,
+                    "privacy": "public",
+                    "url": f"https://youtu.be/{vid_bare}",
+                    "view_count": 200,
+                    "like_count": 10,
+                    "comment_count": 1,
+                    "favorite_count": 0,
+                },
+                {
+                    # Lives on YouTube but no local upload record exists.
+                    "video_id": "ORPHAN1",
+                    "title": "Manually uploaded short",
+                    "published_at": "2026-04-30T12:00:00Z",
+                    "channel_id": "UC_sports",
+                    "thumbnail_url": "https://img/orphan.jpg",
+                    "duration_s": 40,
+                    "privacy": "public",
+                    "url": "https://youtu.be/ORPHAN1",
+                    "view_count": 50,
+                    "like_count": 1,
+                    "comment_count": 0,
+                    "favorite_count": 0,
+                },
+            ],
+        },
+    )
+    # historyrecapped: one video, fully joined.
+    _write_json(
+        root / "data" / "research" / "youtube" / "historyrecapped.json",
+        {
+            "account": "historyrecapped",
+            "fetched_at": "2026-05-04T12:00:00+00:00",
+            "channel": {
+                "id": "UC_hist",
+                "title": "History Recapped",
+                "subscriber_count": 25,
+                "view_count": 500,
+                "video_count": 1,
+                "hidden_subscribers": False,
+                "uploads_playlist": "UU_hist",
+            },
+            "videos": [
+                {
+                    "video_id": vid_hist,
+                    "title": "Midway 1942 — five minutes",
+                    "published_at": "2026-05-04T10:00:00Z",
+                    "channel_id": "UC_hist",
+                    "thumbnail_url": "https://img/hist.jpg",
+                    "duration_s": 60,
+                    "privacy": "public",
+                    "url": f"https://youtu.be/{vid_hist}",
+                    "view_count": 80,
+                    "like_count": 4,
+                    "comment_count": 0,
+                    "favorite_count": 0,
+                }
+            ],
         },
     )
 
@@ -200,7 +305,6 @@ def _build_fixture_tree(root: Path) -> None:
         "---\n"
         "Body.\n",
     )
-    # Edge case: a markdown without frontmatter — must not crash.
     _write_text(mem / "feedback_no_frontmatter.md", "just body, no metadata\n")
 
 
@@ -217,25 +321,17 @@ class _ResearchPatcher:
     def __enter__(self) -> "_ResearchPatcher":
         self._saved = {
             "PROJECT_ROOT": research.PROJECT_ROOT,
-            "CHANNELS_DIR": research.CHANNELS_DIR,
             "DATA_DIR": research.DATA_DIR,
-            "SHORTS_DIR": research.SHORTS_DIR,
-            "INTERMEDIATE_DIR": research.INTERMEDIATE_DIR,
-            "UPLOADS_DIR": research.UPLOADS_DIR,
             "CRITIQUES_DIR": research.CRITIQUES_DIR,
             "RESEARCH_DIR": research.RESEARCH_DIR,
-            "ANALYTICS_DIR": research.ANALYTICS_DIR,
+            "YOUTUBE_DIR": research.YOUTUBE_DIR,
             "MEMORY_DIR": research.MEMORY_DIR,
         }
         research.PROJECT_ROOT = self.root
-        research.CHANNELS_DIR = self.root / "channels"
         research.DATA_DIR = self.root / "data"
-        research.SHORTS_DIR = self.root / "data" / "shorts"
-        research.INTERMEDIATE_DIR = self.root / "data" / "intermediate"
-        research.UPLOADS_DIR = self.root / "data" / "uploads"
         research.CRITIQUES_DIR = self.root / "data" / "critiques"
         research.RESEARCH_DIR = self.root / "data" / "research"
-        research.ANALYTICS_DIR = self.root / "data" / "research" / "analytics"
+        research.YOUTUBE_DIR = self.root / "data" / "research" / "youtube"
         research.MEMORY_DIR = self.root / "memory"
         return self
 
@@ -258,41 +354,56 @@ class BuildVideosTest(unittest.TestCase):
         self.patcher.__exit__(None, None, None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_one_row_per_mp4(self):
+    def test_one_row_per_youtube_video(self):
         rows = research.build_videos()
-        self.assertEqual(len(rows), 3)
-        slugs = {r["slug"] for r in rows}
-        self.assertEqual(slugs, {"aguero-9320", "no-critique-yet", "amitheasshole-test"})
+        # 3 sports + 1 history = 4 rows
+        self.assertEqual(len(rows), 4)
+        ids = {r["video_id"] for r in rows}
+        self.assertEqual(ids, {"ABC123", "BARE99", "ORPHAN1", "HIST01"})
 
-    def test_full_record_joins_script_upload_critique_analytics(self):
+    def test_full_record_left_joins_local_artefacts(self):
         rows = research.build_videos()
-        full = next(r for r in rows if r["slug"] == "aguero-9320")
+        full = next(r for r in rows if r["video_id"] == "ABC123")
+        self.assertEqual(full["slug"], "aguero-9320")
         self.assertEqual(full["channel"], "sportstoriesanimated")
+        self.assertEqual(full["account"], "sportstoriesanimated")
+        # YouTube fields come straight from the cache.
+        self.assertEqual(full["title"], "Aguero 93:20")
+        self.assertEqual(full["stats"]["view_count"], 1234)
+        # Local artefacts joined by video_id.
         self.assertEqual(full["script"]["hook"][:8], "Manchest")
         self.assertEqual(full["script"]["footage_count"], 1)
-        self.assertEqual(full["upload"]["video_id"], "ABC123")
+        self.assertEqual(full["local"]["mp4_size_bytes"], 128)
         self.assertEqual(full["critique"]["score"], 3)
-        # 2 class-of-bug + 1 one-off in top_issues
         self.assertEqual(full["critique"]["class_of_bug_count"], 2)
         self.assertEqual(full["critique"]["one_off_count"], 1)
         self.assertEqual(full["critique"]["system_correction_count"], 2)
-        self.assertEqual(full["analytics"]["view_count"], 1234)
         self.assertTrue(full["critique_md_path"].endswith("aguero-9320.md"))
 
-    def test_no_critique_no_analytics_no_upload(self):
+    def test_orphan_youtube_video_has_null_local_block(self):
         rows = research.build_videos()
-        bare = next(r for r in rows if r["slug"] == "no-critique-yet")
-        self.assertIsNone(bare["upload"])
-        self.assertIsNone(bare["critique"])
-        self.assertIsNone(bare["analytics"])
-        # Script join still works even without the rest.
-        self.assertEqual(bare["script"]["hook"], "fresh render")
+        orphan = next(r for r in rows if r["video_id"] == "ORPHAN1")
+        # The video EXISTS — YouTube knows about it — but local doesn't.
+        self.assertEqual(orphan["title"], "Manually uploaded short")
+        self.assertEqual(orphan["stats"]["view_count"], 50)
+        self.assertIsNone(orphan["slug"])
+        self.assertIsNone(orphan["channel"])
+        self.assertIsNone(orphan["local"])
+        self.assertIsNone(orphan["script"])
+        self.assertIsNone(orphan["critique"])
 
-    def test_legacy_intermediate_dir_still_resolves_channel(self):
+    def test_stats_fetched_at_propagated_from_cache(self):
         rows = research.build_videos()
-        legacy = next(r for r in rows if r["slug"] == "amitheasshole-test")
-        self.assertEqual(legacy["channel"], "reddit_amitheasshole")
-        self.assertEqual(legacy["upload"]["account"], "mystoriesanimated")
+        for r in rows:
+            self.assertTrue(r["stats"]["fetched_at"].startswith("2026-05-04"))
+
+    def test_video_without_critique_has_critique_null(self):
+        rows = research.build_videos()
+        bare = next(r for r in rows if r["video_id"] == "BARE99")
+        self.assertEqual(bare["slug"], "iniesta-2010")
+        self.assertIsNone(bare["critique"])
+        self.assertEqual(bare["script"]["hook"], "fresh render")
+        self.assertEqual(bare["local"]["mp4_size_bytes"], 64)
 
 
 class BuildChannelsTest(unittest.TestCase):
@@ -307,43 +418,36 @@ class BuildChannelsTest(unittest.TestCase):
         self.patcher.__exit__(None, None, None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_three_kinds_present(self):
+    def test_one_row_per_config_yaml(self):
         rows = research.build_channels(self.videos)
-        kinds = {r["kind"] for r in rows}
-        self.assertEqual(kinds, {"yaml", "intermediate", "account"})
+        names = {r["channel"] for r in rows}
+        self.assertEqual(names, {"sportstoriesanimated", "historyrecapped"})
+        # All rows have the new uniform kind.
+        self.assertEqual({r["kind"] for r in rows}, {"channel"})
 
-    def test_yaml_production_flag_only_for_canonical_recipes(self):
+    def test_youtube_meta_propagated(self):
         rows = research.build_channels(self.videos)
-        prod_yaml = [r for r in rows if r["kind"] == "yaml" and r["production"]]
-        self.assertEqual(len(prod_yaml), 1)
-        # sportstoriesanimated.yaml is the only canonical prod recipe in
-        # the fixture; aita_animated.yaml ships to mystoriesanimated but
-        # is a variant per project_two_production_channels.md.
-        self.assertEqual(prod_yaml[0]["yaml_filename"], "sportstoriesanimated.yaml")
+        sports = next(r for r in rows if r["channel"] == "sportstoriesanimated")
+        self.assertEqual(sports["youtube_channel_id"], "UC_sports")
+        self.assertEqual(sports["subscriber_count"], 100)
+        self.assertEqual(sports["youtube_video_count"], 3)
+        self.assertEqual(sports["youtube_uploads_seen"], 3)
 
-    def test_account_view_aggregates_uploads(self):
+    def test_production_flag_only_for_canonical_recipes(self):
         rows = research.build_channels(self.videos)
-        accts = {r["channel"]: r for r in rows if r["kind"] == "account"}
-        self.assertIn("sportstoriesanimated", accts)
-        self.assertIn("mystoriesanimated", accts)
-        self.assertEqual(accts["sportstoriesanimated"]["video_count"], 1)
-        self.assertEqual(accts["sportstoriesanimated"]["uploaded_count"], 1)
-        self.assertEqual(accts["mystoriesanimated"]["uploaded_count"], 1)
+        prod = [r for r in rows if r["production"]]
+        self.assertEqual({r["channel"] for r in prod}, {"sportstoriesanimated"})
 
-    def test_intermediate_kind_only_when_no_yaml_claims_it(self):
+    def test_rollup_only_counts_locally_joined_videos(self):
         rows = research.build_channels(self.videos)
-        intermediate_names = {r["channel"] for r in rows if r["kind"] == "intermediate"}
-        # reddit_amitheasshole has videos but no YAML → must surface
-        self.assertIn("reddit_amitheasshole", intermediate_names)
-        # sportstoriesanimated has a YAML and an intermediate dir but the
-        # YAML's channel_id matches, so no intermediate-orphan row.
-        # (build emits the videos via the kind=account row instead.)
-
-    def test_avg_score_rounded_two_decimals(self):
-        rows = research.build_channels(self.videos)
-        for r in rows:
-            if r["avg_score"] is not None:
-                self.assertEqual(round(r["avg_score"], 2), r["avg_score"])
+        sports = next(r for r in rows if r["channel"] == "sportstoriesanimated")
+        # 2 of the 3 YouTube videos joined to local upload records;
+        # the orphan one didn't.
+        self.assertEqual(sports["video_count_local"], 2)
+        self.assertEqual(sports["locally_rendered_count"], 2)
+        # Only one of the local videos has a critique (aguero, score=3).
+        self.assertEqual(sports["score_count"], 1)
+        self.assertEqual(sports["avg_score"], 3.0)
 
 
 class BuildLearningsTest(unittest.TestCase):
@@ -360,7 +464,6 @@ class BuildLearningsTest(unittest.TestCase):
 
     def test_skips_memory_index(self):
         rows = research.build_learnings(self.videos)
-        # MEMORY.md is the index; must never appear as a learning.
         self.assertFalse(any("MEMORY" in (r.get("source_path") or "") for r in rows))
 
     def test_memory_with_frontmatter_uses_meta(self):
@@ -372,19 +475,15 @@ class BuildLearningsTest(unittest.TestCase):
 
     def test_memory_without_frontmatter_does_not_crash(self):
         rows = research.build_learnings(self.videos)
-        # The "feedback_no_frontmatter.md" file should still produce a row,
-        # falling back to the file stem as the title.
         titles = {r["title"] for r in rows if r["source"] == "memory"}
         self.assertIn("feedback_no_frontmatter", titles)
 
     def test_critique_system_corrections_promoted(self):
         rows = research.build_learnings(self.videos)
         crit = [r for r in rows if r["source"] == "critique"]
-        # 2 system_corrections in the fixture
         self.assertEqual(len(crit), 2)
         classes = {r["title"] for r in crit}
         self.assertEqual(classes, {"kit-text-gibberish", "opposition-cast-missing"})
-        # Critique learnings carry the channel + slug they came from.
         for r in crit:
             self.assertEqual(r["channel"], "sportstoriesanimated")
             self.assertEqual(r["related_slugs"], ["aguero-9320"])
@@ -416,8 +515,8 @@ class RebuildAndJsonlRoundtripTest(unittest.TestCase):
 
     def test_full_rebuild_writes_three_files(self):
         out = research.rebuild(quiet=True)
-        self.assertEqual(out["videos"], 3)
-        self.assertGreaterEqual(out["channels"], 5)  # 3 yamls + at least 1 intermediate + 2 accounts
+        self.assertEqual(out["videos"], 4)
+        self.assertEqual(out["channels"], 2)
         self.assertGreaterEqual(out["learnings"], 4)  # 3 memory + 2 critique
         for name, key in [
             ("videos.jsonl", "videos"),
@@ -430,21 +529,13 @@ class RebuildAndJsonlRoundtripTest(unittest.TestCase):
             self.assertEqual(len(rows), out[key])
 
     def test_partial_rebuild_only_touches_named_slice(self):
-        # First, full build so all three files exist.
         research.rebuild(quiet=True)
-        # Stamp learnings to detect untouched.
         learnings_path = research.RESEARCH_DIR / "learnings.jsonl"
-        before = learnings_path.stat().st_mtime
-        # Sleep-free: just compare the on-disk content.
         original_text = learnings_path.read_text()
-        # Rewrite only videos — must not touch learnings.jsonl.
         research.rebuild(["videos"], quiet=True)
         self.assertEqual(learnings_path.read_text(), original_text)
 
     def test_rebuild_does_not_call_youtube_when_refresh_false(self):
-        # If we don't pass refresh_analytics=True, the youtube_stats
-        # module must not be imported. We assert by ensuring no
-        # network attempt: monkey-patch fetch_all to raise if called.
         from pipeline import youtube_stats
 
         original = youtube_stats.fetch_all
@@ -452,7 +543,7 @@ class RebuildAndJsonlRoundtripTest(unittest.TestCase):
             raise AssertionError("fetch_all should not be called")
         youtube_stats.fetch_all = _boom
         try:
-            research.rebuild(quiet=True)  # default: no refresh
+            research.rebuild(quiet=True)
         finally:
             youtube_stats.fetch_all = original
 

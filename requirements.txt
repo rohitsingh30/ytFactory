@@ -2,6 +2,7 @@ kokoro-onnx>=0.4.0
 mlx-whisper>=0.4.0
 diffusers>=0.30.0
 torch>=2.4.0
+torchaudio>=2.4.0       # required by tts_provider: chatterbox (Resemble AI voice clone)
 transformers>=4.44.0
 accelerate>=0.33.0
 peft>=0.10.0          # required by diffusers for SDXL-Lightning LoRA loading
@@ -20,6 +21,17 @@ google-api-python-client>=2.100
 google-auth-oauthlib>=1.2
 google-auth-httplib2>=0.2
 
+# Cross-channel engagement (pipeline/cross_engage.py) — anonymous muted
+# tab plays each new upload to register a natural view. After install
+# run `playwright install chromium` once.
+playwright>=1.45
+
+# Stage 8b — X (Twitter) cross-post (pipeline/x_upload.py)
+tweepy>=4.14
+
+# Stage 8b — X (Twitter) cross-post (pipeline/x_upload.py)
+tweepy>=4.14
+
 # Control plane + laptop agent (cloud migration)
 fastapi>=0.115
 uvicorn[standard]>=0.30
@@ -34,5 +46,8 @@ openai>=1.50  # Azure OpenAI client used by control/chat_service.py
 # corresponding channel YAML knob)
 # parakeet-mlx>=0.2     # asr_provider: parakeet_mlx        (~600 MB on first use)
 # f5-tts-mlx>=0.2       # tts_provider: f5_tts              (~1.35 GB on first use)
+# chatterbox-tts>=0.1   # tts_provider: chatterbox          (~3 GB on first use; install with --no-deps to avoid downgrading transformers)
+# git+https://github.com/huggingface/parler-tts.git  # tts_provider: indic_parler (~2 GB; AI4Bharat, Apache 2.0; HF repo is GATED — accept license at https://huggingface.co/ai4bharat/indic-parler-tts before first run)
+# styletts2 — wired in pipeline/audio.py but PyPI 0.1.6 has hard pins (huggingface_hub<0.20, librosa<0.11, networkx<3) that conflict with this venv. Skip in this repo; long-form sleep uses Kokoro instead.
 # imageio>=2.34         # only if you switch animation.py to diffusers' export_to_video
 # fal-client>=0.5       # image_provider: z_image_turbo_fal (hosted z-image-turbo on fal.ai)

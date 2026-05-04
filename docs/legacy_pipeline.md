@@ -1224,7 +1224,7 @@ entry's URL to `pull_backgrounds.py` to actually download + slice.
 
 | File | Purpose |
 |---|---|
-| `pipeline/audio.py` | TTS (Kokoro / F5-TTS) — provider switchable. |
+| `pipeline/audio.py` | TTS — provider switchable: kokoro, f5_tts, chatterbox, styletts2, indic_parler, cartesia. |
 | `pipeline/asr.py` | Word-level transcription (whisper_mlx / parakeet_mlx). Heavy imports lazy. |
 | `pipeline/transcribe.py` | Stage 1 thin wrapper for long-form transcription. |
 | `pipeline/segment.py` | Stage 2 — story boundaries inside a long transcript. |

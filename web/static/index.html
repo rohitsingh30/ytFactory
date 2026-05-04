@@ -731,12 +731,12 @@
     <!-- videos -->
     <div id="rsr-tab-videos" class="space-y-3">
       <div class="flex flex-wrap items-center gap-2">
-        <input id="rsr-v-search" type="text" placeholder="filter by slug, hook, channel…" class="flex-1 min-w-[240px] bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm"/>
+        <input id="rsr-v-search" type="text" placeholder="filter by slug, title, hook, channel…" class="flex-1 min-w-[240px] bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm"/>
         <select id="rsr-v-channel" class="bg-slate-900 border border-slate-700 rounded px-2 py-2 text-sm"><option value="">all channels</option></select>
         <select id="rsr-v-status" class="bg-slate-900 border border-slate-700 rounded px-2 py-2 text-sm">
           <option value="">all statuses</option>
-          <option value="uploaded">uploaded</option>
-          <option value="not_uploaded">not uploaded</option>
+          <option value="local">has local artefacts</option>
+          <option value="orphan">no local match</option>
           <option value="critiqued">has critique</option>
           <option value="no_critique">no critique</option>
         </select>
@@ -747,7 +747,7 @@
 
     <!-- channels -->
     <div id="rsr-tab-channels" class="hidden space-y-3">
-      <div class="text-xs text-slate-500">Three views: <span class="text-slate-300">yaml</span> = recipe definition, <span class="text-slate-300">intermediate</span> = render dir without YAML, <span class="text-slate-300">account</span> = YouTube upload destination. Same channel can appear in multiple rows.</div>
+      <div class="text-xs text-slate-500">One row per <span class="text-slate-300">&lt;channel&gt;/config.yaml</span>, joined live with the YouTube channel meta (subscribers / total views / video count).</div>
       <div id="rsr-c-table" class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden"></div>
     </div>
 
@@ -2995,19 +2995,19 @@ function fmtBytes(n) {
 
 function renderResearchKpis() {
   const v = research.videos;
-  const uploaded = v.filter(x => x.upload).length;
+  const withLocal = v.filter(x => x.local).length;
+  const orphans = v.length - withLocal;
   const critiqued = v.filter(x => x.critique).length;
   const scores = v.map(x => x.critique?.score).filter(s => typeof s === 'number');
   const avg = scores.length ? (scores.reduce((a,b)=>a+b,0)/scores.length).toFixed(2) : '—';
-  const channels = research.channels.filter(c => c.video_count > 0).length;
-  const totalViews = v.reduce((s, x) => s + (x.analytics?.view_count || 0), 0);
-  const haveStats = v.filter(x => x.analytics?.view_count != null).length;
-  const needsCritique = v.filter(x => !x.critique).length;
+  const totalViews = v.reduce((s, x) => s + (x.stats?.view_count || 0), 0);
+  const totalSubs = research.channels.reduce((s, c) => s + (c.subscriber_count || 0), 0);
+  const refreshable = research.channels.filter(c => c.youtube_fetched_at).length;
   const cards = [
-    ['Videos rendered', v.length, `${uploaded} uploaded · ${needsCritique} need critique`],
-    ['Avg critique score', avg, `${scores.length} of ${v.length} scored`],
-    ['Total YouTube views', totalViews.toLocaleString(), haveStats ? `${haveStats} of ${uploaded} have stats` : 'no stats yet — click Refresh stats'],
-    ['Active channels', channels, `${research.channels.length} configured`],
+    ['Videos on YouTube', v.length, `${withLocal} with local · ${orphans} orphan`],
+    ['Total views', totalViews.toLocaleString(), `${totalSubs.toLocaleString()} subs across ${refreshable} channels`],
+    ['Avg critique score', avg, `${scores.length} scored · ${v.length - critiqued} need critique`],
+    ['Channels', research.channels.length, `${refreshable} have YouTube cache`],
     ['Learnings', research.learnings.length, `${research.learnings.filter(l=>l.source==='memory').length} memory · ${research.learnings.filter(l=>l.source==='critique').length} critique`],
   ];
   document.getElementById('rsr-kpis').innerHTML = cards.map(([label, big, sub]) => `
@@ -3022,13 +3022,13 @@ function videoMatchesFilters(v) {
   const q = (document.getElementById('rsr-v-search').value || '').toLowerCase().trim();
   const ch = document.getElementById('rsr-v-channel').value;
   const status = document.getElementById('rsr-v-status').value;
-  if (ch && v.channel !== ch) return false;
-  if (status === 'uploaded' && !v.upload) return false;
-  if (status === 'not_uploaded' && v.upload) return false;
+  if (ch && v.account !== ch) return false;
+  if (status === 'local' && !v.local) return false;
+  if (status === 'orphan' && v.local) return false;
   if (status === 'critiqued' && !v.critique) return false;
   if (status === 'no_critique' && v.critique) return false;
   if (q) {
-    const hay = [v.slug, v.channel, v.script?.hook, v.upload?.title, v.script?.source].filter(Boolean).join(' ').toLowerCase();
+    const hay = [v.slug, v.account, v.channel, v.title, v.script?.hook, v.script?.source].filter(Boolean).join(' ').toLowerCase();
     if (!hay.includes(q)) return false;
   }
   return true;
@@ -3042,7 +3042,7 @@ function scoreColor(s) {
 }
 
 function renderVideosTable() {
-  const rows = research.videos.filter(videoMatchesFilters).sort((a,b) => (b.rendered_at||'').localeCompare(a.rendered_at||''));
+  const rows = research.videos.filter(videoMatchesFilters).sort((a,b) => (b.published_at||'').localeCompare(a.published_at||''));
   document.getElementById('rsr-v-count').textContent = `${rows.length} of ${research.videos.length}`;
   if (!rows.length) {
     document.getElementById('rsr-v-table').innerHTML = `<div class="p-6 text-sm text-slate-500">No videos match these filters.</div>`;
@@ -3052,33 +3052,33 @@ function renderVideosTable() {
     <table class="w-full text-sm">
       <thead class="bg-slate-900/60 text-[11px] uppercase tracking-wider text-slate-500">
         <tr>
-          <th class="text-left px-3 py-2">Slug</th>
+          <th class="text-left px-3 py-2">Title</th>
           <th class="text-left px-3 py-2">Channel</th>
-          <th class="text-left px-3 py-2">Hook</th>
-          <th class="text-left px-3 py-2">Rendered</th>
-          <th class="text-right px-3 py-2">Size</th>
-          <th class="text-center px-3 py-2">Score</th>
-          <th class="text-center px-3 py-2">Class-of-bug</th>
+          <th class="text-left px-3 py-2">Slug</th>
+          <th class="text-left px-3 py-2">Published</th>
           <th class="text-right px-3 py-2">Views</th>
-          <th class="text-left px-3 py-2">Upload</th>
+          <th class="text-right px-3 py-2">Likes</th>
+          <th class="text-right px-3 py-2">Comments</th>
+          <th class="text-center px-3 py-2">Score</th>
+          <th class="text-left px-3 py-2">Link</th>
         </tr>
       </thead>
       <tbody>
         ${rows.map(v => `
           <tr class="border-t border-slate-800/60 hover:bg-slate-900/30">
-            <td class="px-3 py-2 font-mono text-xs whitespace-nowrap">${escapeHtml(v.slug)}</td>
-            <td class="px-3 py-2 text-xs text-slate-300">${escapeHtml(v.channel || '—')}</td>
-            <td class="px-3 py-2 text-slate-300 max-w-md truncate" title="${escapeHtml(v.script?.hook || '')}">${escapeHtml(v.script?.hook || '—')}</td>
-            <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">${fmtDate(v.rendered_at)}</td>
-            <td class="px-3 py-2 text-xs text-slate-400 text-right whitespace-nowrap">${fmtBytes(v.mp4_size_bytes)}</td>
+            <td class="px-3 py-2 text-slate-200 max-w-md truncate" title="${escapeHtml(v.title || '')}">${escapeHtml(v.title || '—')}</td>
+            <td class="px-3 py-2 text-xs text-slate-300">${escapeHtml(v.account || '—')}</td>
+            <td class="px-3 py-2 font-mono text-xs whitespace-nowrap ${v.slug ? 'text-slate-300' : 'text-slate-600'}">${escapeHtml(v.slug || 'orphan')}</td>
+            <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">${fmtDate(v.published_at)}</td>
+            <td class="px-3 py-2 text-right text-xs text-slate-200 whitespace-nowrap" title="${v.stats?.fetched_at ? 'as of ' + fmtDate(v.stats.fetched_at) : ''}">${v.stats?.view_count != null ? v.stats.view_count.toLocaleString() : '—'}</td>
+            <td class="px-3 py-2 text-right text-xs text-slate-400 whitespace-nowrap">${v.stats?.like_count != null ? v.stats.like_count.toLocaleString() : '—'}</td>
+            <td class="px-3 py-2 text-right text-xs text-slate-400 whitespace-nowrap">${v.stats?.comment_count != null ? v.stats.comment_count.toLocaleString() : '—'}</td>
             <td class="px-3 py-2 text-center font-bold ${scoreColor(v.critique?.score)}">${v.critique?.score ?? '—'}</td>
-            <td class="px-3 py-2 text-center text-xs ${v.critique?.class_of_bug_count ? 'text-rose-300' : 'text-slate-500'}">${v.critique?.class_of_bug_count ?? '—'}</td>
-            <td class="px-3 py-2 text-right text-xs text-slate-300 whitespace-nowrap" title="${v.analytics?.fetched_at ? 'as of ' + fmtDate(v.analytics.fetched_at) : ''}">${v.analytics?.view_count != null ? v.analytics.view_count.toLocaleString() : '—'}</td>
-            <td class="px-3 py-2 text-xs">${v.upload?.url ? `<a href="${escapeHtml(v.upload.url)}" target="_blank" class="text-violet-300 hover:text-violet-200">${escapeHtml(v.upload.video_id || 'open')}</a>` : '—'}</td>
+            <td class="px-3 py-2 text-xs">${v.url ? `<a href="${escapeHtml(v.url)}" target="_blank" class="text-violet-300 hover:text-violet-200">${escapeHtml(v.video_id)}</a>` : '—'}</td>
           </tr>
-          ${v.critique?.one_line_take ? `
+          ${(v.critique?.one_line_take || v.script?.hook) ? `
           <tr class="border-t border-slate-900/40">
-            <td colspan="9" class="px-3 pb-2 text-xs italic text-slate-400">↳ ${escapeHtml(v.critique.one_line_take)}</td>
+            <td colspan="9" class="px-3 pb-2 text-xs italic text-slate-400">↳ ${escapeHtml(v.critique?.one_line_take || v.script?.hook || '')}</td>
           </tr>` : ''}
         `).join('')}
       </tbody>
@@ -3088,39 +3088,39 @@ function renderVideosTable() {
 
 function renderChannelsTable() {
   const rows = research.channels.slice().sort((a, b) => {
-    // Production accounts first, then by video count desc.
-    if (a.kind !== b.kind) return ['account','yaml','intermediate'].indexOf(a.kind) - ['account','yaml','intermediate'].indexOf(b.kind);
     if (a.production !== b.production) return a.production ? -1 : 1;
-    return (b.video_count || 0) - (a.video_count || 0);
+    return (b.subscriber_count || 0) - (a.subscriber_count || 0);
   });
   const html = `
     <table class="w-full text-sm">
       <thead class="bg-slate-900/60 text-[11px] uppercase tracking-wider text-slate-500">
         <tr>
-          <th class="text-left px-3 py-2">Kind</th>
           <th class="text-left px-3 py-2">Channel</th>
-          <th class="text-left px-3 py-2">Upload account</th>
-          <th class="text-left px-3 py-2">Source adapter</th>
-          <th class="text-right px-3 py-2">Videos</th>
-          <th class="text-right px-3 py-2">Uploaded</th>
+          <th class="text-left px-3 py-2">Account</th>
+          <th class="text-right px-3 py-2">Subs</th>
+          <th class="text-right px-3 py-2">Total views</th>
+          <th class="text-right px-3 py-2">Videos (YT)</th>
+          <th class="text-right px-3 py-2">Local</th>
           <th class="text-right px-3 py-2">Avg score</th>
-          <th class="text-left px-3 py-2">Last render</th>
+          <th class="text-left px-3 py-2">Last published</th>
+          <th class="text-left px-3 py-2">Cache</th>
         </tr>
       </thead>
       <tbody>
         ${rows.map(c => `
           <tr class="border-t border-slate-800/60 hover:bg-slate-900/30">
-            <td class="px-3 py-2 text-xs">
-              <span class="chip" style="background: ${c.kind==='account'?'rgb(76 29 149 / .35)':c.kind==='yaml'?'rgb(30 58 138 / .35)':'rgb(30 41 59)'}; color: ${c.kind==='account'?'rgb(196 181 253)':c.kind==='yaml'?'rgb(147 197 253)':'rgb(148 163 184)'}">${c.kind}</span>
-              ${c.production ? '<span class="chip" style="background:rgb(6 78 59 / .35); color:rgb(110 231 183)">PROD</span>' : ''}
+            <td class="px-3 py-2 font-mono text-xs">
+              ${escapeHtml(c.channel)}
+              ${c.production ? '<span class="chip ml-1" style="background:rgb(6 78 59 / .35); color:rgb(110 231 183)">PROD</span>' : ''}
             </td>
-            <td class="px-3 py-2 font-mono text-xs">${escapeHtml(c.channel)}</td>
-            <td class="px-3 py-2 text-xs text-slate-400">${escapeHtml(c.upload_account || '—')}</td>
-            <td class="px-3 py-2 text-xs text-slate-400">${escapeHtml(c.source_adapter || '—')}</td>
-            <td class="px-3 py-2 text-right">${c.video_count}</td>
-            <td class="px-3 py-2 text-right text-slate-400">${c.uploaded_count}</td>
+            <td class="px-3 py-2 text-xs text-slate-400">${escapeHtml(c.account || '—')}</td>
+            <td class="px-3 py-2 text-right text-slate-200 whitespace-nowrap">${c.subscriber_count != null ? c.subscriber_count.toLocaleString() : '—'}</td>
+            <td class="px-3 py-2 text-right text-slate-200 whitespace-nowrap">${c.youtube_view_count != null ? c.youtube_view_count.toLocaleString() : '—'}</td>
+            <td class="px-3 py-2 text-right text-slate-300 whitespace-nowrap">${c.youtube_video_count ?? '—'}</td>
+            <td class="px-3 py-2 text-right text-slate-400 whitespace-nowrap" title="locally rendered / joined to upload record">${c.locally_rendered_count}/${c.video_count_local}</td>
             <td class="px-3 py-2 text-right font-bold ${scoreColor(c.avg_score)}">${c.avg_score ?? '—'}</td>
-            <td class="px-3 py-2 text-xs text-slate-400">${fmtDate(c.last_render_at)}</td>
+            <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">${fmtDate(c.last_published_at)}</td>
+            <td class="px-3 py-2 text-xs text-slate-500 whitespace-nowrap" title="${c.youtube_fetched_at || 'no cache'}">${c.youtube_fetched_at ? fmtDate(c.youtube_fetched_at) : '<span class="text-amber-400">none — Refresh stats</span>'}</td>
           </tr>
         `).join('')}
       </tbody>
@@ -3179,11 +3179,12 @@ async function loadResearch(force) {
     research.channels = c.channels || [];
     research.learnings = l.learnings || [];
     research.loaded = true;
-    // Populate channel filter dropdown.
-    const channels = Array.from(new Set(research.videos.map(v => v.channel).filter(Boolean))).sort();
+    // Populate channel filter dropdown — keyed by account (the YouTube
+    // upload destination) since orphan rows have no local channel dir.
+    const accounts = Array.from(new Set(research.videos.map(v => v.account).filter(Boolean))).sort();
     const sel = document.getElementById('rsr-v-channel');
     const cur = sel.value;
-    sel.innerHTML = '<option value="">all channels</option>' + channels.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+    sel.innerHTML = '<option value="">all channels</option>' + accounts.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
     sel.value = cur;
     renderResearchKpis();
     renderVideosTable();
@@ -3215,7 +3216,7 @@ async function rebuildIndex(refreshAnalytics) {
   const url = '/api/research/rebuild' + (refreshAnalytics ? '?refresh_analytics=1' : '');
   const r = await fetch(url, { method: 'POST' }).then(r => r.json());
   const parts = [`Built ${fmtDate(r.built_at)}`, `${r.videos} videos`, `${r.channels} channels`, `${r.learnings} learnings`];
-  if (r.analytics) parts.push(`${r.analytics.fetched} stats fetched${r.analytics.missing_auth ? ` (${r.analytics.missing_auth} no-auth)` : ''}`);
+  if (r.analytics) parts.push(`YT: ${r.analytics.fetched}/${r.analytics.channels} channels · ${r.analytics.videos} videos${r.analytics.missing_auth ? ` (${r.analytics.missing_auth} no-auth)` : ''}`);
   document.getElementById('rsr-built-at').textContent = parts.join(' · ');
   await loadResearch(true);
 }

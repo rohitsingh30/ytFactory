@@ -42,12 +42,15 @@ from typing import Any
 # https://developers.google.com/youtube/v3/docs/thumbnails/set#auth).
 # `youtube.readonly` is needed by get_channel_sub_count (used by the
 # Part-2 cliffhanger watcher to detect when Part 1 has crossed its
-# subscriber threshold). Adding it forces a one-time re-auth on accounts
-# whose cached token predates the change — the OAuth flow re-prompts the
-# browser when authenticate() detects the missing scope.
+# subscriber threshold). The full `youtube` scope is needed by
+# pipeline/cross_engage.py for videos.rate (likes) and
+# subscriptions.insert (cross-channel subscribes). Adding scopes forces
+# a one-time re-auth on accounts whose cached token predates the change
+# — authenticate() detects scope-set drift and re-runs the browser flow.
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
+    "https://www.googleapis.com/auth/youtube",
 ]
 
 
@@ -83,6 +86,40 @@ class UploadError(RuntimeError):
 # ---- auth ---------------------------------------------------------------
 
 
+def inspect_token_status(account: str) -> dict:
+    """Read this account's cached token and report its state — no API calls.
+
+    ``state`` is one of:
+      ok               — has refresh_token and all required scopes; ready
+      missing          — file does not exist
+      no_refresh_token — token exists but no refresh_token (worthless once
+                         expired — re-auth required)
+      missing_scopes   — token exists but lacks one or more SCOPES
+      unreadable       — file exists but is malformed
+    """
+    tp = _token_path(account)
+    out: dict[str, Any] = {"account": account, "path": str(tp)}
+    if not tp.exists():
+        out["state"] = "missing"
+        return out
+    try:
+        data = json.loads(tp.read_text())
+    except Exception as e:
+        out.update(state="unreadable", error=str(e))
+        return out
+    out["expiry"] = data.get("expiry")
+    cached_scopes = set(data.get("scopes") or [])
+    needed = set(SCOPES)
+    if cached_scopes and not cached_scopes.issuperset(needed):
+        out.update(state="missing_scopes", missing=sorted(needed - cached_scopes))
+        return out
+    if not data.get("refresh_token"):
+        out["state"] = "no_refresh_token"
+        return out
+    out["state"] = "ok"
+    return out
+
+
 def authenticate(account: str = "default", *, interactive: bool = True) -> Any:
     """Return a google-auth ``Credentials`` for the given account.
 
@@ -107,6 +144,20 @@ def authenticate(account: str = "default", *, interactive: bool = True) -> Any:
             creds = Credentials.from_authorized_user_file(str(tp), SCOPES)
         except Exception as e:
             print(f"[upload] cached token unreadable ({e}); re-auth required")
+            creds = None
+
+    # Scope-set drift: token was minted before SCOPES grew (e.g. the
+    # `youtube` write scope added for cross-engagement). Discard the
+    # cached creds so we fall through to the browser flow.
+    if creds is not None:
+        cached = set(getattr(creds, "scopes", None) or [])
+        needed = set(SCOPES)
+        if not cached.issuperset(needed):
+            missing = needed - cached
+            print(
+                f"[upload] cached token for {account!r} missing scopes "
+                f"{sorted(missing)}; re-auth required"
+            )
             creds = None
 
     if creds and creds.valid:
@@ -146,7 +197,11 @@ def authenticate(account: str = "default", *, interactive: bool = True) -> Any:
     callback_port = int(os.environ.get("YTFACTORY_OAUTH_PORT") or 8089)
     creds = flow.run_local_server(
         port=callback_port,
-        prompt="consent",
+        # `consent select_account` forces BOTH the account picker AND the
+        # consent screen, increasing the odds Google issues a fresh
+        # refresh_token. `access_type=offline` is sent automatically by
+        # google-auth-oauthlib's authorization_url().
+        prompt="consent select_account",
         open_browser=False,
         authorization_prompt_message=(
             "\n"
@@ -159,6 +214,32 @@ def authenticate(account: str = "default", *, interactive: bool = True) -> Any:
         ),
         success_message="Authorization complete — you can close this tab.",
     )
+
+    # Refresh-token preservation: Google may omit refresh_token in the
+    # token response when the user has previously consented to this OAuth
+    # client, even with prompt=consent. Without a refresh_token the next
+    # interactive=False call will fail. If we have one from the prior
+    # token file, splice it forward — it keeps offline access alive even
+    # though it was minted under the old scope set (the access tokens
+    # the refresh endpoint returns will reflect the new scopes
+    # Google has on file for this user/client pair).
+    if not creds.refresh_token:
+        if prior_refresh_token:
+            print(
+                f"[upload] OAuth response for {account!r} omitted refresh_token; "
+                f"reusing prior cached refresh_token"
+            )
+            creds.refresh_token = prior_refresh_token
+        else:
+            raise UploadError(
+                f"OAuth flow for {account!r} returned NO refresh_token AND there "
+                f"was no prior cached one to splice forward. This usually means "
+                f"the Google account has the app pre-consented in a way that "
+                f"deduplicates refresh-token issuance. Fix: visit "
+                f"https://myaccount.google.com/connections , find the OAuth app, "
+                f"REMOVE access, then re-run this auth flow."
+            )
+
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     tp.write_text(creds.to_json())
     print(f"[upload] cached refresh token → {tp}")
@@ -812,4 +893,176 @@ def upload_short(
     except Exception as e:
         print(f"[upload] part2_pending write failed (non-fatal): {e}")
 
+    # Cross-channel engagement: every sibling channel likes the new
+    # video + one anonymous Playwright tab plays it muted to register a
+    # natural view. Runs in a background daemon thread so this call
+    # returns fast. Disable globally via YTFACTORY_CROSS_ENGAGE=0.
+    try:
+        from pipeline import cross_engage
+
+        cross_engage.engage_after_upload(account, record["video_id"])
+    except Exception as e:
+        print(f"[upload] cross_engage dispatch failed (non-fatal): {e}")
+
     return record
+
+
+# ---- CLI ----------------------------------------------------------------
+
+
+def _discover_accounts() -> list[str]:
+    """Distinct OAuth-account names across every <channel>/config.yaml.
+
+    Falls back to listing existing token files if no channel YAMLs are
+    discoverable (e.g. running outside the repo).
+    """
+    try:
+        from pipeline import youtube_stats
+
+        accts = sorted({a for a, _ in youtube_stats.iter_channel_configs()})
+        if accts:
+            return accts
+    except Exception:
+        pass
+    if CONFIG_DIR.exists():
+        return sorted({
+            p.stem.replace("youtube_token_", "")
+            for p in CONFIG_DIR.glob("youtube_token_*.json")
+        })
+    return []
+
+
+def _print_status_table(rows: list[dict]) -> None:
+    state_color = {
+        "ok": "\033[32m",  # green
+        "missing": "\033[31m",  # red
+        "no_refresh_token": "\033[33m",  # yellow
+        "missing_scopes": "\033[33m",
+        "unreadable": "\033[31m",
+    }
+    reset = "\033[0m"
+    name_w = max((len(r["account"]) for r in rows), default=10)
+    print(f"{'account':<{name_w}}  {'state':<18}  detail")
+    print("-" * (name_w + 2 + 18 + 2 + 40))
+    for r in rows:
+        col = state_color.get(r["state"], "")
+        detail = ""
+        if r["state"] == "missing_scopes":
+            detail = "missing: " + ",".join(s.split("/")[-1] for s in r.get("missing") or [])
+        elif r["state"] == "no_refresh_token":
+            detail = f"expiry={r.get('expiry') or '?'} — re-auth required"
+        elif r["state"] == "ok":
+            detail = f"expiry={r.get('expiry') or '?'}"
+        elif r["state"] == "unreadable":
+            detail = (r.get("error") or "")[:60]
+        print(f"{r['account']:<{name_w}}  {col}{r['state']:<18}{reset}  {detail}")
+
+
+def _cmd_auth_status(_args) -> int:
+    accounts = _discover_accounts()
+    if not accounts:
+        print("No accounts discovered (no <channel>/config.yaml files, no token files).")
+        return 1
+    rows = [inspect_token_status(a) for a in accounts]
+    _print_status_table(rows)
+    bad = [r for r in rows if r["state"] != "ok"]
+    if bad:
+        print(
+            f"\n{len(bad)} account(s) need attention. Re-auth with:\n"
+            f"  python -m pipeline.upload auth refresh"
+        )
+    return 0
+
+
+def _cmd_auth_refresh(args) -> int:
+    """Interactively (re-)auth one account or every broken account."""
+    excludes = set(args.exclude or [])
+    if args.account:
+        targets = [args.account]
+    else:
+        accounts = _discover_accounts()
+        if not accounts:
+            print("No accounts discovered. Pass --account <name> to auth a single channel.")
+            return 1
+        rows = [inspect_token_status(a) for a in accounts]
+        targets = [
+            r["account"] for r in rows
+            if r["state"] != "ok" and r["account"] not in excludes
+        ]
+        if not targets:
+            print("All accounts already authed (state=ok). Nothing to do.")
+            return 0
+        skipped = [r["account"] for r in rows if r["account"] in excludes]
+        print(f"Will (re-)auth {len(targets)} account(s):")
+        for r in rows:
+            if r["state"] != "ok" and r["account"] not in excludes:
+                print(f"  - {r['account']}  (state={r['state']})")
+        if skipped:
+            print(f"Skipping (--exclude): {', '.join(skipped)}")
+        if not args.yes:
+            try:
+                answer = input("\nProceed? [y/N] ").strip().lower()
+            except EOFError:
+                answer = ""
+            if answer != "y":
+                print("aborted.")
+                return 1
+
+    failed: list[tuple[str, str]] = []
+    for i, account in enumerate(targets, 1):
+        print(
+            f"\n================ [{i}/{len(targets)}] re-authing "
+            f"{account!r} ================"
+        )
+        try:
+            authenticate(account=account, interactive=True)
+            print(f"[auth] {account}: OK")
+        except KeyboardInterrupt:
+            print("\n[auth] interrupted by user")
+            failed.append((account, "interrupted"))
+            break
+        except Exception as e:
+            print(f"[auth] {account}: FAILED — {e}")
+            failed.append((account, str(e)))
+
+    print("\n--- summary ---")
+    rows = [inspect_token_status(a) for a in targets]
+    _print_status_table(rows)
+    if failed:
+        print(f"\n{len(failed)} account(s) failed: {[a for a,_ in failed]}")
+        return 1
+    return 0
+
+
+def main() -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="python -m pipeline.upload")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    auth = sub.add_parser("auth", help="Inspect or refresh OAuth tokens")
+    auth_sub = auth.add_subparsers(dest="auth_cmd", required=True)
+
+    s = auth_sub.add_parser("status", help="Show auth state of every channel")
+    s.set_defaults(func=_cmd_auth_status)
+
+    r = auth_sub.add_parser(
+        "refresh",
+        help="Run the OAuth flow for a single account or every broken one",
+    )
+    r.add_argument("--account", help="Re-auth only this account")
+    r.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Skip this account (repeatable). Useful for X-only channels.",
+    )
+    r.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+    r.set_defaults(func=_cmd_auth_refresh)
+
+    args = ap.parse_args()
+    raise SystemExit(args.func(args))
+
+
+if __name__ == "__main__":
+    main()

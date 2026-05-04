@@ -25,29 +25,33 @@ name: HindutavaAnimated
 source_adapter: manual
 
 # ---- TTS ---------------------------------------------------------------
-# Cartesia Sonic-2 + "Sneha" (Hindi-tuned empathetic female narrator).
-# Migrated 2026-05-03 from kokoro/hm_psi after the user A/B'd Sneha on
-# the abhimanyu-chakravyuh narration and approved Cartesia's Devanagari
-# rendering. Sneha's "gentle and reassuring" tone fits the kathaa
-# format — gravitas without melodrama. Requires CARTESIA_API_KEY env
-# var at render time.
+# Kokoro hf_alpha (Hindi female, Apache 2.0, local).
 #
-# tts_language: hi cues Cartesia Sonic-2 for Hindi. Without it Sonic
-# would treat the Devanagari as English (mangled phonemes). Cartesia's
-# Hindi handling on conjuncts (कुरुक्षेत्र, चक्रव्यूह, द्रोणाचार्य) is
-# Sonic-2's responsibility — Kokoro's _HINDI_TATSAMA_RESPELLINGS table
-# in pipeline/audio.py is a no-op for Cartesia (different g2p). If a
-# Cartesia mispronunciation surfaces in critique, fix via
-# pronunciation_dict in the dossier (per-name phonetic respellings),
-# NOT by re-adding the Kokoro respelling table.
+# Indic Parler-TTS history (2026-05-04 → 2026-05-04 same day):
+# Briefly defaulted to indic_parler for Hindi. Reverted within hours
+# because parler-tts (the underlying library) hasn't been updated for
+# transformers ≥ 4.49 — its Config API depends on a removed
+# `PreTrainedConfig` attribute, and our venv requires transformers 4.49+
+# for diffusers 0.38 (image-gen). Holding parler-tts' transformers pin
+# would break image-gen for the whole repo. So Hindi is back on Kokoro
+# until parler-tts ships a maintenance release OR we wire a different
+# Hindi TTS lib. Indic Parler code stays in pipeline/audio.py for
+# anyone willing to set up a separate venv.
 #
-# Fallback: switch tts_provider back to kokoro (hm_psi/hf_alpha) for
-# a free, no-API-cost render.
-tts_provider: cartesia
-tts_voice: 6b02ffe5-e3cb-48c0-a023-c72f85953375  # Sneha, Hindi female
+# Cartesia fallback (paid, ship-quality): re-enable by replacing these
+# lines with:
+#   tts_provider: cartesia
+#   tts_voice: 6b02ffe5-e3cb-48c0-a023-c72f85953375  # Sneha
+#   tts_language: hi
+#   tts_speed: 0.85
+#
+# Kokoro Devanagari handling: pipeline/audio._HINDI_TATSAMA_RESPELLINGS
+# table re-spells common conjuncts before TTS. Per-name overrides go
+# in the per-story dossier's pronunciation_dict.
+tts_provider: kokoro
+tts_voice: hf_alpha   # Hindi female (Kokoro's only female Hindi voice)
 tts_language: hi
-# 0.85 — storyteller tempo. Maps to Cartesia "slow".
-tts_speed: 0.85
+tts_speed: 1.0       # Kokoro at native rate; per-sentence modulation in audio.py drives final pacing.
 
 # ---- Image gen — Amar Chitra Katha aesthetic --------------------------
 image_provider: z_image_turbo

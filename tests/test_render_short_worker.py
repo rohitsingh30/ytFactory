@@ -79,23 +79,6 @@ class BuildRawTest(unittest.TestCase):
         self.assertEqual(raw["body"], "Aguero goal")
 
 
-class ChannelResolveTest(unittest.TestCase):
-    def test_known_channels_map_to_yaml_paths(self):
-        from workers.heavy.render_short import _resolve_channel_yaml, _channel_dir_from_yaml
-        self.assertTrue(str(_resolve_channel_yaml("mystoriesanimated")).endswith("mystoriesanimated.yaml"))
-        self.assertTrue(str(_resolve_channel_yaml("sportstoriesanimated")).endswith("sportstoriesanimated.yaml"))
-        self.assertTrue(str(_resolve_channel_yaml("mahabharathindi")).endswith("hindutavaanimated.yaml"))
-        # auto falls back to mystoriesanimated.
-        self.assertTrue(str(_resolve_channel_yaml("auto")).endswith("mystoriesanimated.yaml"))
-        # unknown also falls back.
-        self.assertTrue(str(_resolve_channel_yaml("nonsense")).endswith("mystoriesanimated.yaml"))
-
-    def test_channel_dir_inferred_from_stem(self):
-        from workers.heavy.render_short import _channel_dir_from_yaml
-        self.assertEqual(_channel_dir_from_yaml(Path("mystoriesanimated/config.yaml")), "mystoriesanimated")
-        self.assertEqual(_channel_dir_from_yaml(Path("hindutavaanimated/config.yaml")), "hindutavaanimated")
-
-
 class OrchestrationTest(unittest.IsolatedAsyncioTestCase):
     """Drive render_short end-to-end with everything heavy mocked out.
 

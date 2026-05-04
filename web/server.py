@@ -1521,13 +1521,24 @@ async def auth_page(token: str | None = None) -> Response:
 
 @app.get("/")
 async def home() -> FileResponse:
-    return FileResponse(Path(__file__).resolve().parent / "static" / "index.html")
+    # no-cache: ETag/304 revalidation only — fresh deploys take effect
+    # on a normal reload, no hard-refresh required.
+    return FileResponse(
+        Path(__file__).resolve().parent / "static" / "index.html",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/dashboard")
 async def dashboard() -> FileResponse:
     """Live YouTube analytics dashboard for every uploaded Short."""
-    return FileResponse(Path(__file__).resolve().parent / "static" / "dashboard.html")
+    # no-cache forces the browser to revalidate via ETag/304 every load,
+    # so dashboard.html updates take effect on a normal reload instead of
+    # requiring ⌘⇧R after every deploy. The 304 path stays bandwidth-cheap.
+    return FileResponse(
+        Path(__file__).resolve().parent / "static" / "dashboard.html",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/api/dashboard/videos")
@@ -2918,3 +2929,168 @@ async def research_rebuild(refresh_analytics: bool = Query(False)) -> dict:
     """Rebuild the index. ?refresh_analytics=1 also pulls fresh YouTube
     view/like/comment counts (slower, network-dependent)."""
     return _research.rebuild(quiet=True, refresh_analytics=refresh_analytics)
+
+
+# ---- YouTube OAuth re-auth (cross-engagement support) -------------------
+#
+# pipeline/cross_engage.py likes + subscribes from every sibling channel
+# on every upload. That requires each channel's OAuth token to (a) carry
+# the full `youtube` scope and (b) include a refresh_token so the laptop
+# agent can run non-interactively. These routes surface auth health on
+# the dashboard and let the operator kick off a re-auth flow per account
+# without dropping to a terminal.
+
+# In-memory map of account → in-flight reauth subprocess + captured URL.
+_REAUTH_JOBS: dict[str, dict[str, Any]] = {}
+
+
+@app.get("/api/youtube/auth/status")
+async def youtube_auth_status() -> dict:
+    """Per-account OAuth health: token present? has refresh_token? has all SCOPES?"""
+    from pipeline import upload as _upload
+    from pipeline import cross_engage as _ce
+
+    accounts = _ce.list_sibling_accounts()
+    registry = _ce._load_registry()
+    out = []
+    for a in accounts:
+        s = _upload.inspect_token_status(a)
+        entry = registry.get(a) or {}
+        s["channel_id"] = entry.get("channel_id")
+        s["channel_title"] = entry.get("title")
+        job = _REAUTH_JOBS.get(a)
+        if job:
+            s["reauth_in_flight"] = True
+            s["reauth_url"] = job.get("url")
+            s["reauth_started_at"] = job.get("started_at")
+        out.append(s)
+    return {"accounts": out, "scopes": _upload.SCOPES}
+
+
+@app.post("/api/youtube/auth/start/{account}")
+async def youtube_auth_start(account: str) -> dict:
+    """Kick off the browser OAuth flow for ``account`` in a subprocess.
+
+    The subprocess binds localhost:8089 and prints the URL to stdout; we
+    parse it and return it so the dashboard can show the operator a
+    clickable link. The caller then opens it, signs into the right
+    Google account, clicks Allow, and the localhost callback completes
+    the flow inside the subprocess.
+
+    Idempotent on a per-account basis — calling twice while a flow is
+    in flight returns the existing URL instead of starting a duplicate
+    (which would just hit "Address already in use" anyway).
+    """
+    import re as _re
+    import subprocess
+    import threading
+    from datetime import datetime, timezone
+
+    from pipeline import cross_engage as _ce
+
+    if account not in _ce.list_sibling_accounts() and account not in (
+        "default",
+    ):
+        raise HTTPException(404, f"unknown account {account!r}")
+
+    job = _REAUTH_JOBS.get(account)
+    if job and job.get("proc") and job["proc"].poll() is None:
+        return {
+            "account": account,
+            "status": "in_flight",
+            "url": job.get("url"),
+            "started_at": job.get("started_at"),
+        }
+
+    py = str(PYTHON_BIN if PYTHON_BIN.exists() else "python3")
+    proc = subprocess.Popen(
+        [
+            py,
+            "-c",
+            "from pipeline.upload import authenticate; "
+            f"authenticate({account!r}, interactive=True)",
+        ],
+        cwd=str(PROJECT_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    rec: dict[str, Any] = {
+        "proc": proc,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "url": None,
+        "log": [],
+        "completed": False,
+        "ok": None,
+    }
+    _REAUTH_JOBS[account] = rec
+
+    url_re = _re.compile(r"https://accounts\.google\.com/o/oauth2/auth\?\S+")
+
+    def _drain() -> None:
+        try:
+            for line in proc.stdout:  # type: ignore[union-attr]
+                rec["log"].append(line.rstrip())
+                if rec["url"] is None:
+                    m = url_re.search(line)
+                    if m:
+                        rec["url"] = m.group(0)
+        finally:
+            proc.wait()
+            rec["completed"] = True
+            rec["ok"] = proc.returncode == 0
+
+    threading.Thread(target=_drain, daemon=True).start()
+
+    # Wait briefly for the URL to appear in stdout (max 8s).
+    for _ in range(80):
+        if rec.get("url") or rec.get("completed"):
+            break
+        await asyncio.sleep(0.1)
+
+    return {
+        "account": account,
+        "status": "started" if rec.get("url") else ("done" if rec.get("completed") else "starting"),
+        "url": rec.get("url"),
+        "started_at": rec["started_at"],
+        "ok": rec.get("ok"),
+    }
+
+
+@app.get("/api/youtube/auth/poll/{account}")
+async def youtube_auth_poll(account: str) -> dict:
+    """Check whether the in-flight OAuth flow for ``account`` has finished."""
+    job = _REAUTH_JOBS.get(account)
+    if not job:
+        return {"account": account, "status": "no_job"}
+    proc = job.get("proc")
+    if proc is None:
+        return {"account": account, "status": "no_proc"}
+    if proc.poll() is None:
+        return {
+            "account": account,
+            "status": "in_flight",
+            "url": job.get("url"),
+            "started_at": job["started_at"],
+        }
+    return {
+        "account": account,
+        "status": "completed" if job.get("ok") else "failed",
+        "url": job.get("url"),
+        "started_at": job["started_at"],
+        "tail": job.get("log", [])[-20:],
+    }
+
+
+@app.post("/api/youtube/cross_engage/subscribe_all")
+async def youtube_cross_engage_subscribe_all() -> dict:
+    """Run the one-time cross-subscribe pass across all sibling pairs.
+
+    Each successful pair is idempotent at the YouTube end (already-subscribed
+    is treated as success), so this is safe to re-run.
+    """
+    from pipeline import cross_engage as _ce
+
+    results = await asyncio.to_thread(_ce.subscribe_all_pairs)
+    return {"results": results}

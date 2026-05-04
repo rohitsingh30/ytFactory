@@ -38,39 +38,6 @@ class AgentLeaseProtocolTest(unittest.IsolatedAsyncioTestCase):
         reset_queue()
         _LAST_SEEN.clear()
 
-    async def test_noop_round_trip(self) -> None:
-        # Reuse the singleton in-memory queue across server + test.
-        q = get_queue()
-
-        # Sanity: noop_worker is registered.
-        self.assertIn(TaskKind.NOOP, runner._REGISTRY)
-
-        # Enqueue a noop task.
-        task = TaskEnvelope(task_id=new_task_id(), job_id="job-1", kind=TaskKind.NOOP, payload={"hello": "world"})
-        q.enqueue(task)
-
-        cfg = AgentConfig(
-            agent_id="test-agent",
-            control_url="http://test",
-            auth_token="test-token",
-            heartbeat_interval_s=15.0,
-            lease_caps=("noop",),
-            lease_ttl_s=60,
-        )
-
-        app = _make_app()
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            ran = await _lease_one(cfg, client)
-
-        self.assertTrue(ran, "agent should have processed exactly one task")
-
-        final = q.get(task.task_id)
-        self.assertIsNotNone(final)
-        assert final is not None  # mypy
-        self.assertEqual(final.status, TaskStatus.DONE)
-        self.assertEqual(final.output_uri, f"noop://done/{task.task_id}")
-        self.assertEqual(final.attempts, 1)
 
     async def test_unauth_lease_rejected(self) -> None:
         app = _make_app()

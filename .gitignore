@@ -33,6 +33,7 @@ data/_jobs/
 data/telemetry/
 data/cache/
 data/scratch/
+data/intermediate/
 
 # Per-channel runtime artifacts (apply across every <channel>/ folder)
 # Cache — per-slug intermediate render artifacts (regenerable via re-render)

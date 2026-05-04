@@ -561,16 +561,21 @@ def _split_long_group(group: list[Word], max_s: float) -> list[list[Word]]:
 
 
 def save_beats(beats: list[Beat], path: Path) -> None:
-    """Serialise beats to JSON, with a final monotonicity sanity-pass.
+    """Serialise beats to JSON with a final monotonicity sanity-pass.
 
-    Class-of-bug guard (2026-05-03 hathi-raja sung-audio render): the
-    word-level fix in transcribe_words covers the source-of-truth path,
-    but if a downstream caller ever bypasses transcribe_words (or
-    re-builds beats from a different ASR backend that has the same
-    overlapping-words bug), the safety net catches it. Here we walk the
-    saved beats once more and clamp every beat.start ≥ previous
-    beat.start, every beat.end ≥ beat.start + 0.01s. Idempotent on
-    already-monotonic input.
+    Class-of-bug guards (2026-05-03 hathi-raja sung-audio renders):
+      (1) Beat-level monotonicity — clamp every beat.start ≥ previous
+          beat.start, beat.end ≥ start + 0.01.
+      (2) Word-level monotonicity ACROSS the saved beats — even when
+          split_into_beats shuffles words into different beat groups
+          based on text matching (sung audio has repeated chorus
+          lines, so a chorus-repeat word ends up in a later beat at
+          an earlier timestamp), the GLOBAL word sequence must stay
+          monotonic. Otherwise compose's per-word ffmpeg trim sees
+          negative durations and crashes ("trim_in_X: durationi out
+          of range"). Word-level fix here is the FINAL write barrier.
+
+    Idempotent on already-monotonic input.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     last_start = 0.0
@@ -580,8 +585,25 @@ def save_beats(beats: list[Beat], path: Path) -> None:
         d = asdict(b)
         d["start"] = max(d.get("start", 0.0), last_start)
         d["end"] = max(d.get("end", 0.0), d["start"] + 0.01, last_end)
-        last_start = d["start"]
-        last_end = d["end"]
+        # (2) Word-level monotonicity inside this beat AND across the
+        # global word sequence. We thread last_word_start/last_word_end
+        # via the outer last_start/last_end so words never go backward
+        # even when crossing beat boundaries.
+        new_words: list[dict] = []
+        for w in d.get("words") or []:
+            ws = max(float(w.get("start", 0.0)), last_start)
+            we = max(float(w.get("end", 0.0)), ws + 0.01, last_end)
+            new_words.append({**w, "start": ws, "end": we})
+            last_start = ws
+            last_end = we
+        d["words"] = new_words
+        # If words were sanitised, beat boundaries may need to expand
+        # to enclose them.
+        if new_words:
+            d["start"] = min(d["start"], new_words[0]["start"])
+            d["end"] = max(d["end"], new_words[-1]["end"])
+        last_start = max(last_start, d["start"])
+        last_end = max(last_end, d["end"])
         serialised.append(d)
     with path.open("w") as f:
         json.dump(serialised, f, indent=2)

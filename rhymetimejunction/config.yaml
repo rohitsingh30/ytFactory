@@ -186,15 +186,19 @@ beat_max_s: 6.5
 # Compilations come later as a separate channel YAML.
 duration_target_s: [50, 60]
 duration_max_s: 60                # hard cap; pipeline trims to this
-audio_trim_start_s: 0.5           # skip the bare leading silence
-                                  # (RMS<-35dB for ~0.6s on the source).
-                                  # Was 3.0 in v4/v5 — that cut INTO the
-                                  # actual sung first phrase. The
-                                  # instrumental ramp-up + vocal-onset
-                                  # are now both PRESERVED in the
-                                  # trimmed audio; Whisper hallucinations
-                                  # over the instrumental are dropped by
-                                  # the RMS-mask in pipeline/beats.transcribe_words.
+audio_trim_start_s: 5.5           # skip past the vocal RAMP-IN, not just
+                                  # the instrumental. Suno V4_5 has
+                                  # 0-5s of instrumental, then a 0.5s
+                                  # vocal ramp from -25dB to -17dB peak.
+                                  # Whisper labels the FIRST audible
+                                  # vocal as the first lyric, but the
+                                  # user perceives the word as starting
+                                  # at the peak, not the ramp-in. Trim
+                                  # at 5.5 so trim t=0 is at peak vocal
+                                  # — captions and perceived audio
+                                  # align. (Bumped from 5.0 in v9
+                                  # critique — residual 0.3-0.5s
+                                  # caption-ahead-of-vocal-peak.)
 audio_drop_vocal_pickup: false    # silenceremove was too aggressive on
                                   # Suno V4_5 — it ate the leading "S" of
                                   # "Suno" because vocal attack and
