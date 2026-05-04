@@ -99,6 +99,7 @@ def _regen_audio_caps(channel: str, slug: str, cfg: dict) -> tuple[Path, Path, l
             speed=cfg.get("tts_speed", 1.0),
             provider=cfg["tts_provider"],
             language=cfg.get("tts_language", "en"),
+            ref_audio_text=cfg.get("tts_ref_text"),
         )
         print(f"     wrote {narr_path.name} in {time.time() - t0:.1f}s")
     else:
@@ -303,6 +304,7 @@ def _burn_video(
     chains: list[str] = []
     inputs: list[str] = ["-i", str(base_video)]
     cur = "[0:v]"
+    input_pos = 1   # base_video is input 0, PNGs start at 1
     fi = 0
     for j, (idx, st, en) in enumerate(words):
         png = words_dir / f"word_{idx:04d}.png"
@@ -321,10 +323,11 @@ def _burn_video(
         inputs += ["-i", str(png)]
         out_lbl = f"[v{fi}]"
         chains.append(
-            f"{cur}[{len(inputs)//2}:v]overlay=x=(W-w)/2:y=(H-h)/2:"
+            f"{cur}[{input_pos}:v]overlay=x=(W-w)/2:y=(H-h)/2:"
             f"enable='between(t,{st:.3f},{en:.3f})'{out_lbl}"
         )
         cur = out_lbl
+        input_pos += 1
         fi += 1
 
     print(f"[burn] {fi} captions onto video → {out_path.name}")
