@@ -18,11 +18,14 @@ from tests._helpers import PROJECT_ROOT, FakeBeat  # noqa: F401
 
 
 # Pre-stub pipeline.images so prompts.py's `from . import images, llm`
-# resolves without triggering torch. _validate_and_clean only uses
-# images.lint_prompt; a no-op stand-in is sufficient.
+# resolves without triggering torch. _validate_and_clean uses both
+# images.lint_prompt and images.strip_text_bait (the latter dedupes the
+# text-bait stripper between the author path and the critic path —
+# pipeline/critic.py:regenerate_with_corrections also calls it).
 if "pipeline.images" not in sys.modules:
     _stub = types.ModuleType("pipeline.images")
     _stub.lint_prompt = lambda scene: []
+    _stub.strip_text_bait = lambda scene: (scene, [])
     sys.modules["pipeline.images"] = _stub
 
 from pipeline.prompts import _validate_and_clean  # noqa: E402

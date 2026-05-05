@@ -1,0 +1,42 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install slim deps
+        # Control plane + agent + light pipeline modules.
+        # Heavy ML deps (torch / diffusers / kokoro_onnx / mlx_*) are
+        # NOT installed — those run on the laptop, not in CI.
+        # Pillow + requests are pulled in by a few CI-safe test files
+        # (test_pipeline_critic, test_pipeline_quality_gate).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-control.txt
+          pip install Pillow requests
+
+      - name: Run unit tests (excluding heavy-ML tests)
+        # tests/test_audio_tts_providers.py is the only file that
+        # transitively imports kokoro_onnx + soundfile at module load,
+        # so it can't run on the slim CI venv. Everything else (260+
+        # tests across control plane, agent lease protocol, queue,
+        # rate limit, chat extraction, light pipeline modules) stays.
+        env:
+          YTFACTORY_QUEUE_BACKEND: memory
+        run: |
+          FILES=$(ls tests/test_*.py | grep -v test_audio_tts_providers.py)
+          MODULES=$(echo "$FILES" | sed 's|tests/||;s|\.py$||;s|^|tests.|')
+          python -m unittest $MODULES

@@ -160,6 +160,12 @@ than a UUID or ref-WAV path.
 
 ### Local dev (rare — only when changing control plane code)
 
+**Python version:** This project pins Python **3.12** (see `.python-version`).
+3.13 + 3.14 break several deps (notably `torch.jit` is unsupported on
+3.14, several MLX/diffusers transitive packages still pin <3.13). Use
+`pyenv install 3.12 && pyenv local 3.12` and create the venv with
+`python3.12 -m venv .venv`.
+
 ```bash
 # 1. Set env (chat needs Azure keys, agent endpoints need a token)
 source .env

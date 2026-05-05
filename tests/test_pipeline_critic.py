@@ -75,7 +75,12 @@ class RegeneratePatchTest(unittest.TestCase):
             self.assertTrue((cache / "img_01.png").exists())
             regenerate_with_corrections(
                 slug="s", cache_dir=cache,
-                beat_corrections={"1": "fix"},
+                # Use a realistic visual-content correction. Short or
+                # meta-only strings (e.g. "fix") are correctly rejected
+                # by _sanitise_scene_patch + the second-pass
+                # images.strip_text_bait length floor — see
+                # pipeline/critic.py:regenerate_with_corrections.
+                beat_corrections={"1": "make her angry, arms crossed, leaning forward"},
             )
             # The patched beat's image is removed so the next
             # orchestrator pass regenerates it.
