@@ -319,30 +319,64 @@ def _trim_clip_letterbox(
     same warm tone — keeps the lantern-lit feel consistent across letterboxed
     4:3 archival sources.
 
-    Aspect-equality short-circuit: when src is already out_w x out_h AND no
-    grade_filter is needed, stream-copy the trim. The blurred letterbox is a
-    no-op on aspect-matched sources, and re-encoding 1+ hours of 1080p with
-    gblur sigma=22 burns 30-40 minutes of CPU and can fail on long single
-    clips (observed on western-front-1914-1918-sleep, 5640s, 2026-05-04).
+    Three-tier short-circuit (in order, first match wins):
+
+    1. **Exact match + no grade** → ``-c:v copy`` stream-copy. Fastest;
+       no re-encode at all.
+    2. **Aspect match (within 1%) + no grade**, any source resolution
+       → plain ``scale + setsar=1`` re-encode. Skips the
+       ``split→gblur sigma=22→overlay`` chain entirely. The blurred
+       letterbox is a visual no-op when the source already covers the
+       output canvas; running gblur on every frame just to throw the
+       result away wastes 10–40 min on 90-min renders with mixed-
+       resolution 16:9 sources (1280×720 / 1440×1080 / 1920×1080
+       reuploads of the same 16:9 documentary). Promoted to Tier 1
+       in the 2026-05-05 efficiency overhaul.
+    3. **Otherwise** (4:3 source, grade requested, or aspect mismatch)
+       → full split+gblur+overlay chain. Required for letterboxing
+       4:3 archival into 16:9 and for warm-firelight grading.
     """
     duration = max(0.1, out_s - in_s)
-    if grade_filter is None:
-        try:
-            probe = subprocess.check_output([
-                "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=width,height",
-                "-of", "default=noprint_wrappers=1:nokey=1", str(src),
-            ]).decode().strip().splitlines()
-            src_w, src_h = int(probe[0]), int(probe[1])
-            if src_w == out_w and src_h == out_h:
-                print(f"[trim] aspect-match {src_w}x{src_h} == {out_w}x{out_h} — stream-copy")
-                _ffmpeg([
-                    "-ss", f"{in_s}", "-t", f"{duration}", "-i", str(src),
-                    "-an", "-c:v", "copy", str(out_path),
-                ])
-                return
-        except (subprocess.CalledProcessError, ValueError, IndexError):
-            pass  # fall through to filter chain
+    src_w: int | None = None
+    src_h: int | None = None
+    try:
+        probe = subprocess.check_output([
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(src),
+        ]).decode().strip().splitlines()
+        src_w, src_h = int(probe[0]), int(probe[1])
+    except (subprocess.CalledProcessError, ValueError, IndexError):
+        pass  # fall through to full chain below
+
+    if grade_filter is None and src_w and src_h:
+        # Tier 1: exact match → stream copy (fastest).
+        if src_w == out_w and src_h == out_h:
+            print(f"[trim] aspect-match {src_w}x{src_h} == {out_w}x{out_h} — stream-copy")
+            _ffmpeg([
+                "-ss", f"{in_s}", "-t", f"{duration}", "-i", str(src),
+                "-an", "-c:v", "copy", str(out_path),
+            ])
+            return
+        # Tier 2: aspect match within 1% but different resolution → plain scale.
+        # Skip the split+gblur+overlay chain entirely — it's a no-op when the
+        # source already covers the output canvas.
+        src_ratio = src_w / src_h
+        out_ratio = out_w / out_h
+        aspect_match = abs(src_ratio - out_ratio) / out_ratio < 0.01
+        if aspect_match:
+            print(f"[trim] aspect-match {src_w}x{src_h} ~ {out_w}x{out_h} — plain scale (no gblur)")
+            vf = f"scale={out_w}:{out_h}:flags=lanczos,setsar=1,fps={fps},format=yuv420p"
+            _ffmpeg([
+                "-ss", f"{in_s}", "-t", f"{duration}", "-i", str(src),
+                "-vf", vf, "-an",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-threads", "3",
+                "-pix_fmt", "yuv420p",
+                str(out_path),
+            ])
+            return
+
     grade_tail = f",{grade_filter}" if grade_filter else ""
     vf = (
         f"[0:v]split=2[bg][fg];"
@@ -356,6 +390,7 @@ def _trim_clip_letterbox(
         "-filter_complex", vf,
         "-an",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-threads", "3",
         "-pix_fmt", "yuv420p",
         str(out_path),
     ])
@@ -1224,57 +1259,15 @@ def final_mux(
 
 
 def _preflight_power_check() -> None:
-    """Refuse to start a long MLX render under power conditions that
-    routinely crash the WindowServer watchdog.
-
-    Symptom (incident F743A4C5, 2026-05-04): a long-form run on battery
-    with Low Power Mode + display off blocked WindowServer for >40s while
-    F5-TTS-MLX held the Metal command queue. The kernel watchdog killed
-    WindowServer; from the user's POV that looks like a "memory error" /
-    crash because the system logs out or kernel-panics.
-
-    Conditions we refuse:
-        - macOS Low Power Mode ON (`pmset -g` → ``lowpowermode 1``).
-          The CPU/GPU are clocked down and Metal command buffers stretch
-          to the watchdog ceiling.
-        - Running on battery with the display off (lid closed).
-          GPU contexts are aggressively suspended; long Metal jobs hang.
-
-    Override with ``YTFACTORY_SKIP_POWER_CHECK=1`` if you're sure (e.g.
-    desktop M2 Studio, dev iteration, recovery from a crashed run).
+    """Backward-compat shim. The implementation moved to
+    :func:`pipeline.preflight.power_check` 2026-05-05 so the same guard
+    can be used by every renderer (footage_only / shorts / sports_doc),
+    not just long_form. Existing callers (and tests that patch this
+    name) keep working unchanged.
     """
-    if os.environ.get("YTFACTORY_SKIP_POWER_CHECK") == "1":
-        return
-    if sys.platform != "darwin":
-        return
-    try:
-        out = subprocess.check_output(
-            ["pmset", "-g"], text=True, stderr=subprocess.DEVNULL, timeout=5,
-        )
-    except (FileNotFoundError, subprocess.SubprocessError):
-        return  # pmset unavailable; don't block
+    from pipeline.preflight import power_check  # noqa: PLC0415
 
-    low_power = bool(re.search(r"lowpowermode\s+1\b", out))
-    on_battery = "Battery Power" in out
-    if low_power:
-        raise SystemExit(
-            "Low Power Mode is ON. Long-form renders hold the Metal command\n"
-            "queue for tens of seconds at a time; under Low Power Mode the\n"
-            "WindowServer watchdog times out and the system logs out or panics.\n"
-            "Disable Low Power Mode (Settings → Battery), or set\n"
-            "YTFACTORY_SKIP_POWER_CHECK=1 to override at your own risk."
-        )
-    if on_battery:
-        # Don't hard-block — running on battery is sometimes intentional.
-        # Just warn and recommend caffeinate -dimsu (display, idle, mouse,
-        # system, user).
-        print(
-            "[preflight] WARNING: running on battery. For long-form renders prefer\n"
-            "            AC power + lid open. If you must run on battery, wrap\n"
-            "            with `caffeinate -dimsu` (NOT just -i) so the display\n"
-            "            stays on — display-off + heavy MLX crashes WindowServer.",
-            file=sys.stderr,
-        )
+    power_check(label="long-form")
 
 
 def main() -> int:
@@ -1361,6 +1354,18 @@ def main() -> int:
         print("[done] --tts-only set; stopping after narration synth")
         return 0
 
+    # 2026-05-05: drop F5-TTS-MLX (1.35 GB) at the renderer-stage boundary,
+    # *before* the render_mode branch. Stage 1 is the only stage that needs
+    # F5; both archival_footage (ffmpeg + libass) and image_panels
+    # (z_image_turbo) need the unified-memory headroom F5 was holding. The
+    # earlier code only freed F5 in the image_panels branch — leaving 1.35 GB
+    # resident through 90 minutes of ffmpeg work in archival_footage runs.
+    # That contributed to the 2026-05-04 / 2026-05-05 SIGABRT-on-Metal
+    # crashes (see docs/long_form_model_inventory.md and the dual-save memory
+    # entry feedback_f5_reset_at_renderer_boundary.md).
+    from pipeline.preflight import reset_mlx_state  # noqa: PLC0415
+    reset_mlx_state(drop_f5=True, label="long-form stage-1 TTS")
+
     # Stage 2 — video track. Two paths controlled by long_form.render_mode:
     #   "image_panels" (Path B) — comic-illustrated Z-Image-Turbo panels with
     #       Ken-Burns + cross-fade. Reads `panels: [{scene, hold_s, seed_offset}]`
@@ -1375,8 +1380,9 @@ def main() -> int:
     # 2026-05-04: image_panels (z_image_turbo) caused Metal GPU command-buffer
     # timeouts on the 89-panel run for western-front-1914-1918-sleep. Root
     # causes (see docs/long_form_model_inventory.md):
-    #   1. F5-TTS-MLX (1.35 GB) stays resident from stage 1 → ~5 GB MLX state
-    #      by the time image gen schedules its compute buffers
+    #   1. F5-TTS-MLX (1.35 GB) stayed resident from stage 1 → ~5 GB MLX state
+    #      by the time image gen schedules its compute buffers — fixed above
+    #      at the renderer-stage boundary so BOTH branches benefit (2026-05-05).
     #   2. Long pure-diffusion timelines fragment unified memory faster than
     #      Metal's watchdog allows
     #
@@ -1384,8 +1390,8 @@ def main() -> int:
     # available for limited / hybrid use):
     #   (a) Cap the panel count. Pure 89-panel runs are out; <= panel_max_count
     #       (configurable, default 24) is fine. Author shotlists for the rest.
-    #   (b) Free MLX cache + drop the F5 singleton between TTS and image stages
-    #       so image gen starts on a clean Metal heap.
+    #   (b) F5 drop is now unconditional above, so this stage starts on a
+    #       clean Metal heap regardless of render_mode.
     PANEL_HARD_CAP = int(lf.get("panel_max_count", 24))
 
     if render_mode == "image_panels":
@@ -1407,21 +1413,9 @@ def main() -> int:
                 "long_form.panel_max_count in config.yaml only if you've "
                 "verified the new ceiling on a test render."
             )
-        # Free MLX heap before image gen — F5-TTS-MLX is no longer needed.
-        try:
-            import mlx.core as _mx  # type: ignore
-            _mx.metal.clear_cache()
-            from pipeline import audio as _aud
-            # Was: _aud._F5_MODEL = None; _aud._F5_REF_CACHE.clear() —
-            # but those mutations only updated the audio.py compat-facade
-            # locals, not the real singletons in pipeline/tts/f5.py.
-            # The reset_f5_state() API drops the underlying singleton +
-            # ref cache atomically; same intent, actually works post-split.
-            _aud.reset_f5_state()
-            _mx.metal.clear_cache()
-            print("[mem] dropped F5-TTS singleton + cleared Metal cache before image gen")
-        except Exception as e:
-            print(f"[mem] could not clear MLX cache before image gen: {e}")
+        # F5 already dropped at the renderer-stage boundary above; nothing
+        # more to do here. Image gen starts on a clean Metal heap regardless
+        # of which branch we're in.
         # Auto-pad hold_s if total panel duration < narration duration.
         total_panel_s = sum(float(p.get("hold_s", 20)) for p in panels)
         if total_panel_s < dur - 1.0:

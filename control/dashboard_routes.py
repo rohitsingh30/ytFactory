@@ -96,10 +96,16 @@ def _enumerate_uploads() -> list[tuple[str, str, str, dict]]:
     for chan_dir in sorted(PROJECT_ROOT.iterdir()):
         if not chan_dir.is_dir() or not (chan_dir / "config.yaml").exists():
             continue
-        uploads_dir = chan_dir / "uploads"
-        if not uploads_dir.exists():
-            continue
-        for f in sorted(uploads_dir.rglob("*.json")):
+        # Glob both shapes:
+        #   <channel>/uploads/<slug>.json                 (flat channels)
+        #   <channel>/<niche>/uploads/<slug>.json         (niched channels — post-2026-05-05 layout)
+        # Single recursive pattern catches both. Skip the *.x.json X-platform
+        # sidecars (different upload track).
+        record_files = sorted(
+            f for f in chan_dir.rglob("uploads/*.json")
+            if not f.name.endswith(".x.json")
+        )
+        for f in record_files:
             try:
                 rec = json.loads(f.read_text())
             except (OSError, json.JSONDecodeError):

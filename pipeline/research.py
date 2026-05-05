@@ -113,17 +113,23 @@ def _channel_account(chan_dir: Path) -> str:
 
 
 def _index_local_uploads() -> dict[str, dict]:
-    """Scan every ``<channel>/uploads/**/*.json`` once and return a
-    ``{video_id: {channel, slug, path, record}}`` index. Missing or
-    malformed records are skipped; the YouTube row stays without a
+    """Scan every ``<channel>/[<niche>/]/uploads/<slug>.json`` once and
+    return a ``{video_id: {channel, slug, path, record}}`` index. Missing
+    or malformed records are skipped; the YouTube row stays without a
     local join.
+
+    Globs both flat (``<channel>/uploads/<slug>.json``) and niched
+    (``<channel>/<niche>/uploads/<slug>.json``) layouts via the
+    recursive ``<channel>/**/uploads/*.json`` pattern. Skips the X
+    sidecar (``*.x.json``) — different upload track.
     """
     out: dict[str, dict] = {}
     for chan_dir in _iter_channel_dirs():
-        uploads_dir = chan_dir / "uploads"
-        if not uploads_dir.exists():
-            continue
-        for f in sorted(uploads_dir.rglob("*.json")):
+        record_files = sorted(
+            f for f in chan_dir.rglob("uploads/*.json")
+            if not f.name.endswith(".x.json")
+        )
+        for f in record_files:
             rec = _read_json(f)
             if not rec:
                 continue

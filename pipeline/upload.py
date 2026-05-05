@@ -116,23 +116,33 @@ def _latest_publish_for_account(project_root: Path, account: str) -> datetime | 
     records on this account, or ``None`` if no priors.
 
     Effective publish = ``publish_at`` if scheduled, else ``uploaded_at``
-    (immediate publish). Scans every ``<channel>/uploads/**/*.json`` under
-    the project root and filters by the record's ``account`` field — robust
-    to compound channel_dir layouts and to account != folder-name drift.
+    (immediate publish). Globs every upload record on disk and filters
+    by the record's ``account`` field — robust to compound channel_dir
+    layouts (``<channel>/<niche>/uploads/<slug>.json``, post-2026-05-05)
+    AND flat layouts (``<channel>/uploads/<slug>.json``). Skips
+    ``*.x.json`` X-platform sidecars (different upload track).
     """
     latest: datetime | None = None
-    for record_path in project_root.glob("*/uploads/**/*.json"):
-        try:
-            rec = json.loads(record_path.read_text())
-        except (OSError, json.JSONDecodeError):
+    # Glob shape: ``<channel>/**/uploads/*.json`` — recursive into each
+    # channel root so niched uploads (mystoriesanimated/<niche>/uploads/)
+    # are covered alongside flat ones.
+    for chan_dir in project_root.iterdir():
+        if not chan_dir.is_dir() or not (chan_dir / "config.yaml").exists():
             continue
-        if rec.get("account") != account:
-            continue
-        eff = _parse_iso(rec.get("publish_at")) or _parse_iso(rec.get("uploaded_at"))
-        if eff is None:
-            continue
-        if latest is None or eff > latest:
-            latest = eff
+        for record_path in chan_dir.rglob("uploads/*.json"):
+            if record_path.name.endswith(".x.json"):
+                continue
+            try:
+                rec = json.loads(record_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if rec.get("account") != account:
+                continue
+            eff = _parse_iso(rec.get("publish_at")) or _parse_iso(rec.get("uploaded_at"))
+            if eff is None:
+                continue
+            if latest is None or eff > latest:
+                latest = eff
     return latest
 
 

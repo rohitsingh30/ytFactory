@@ -97,11 +97,17 @@ def _has_in_flight_heavy() -> bool:
 # -------- backlog walk -------------------------------------------------------
 
 def _uploaded_slugs(channel_dir: Path) -> set[str]:
+    """All slug stems that already have an upload record on disk.
+
+    Globs both flat (``<channel>/uploads/<slug>.json``) and niched
+    (``<channel>/<niche>/uploads/<slug>.json``) layouts via the
+    recursive ``<channel>/**/uploads/*.json`` pattern. Skips
+    ``*.x.json`` X sidecars (different upload track — same slug).
+    """
     out: set[str] = set()
-    uploads = channel_dir / "uploads"
-    if not uploads.exists():
-        return out
-    for f in uploads.rglob("*.json"):
+    for f in channel_dir.rglob("uploads/*.json"):
+        if f.name.endswith(".x.json"):
+            continue
         out.add(f.stem)
     return out
 

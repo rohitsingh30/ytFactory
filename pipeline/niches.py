@@ -30,6 +30,19 @@ NICHE_CHANNEL: dict[str, tuple[str, str]] = {
     "prorevenge":       ("mystoriesanimated/reddit_prorevenge",                 "mystoriesanimated/variants/aita_animated.yaml"),
     "oddities":         ("mystoriesanimated/wiki_oddities",                     "mystoriesanimated/variants/wiki_oddities.yaml"),
     "tih":              ("mystoriesanimated/today_in_history",                  "mystoriesanimated/variants/today_in_history.yaml"),
+    # /aita_cooking is a SEPARATE niche from "aita" because the cooking
+    # rewrite prompt produces materially different narration text (silent
+    # cooking video bg + Reddit-text overlay format). Its narration JSON
+    # therefore lives in its own dir alongside the vanilla AITA pool —
+    # multiple variants writing to the same niche dir would clobber each
+    # other.
+    "aita_cooking":     ("mystoriesanimated/aita_cooking",                      "mystoriesanimated/variants/aita_cooking.yaml"),
+    # Wikipedia "list of common misconceptions" — a separate source with
+    # its own raw shape (per-misconception story rather than per-Reddit-
+    # post) and its own narration cadence. Doesn't share with wiki_oddities
+    # because the source pull + rewrite are distinct. No bespoke variant
+    # YAML yet — defaults to the vanilla animated pipeline.
+    "wiki_misconceptions": ("mystoriesanimated/wiki_misconceptions",            "mystoriesanimated/variants/aita_animated.yaml"),
     # Top-5 countdown tier-list — sports rankings with footage cut-ins.
     # The script structure (5 ranked beats + hook + closer) is authored
     # by the /make-ranking skill; pull_stories has no auto adapter for
