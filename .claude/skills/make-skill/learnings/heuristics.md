@@ -72,6 +72,15 @@ SKILL.md cross-reference if the wording changes.
     `/make-*` skill.
 30. Source/citation list mandatory for any factual format
     (history, sports doc, AI-recap).
+30b. **SKILL.md frontmatter `description:` MUST be ≤1024 chars.**
+    The Claude Skills loader rejects the SKILL outright on overflow
+    (silent failure at session start: `✖ .claude/skills/<name>/SKILL.md:
+    description: Skill d…`). Hard-cap at ~980 chars to leave margin.
+    Trigger phrases + routing hints to sibling skills are mandatory and
+    must survive any trim — drop adjectives and parenthetical asides
+    first, never the trigger keywords. Regression: 2026-05-05 —
+    `make-cosmos-decoder` (1159) and `make-sleep-history` (1033) both
+    failed to load on session start; trimmed to 981 each.
 
 ## E. Pre-render quality gates (31–38)
 
@@ -150,3 +159,14 @@ SKILL.md cross-reference if the wording changes.
 ## Regression log (append-only)
 
 <!-- format: YYYY-MM-DD — heuristic # — what fired — fix -->
+- 2026-05-05 — 30b — `.claude/skills/make-cosmos-decoder/SKILL.md`
+  (1159 chars) and `.claude/skills/make-sleep-history/SKILL.md`
+  (1033 chars) failed to load at session start because frontmatter
+  `description:` exceeded the Claude Skills 1024-char cap. Loader
+  reported `✖ .claude/skills/<name>/SKILL.md: description: Skill d…`.
+  Fix: trimmed both to 981 chars by collapsing duplicated context
+  ("Cosmos Decoded channel" → "Cosmos Decoded", merging sibling-route
+  hints) while preserving every trigger phrase and the routing pointers
+  to /make-script, /make-top10, /make-katha, /make-cosmos-decoder,
+  /make-sports-doc. New rule: hard-cap descriptions at ~980 chars in
+  /make-skill stage-3 emit.

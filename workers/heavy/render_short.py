@@ -130,6 +130,13 @@ async def _run_make_shorts(script_path: Path, channel_yaml: Path, log_path: Path
     upload step refuses to ship if the post-render critique didn't run or
     didn't produce a score (per the user's "never auto-upload without a
     critic check" rule).
+
+    Note: scripts/make_shorts.py is now a thin shim around
+    pipeline.render.shorts.cli_main (since the 2026-05-05 renderer
+    promotion). The shim still accepts the same CLI flags so this
+    subprocess contract is unchanged. The shim's cli_main also prints
+    an OUTPUT_MANIFEST: {...} line on stdout that ``_find_outputs``
+    parses to locate the produced mp4 + thumb.
     """
     cmd = [
         sys.executable, str(PROJECT_ROOT / "scripts" / "make_shorts.py"),
@@ -153,18 +160,88 @@ async def _run_make_shorts(script_path: Path, channel_yaml: Path, log_path: Path
         log_f.close()
 
 
-def _find_outputs(slug: str, channel_dir: str) -> tuple[Path | None, Path | None]:
-    """Return (mp4, thumb) paths if they exist on disk."""
-    mp4 = PROJECT_ROOT / "data" / "shorts" / f"{slug}.mp4"
-    # Thumb path varies by pipeline; check the common locations.
-    for candidate in [
+def _parse_output_manifest(log_path: Path) -> dict | None:
+    """Pull the most recent ``OUTPUT_MANIFEST: {…}`` line from the render log.
+
+    pipeline.render.shorts.cli_main prints exactly one of these lines on
+    successful render. Returns ``{"mp4": str, "thumb": str | None,
+    "slug": str, "channel_dir": str}`` or ``None`` if the line wasn't
+    found (older renderer versions, render failure, partial log, etc).
+    """
+    if not log_path.exists():
+        return None
+    try:
+        for line in reversed(log_path.read_text(errors="replace").splitlines()):
+            if line.startswith("OUTPUT_MANIFEST: "):
+                return json.loads(line[len("OUTPUT_MANIFEST: "):])
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("failed to parse OUTPUT_MANIFEST from %s: %s", log_path, e)
+    return None
+
+
+def _find_outputs(
+    slug: str, channel_dir: str, log_path: Path | None = None,
+) -> tuple[Path | None, Path | None]:
+    """Return ``(mp4, thumb)`` paths produced by the render.
+
+    Resolution precedence:
+
+    1. **OUTPUT_MANIFEST stdout line** — printed by
+       ``pipeline.render.shorts.cli_main`` (since 2026-05-05 renderer
+       promotion). Authoritative when present; covers per-channel
+       layouts that don't follow the legacy ``data/`` convention.
+
+    2. **Per-channel scan** — ``<channel_dir>/shorts/<slug>.mp4`` is
+       the per-channel layout (memory: feedback_channels_subdir_layout)
+       that landed in the 2026-05-05 reorg. Used as a fallback if the
+       manifest is missing AND ``channel_dir`` is something other than
+       the legacy ``data`` (i.e. the channel reorg actually applied).
+
+    3. **Legacy fallback** — ``data/shorts/<slug>.mp4``. Pre-2026-05-05
+       behaviour. Kept only because some half-migrated runs may still
+       land mp4s here while the cron picks up.
+    """
+    if log_path is not None:
+        manifest = _parse_output_manifest(log_path)
+        if manifest is not None:
+            mp4_str = manifest.get("mp4")
+            thumb_str = manifest.get("thumb")
+            mp4_p = Path(mp4_str) if mp4_str else None
+            thumb_p = Path(thumb_str) if thumb_str else None
+            if mp4_p is not None and not mp4_p.is_absolute():
+                mp4_p = PROJECT_ROOT / mp4_p
+            if thumb_p is not None and not thumb_p.is_absolute():
+                thumb_p = PROJECT_ROOT / thumb_p
+            return (
+                mp4_p if mp4_p and mp4_p.exists() else None,
+                thumb_p if thumb_p and thumb_p.exists() else None,
+            )
+
+    # Per-channel scan: tries the new layout first.
+    channel_root = PROJECT_ROOT / channel_dir
+    per_channel_mp4 = channel_root / "shorts" / f"{slug}.mp4"
+    per_channel_thumb_candidates = [
+        channel_root / "thumbs" / f"{slug}.png",
+        channel_root / "thumb" / f"{slug}.png",
+        channel_root / "shorts" / f"{slug}.thumb.png",
+    ]
+
+    # Legacy data/ fallback for half-migrated runs.
+    legacy_mp4 = PROJECT_ROOT / "data" / "shorts" / f"{slug}.mp4"
+    legacy_thumb_candidates = [
         PROJECT_ROOT / "data" / "intermediate" / channel_dir / "thumbs" / f"{slug}.png",
         PROJECT_ROOT / "data" / "intermediate" / channel_dir / "thumb" / f"{slug}.png",
         PROJECT_ROOT / "data" / "shorts" / f"{slug}.thumb.png",
-    ]:
-        if candidate.exists():
-            return mp4 if mp4.exists() else None, candidate
-    return mp4 if mp4.exists() else None, None
+    ]
+
+    mp4 = per_channel_mp4 if per_channel_mp4.exists() else (
+        legacy_mp4 if legacy_mp4.exists() else None
+    )
+    thumb = next(
+        (c for c in per_channel_thumb_candidates + legacy_thumb_candidates if c.exists()),
+        None,
+    )
+    return mp4, thumb
 
 
 def _cleanup_intermediate(slug: str, channel_dir: str) -> None:
@@ -273,7 +350,9 @@ async def render_short(ctx: TaskContext) -> str | None:
 
     # 3. Upload outputs to GCS.
     jobs_mod.mark_stage(job_id, status=jobs_mod.STATUS_UPLOADING, stage="gcs_upload")
-    mp4_path, thumb_path = _find_outputs(slug, channel_dir)
+    # Pass log_path so _find_outputs can prefer the OUTPUT_MANIFEST line
+    # (printed by pipeline.render.shorts.cli_main) over path guessing.
+    mp4_path, thumb_path = _find_outputs(slug, channel_dir, log_path=log_path)
     if mp4_path is None:
         err = f"render reported success but no mp4 found at {slug}.mp4"
         jobs_mod.mark_failed(job_id, stage="gcs_upload", error=err)

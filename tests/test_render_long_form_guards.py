@@ -37,12 +37,13 @@ import yaml
 from tests._helpers import PROJECT_ROOT  # noqa: F401
 
 
-# Import the script as a module. It lives under scripts/historyrecapped/
-# which is not on sys.path by default, so we add it.
-_RENDER_SCRIPTS_DIR = PROJECT_ROOT / "scripts" / "historyrecapped"
-if str(_RENDER_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_RENDER_SCRIPTS_DIR))
-render_long_form = importlib.import_module("render_long_form")
+# Import the renderer module. Used to live under scripts/historyrecapped/
+# (and tests imported it via sys.path manipulation); after the
+# 2026-05-05 renderer-promotion refactor it lives at
+# pipeline.render.long_form. The thin scripts/historyrecapped/render_long_form.py
+# CLI shim still works for invocations, but tests should target the
+# real implementation directly.
+from pipeline.render import long_form as render_long_form  # noqa: E402
 
 
 # ---------- _split_into_chunks --------------------------------------------
