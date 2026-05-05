@@ -699,7 +699,7 @@ def _ensure_critique(
     # Lazy import: keeps `pipeline.upload` importable in environments
     # that don't have the LLM toolchain installed (the upload-only path).
     try:
-        from pipeline import critic as critic_mod
+        from pipeline.llm import critic as critic_mod
     except ImportError as e:
         print(f"[upload] critic import failed; cannot pre-check ({e})")
         return None
@@ -1101,7 +1101,7 @@ def upload_short(
     # natural view. Runs in a background daemon thread so this call
     # returns fast. Disable globally via YTFACTORY_CROSS_ENGAGE=0.
     try:
-        from pipeline import cross_engage
+        from pipeline.research import cross_engage
 
         cross_engage.engage_after_upload(account, record["video_id"])
     except Exception as e:
@@ -1120,7 +1120,7 @@ def _discover_accounts() -> list[str]:
     discoverable (e.g. running outside the repo).
     """
     try:
-        from pipeline import youtube_stats
+        from pipeline.research import youtube as youtube_stats
 
         accts = sorted({a for a, _ in youtube_stats.iter_channel_configs()})
         if accts:

@@ -20,7 +20,7 @@ import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from . import llm
+from . import cli as llm
 from . import script_lint
 
 

@@ -94,7 +94,7 @@ def _try_rebuild_research_index() -> None:
 def _try_fetch_initial_stats(video_id: str) -> None:
     """pipeline.youtube_stats.fetch_all() pulls live counters from YT Data API."""
     try:
-        from pipeline import youtube_stats as _yt  # noqa: PLC0415
+        from pipeline.research import youtube as _yt  # noqa: PLC0415
 
         fetch_all = getattr(_yt, "fetch_all", None)
         if fetch_all is None:

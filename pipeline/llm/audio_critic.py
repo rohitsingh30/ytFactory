@@ -35,7 +35,8 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import asr, llm
+from .. import asr
+from . import cli as llm
 
 
 # Schema constrains free-form prose so the model can't ramble; mirrors

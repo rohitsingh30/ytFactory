@@ -34,7 +34,7 @@ from urllib.parse import quote
 
 import requests
 
-from . import llm
+from pipeline.llm import cli as llm
 
 
 WIKI_API = "https://en.wikipedia.org/w/api.php"

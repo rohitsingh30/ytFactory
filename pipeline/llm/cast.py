@@ -47,7 +47,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import llm
+from . import cli as llm
 
 
 _PROMPT = """\

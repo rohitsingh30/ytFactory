@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw
 
 from tests._helpers import PROJECT_ROOT  # noqa: F401
 
-from pipeline.quality_gate import check_image
+from pipeline.llm.quality_gate import check_image
 
 
 def _save(img: Image.Image, suffix=".png") -> Path:

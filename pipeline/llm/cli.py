@@ -18,7 +18,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import telemetry as _tlm
+from .. import telemetry as _tlm
 
 
 CLAUDE_BIN = "claude"

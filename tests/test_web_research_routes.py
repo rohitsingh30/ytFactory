@@ -18,6 +18,7 @@ from tests._helpers import PROJECT_ROOT  # noqa: F401
 from fastapi.testclient import TestClient
 
 from pipeline import research
+from pipeline.research import aggregator as _research_mod
 from web import server
 from tests.test_pipeline_research import _build_fixture_tree, _ResearchPatcher
 
@@ -30,9 +31,9 @@ class ResearchRoutesTest(unittest.TestCase):
         self.patcher.__enter__()
         # The server's RESEARCH_DIR is read at import time. Re-bind it.
         self._orig_server_research = server.RESEARCH_DIR
-        server.RESEARCH_DIR = research.RESEARCH_DIR
+        server.RESEARCH_DIR = _research_mod.RESEARCH_DIR
         # Pre-build so the auto-build-on-first-hit path doesn't race.
-        research.rebuild(quiet=True)
+        _research_mod.rebuild(quiet=True)
         self.client = TestClient(server.app)
 
     def tearDown(self):
@@ -75,7 +76,7 @@ class ResearchRoutesTest(unittest.TestCase):
 
     def test_rebuild_with_refresh_analytics_calls_fetcher(self):
         # Patch youtube_stats.fetch_all so the route is hermetic.
-        from pipeline import youtube_stats
+        from pipeline.research import youtube as youtube_stats
         called = {"n": 0}
 
         def _fake(**kw):
@@ -103,7 +104,7 @@ class AutoBuildOnFirstHitTest(unittest.TestCase):
         self.patcher = _ResearchPatcher(self.tmp)
         self.patcher.__enter__()
         self._orig_server_research = server.RESEARCH_DIR
-        server.RESEARCH_DIR = research.RESEARCH_DIR
+        server.RESEARCH_DIR = _research_mod.RESEARCH_DIR
         # Note: NO pre-build; this is what we're testing.
         self.client = TestClient(server.app)
 
@@ -115,11 +116,11 @@ class AutoBuildOnFirstHitTest(unittest.TestCase):
     def test_videos_endpoint_lazy_builds(self):
         # The fixture seeds data/research/analytics/<slug>.json but NOT
         # the videos.jsonl. Confirm it doesn't exist before, exists after.
-        videos_path = research.RESEARCH_DIR / "videos.jsonl"
+        videos_path = _research_mod.RESEARCH_DIR / "videos.jsonl"
         if videos_path.exists():
             videos_path.unlink()
         for n in ("channels.jsonl", "learnings.jsonl"):
-            p = research.RESEARCH_DIR / n
+            p = _research_mod.RESEARCH_DIR / n
             if p.exists():
                 p.unlink()
         r = self.client.get("/api/research/videos")

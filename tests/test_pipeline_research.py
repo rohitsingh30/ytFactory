@@ -22,6 +22,7 @@ from pathlib import Path
 from tests._helpers import PROJECT_ROOT  # noqa: F401  (sys.path side-effect)
 
 from pipeline import research
+from pipeline.research import aggregator as _research_mod
 
 
 # ---- fixture builder ----------------------------------------------------
@@ -320,24 +321,24 @@ class _ResearchPatcher:
 
     def __enter__(self) -> "_ResearchPatcher":
         self._saved = {
-            "PROJECT_ROOT": research.PROJECT_ROOT,
-            "DATA_DIR": research.DATA_DIR,
-            "CRITIQUES_DIR": research.CRITIQUES_DIR,
-            "RESEARCH_DIR": research.RESEARCH_DIR,
-            "YOUTUBE_DIR": research.YOUTUBE_DIR,
-            "MEMORY_DIR": research.MEMORY_DIR,
+            "PROJECT_ROOT": _research_mod.PROJECT_ROOT,
+            "DATA_DIR": _research_mod.DATA_DIR,
+            "CRITIQUES_DIR": _research_mod.CRITIQUES_DIR,
+            "RESEARCH_DIR": _research_mod.RESEARCH_DIR,
+            "YOUTUBE_DIR": _research_mod.YOUTUBE_DIR,
+            "MEMORY_DIR": _research_mod.MEMORY_DIR,
         }
-        research.PROJECT_ROOT = self.root
-        research.DATA_DIR = self.root / "data"
-        research.CRITIQUES_DIR = self.root / "data" / "critiques"
-        research.RESEARCH_DIR = self.root / "data" / "research"
-        research.YOUTUBE_DIR = self.root / "data" / "research" / "youtube"
-        research.MEMORY_DIR = self.root / "memory"
+        _research_mod.PROJECT_ROOT = self.root
+        _research_mod.DATA_DIR = self.root / "data"
+        _research_mod.CRITIQUES_DIR = self.root / "data" / "critiques"
+        _research_mod.RESEARCH_DIR = self.root / "data" / "research"
+        _research_mod.YOUTUBE_DIR = self.root / "data" / "research" / "youtube"
+        _research_mod.MEMORY_DIR = self.root / "memory"
         return self
 
     def __exit__(self, *exc) -> None:
         for k, v in self._saved.items():
-            setattr(research, k, v)
+            setattr(_research_mod, k, v)
 
 
 # ---- tests --------------------------------------------------------------
@@ -523,20 +524,20 @@ class RebuildAndJsonlRoundtripTest(unittest.TestCase):
             ("channels.jsonl", "channels"),
             ("learnings.jsonl", "learnings"),
         ]:
-            p = research.RESEARCH_DIR / name
+            p = _research_mod.RESEARCH_DIR / name
             self.assertTrue(p.exists(), f"{name} should exist")
             rows = research.load_jsonl(p)
             self.assertEqual(len(rows), out[key])
 
     def test_partial_rebuild_only_touches_named_slice(self):
         research.rebuild(quiet=True)
-        learnings_path = research.RESEARCH_DIR / "learnings.jsonl"
+        learnings_path = _research_mod.RESEARCH_DIR / "learnings.jsonl"
         original_text = learnings_path.read_text()
         research.rebuild(["videos"], quiet=True)
         self.assertEqual(learnings_path.read_text(), original_text)
 
     def test_rebuild_does_not_call_youtube_when_refresh_false(self):
-        from pipeline import youtube_stats
+        from pipeline.research import youtube as youtube_stats
 
         original = youtube_stats.fetch_all
         def _boom(*a, **kw):

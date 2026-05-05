@@ -12,7 +12,7 @@ from PIL import Image
 
 from tests._helpers import PROJECT_ROOT  # noqa: F401
 
-from pipeline.critic import regenerate_with_corrections
+from pipeline.llm.critic import regenerate_with_corrections
 
 
 def _save_dummy_png(path: Path) -> None:

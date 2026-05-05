@@ -25,8 +25,9 @@ import json
 import re
 from pathlib import Path
 
-from . import images, llm
-from .beats import Beat
+from .. import images
+from . import cli as llm
+from ..beats import Beat
 
 
 # Grammatical-subject heuristic for the PRIMARY SUBJECT IN FRAME

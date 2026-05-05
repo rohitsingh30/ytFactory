@@ -29,7 +29,8 @@ from pathlib import Path
 
 import yaml
 
-from pipeline import align, audio, beats, compose, images, prompts as prompts_mod, script_check
+from pipeline import align, audio, beats, compose, images
+from pipeline.llm import prompts as prompts_mod, script_check
 from pipeline import telemetry as tlm
 
 
@@ -864,7 +865,7 @@ def make_short(
     character_description = cfg.get("character_description")
     cast_default_emotion: str | None = None
     cast_path = _find_cast_path(slug)
-    from pipeline import cast as cast_mod
+    from pipeline.llm import cast as cast_mod
     if cast_path is None and source_story:
         # Principle #24 — auto-author per-story narrator instead of
         # silently falling back to the channel default. The
@@ -1325,7 +1326,7 @@ def make_short(
                 # Channel-locked character + key-visual weighting baked in
                 # (Principles #2, #11, #13). Cast routing per beat — see
                 # build_full_prompt call further down for details.
-                from pipeline.cast_router import (
+                from pipeline.llm.cast_router import (
                     route_character_description, is_object_only_beat,
                 )
                 routed_desc, matched = route_character_description(
@@ -1573,7 +1574,7 @@ def make_short(
                 # the narrator's. Without this, the narrator is the only
                 # body that ever appears on screen even when the narration
                 # is about someone else.
-                from pipeline.cast_router import (
+                from pipeline.llm.cast_router import (
                     route_character_description, is_object_only_beat,
                 )
                 routed_desc, matched = route_character_description(
@@ -1612,7 +1613,7 @@ def make_short(
                 # Quality-gate retries: if Flux/SDXL produces an obviously
                 # broken image (all-black, low edge density), bump the
                 # seed and regenerate up to MAX_QC_RETRIES times.
-                from pipeline import quality_gate
+                from pipeline.llm import quality_gate
                 # Bumped 2 → 3 in 2026-05 alongside the tightened
                 # luminance gate in quality_gate.py. The new mean/P75
                 # luminance checks reject more images (the dark-frame
@@ -1905,7 +1906,7 @@ def make_short(
     score: int | None = None
     if run_critic:
         try:
-            from pipeline import critic
+            from pipeline.llm import critic
             min_score = int(cfg.get("min_critic_score", 6))
             critique = critic.critique_short(
                 slug=slug,
@@ -1945,7 +1946,7 @@ def make_short(
                         n_beats=len(beat_list),
                         beat_texts=[b.text for b in beat_list],
                     )
-                    from pipeline import quality_gate
+                    from pipeline.llm import quality_gate
                     for n, i in enumerate(sorted(patched)):
                         b = beat_list[i]
                         kv = custom_prompts[i]["key_visual"]
@@ -1959,7 +1960,7 @@ def make_short(
                         )
                         # Cast routing on the critic-regen path too (see
                         # earlier build_full_prompt call). Same rationale.
-                        from pipeline.cast_router import (
+                        from pipeline.llm.cast_router import (
                             route_character_description, is_object_only_beat,
                         )
                         routed_desc, matched = route_character_description(

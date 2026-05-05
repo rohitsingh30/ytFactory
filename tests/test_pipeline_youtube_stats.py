@@ -21,7 +21,7 @@ from pathlib import Path
 
 from tests._helpers import PROJECT_ROOT  # noqa: F401
 
-from pipeline import youtube_stats
+from pipeline.research import youtube as youtube_stats
 
 
 # ---- fake googleapiclient -----------------------------------------------

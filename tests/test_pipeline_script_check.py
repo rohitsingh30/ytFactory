@@ -10,7 +10,7 @@ import unittest
 
 from tests._helpers import PROJECT_ROOT, fake_beat_list  # noqa: F401
 
-from pipeline.script_check import check_beats, check_script_text
+from pipeline.llm.script_check import check_beats, check_script_text
 
 
 GOOD_AITA = (

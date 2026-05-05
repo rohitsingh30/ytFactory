@@ -1132,7 +1132,7 @@ async def _riff_render_one_seed(
     cfg_path = PROJECT_ROOT / channel_yaml
     cfg = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
 
-    from pipeline import cast as cast_mod, rewrite as rewrite_mod
+    from pipeline.llm import cast as cast_mod, rewrite as rewrite_mod
 
     # Rewrite + cast are independent claude-CLI calls — run in parallel.
     _emit_simple(job, "rewrite", "start", "Rewriting narration",
@@ -1220,7 +1220,7 @@ async def run_riff_job(job: Job) -> None:
       - per-seed     : pull → rewrite → cast → tts → ... → compose
       - done         : list of N mp4 urls
     """
-    from pipeline import imitate
+    from pipeline.llm import imitate
 
     options = job.options or {}
     url = (options.get("url") or "").strip()
@@ -1549,7 +1549,7 @@ async def dashboard_videos(refresh: bool = False) -> dict:
     returning. Without it, returns whatever's cached at
     ``data/research/analytics/<slug>.json``.
     """
-    from pipeline import youtube_stats as _yt
+    from pipeline.research import youtube as _yt
     refresh_summary: dict | None = None
     refresh_error: str | None = None
     if refresh:
@@ -2948,7 +2948,7 @@ _REAUTH_JOBS: dict[str, dict[str, Any]] = {}
 async def youtube_auth_status() -> dict:
     """Per-account OAuth health: token present? has refresh_token? has all SCOPES?"""
     from pipeline import upload as _upload
-    from pipeline import cross_engage as _ce
+    from pipeline.research import cross_engage as _ce
 
     accounts = _ce.list_sibling_accounts()
     registry = _ce._load_registry()
@@ -2986,7 +2986,7 @@ async def youtube_auth_start(account: str) -> dict:
     import threading
     from datetime import datetime, timezone
 
-    from pipeline import cross_engage as _ce
+    from pipeline.research import cross_engage as _ce
 
     if account not in _ce.list_sibling_accounts() and account not in (
         "default",
@@ -3090,7 +3090,7 @@ async def youtube_cross_engage_subscribe_all() -> dict:
     Each successful pair is idempotent at the YouTube end (already-subscribed
     is treated as success), so this is safe to re-run.
     """
-    from pipeline import cross_engage as _ce
+    from pipeline.research import cross_engage as _ce
 
     results = await asyncio.to_thread(_ce.subscribe_all_pairs)
     return {"results": results}

@@ -37,13 +37,13 @@ from pipeline.sources.youtube_video import (
     _fetch_oembed_meta,
 )
 
-from . import llm
+from . import cli as llm
 
 
 # Niche → (channel_dir, channel_yaml) routing lives in pipeline.niches
 # so web.server and this module read from one canonical source. Re-
 # exported here for any caller that imports ``imitate.NICHE_CHANNEL``.
-from .niches import NICHE_CHANNEL, NICHE_FALLBACK  # noqa: F401
+from ..niches import NICHE_CHANNEL, NICHE_FALLBACK  # noqa: F401
 
 
 # Voice ids the profile is allowed to suggest. Mirrors web/server.py VOICES.

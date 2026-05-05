@@ -22,7 +22,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import llm
+from . import cli as llm
 
 
 # Channel-spec encoded directly in the prompt. If/when we want to re-use

@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .beats import Beat
+from ..beats import Beat
 
 
 # Closing CTA — must appear in the LAST sentence/clause.

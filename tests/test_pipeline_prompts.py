@@ -28,7 +28,7 @@ if "pipeline.images" not in sys.modules:
     _stub.strip_text_bait = lambda scene: (scene, [])
     sys.modules["pipeline.images"] = _stub
 
-from pipeline.prompts import _validate_and_clean  # noqa: E402
+from pipeline.llm.prompts import _validate_and_clean  # noqa: E402
 
 
 def _beats(n: int) -> list:

@@ -6,7 +6,7 @@ import unittest
 
 from tests._helpers import PROJECT_ROOT  # noqa: F401
 
-from pipeline.visualizability import score_visualizability
+from pipeline.llm.visualizability import score_visualizability
 
 
 class EmptyTextTest(unittest.TestCase):

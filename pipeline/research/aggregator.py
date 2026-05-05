@@ -498,7 +498,7 @@ def rebuild(
     out: dict[str, Any] = {"built_at": datetime.now(tz=timezone.utc).isoformat()}
 
     if refresh_analytics:
-        from pipeline import youtube_stats
+        from pipeline.research import youtube as youtube_stats
 
         out["analytics"] = youtube_stats.fetch_all(quiet=quiet)
 

@@ -25,7 +25,7 @@ from pathlib import Path
 
 import yaml
 
-from pipeline import cast as cast_mod, rewrite, visualizability
+from pipeline.llm import cast as cast_mod, rewrite, visualizability
 from pipeline.sources import save_raw
 from pipeline.sources import drama, reddit_api, today_in_history, wikipedia, youtube_video
 

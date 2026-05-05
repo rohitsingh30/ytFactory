@@ -113,7 +113,7 @@ async def _rewrite_and_cast(raw: dict, channel_yaml: Path, slug: str, channel_di
     script_path = paths.narration_for(slug)
     cast_path = paths.cast_for(slug)
 
-    from pipeline import cast as cast_mod, rewrite as rewrite_mod  # noqa: PLC0415
+    from pipeline.llm import cast as cast_mod, rewrite as rewrite_mod  # noqa: PLC0415
 
     async def _do_rewrite() -> None:
         script = await asyncio.to_thread(rewrite_mod.rewrite, raw, cfg)

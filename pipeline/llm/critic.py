@@ -24,7 +24,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import llm
+from . import cli as llm
 
 
 # Patterns the critic occasionally emits that are NOT visual scene
@@ -420,7 +420,7 @@ def regenerate_with_corrections(
         # Second-pass strip — catches text-bait phrases / meta-imperatives
         # the regex above missed. Same enforcer the author path uses
         # (prompts.py:_validate_and_clean), shared via images.strip_text_bait.
-        from . import images as _images
+        from .. import images as _images
         clean_fix, removed_secondpass = _images.strip_text_bait(clean_fix)
         if removed_secondpass:
             print(

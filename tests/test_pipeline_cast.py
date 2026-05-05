@@ -10,7 +10,7 @@ from pathlib import Path
 
 from tests._helpers import PROJECT_ROOT  # noqa: F401
 
-from pipeline.cast import load_cast
+from pipeline.llm.cast import load_cast
 
 
 class LoadCastTest(unittest.TestCase):

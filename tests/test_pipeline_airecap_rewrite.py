@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from tests._helpers import PROJECT_ROOT  # noqa: F401
 
-from pipeline import airecap_rewrite as ar
+from pipeline.llm import airecap_rewrite as ar
 
 
 # A canned LLM response that satisfies the schema.
