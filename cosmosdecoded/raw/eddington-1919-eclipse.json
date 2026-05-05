@@ -1,0 +1,117 @@
+{
+  "slug": "eddington-1919-eclipse",
+  "subject_summary": "How Arthur Eddington's 1919 solar eclipse expedition produced the first empirical evidence that light bends near mass — confirming Einstein's general theory of relativity and overturning more than two centuries of Newtonian gravity.",
+  "prediction": {
+    "claim_one_line": "Light grazing the limb of the Sun is deflected by 1.75 arcseconds — exactly twice the value Newtonian gravity would predict for a corpuscular ray (0.87 arcseconds).",
+    "predicting_paper": {
+      "author": "Albert Einstein",
+      "title": "Die Grundlage der allgemeinen Relativitätstheorie (The Foundation of the General Theory of Relativity)",
+      "journal": "Annalen der Physik, vol. 354 issue 7, pp. 769-822",
+      "year": 1916,
+      "doi_or_url": "https://onlinelibrary.wiley.com/doi/10.1002/andp.19163540702"
+    },
+    "earlier_einstein_calculation": {
+      "year": 1911,
+      "value": "0.87 arcseconds (Newtonian limit, equivalence-principle argument only)",
+      "note": "Einstein's first attempt in 1911 gave only the Newtonian half-value because spatial curvature had not yet entered the theory. The full 1.75″ prediction appears only after the 1915-1916 field equations are complete."
+    },
+    "key_physicists": [
+      {
+        "name": "Albert Einstein",
+        "role": "predictor",
+        "affiliation": "Kaiser Wilhelm Institute, Berlin (1916)",
+        "wikimedia_portrait": "https://commons.wikimedia.org/wiki/File:Einstein_1921_by_F_Schmutzer_-_restoration.jpg"
+      }
+    ]
+  },
+  "experiment": {
+    "expedition_name": "Joint Royal Society / Royal Astronomical Society 1919 Eclipse Expedition",
+    "eclipse_date": "1919-05-29",
+    "totality_duration_s": 410,
+    "two_stations": [
+      {
+        "site": "Príncipe (Roça Sundy plantation, Gulf of Guinea, Portuguese West Africa)",
+        "team": ["Arthur Eddington (lead)", "Edwin Cottingham"],
+        "instrument": "4-inch astrographic refractor on coelostat mount",
+        "weather_summary": "Cloud cover during totality; only 2 of 16 plates yielded usable star images.",
+        "result": "1.61 ± 0.30 arcseconds"
+      },
+      {
+        "site": "Sobral (Ceará state, northern Brazil)",
+        "team": ["Andrew Crommelin", "Charles Davidson"],
+        "instrument_a": "Astrographic 4-inch refractor (failed: heat-distorted mirror)",
+        "instrument_b": "4-inch Cortie lens on a separate telescope (the 'good plates')",
+        "result_b": "1.98 ± 0.12 arcseconds (most precise measurement of the campaign)"
+      }
+    ],
+    "moment_of_measurement": "Plate measurements at the Royal Observatory and Cambridge during summer-autumn 1919. Eddington and Davidson laid the eclipse plates and reference plates (taken months earlier of the same Hyades star field at night) face-to-face on a Zeiss measuring engine and recorded the angular displacement of each star. The first plate Eddington measured at Príncipe in early June 1919 — a 'preliminary reduction' on the small set of usable plates — already showed deflection of order 1 to 2 arcseconds.",
+    "proving_paper": {
+      "authors": "Frank Watson Dyson, Arthur Stanley Eddington, Charles Davidson",
+      "title": "A Determination of the Deflection of Light by the Sun's Gravitational Field, from Observations Made at the Total Eclipse of May 29, 1919",
+      "journal": "Philosophical Transactions of the Royal Society A, vol. 220, pp. 291-333",
+      "year": 1920,
+      "doi_or_url": "https://royalsocietypublishing.org/doi/10.1098/rsta.1920.0009"
+    },
+    "announcement": {
+      "venue": "Joint meeting of the Royal Society and the Royal Astronomical Society",
+      "date": "1919-11-06",
+      "location": "Burlington House, London",
+      "chair": "J. J. Thomson (President of the Royal Society)",
+      "thomson_quote": "This is the most important result obtained in connection with the theory of gravitation since Newton's day."
+    },
+    "result_summary": "The combined Sobral and Príncipe values bracket the 1.75″ Einstein prediction and exclude the 0.87″ Newtonian value at >5 sigma."
+  },
+  "consequence": {
+    "media_storm": {
+      "nyt_headline_1919_11_10": "LIGHTS ALL ASKEW IN THE HEAVENS / Men of Science More or Less Agog Over Results of Eclipse Observations",
+      "times_of_london_1919_11_07": "Revolution in Science / Newtonian Ideas Overthrown",
+      "effect": "Einstein, who had been a mostly continental celebrity confined to physics journals, becomes a global household name within seven days of the announcement."
+    },
+    "physics_followup": [
+      {"name": "Pound-Rebka 1959", "tested": "gravitational redshift in a Harvard tower"},
+      {"name": "Hafele-Keating 1971", "tested": "time dilation on commercial airliners"},
+      {"name": "Gravity Probe A 1976", "tested": "gravitational redshift to higher precision"},
+      {"name": "Gravity Probe B 2011", "tested": "geodetic + frame-dragging effects"},
+      {"name": "Eddington-Cassini ratio test 2003", "tested": "Cassini radio signals near Sun: 1 + γ = 2.000021 ± 0.000023"}
+    ],
+    "tech_enabled": [
+      "GPS satellite time-dilation correction (operational from 1989; without GR correction, GPS positions drift by approximately 11 km per day)",
+      "Very-Long-Baseline Interferometry tests of GR using quasars near the Sun (now confirm Einstein to ~0.0001%)"
+    ],
+    "nobel_status": "Einstein received the 1921 Nobel Prize in Physics — but the citation specifies 'for his services to Theoretical Physics, and especially for his discovery of the law of the photoelectric effect.' Relativity is conspicuously absent. The Nobel committee considered the eclipse evidence insufficient for so radical a claim and chose the safer photoelectric work instead."
+  },
+  "counterfactual": "If general relativity had been wrong and Newton right, the developed eclipse plates from Sobral would have shown each Hyades star displaced by approximately 0.87 arcseconds away from the limb of the Sun — and the Cortie-lens plates, with their 0.12 arcsecond uncertainty, would have ruled out the 1.75″ Einstein value at more than seven standard deviations. The 'how' of GPS satellite synchronisation would have been built around an entirely different gravitational model.",
+  "key_documents_for_screen": [
+    {"label": "Page 332 of Dyson-Eddington-Davidson 1920 — final results table", "url": "https://royalsocietypublishing.org/doi/10.1098/rsta.1920.0009"},
+    {"label": "Página 1 of Einstein 1916 Annalen der Physik — title page in German", "url": "https://onlinelibrary.wiley.com/doi/10.1002/andp.19163540702"},
+    {"label": "New York Times Nov 10 1919 page 17", "url": "https://timesmachine.nytimes.com/timesmachine/1919/11/10/issue.html"},
+    {"label": "London Times Nov 7 1919 'Revolution in Science'", "url": "https://www.thetimes.co.uk/archive"}
+  ],
+  "footage_pool_seed": [
+    "https://commons.wikimedia.org/wiki/File:1919_eclipse_negative.jpg",
+    "https://commons.wikimedia.org/wiki/File:1919_eclipse_positive.jpg",
+    "https://commons.wikimedia.org/wiki/File:Solar_eclipse_1919_results_published_in_The_Illustrated_London_News,_1919.jpg",
+    "https://commons.wikimedia.org/wiki/File:Arthur_Stanley_Eddington.jpg",
+    "https://commons.wikimedia.org/wiki/File:Einstein_1921_by_F_Schmutzer_-_restoration.jpg",
+    "https://commons.wikimedia.org/wiki/File:Frank_Watson_Dyson.jpg",
+    "https://commons.wikimedia.org/wiki/File:Sobral_expedition_1919.jpg",
+    "https://commons.wikimedia.org/wiki/File:Roca_Sundy_Principe.jpg",
+    "https://commons.wikimedia.org/wiki/File:Cambridge_Observatory_-_geograph.org.uk.jpg",
+    "https://commons.wikimedia.org/wiki/File:Royal_Greenwich_Observatory_Hours.jpg",
+    "https://commons.wikimedia.org/wiki/Category:Burlington_House",
+    "https://commons.wikimedia.org/wiki/Category:GPS_satellites",
+    "https://images.nasa.gov/details/PIA01589",
+    "https://commons.wikimedia.org/wiki/File:Hyades_star_cluster.jpg",
+    "https://commons.wikimedia.org/wiki/File:Lichtablenkung.png"
+  ],
+  "sources": [
+    "Dyson, F. W., Eddington, A. S. & Davidson, C. (1920). A Determination of the Deflection of Light by the Sun's Gravitational Field. Philosophical Transactions of the Royal Society A, 220, 291-333.",
+    "Einstein, A. (1916). Die Grundlage der allgemeinen Relativitätstheorie. Annalen der Physik, 49 (354), 769-822.",
+    "Kennefick, D. (2019). No Shadow of a Doubt: The 1919 Eclipse That Confirmed Einstein's Theory of Relativity. Princeton University Press.",
+    "Will, C. M. (2014). The Confrontation between General Relativity and Experiment. Living Reviews in Relativity, 17, 4.",
+    "New York Times (Nov 10, 1919). 'Lights All Askew in the Heavens', p. 17.",
+    "Earman, J. & Glymour, C. (1980). Relativity and Eclipses: The British Eclipse Expeditions of 1919 and Their Predecessors. Historical Studies in the Physical Sciences, 11(1), 49-85.",
+    "Bertotti, B., Iess, L. & Tortora, P. (2003). A test of general relativity using radio links with the Cassini spacecraft. Nature, 425, 374-376."
+  ],
+  "_render_notes": "All claims in narrations/<slug>.json and narrations/<slug>-short.json must trace to a field above. The single strongest measurement of the campaign is the Sobral 4-inch Cortie lens (1.98 ± 0.12), NOT Eddington's Príncipe plates — the popular story conflates the two. The narration must mythbust this in chapter 2."
+}

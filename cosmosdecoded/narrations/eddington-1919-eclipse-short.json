@@ -1,0 +1,58 @@
+{
+  "slug": "eddington-1919-eclipse-short",
+  "long_form_parent": "eddington-1919-eclipse",
+  "format": "shorts",
+  "channel": "cosmosdecoded",
+  "duration_target_s": [50, 60],
+  "wpm_target": 165,
+  "hook": "This is the photograph that made Einstein famous.",
+  "narration": "This is the photograph that made Einstein famous. May twenty-ninth, nineteen-nineteen. A British astronomer named Arthur Eddington pointed a telescope at a total solar eclipse off the coast of West Africa. Einstein had said that mass curves spacetime, and that starlight grazing the Sun would bend by one point seven five arcseconds. Newton said zero point eight seven. A factor of two. After the eclipse, the photographic plates went home to Cambridge. Eddington and Davidson laid them face to face on a Zeiss measuring engine and tabulated the displacement of fifteen stars by hand. The Sobral plates gave one point nine eight arcseconds, plus or minus zero point one two. Einstein, confirmed. Newton, displaced. Within a week, the New York Times put the words 'Lights All Askew in the Heavens' on its front page. That number is why your phone navigates. SUBSCRIBE for more decoders. LIKE if this changed how you see physics.",
+  "beats": [
+    {
+      "index": 0,
+      "text": "This is the photograph that made Einstein famous.",
+      "match_text": "the photograph that made Einstein"
+    },
+    {
+      "index": 1,
+      "text": "May twenty-ninth, nineteen-nineteen. A British astronomer named Arthur Eddington pointed a telescope at a total solar eclipse off the coast of West Africa.",
+      "match_text": "Arthur Eddington pointed a telescope"
+    },
+    {
+      "index": 2,
+      "text": "Einstein had said that mass curves spacetime, and that starlight grazing the Sun would bend by one point seven five arcseconds. Newton said zero point eight seven. A factor of two.",
+      "match_text": "one point seven five arcseconds"
+    },
+    {
+      "index": 3,
+      "text": "After the eclipse, the photographic plates went home to Cambridge. Eddington and Davidson laid them face to face on a Zeiss measuring engine and tabulated the displacement of fifteen stars by hand.",
+      "match_text": "Zeiss measuring engine"
+    },
+    {
+      "index": 4,
+      "text": "The Sobral plates gave one point nine eight arcseconds, plus or minus zero point one two. Einstein, confirmed. Newton, displaced.",
+      "match_text": "Einstein, confirmed. Newton, displaced."
+    },
+    {
+      "index": 5,
+      "text": "Within a week, the New York Times put the words 'Lights All Askew in the Heavens' on its front page. That number is why your phone navigates.",
+      "match_text": "Lights All Askew in the Heavens"
+    },
+    {
+      "index": 6,
+      "text": "SUBSCRIBE for more decoders. LIKE if this changed how you see physics.",
+      "match_text": "SUBSCRIBE for more decoders"
+    }
+  ],
+  "closer": "SUBSCRIBE for more decoders\nLIKE if this changed how you see physics",
+  "title_options": [
+    "The Photograph That Made Einstein Famous",
+    "How a 1919 Eclipse Proved General Relativity",
+    "1.98 Arcseconds: The Number That Replaced Newton",
+    "Why Your Phone Needs Einstein"
+  ],
+  "thumbnail_brief": "Eclipse plate close-up (negative) on left half; bold sans caption right half: 'The photo that made EINSTEIN famous'. Cool dawn + observatory blue grade per channel signature.",
+  "source_url": "https://commons.wikimedia.org/wiki/File:1919_eclipse_negative.jpg",
+  "source": "Dyson, Eddington & Davidson 1920, Phil. Trans. R. Soc. A 220, 291-333; Einstein 1916, Annalen der Physik 354(7), 769-822.",
+  "_pronunciation_notes": "see eddington-1919-eclipse.pronounce.json sidecar"
+}
