@@ -90,6 +90,20 @@ class OrchestrationTest(unittest.IsolatedAsyncioTestCase):
       - missing mp4 raises (caught by the runner as failure)
     """
 
+    def setUp(self) -> None:
+        # Track files we write into the real repo so we can clean up
+        # post-test. Pre-2026-05-05 this test wrote to legacy paths
+        # that polluted git status across runs.
+        self._cleanup_paths: list[Path] = []
+
+    def tearDown(self) -> None:
+        for p in self._cleanup_paths:
+            try:
+                if p.exists():
+                    p.unlink()
+            except OSError:
+                pass
+
     async def test_happy_path(self) -> None:
         from workers.heavy import render_short as rs
 
@@ -107,23 +121,32 @@ class OrchestrationTest(unittest.IsolatedAsyncioTestCase):
             return uri
 
         async def fake_rewrite_and_cast(raw, yaml_path, slug, ch_dir):
-            # Pretend the script + cast files were written.
-            inter = rs.PROJECT_ROOT / "data" / "intermediate" / ch_dir
-            sp = inter / "scripts" / f"{slug}.json"
-            cp = inter / "cast" / f"{slug}.json"
+            # Pretend the script + cast files were written. Use the
+            # canonical per-channel layout via paths.RenderPaths so this
+            # test doesn't pollute legacy data/intermediate/<ch>/ on
+            # every run (regression caught by tests/test_layout_parity).
+            from pipeline.paths import RenderPaths  # noqa: PLC0415
+            paths = RenderPaths.from_channel_dir(ch_dir, project_root=rs.PROJECT_ROOT)
+            sp = paths.narration_for(slug)
+            cp = paths.cast_for(slug)
             sp.parent.mkdir(parents=True, exist_ok=True)
             cp.parent.mkdir(parents=True, exist_ok=True)
             sp.write_text("{}")
             cp.write_text("{}")
+            self._cleanup_paths.extend([sp, cp])
             return sp, cp
 
         async def fake_run_make_shorts(script_path, channel_yaml, log_path):
-            # Simulate make_shorts.py creating the mp4 in .
+            # Simulate make_shorts.py creating the mp4 in the canonical
+            # per-channel shorts/ dir. Channel resolved via the script
+            # path: <root>/<channel>/[<niche>/]/narrations/<slug>.json
+            # → <root>/<channel>/[<niche>/]/shorts/<slug>.mp4.
             slug = script_path.stem
-            mp4 = rs.PROJECT_ROOT / "data" / "shorts" / f"{slug}.mp4"
+            mp4 = script_path.parent.parent / "shorts" / f"{slug}.mp4"
             mp4.parent.mkdir(parents=True, exist_ok=True)
             mp4.write_bytes(b"\0\0\0\x18ftypmp42")  # minimal mp4-ish bytes
             log_path.write_text("rendered ok\n")
+            self._cleanup_paths.append(mp4)
             return 0
 
         with patch.object(rs, "_rewrite_and_cast", new=fake_rewrite_and_cast), \

@@ -67,22 +67,51 @@ control/              # Cloud Run service (deployed)
   queue.py              # Firestore + InMemory queue backends
   storage.py            # GCS adapter
   auth.py               # bearer-token agent auth (Firebase user auth in #12)
-shared/
-  schema.py             # cross-side: TaskEnvelope, JobEnvelope, ShortProposal
-agent/                  # laptop daemon (outbound-only HTTPS)
-  main.py               # heartbeat + lease loops
-  config.py runner.py resources.py
+  dashboard_routes.py   # /api/dashboard/* — live YouTube stats
+  scheduler.py          # round-robin 24/7 cron scheduler
+pipeline/               # shared library — all channels reuse from here
+  paths.py              # CANONICAL — single source of truth for layout (RenderPaths)
+  niches.py             # variant_yaml → (channel, niche) routing (NICHE_CHANNEL)
+  audio.py              # TTS facade re-exporting pipeline.tts.* providers
+  tts/{kokoro,f5,chatterbox,styletts2,parler,song,text_normalize}.py
+  render/{shorts,long_form,footage_only,sports_doc}.py   # universal renderers
+  upload.py             # YouTube upload + part2 sidecar + critic gate
+  x_upload.py           # X cross-post (sidecar to YouTube)
+  research.py           # cross-channel YouTube analytics ingest
+  preflight.py          # power-state guard + MLX state reset
+  ... + asr, beats, captions, cast, compose, critic, footage, images,
+        imitate, prompts, rewrite, script_check, telemetry, thumbnails,
+        visualizability, voice_clone, wiki_research, ...
 workers/
+  agent/                # laptop daemon (outbound-only HTTPS)
+    main.py               # heartbeat + lease loops
+    config.py runner.py resources.py
   heavy/                # registered with agent runner; runs on laptop
-    render_short.py     # (in progress) wraps make_short() as one mega-task
-  light/                # (later) Cloud Run jobs for fan-out
-web/static/
-  chat.html             # public chat UI (vanilla JS, no framework)
-  index.html            # legacy operator UI
+    render_short.py     # mega-task wrapping pipeline.render.shorts via subprocess
+  light/                # YOUTUBE_UPLOAD + RESEARCH_HANDOFF Cloud Run jobs
+scripts/                # CLI entry points — thin shims around pipeline.render.*
+  make_shorts.py        # → pipeline.render.shorts.cli_main
+  historyrecapped/render_long_form.py    # → pipeline.render.long_form.cli_main
+  historyrecapped/render_footage_only.py # → pipeline.render.footage_only.cli_main
+  sportstoriesanimated/render_long_form_doc.py # → pipeline.render.sports_doc.cli_main
+  ... channel-specific tooling (auth, branding, b-roll discovery, ...)
+web/static/             # public chat UI + landing page (vanilla JS)
+  chat.html  landing.html  index.html  dashboard.html
+data/                   # cross-channel state ONLY (per-channel state lives in <channel>/)
+  cache/                  # ML model weight cache (Kokoro, F5, Whisper)
+  research/               # YouTube analytics aggregate
+  telemetry/              # render telemetry JSONL
+  _bench/                 # TTS A/B benchmark output (gitignored)
 
-# Legacy monolith — still works today, gets decommissioned at the end:
-make_shorts.py  pipeline/  pull_stories.py  upload.py  channels/  web/server.py
+# Per-channel folders — every channel matches the canonical spec in
+# docs/channel_layout.md. RenderPaths.for_channel(...) is the only
+# correct way to derive paths within a channel.
+airecap/  cosmosdecoded/  hindutavaanimated/  historyrecapped/
+mystoriesanimated/  rhymetimejunction/  sportstoriesanimated/
 ```
+
+For the canonical per-channel layout (every subdir, niche rules,
+gitignore conventions) see [`docs/channel_layout.md`](./docs/channel_layout.md).
 
 ## Running
 

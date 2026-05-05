@@ -36,9 +36,30 @@ raw activity logs — things that don't belong in the repo.
 
 ## Layout reference
 
-- Each YouTube channel: `/Users/rohit/ytFactory/<slug>/` with its own
-  `config.yaml`, `scripts/`, `learnings/`, and state subdirs (`raw/`,
-  `narrations/`, `cache/`, `shorts/`, `uploads/`, `branding/`, …).
+Per-channel layout is the canonical 2026-05-05 spec. **Use
+`pipeline.paths.RenderPaths` — never derive paths by string — see
+[`docs/channel_layout.md`](./docs/channel_layout.md) for the full spec.**
+
+Quick recap:
+
+- Every YouTube channel: `/Users/rohit/ytFactory/<slug>/` with its own
+  `config.yaml`, channel-wide subdirs (`scripts/`, `learnings/`,
+  `branding/`, `music/`, `footage/`, …) and per-slug subdirs (`raw/`,
+  `narrations/`, `cast/`, `shotlist/`, `uploads/`, `shorts/`,
+  `long_form/`, `cache/`, `scratch/`, `critiques/`).
+- **Niche rule:** a channel uses niches **everywhere or nowhere**.
+  Per-slug subdirs nest under the niche when present
+  (`mystoriesanimated/reddit_amitheasshole/narrations/<slug>.json`);
+  channel-wide subdirs never do. Source of truth for variant→niche
+  mapping is `pipeline/niches.py:NICHE_CHANNEL`.
+- **Cross-channel state under `data/`** is reserved for genuinely
+  cross-channel things only: `_bench/`, `cache/` (ML model weights),
+  `research/`, `telemetry/`. Anything per-render lives under its
+  channel root.
 - Cross-cutting docs: `docs/`.
 - Pipeline code: `pipeline/` (shared) + `<channel>/scripts/`
   (channel-specific entrypoints).
+- Renderer entry points: `pipeline/render/{shorts,long_form,
+  footage_only,sports_doc}.py` — channel-agnostic. Thin CLI shims at
+  `scripts/<old-path>` preserve the legacy `python scripts/...`
+  invocations.

@@ -693,6 +693,12 @@ def _mux_audio_no_captions(silent: Path, narration_path: Path, out_path: Path) -
 
 def render(channel: str, slug: str, *, do_upload: bool = False, aspect_override: str | None = None) -> Path:
     from pipeline.paths import RenderPaths  # noqa: PLC0415
+    from pipeline.preflight import power_check, reset_mlx_state  # noqa: PLC0415
+
+    # Refuse to start in Low Power Mode (the 2026-05-04 / 2026-05-05
+    # SIGABRT-on-Metal class of bug). Override with
+    # ``YTFACTORY_SKIP_POWER_CHECK=1`` if you understand the risk.
+    power_check(label="footage-only Shorts/long-form")
 
     paths = RenderPaths.from_channel_dir(channel, project_root=REPO_ROOT)
     chan_dir = paths.root  # backward-compat: subsequent code uses chan_dir
@@ -730,6 +736,15 @@ def render(channel: str, slug: str, *, do_upload: bool = False, aspect_override:
     print(f"[cfg] aspect={aspect} caption_mode={caption_mode} channel={channel} slug={slug}")
 
     narration_path, _, beat_list = _regen_audio_caps(channel, slug, cfg, caption_mode=caption_mode)
+
+    # 2026-05-05: drop F5-TTS-MLX (~1.35 GB) at the renderer-stage boundary
+    # before the video build / mux stages. F5 was loaded by the TTS step and
+    # is not needed again in this renderer; previously it leaked into the
+    # ffmpeg-heavy stages and contributed to the Metal-completion-queue
+    # SIGABRTs. (No-op when channel uses Kokoro / Chatterbox / etc. — those
+    # singletons aren't dropped here, only F5.)
+    reset_mlx_state(drop_f5=True, label="footage-only stage-1 TTS")
+
     silent = _build_silent_video(channel, slug, shotlist, scratch)
 
     out_dir = chan_dir / ("long_form" if aspect == "16:9" else "shorts")

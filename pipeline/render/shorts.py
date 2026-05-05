@@ -790,6 +790,13 @@ def make_short(
     upload_override: bool | None = None,
     require_critic: bool = False,
 ) -> Path:
+    from pipeline.preflight import power_check  # noqa: PLC0415
+
+    # Refuse to start in Low Power Mode (the 2026-05-04 / 2026-05-05
+    # SIGABRT-on-Metal class of bug). Override with
+    # ``YTFACTORY_SKIP_POWER_CHECK=1`` if you understand the risk.
+    power_check(label="Shorts")
+
     cfg = yaml.safe_load(channel_path.read_text())
     # An override that contains no path separator is a Kokoro voice id
     # (e.g. "am_eric"). When the channel default is F5-TTS but the user
@@ -1170,6 +1177,15 @@ def make_short(
     else:
         print(f"[1/4] TTS cached: {audio_path}")
     print(f"     done in {time.time() - t0:.1f}s")
+
+    # 2026-05-05: drop F5-TTS-MLX (~1.35 GB) at the renderer-stage boundary
+    # if F5 was the active provider. Image gen, beats, captions, mux all
+    # run after this and don't need F5; previously it leaked through to
+    # those stages and contributed to Metal aborts on long renders.
+    # No-op when tts_provider != 'f5_tts'.
+    if tts_provider == "f5_tts":
+        from pipeline.preflight import reset_mlx_state  # noqa: PLC0415
+        reset_mlx_state(drop_f5=True, label="Shorts stage-1 TTS")
 
     # Stage 5 — beats (word timestamps + source-text alignment)
     t0 = time.time()

@@ -636,6 +636,9 @@ def main() -> int:
                          "stops before video assembly. Useful for verifying anchor matching.")
     args = ap.parse_args()
 
+    from pipeline.preflight import power_check  # noqa: PLC0415
+    power_check(label="sports-doc")
+
     _load_env(REPO_ROOT)
 
     from pipeline.paths import RenderPaths  # noqa: PLC0415
@@ -700,6 +703,14 @@ def main() -> int:
     if args.tts_only:
         print("[done] --tts-only set; stopping after narration synth")
         return 0
+
+    # 2026-05-05: drop F5-TTS-MLX (~1.35 GB) at the renderer-stage boundary.
+    # Subsequent stages (whisper alignment, footage trim, mux) don't need
+    # F5; previously it leaked through to those stages and contributed to
+    # Metal aborts on long renders. No-op when provider != f5_tts.
+    if str(lf.get("tts_provider", "f5_tts")) == "f5_tts":
+        from pipeline.preflight import reset_mlx_state  # noqa: PLC0415
+        reset_mlx_state(drop_f5=True, label="sports-doc stage-1 TTS")
 
     # ----- Stage 2: Anchor alignment + timeline resolution -----------------
     print("[2/7] resolving timeline (whisper-aligning anchors)…")

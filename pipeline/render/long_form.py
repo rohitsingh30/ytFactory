@@ -1058,41 +1058,170 @@ def _hms_ass(t: float) -> str:
     return f"{h:d}:{m:02d}:{s:05.2f}"
 
 
-def build_captions_ass(
-    narration_wav: Path,
-    out_ass: Path,
-) -> Path:
-    """Whisper-align narration → ASS subtitle file with sleep-friendly styling baked in.
+def _ass_escape(text: str) -> str:
+    r"""Escape characters that have special meaning inside ASS Dialogue text.
 
-    ASS bypasses the `subtitles=...:force_style=...` escaping mess in ffmpeg.
-    Styling: Helvetica 36, soft white (slightly off-white #F0F0F0), drop shadow
-    Shadow=2 (soft, not hard outline), no border outline, bottom-centered with
-    margin 80 px. Aligns the look with the calm-evening register.
+    libass treats ``{...}`` as override blocks (e.g. ``{\an8}``) and ``\``
+    as the escape prefix. Apostrophes / em-dashes / accented chars are
+    plain UTF-8 and pass through unchanged.
+
+    We also fold any literal newlines/CRs into ``\N`` (ASS line break)
+    to avoid breaking the Dialogue line format.
+    """
+    if not text:
+        return ""
+    return (
+        text
+        .replace("\\", r"\\")     # backslash first
+        .replace("{", r"\{")
+        .replace("}", r"\}")
+        .replace("\r\n", r"\N")
+        .replace("\n", r"\N")
+        .replace("\r", r"\N")
+    )
+
+
+def _ass_color_from_rgba(rgba: tuple | list, alpha_override: int | None = None) -> str:
+    """Convert an (R, G, B[, A]) tuple on 0-255 into ASS ``&HAABBGGRR``.
+
+    Channel ``caption_style.text_rgba`` uses the standard PIL/web order
+    (R, G, B, A). ASS uses the Windows BGR order with an alpha byte where
+    **0 = fully opaque, 255 = fully transparent** (inverse of the usual
+    convention — easy to get wrong).
+
+    ``alpha_override``: if set, use this alpha (0-255) instead of the
+    rgba's alpha channel. Used to emit ``OutlineColour`` / ``BackColour``
+    with full opacity regardless of caller's alpha.
+    """
+    if len(rgba) == 4:
+        r, g, b, a = rgba
+    else:
+        r, g, b = rgba
+        a = 255
+    if alpha_override is not None:
+        a = alpha_override
+    # ASS alpha is inverted: 0=opaque, 255=transparent
+    ass_alpha = 255 - max(0, min(255, int(a)))
+    return f"&H{ass_alpha:02X}{int(b):02X}{int(g):02X}{int(r):02X}"
+
+
+def build_captions_ass(
+    out_ass: Path,
+    *,
+    narration_text: str | None = None,
+    chunk_wavs: list[Path] | None = None,
+    join_silence_s: float = 0.0,
+    chunk_target_chars: int = 380,
+    narration_wav: Path | None = None,
+    text_color: tuple | list = (255, 217, 61, 255),
+    italic: bool = True,
+    font_name: str = "Helvetica",
+    font_size: int = 38,
+    margin_v: int = 80,
+    max_chars: int = 70,
+    max_lines: int = 2,
+) -> tuple[Path, int]:
+    """Build a libass-compatible ASS subtitle file for the long-form mux.
+
+    Two alignment modes (mutually exclusive — pass exactly one set):
+
+    1. **Authored** (default; pass ``narration_text`` + ``chunk_wavs``):
+       reuse the same ``_split_into_chunks`` algorithm the TTS stage
+       used, ffprobe each chunk wav for its post-atempo duration, then
+       distribute time across sentences within each chunk by character
+       count. Identical timing math to ``build_caption_pngs_from_chunks``
+       so the look matches what the legacy PNG path produced — just
+       rendered by libass as one input instead of N.
+    2. **Whisper-aligned** (pass ``narration_wav`` only): re-transcribe
+       the rendered narration with whisper and group words by
+       sentence-ending punctuation. Legacy fallback for
+       ``caption_align: whisper`` configs.
+
+    Style is parameterised from the channel's ``long_form.caption_style``
+    block (``text_rgba``, ``italic``). Defaults to **yellow italic** to
+    match the Sleepy-Time-History caption signature (channel learning
+    ``historyrecapped/learnings/long_form_captions.md``). Earlier
+    hardcoded "off-white non-italic" was wrong — fixed 2026-05-05 in
+    the rubber-duck-flagged style mismatch.
+
+    Returns ``(out_ass, cue_count)``.
     """
     import re as _re
-    from pipeline import beats as _beats
 
-    print(f"[cap] whisper-aligning {narration_wav.name}…")
-    words = _beats.transcribe_words(narration_wav)
-    if not words:
-        raise RuntimeError("whisper returned no words for caption alignment")
+    # ---- alignment ---------------------------------------------------------
+    # Build a list of (start_s, end_s, text) triples — sentence-level cues.
+    cues_raw: list[tuple[float, float, str]] = []
 
-    # Group by sentence-ending punctuation in the word text.
-    sentences: list[list] = []
-    cur: list = []
-    for w in words:
-        cur.append(w)
-        text = (w.text or "").strip()
-        if text and text[-1] in ".!?":
+    if narration_text is not None and chunk_wavs is not None:
+        # Authored alignment (default).
+        chunk_texts = _split_into_chunks(narration_text, target_chars=chunk_target_chars)
+        if len(chunk_texts) != len(chunk_wavs):
+            raise RuntimeError(
+                f"chunk count mismatch: authored split → {len(chunk_texts)} chunks, "
+                f"cached wav count → {len(chunk_wavs)}. Caption alignment requires "
+                f"the same chunk_target_chars used during TTS synth."
+            )
+        chunk_durs = [_probe_duration(p) for p in chunk_wavs]
+        chunk_start = 0.0
+        for ctext, cdur in zip(chunk_texts, chunk_durs):
+            sentences = _re.findall(r"[^.!?]+[.!?]+(?:\s|$)|\S[^.!?]*$", ctext)
+            sentences = [s.strip() for s in sentences if s.strip()]
+            if not sentences:
+                chunk_start += cdur + join_silence_s
+                continue
+            total_chars = sum(len(s) for s in sentences) or 1
+            cursor = chunk_start
+            for sent in sentences:
+                frac = len(sent) / total_chars
+                sent_dur = cdur * frac
+                cues_raw.append((cursor, cursor + sent_dur, sent))
+                cursor += sent_dur
+            chunk_start += cdur + join_silence_s
+    elif narration_wav is not None:
+        # Whisper alignment (legacy fallback).
+        from pipeline import beats as _beats  # noqa: PLC0415
+        print(f"[cap] whisper-aligning {narration_wav.name}…")
+        words = _beats.transcribe_words(narration_wav)
+        if not words:
+            raise RuntimeError("whisper returned no words for caption alignment")
+        sentences: list[list] = []
+        cur: list = []
+        for w in words:
+            cur.append(w)
+            wt = (w.text or "").strip()
+            if wt and wt[-1] in ".!?":
+                sentences.append(cur)
+                cur = []
+        if cur:
             sentences.append(cur)
-            cur = []
-    if cur:
-        sentences.append(cur)
+        for sent in sentences:
+            if not sent:
+                continue
+            text = " ".join((w.text or "").strip() for w in sent).strip()
+            text = _re.sub(r"\s+", " ", text)
+            cues_raw.append((float(sent[0].start), float(sent[-1].end), text))
+    else:
+        raise ValueError(
+            "build_captions_ass: pass either (narration_text + chunk_wavs) for "
+            "authored alignment, or narration_wav for whisper alignment."
+        )
 
-    # ASS header — single Default style with our sleep-friendly look.
-    # PrimaryColour ASS format is &HAABBGGRR (alpha-blue-green-red).
-    # &H00F0F0F0 = soft off-white, fully opaque.
-    # OutlineColour &H00000000 with Outline=0 + Shadow=2 = pure drop shadow.
+    # ---- style block -------------------------------------------------------
+    primary = _ass_color_from_rgba(text_color)
+    # Outline / back / shadow always opaque black for readability.
+    outline = _ass_color_from_rgba((0, 0, 0, 255))
+    back = _ass_color_from_rgba((0, 0, 0, 255))
+    italic_flag = 1 if italic else 0
+    # BorderStyle=1 + Outline=1.5 + Shadow=2 = soft outline + drop shadow,
+    # readable on warm-firelight-graded archival footage. Alignment=2 =
+    # bottom-center (libass numpad layout).
+    style_line = (
+        f"Style: Default,{font_name},{int(font_size)},"
+        f"{primary},{primary},{outline},{back},"
+        f"0,{italic_flag},0,0,"
+        f"100,100,1,0,1,1.5,2,"
+        f"2,80,80,{int(margin_v)},1"
+    )
     header = (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
@@ -1106,31 +1235,21 @@ def build_captions_ass(
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        "Style: Default,Helvetica,38,&H00F0F0F0,&H00F0F0F0,"
-        "&H00000000,&H00000000,0,0,0,0,"
-        "100,100,1,0,1,0,3,"
-        "2,80,80,80,1\n"
+        f"{style_line}\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
         "MarginV, Effect, Text\n"
     )
 
+    # ---- events: wrap + emit -----------------------------------------------
     events: list[str] = []
     cue_idx = 0
-    max_chars = 70
-    max_lines = 2
-    for sent in sentences:
-        if not sent:
-            continue
-        text = " ".join((w.text or "").strip() for w in sent).strip()
-        text = _re.sub(r"\s+", " ", text)
-        start = float(sent[0].start)
-        end = float(sent[-1].end)
-        # Wrap to <= max_chars per line.
+    for start, end, text in cues_raw:
+        # Soft-wrap to <= max_chars per line.
         wrapped: list[str] = []
         cur_line = ""
-        for tok in text.split(" "):
+        for tok in text.split():
             if not cur_line:
                 cur_line = tok
             elif len(cur_line) + 1 + len(tok) <= max_chars:
@@ -1140,12 +1259,12 @@ def build_captions_ass(
                 cur_line = tok
         if cur_line:
             wrapped.append(cur_line)
-        chunks = [wrapped[i:i+max_lines] for i in range(0, len(wrapped), max_lines)]
-        per = (end - start) / max(1, len(chunks))
-        for i, ch in enumerate(chunks):
+        sub_chunks = [wrapped[i:i+max_lines] for i in range(0, len(wrapped), max_lines)]
+        per = (end - start) / max(1, len(sub_chunks))
+        for i, lines in enumerate(sub_chunks):
             cs = start + i * per
             ce = cs + per
-            ass_text = "\\N".join(ch)  # ASS line break is \N
+            ass_text = "\\N".join(_ass_escape(line) for line in lines)
             events.append(
                 f"Dialogue: 0,{_hms_ass(cs)},{_hms_ass(ce)},Default,,0,0,0,,{ass_text}"
             )
@@ -1153,7 +1272,29 @@ def build_captions_ass(
 
     out_ass.write_text(header + "\n".join(events) + "\n", encoding="utf-8")
     print(f"[cap] wrote {cue_idx} ASS cues → {out_ass.name}")
-    return out_ass
+    return out_ass, cue_idx
+
+
+def _ffmpeg_has_libass() -> bool:
+    """Probe (once, memoised) whether the local ffmpeg has libass.
+
+    Required for the ``subtitles=`` filter that renders the ASS file.
+    Falls back to PNG-overlay path when False — keeps Tier-0-less
+    deployments working.
+    """
+    cached = getattr(_ffmpeg_has_libass, "_cached", None)
+    if cached is not None:
+        return cached
+    try:
+        out = subprocess.check_output(
+            ["ffmpeg", "-hide_banner", "-h", "filter=subtitles"],
+            stderr=subprocess.STDOUT, text=True, timeout=5,
+        )
+        ok = "Render text subtitles" in out or "libass" in out
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        ok = False
+    _ffmpeg_has_libass._cached = ok  # type: ignore[attr-defined]
+    return ok
 
 
 # ---------- final mux: video + (narration + music) ------------------------
@@ -1166,33 +1307,49 @@ def final_mux(
     margin_v: int = 80,
     watermark_png: Path | None = None,
     watermark_margin: int = 32,
+    captions_ass: Path | None = None,
 ) -> Path:
     """Mix narration + music; mux against the silent video track.
 
-    If caption_cues is provided, builds an N-overlay filter chain that
-    shows each PNG only during its [start, end] window. Bottom-centered
-    with margin_v from the bottom edge.
+    **Caption rendering** — three modes (mutually exclusive; pick the
+    first that's set, in this order):
 
-    If watermark_png is provided, it's overlaid in the TOP-RIGHT corner of
-    every frame for the full duration (matches Sleepy Time History channel
-    watermark style).
+    1. ``captions_ass`` (preferred): a single libass ASS file is fed to
+       ffmpeg's ``subtitles=`` filter as ONE input + ONE filter step,
+       regardless of cue count. This is the OOM fix (2026-05-05). For
+       a 90-min sleep video with 800 sentence cues, peak ffmpeg RAM
+       drops from ~10 GB → ~1.5 GB. Requires the ffmpeg binary to have
+       libass — probe with :func:`_ffmpeg_has_libass`.
+    2. ``caption_cues`` (legacy fallback): N PNG inputs + N-deep
+       overlay chain. Kept for environments without libass; do NOT
+       pass this if ``captions_ass`` is set.
+    3. None: no captions burned.
+
+    If ``watermark_png`` is provided, it's overlaid TOP-RIGHT for the
+    full duration (Sleepy Time History watermark style). Watermark and
+    captions can be combined in any mode.
     """
+    if captions_ass is not None and caption_cues:
+        raise ValueError(
+            "final_mux: pass either captions_ass OR caption_cues, not both"
+        )
+
     a_flt = (
         f"[1:a]volume={narration_db}dB[narr];"
         f"[2:a]volume={music_db}dB[bed];"
         f"[narr][bed]amix=inputs=2:duration=first:dropout_transition=2[a]"
     )
 
-    needs_filter = bool(caption_cues) or bool(watermark_png)
+    needs_filter = bool(caption_cues) or bool(watermark_png) or bool(captions_ass)
     if needs_filter:
         # Inputs ordering: 0=video, 1=narration, 2=music, 3=watermark (if any),
-        # then each caption PNG follows.
+        # then each caption PNG follows (in legacy mode).
         v_chain_parts: list[str] = []
         cur_label = "[0:v]"
         next_input = 3
 
-        # Watermark first — renders under captions if both present, but they
-        # don't spatially overlap (watermark top-right, captions bottom-center).
+        # Watermark first — under captions if both present, but they don't
+        # spatially overlap (watermark top-right, captions bottom-center).
         if watermark_png:
             wm_label = f"[{next_input}:v]"
             out_label = "[vwm]"
@@ -1205,7 +1362,15 @@ def final_mux(
             cur_label = out_label
             next_input += 1
 
-        if caption_cues:
+        if captions_ass is not None:
+            # Single libass step — fixed cost regardless of cue count.
+            # Path needs ffmpeg-style escaping for the filter argument
+            # (colons + backslashes break the filter parser).
+            ass_path_str = str(captions_ass).replace("\\", "/").replace(":", "\\:")
+            out_label = "[vass]"
+            v_chain_parts.append(f"{cur_label}subtitles={ass_path_str}{out_label}")
+            cur_label = out_label
+        elif caption_cues:
             for i, (_png, cs, ce) in enumerate(caption_cues):
                 in_label = f"[{next_input + i}:v]"
                 out_label = f"[v{i}]"
@@ -1498,38 +1663,82 @@ def main() -> int:
         build_music_bed(music_wav, dur)
 
     # Stage 4 — captions
-    # Default path: build_caption_pngs_from_chunks uses the AUTHORED narration
-    # text + cached TTS chunk durations as the alignment anchor. Captions show
-    # the canonical case + punctuation + proper nouns from the JSON, never a
-    # whisper transcript of our own audio (which loses case, mangles names like
-    # Bar-le-Duc → "barladuk", and hallucinates phrases during quiet stretches).
-    # Set long_form.caption_align: whisper to fall back to the old whisper path.
+    # Default path: build_captions_ass produces a single libass file consumed
+    # via ffmpeg's `subtitles=` filter. Mux peak RAM stays ~1.5 GB regardless
+    # of cue count — the legacy PNG-overlay path balloons to ~10 GB on long
+    # sleep videos with 600+ sentence cues (italian-campaign had 617). When
+    # libass isn't available (`ffmpeg-full` / `homebrew-ffmpeg/ffmpeg/ffmpeg`
+    # not installed), falls back to PNG overlays automatically. See:
+    # docs/long_form_model_inventory.md "Caption alignment" + the dual-save
+    # memory entry feedback_long_form_captions_ass_path.md.
+    #
+    # Authored alignment uses canonical narration text + cached TTS chunk
+    # durations; whisper alignment is the legacy fallback for
+    # `caption_align: whisper` configs.
     caption_cues: list[tuple[Path, float, float]] | None = None
+    captions_ass: Path | None = None
+    cap_cue_count = 0
     if bool(lf.get("captions_enabled", False)):
         cap_dir = cache_dir / "captions"
+        cap_dir.mkdir(parents=True, exist_ok=True)
         cap_style = lf.get("caption_style") or {}
         cap_color = tuple(cap_style.get("text_rgba", (255, 217, 61, 255)))
         cap_italic = bool(cap_style.get("italic", True))
+        cap_font = str(cap_style.get("font_name", "Helvetica"))
+        cap_size = int(cap_style.get("font_size", 38))
+        cap_margin_v = int(cap_style.get("margin_v", 80))
         align_mode = str(lf.get("caption_align", "authored"))
-        if align_mode == "authored":
-            # Nuke stale whisper-text PNGs so the new authored text actually renders.
-            if cap_dir.exists():
-                for old in cap_dir.glob("cap_*.png"):
-                    old.unlink()
-            caption_cues = build_caption_pngs_from_chunks(
-                narration_text=text,
-                chunk_wavs=chunks,
-                join_silence_s=join_silence_s,
-                out_dir=cap_dir,
-                text_color=cap_color,
-                italic=cap_italic,
-                chunk_target_chars=chunk_target_chars,
-            )
+        use_ass = _ffmpeg_has_libass()
+        if not use_ass:
+            print("[cap] libass not available in local ffmpeg — falling back to PNG-overlay path. "
+                  "Install with `brew install homebrew-ffmpeg/ffmpeg/ffmpeg` for the 1-input ASS path.")
+        if use_ass:
+            ass_path = cap_dir / "captions.ass"
+            if align_mode == "authored":
+                _, cap_cue_count = build_captions_ass(
+                    ass_path,
+                    narration_text=text,
+                    chunk_wavs=chunks,
+                    join_silence_s=join_silence_s,
+                    chunk_target_chars=chunk_target_chars,
+                    text_color=cap_color,
+                    italic=cap_italic,
+                    font_name=cap_font,
+                    font_size=cap_size,
+                    margin_v=cap_margin_v,
+                )
+            else:
+                _, cap_cue_count = build_captions_ass(
+                    ass_path,
+                    narration_wav=narration_wav,
+                    text_color=cap_color,
+                    italic=cap_italic,
+                    font_name=cap_font,
+                    font_size=cap_size,
+                    margin_v=cap_margin_v,
+                )
+            captions_ass = ass_path
         else:
-            caption_cues = build_caption_pngs(
-                narration_wav, cap_dir,
-                text_color=cap_color, italic=cap_italic,
-            )
+            # Legacy PNG-overlay fallback (no libass).
+            if align_mode == "authored":
+                if cap_dir.exists():
+                    for old in cap_dir.glob("cap_*.png"):
+                        old.unlink()
+                caption_cues = build_caption_pngs_from_chunks(
+                    narration_text=text,
+                    chunk_wavs=chunks,
+                    join_silence_s=join_silence_s,
+                    out_dir=cap_dir,
+                    text_color=cap_color,
+                    italic=cap_italic,
+                    chunk_target_chars=chunk_target_chars,
+                )
+            else:
+                caption_cues = build_caption_pngs(
+                    narration_wav, cap_dir,
+                    text_color=cap_color, italic=cap_italic,
+                )
+            cap_cue_count = len(caption_cues)
     else:
         print("[cap] captions_enabled=false — skipping subtitle burn")
 
@@ -1556,11 +1765,17 @@ def main() -> int:
             )
         watermark_png = wm_path
 
+    cap_label = "no captions"
+    if captions_ass is not None:
+        cap_label = f"captions ({cap_cue_count} ASS cues, libass)"
+    elif caption_cues:
+        cap_label = f"captions ({len(caption_cues)} PNG cues)"
     print(f"[4/4] muxing video + (narration {nb:+.0f}dB + music {mb:+.0f}dB) "
-          f"+ {'captions (' + str(len(caption_cues)) + ' cues)' if caption_cues else 'no captions'}"
-          f"{' + watermark' if watermark_png else ''} → {out_path.name}…")
+          f"+ {cap_label}{' + watermark' if watermark_png else ''} → {out_path.name}…")
     final_mux(video_path, narration_wav, music_wav, out_path,
-              narration_db=nb, music_db=mb, caption_cues=caption_cues,
+              narration_db=nb, music_db=mb,
+              caption_cues=caption_cues,
+              captions_ass=captions_ass,
               watermark_png=watermark_png,
               watermark_margin=int(wm_cfg.get("margin", 32)))
     final_dur = _probe_duration(out_path)
