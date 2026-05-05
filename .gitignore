@@ -42,6 +42,11 @@ data/intermediate/
 **/scratch/
 # Footage source mp4s — large, downloaded from YouTube via yt-dlp
 **/footage/sources/
+# Long-form footage source mp4s — same idea, larger duration
+**/footage/long_sources/
+# Long-form final renders — mirror of `**/shorts/*.mp4`, regenerable
+**/long_form/*.mp4
+**/long_form/*.wav
 # Emoji cache — twemoji PNGs (regenerable from CDN)
 **/emoji/
 # tts_tests — A/B test renders, not channel-canonical

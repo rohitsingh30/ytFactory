@@ -77,9 +77,10 @@ Each numbered beat above is ONE entry in the `lyrics: [...]` block.
 - **NO scary content.** No predator/prey violence, no death, no
   injury, no shouting. Kids' channel — the YouTube COPPA classifier
   is sensitive on this and the channel YAML has `made_for_kids: true`.
-- **Spoken bridges (between sung verses):** Dadi voice (Cartesia
-  Arushi). Short — ≤8 words each. Intro and outro only; verse-to-
-  verse should flow musically without spoken interruption.
+- **Spoken bridges (between sung verses):** Dadi voice (Kokoro
+  `hf_alpha` — the only Hindi-capable TTS in the repo). Short — ≤8
+  words each. Intro and outro only; verse-to-verse should flow
+  musically without spoken interruption.
 
 ### 3. Author the Suno prompt
 
@@ -99,9 +100,7 @@ NON-NEGOTIABLE:** Suno V4_5 defaults to an English-accented vocalist when
 given any English in the style prompt. The vocalist then pronounces
 Devanagari lyrics with an English accent — "हाथी" comes out as "haa-thee"
 mispronounced, jarring for Indian parents. The clause forces Suno to
-pick a Hindi-native singer profile from its training distribution. See
-`feedback_cartesia_accent_on_foreign_words.md` for the parent principle
-(applies to Suno too even though that memory is about Cartesia).
+pick a Hindi-native singer profile from its training distribution.
 
 Tweak per rhyme:
 - Mahabharat-adjacent (none currently): swap "warm Hinglish" → "epic kathaa style", keep the Indian-vocalist clause
