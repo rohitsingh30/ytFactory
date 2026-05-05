@@ -2213,13 +2213,21 @@ def _cli_main_impl() -> None:
     # tail can pick it up; downstream consumers ignore lines that
     # don't start with ``OUTPUT_MANIFEST: ``.
     if out_path is not None:
+        # Resolve thumb via paths.py (canonical location) with fallbacks.
+        from pipeline.paths import RenderPaths as _RP  # noqa: PLC0415
+
+        rp = _RP.from_channel_yaml(channel_path)
+        thumb_candidates = [
+            rp.short_thumb_for(slug),
+            rp.root / "thumbs" / f"{slug}.png",   # older variant
+            rp.root / "thumb" / f"{slug}.png",    # older variant
+        ]
+        thumb_path = next((c for c in thumb_candidates if c.exists()), None)
         manifest = {
             "mp4": str(out_path),
-            "thumb": str(out_dir / "thumbs" / f"{slug}.png")
-                if (out_dir / "thumbs" / f"{slug}.png").exists()
-                else None,
+            "thumb": str(thumb_path) if thumb_path else None,
             "slug": slug,
-            "channel_dir": str(out_dir),
+            "channel_dir": rp.channel_dir,
         }
         print(f"OUTPUT_MANIFEST: {json.dumps(manifest)}")
 
@@ -2227,50 +2235,39 @@ def _cli_main_impl() -> None:
 def _resolve_channel_out_dir(channel_path: Path) -> Path:
     """Map channel YAML path → per-channel state root (cache/shorts/uploads/...).
 
+    Routes through :class:`pipeline.paths.RenderPaths` (the canonical
+    layout module since 2026-05-05). Returns ``RenderPaths.root``,
+    which is ``<channel>/[<niche>/]`` — the per-slug subdir parent.
     Per-channel layout (memory: feedback_channels_subdir_layout) puts
     every channel's runtime state under a per-channel root, NEVER
-    under the global ``data/`` dir. Lookup precedence:
+    under the global ``data/`` dir.
+
+    Lookup precedence (delegated to :meth:`RenderPaths.from_channel_yaml`):
 
     1. ``pipeline.niches.NICHE_CHANNEL`` — authoritative for variant
        channels (sports_ranked, aita, oddities, tih, …) where YAML and
        state dir don't share a path prefix.
-    2. ``<channel_root>/config.yaml`` simple-channel convention —
-       state dir is the YAML's parent.
-    3. ``<channel_root>/variants/<variant>.yaml`` fallback — when a
-       variant YAML isn't registered in NICHE_CHANNEL yet, default to
-       the parent-of-parent (the channel root), accepting that all
-       variants of that channel will share state. New variants should
-       add a NICHE_CHANNEL entry to disambiguate.
-
-    Falls back to legacy ``Path("data")`` only as a last resort with a
-    loud warning so the regression is visible in logs. The 2026-05-05
-    rivalry-recap render hit this when nothing was registered for a
-    new slug — the mp4 landed in ``data/shorts/`` instead of
-    ``sportstoriesanimated/ranked/shorts/``.
+    2. ``<channel_root>/config.yaml`` simple-channel convention.
+    3. ``<channel_root>/variants/<variant>.yaml`` fallback — flat layout
+       under the channel root, with a loud WARN so the operator adds a
+       NICHE_CHANNEL entry.
     """
+    from pipeline.paths import RenderPaths  # noqa: PLC0415 — lazy
+
     try:
-        from pipeline import niches as _niches
-    except Exception:
-        _niches = None
-
-    yaml_str = str(channel_path).replace("\\", "/")
-    if _niches is not None:
-        for chan_dir, chan_yaml in _niches.NICHE_CHANNEL.values():
-            if yaml_str.endswith(chan_yaml):
-                return Path(chan_dir)
-
-    if channel_path.name == "config.yaml":
-        return channel_path.parent
-
-    if channel_path.parent.name == "variants":
-        return channel_path.parent.parent
-
-    print(
-        f"[out] WARN: could not resolve channel state dir from "
-        f"{channel_path!r}; falling back to legacy 'data/' root. Add a "
-        f"pipeline.niches.NICHE_CHANNEL entry to fix."
-    )
-    return Path("data")
+        return RenderPaths.from_channel_yaml(channel_path).root
+    except ValueError:
+        # YAML doesn't fit any known layout — fall back to legacy ``data/``
+        # root, but with a loud warning so the regression is visible.
+        # The 2026-05-05 rivalry-recap render hit this when nothing was
+        # registered for a new slug — the mp4 landed in ``data/shorts/``
+        # instead of ``sportstoriesanimated/ranked/shorts/``.
+        print(
+            f"[out] WARN: could not resolve channel state dir from "
+            f"{channel_path!r}; falling back to legacy 'data/' root. Add a "
+            f"pipeline.niches.NICHE_CHANNEL entry to fix."
+        )
+        return Path("data")
 
 
 if __name__ == "__main__":

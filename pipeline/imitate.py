@@ -215,7 +215,7 @@ def _analyze_prompt(*, title: str, author: str, video_id: str,
 def analyze(
     url: str,
     *,
-    work_root: Path = Path("data/cache/riff"),
+    work_root: Path | None = None,
     n_frames: int = 8,
 ) -> dict:
     """Pull transcript + frames, ask Claude for an imitation profile.
@@ -224,7 +224,15 @@ def analyze(
     ``video_id``, ``title``, ``author``, ``url``, ``transcript_chars``,
     ``frames`` (list of file paths), and ``channel_dir`` /
     ``channel_yaml`` derived from ``niche_match``.
+
+    ``work_root`` defaults to the cross-channel ML/research cache
+    (``data/cache/riff/`` via :data:`pipeline.paths.MODEL_CACHE_DIR`).
+    Riff analysis is cross-channel — the same imitated video can spawn
+    renders on multiple channels, so per-channel caching would miss.
     """
+    if work_root is None:
+        from pipeline.paths import MODEL_CACHE_DIR  # noqa: PLC0415
+        work_root = MODEL_CACHE_DIR / "riff"
     video_id = _extract_video_id(url)
     work_dir = work_root / video_id
     work_dir.mkdir(parents=True, exist_ok=True)

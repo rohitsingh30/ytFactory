@@ -517,18 +517,34 @@ def _cli() -> None:
     args = ap.parse_args()
 
     import yaml
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+
     chan_yaml = yaml.safe_load(open(args.channel).read()) or {}
-    cache_dir = Path("data/cache") / args.slug
-    # Find the script.json across data/intermediate/*/scripts/.
+    # Resolve per-channel paths via RenderPaths. ``--channel`` is the
+    # channel YAML path; from_channel_yaml maps it to (channel, niche)
+    # via NICHE_CHANNEL or falls back to a flat-channel layout.
+    paths = RenderPaths.from_channel_yaml(args.channel)
+    cache_dir = paths.cache_for(args.slug)
+    # Find the narration JSON via the canonical per-channel layout, with
+    # legacy ``data/intermediate/*/scripts/<slug>.json`` fallback for
+    # half-migrated runs (the "scripts" → "narrations" rename was done
+    # at the read side first; the writer was finally migrated in 2026-05-05).
     script: dict = {"slug": args.slug}
-    channel_dir: str | None = None
-    for sp in Path("data/intermediate").glob(f"*/scripts/{args.slug}.json"):
+    channel_dir: str | None = paths.channel_dir
+    canonical = paths.narration_for(args.slug)
+    if canonical.exists():
         try:
-            script = json.loads(sp.read_text())
+            script = json.loads(canonical.read_text())
         except json.JSONDecodeError:
             pass
-        channel_dir = sp.parent.parent.name
-        break
+    else:
+        for sp in Path("data/intermediate").glob(f"*/scripts/{args.slug}.json"):
+            try:
+                script = json.loads(sp.read_text())
+            except json.JSONDecodeError:
+                pass
+            channel_dir = sp.parent.parent.name
+            break
     out = Path(args.out) if args.out else cache_dir / "auto_thumb.jpg"
     p = auto_thumbnail(
         slug=args.slug,

@@ -1293,14 +1293,21 @@ def main() -> int:
     _preflight_power_check()
     _load_env(REPO_ROOT)
 
-    channel_dir = REPO_ROOT / args.channel
-    config = yaml.safe_load((channel_dir / "config.yaml").read_text())
-    narration_path = channel_dir / "narrations" / f"{args.slug}.json"
+    # Single source of truth for per-slug paths. ``args.channel`` may be
+    # a flat channel slug ("historyrecapped") or a compound
+    # ``<channel>/<niche>`` form (rare for long-form, but supported via
+    # ``RenderPaths.from_channel_dir``).
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+    paths = RenderPaths.from_channel_dir(args.channel, project_root=REPO_ROOT)
+    channel_dir = paths.root  # backward-compat: subsequent code uses channel_dir
+
+    config = yaml.safe_load(paths.config_yaml.read_text())
+    narration_path = paths.narration_for(args.slug)
     if not narration_path.exists():
         raise SystemExit(f"missing narration: {narration_path}")
     script = json.loads(narration_path.read_text())
 
-    cache_dir = channel_dir / "cache" / args.slug
+    cache_dir = paths.cache_for(args.slug)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Long-form mode reads from config["long_form"] (channel YAML may also
@@ -1448,7 +1455,7 @@ def main() -> int:
             zoom_factor=float(lf.get("panel_zoom_factor", 1.08)),
         )
     else:
-        shotlist_path = channel_dir / "shotlist" / f"{args.slug}.json"
+        shotlist_path = paths.shotlist_for(args.slug)
         if not shotlist_path.exists():
             raise SystemExit(
                 f"missing shotlist: {shotlist_path}\n"
@@ -1456,6 +1463,10 @@ def main() -> int:
                 "(or switch render_mode to 'image_panels')."
             )
         shotlist = json.loads(shotlist_path.read_text())
+        # ``footage_dir`` is YAML-overridable (some channels store
+        # long-form sources in unconventional dirs). Default points at
+        # the canonical ``<channel>/footage/long_sources/`` location
+        # exposed via ``paths.footage_long_sources`` for new code.
         sources_dir = channel_dir / lf.get("footage_dir", "footage/long_sources")
         grade_cfg = lf.get("visual_grade") or {}
         grade_filter = grade_cfg.get("filter") if grade_cfg.get("enabled") else None
@@ -1476,8 +1487,10 @@ def main() -> int:
     print(f"[2/5] video → {video_path.name} {video_dur:.1f}s")
 
     # Stage 3 — music bed (synthetic ambient placeholder until a curated wav is dropped in)
+    # ``music`` is a channel-wide subdir (multiple slugs share the same
+    # ambient track). Use paths.music for the canonical location.
     music_default = lf.get("music_bed_default", "aether-loop.wav")
-    music_path = channel_dir / "music" / music_default
+    music_path = paths.music / music_default
     music_wav = cache_dir / "music_bed.wav"
     if music_path.exists():
         # Loop curated track to match narration duration.

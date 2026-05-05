@@ -29,7 +29,13 @@ from pathlib import Path
 from yt_dlp import YoutubeDL
 
 
-CACHE_DIR = Path("data/cache/voice_clones")
+from pipeline.paths import MODEL_CACHE_DIR
+
+
+# Voice-clone WAVs are cross-channel (the same source video can produce
+# a voice clone consumed by multiple channel renders). Lives under the
+# cross-channel ML model cache.
+CACHE_DIR = MODEL_CACHE_DIR / "voice_clones"
 
 
 @dataclass

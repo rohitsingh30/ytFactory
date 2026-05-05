@@ -52,11 +52,26 @@ POLL_INTERVAL_S = 30 * 60  # 30 minutes between watcher ticks
 
 
 def _iter_pending_sidecars() -> list[Path]:
-    """All current part2_pending sidecars across every channel."""
+    """All current part2_pending sidecars across every channel.
+
+    Scans BOTH the canonical per-channel layout
+    (``<channel>/[<niche>/]part2_pending/<slug>.json``, written by
+    ``pipeline.upload._part2_pending_path`` since the 2026-05-05 layout
+    cleanup) AND the legacy ``data/intermediate/<channel_dir>/part2_pending/``
+    location (older sidecars not yet migrated).
+    """
+    out: list[Path] = []
+    # Canonical per-channel layout.
+    for chan_dir in PROJECT_ROOT.iterdir():
+        if not chan_dir.is_dir() or not (chan_dir / "config.yaml").exists():
+            continue
+        for sidecar in chan_dir.rglob("part2_pending/*.json"):
+            out.append(sidecar)
+    # Legacy data/intermediate/ layout (transition window).
     base = PROJECT_ROOT / "data" / "intermediate"
-    if not base.exists():
-        return []
-    return sorted(base.glob("*/part2_pending/*.json"))
+    if base.exists():
+        out.extend(base.glob("*/part2_pending/*.json"))
+    return sorted(out)
 
 
 def _load_sidecar(path: Path) -> dict | None:
@@ -96,16 +111,30 @@ def _copy_continuity_files(
     Part-2 channel dir so make_shorts uses the same narrator and the
     same source-story metadata for the Part-2 render.
 
+    Tries the canonical per-channel layout first
+    (``<channel>/[<niche>/]/{cast,raw}/<slug>.json``, since 2026-05-05),
+    then falls back to the legacy ``data/intermediate/<channel_dir>/``
+    location.
+
     Idempotent: skips files that already exist at the destination.
     """
-    base = PROJECT_ROOT / "data" / "intermediate"
-    src_chan = base / part1_chan_dir
-    dst_chan = base / part2_chan_dir
+    from .paths import RenderPaths  # noqa: PLC0415
+
+    src_paths = RenderPaths.from_channel_dir(part1_chan_dir, project_root=PROJECT_ROOT)
+    dst_paths = RenderPaths.from_channel_dir(part2_chan_dir, project_root=PROJECT_ROOT)
+    legacy_base = PROJECT_ROOT / "data" / "intermediate"
+    src_chan_legacy = legacy_base / part1_chan_dir
+    dst_chan_legacy = legacy_base / part2_chan_dir
+
     for sub in ("cast", "raw"):
-        src = src_chan / sub / f"{slug}.json"
+        # Find source: canonical first, then legacy.
+        canonical_src = (src_paths.cast_for(slug) if sub == "cast" else src_paths.raw_for(slug))
+        legacy_src = src_chan_legacy / sub / f"{slug}.json"
+        src = canonical_src if canonical_src.exists() else legacy_src
         if not src.exists():
             continue
-        dst = dst_chan / sub / f"{slug}.json"
+        # Write to canonical destination.
+        dst = (dst_paths.cast_for(slug) if sub == "cast" else dst_paths.raw_for(slug))
         if dst.exists():
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -145,11 +174,13 @@ def _produce_and_upload(sidecar_path: Path, sidecar: dict) -> bool:
         print(f"[part2-watcher] {slug}: rewrite_part2 failed: {e}")
         return False
 
-    # Save script to Part-2 channel_dir so make_shorts.py picks it up.
-    script_path = (
-        PROJECT_ROOT / "data" / "intermediate" / part2_chan_dir
-        / "scripts" / f"{slug}.json"
-    )
+    # Save script to the Part-2 channel's canonical narrations/<slug>.json
+    # location (the legacy data/intermediate/<chan>/scripts/<slug>.json
+    # writes were retired in the 2026-05-05 layout cleanup; the rename
+    # to "narrations" was done at the read side first).
+    from .paths import RenderPaths  # noqa: PLC0415
+    part2_paths = RenderPaths.from_channel_dir(part2_chan_dir, project_root=PROJECT_ROOT)
+    script_path = part2_paths.narration_for(slug)
     rewrite_mod.save_script(script, script_path)
     print(f"[part2-watcher]   wrote Part-2 script → {script_path.relative_to(PROJECT_ROOT)}")
 

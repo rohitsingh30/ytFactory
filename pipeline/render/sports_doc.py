@@ -638,8 +638,11 @@ def main() -> int:
 
     _load_env(REPO_ROOT)
 
-    channel_dir = REPO_ROOT / args.channel
-    config = yaml.safe_load((channel_dir / "config.yaml").read_text())
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+    paths = RenderPaths.from_channel_dir(args.channel, project_root=REPO_ROOT)
+    channel_dir = paths.root  # backward-compat: subsequent code uses channel_dir
+
+    config = yaml.safe_load(paths.config_yaml.read_text())
     lf = config.get("long_form_doc") or {}
     if not lf:
         raise SystemExit(
@@ -648,8 +651,9 @@ def main() -> int:
             "scripts/historyrecapped/render_long_form.py."
         )
 
-    narration_path = channel_dir / "narrations" / f"{args.slug}.json"
-    footage_plan_path = channel_dir / "footage_plan" / f"{args.slug}.json"
+    narration_path = paths.narration_for(args.slug)
+    # footage_plan/ is channel-wide (sports stores per-doc footage plans).
+    footage_plan_path = paths.footage_plan / f"{args.slug}.json"
     if not narration_path.exists():
         raise SystemExit(f"missing narration: {narration_path}")
     if not footage_plan_path.exists():
@@ -658,7 +662,7 @@ def main() -> int:
     nar = json.loads(narration_path.read_text())
     fp = json.loads(footage_plan_path.read_text())
 
-    cache_dir = channel_dir / "cache" / args.slug
+    cache_dir = paths.cache_for(args.slug)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Concatenate chapter narration into one text body (chapters are the
@@ -898,7 +902,7 @@ def main() -> int:
     #   inM.. = lower-third PNGs.
     # Audio: mix narration + music; narration ducks during talking-head clips
     #   (window-based volume sidechain — emulated via simple amix weights for v1).
-    out_dir = channel_dir / "long_form"
+    out_dir = paths.long_form
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{args.slug}.mp4"
 

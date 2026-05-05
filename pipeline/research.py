@@ -40,11 +40,18 @@ from typing import Any, Iterable
 
 import yaml
 
+# Cross-channel state under data/. Note RESEARCH_DIR is the cross-channel
+# research aggregate (not per-channel); CRITIQUES_DIR has been migrated
+# to per-channel ``<channel>/[<niche>/]/critiques/<slug>/`` since
+# 2026-05-05 — the legacy aggregate dir is kept for backward-compat
+# reads of pre-migration critiques.
+from pipeline.paths import (  # noqa: E402
+    PROJECT_ROOT,
+    DATA_ROOT as DATA_DIR,
+    RESEARCH_DIR,
+)
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
-CRITIQUES_DIR = DATA_DIR / "critiques"
-RESEARCH_DIR = DATA_DIR / "research"
+CRITIQUES_DIR = DATA_DIR / "critiques"  # legacy; new critiques write per-channel
 YOUTUBE_DIR = RESEARCH_DIR / "youtube"
 
 MEMORY_DIR = Path(

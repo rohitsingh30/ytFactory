@@ -70,13 +70,19 @@ def _token_path(account: str) -> Path:
 
 
 def _record_path(project_root: Path, channel_dir: str, slug: str) -> Path:
-    """Per-reorg layout: <project_root>/<channel_dir>/uploads/<slug>.json.
+    """Per-reorg layout: ``<project_root>/<channel_dir>/uploads/<slug>.json``.
 
     ``channel_dir`` may be a compound path (e.g. ``mystoriesanimated/reddit_amitheasshole``)
     for niche-nested layouts; the result is
     ``mystoriesanimated/reddit_amitheasshole/uploads/<slug>.json``.
+
+    Routes through :class:`pipeline.paths.RenderPaths` (the canonical
+    layout module since 2026-05-05) so the convention stays in one
+    place. Existing callers keep their string-style ``channel_dir`` arg.
     """
-    return project_root / channel_dir / "uploads" / f"{slug}.json"
+    from pipeline.paths import RenderPaths  # noqa: PLC0415 — avoid import cycle
+
+    return RenderPaths.from_channel_dir(channel_dir, project_root=project_root).upload_record_for(slug)
 
 
 # ---- per-account publish throttle --------------------------------------
@@ -638,6 +644,7 @@ def _ensure_critique(
     slug: str,
     mp4_path: Path,
     project_root: Path,
+    channel_dir: str | None = None,
     force: bool = False,
 ) -> dict | None:
     """Return the latest critique for this slug; run the critic if needed.
@@ -646,8 +653,21 @@ def _ensure_critique(
     a legacy mp4 rendered before beat caching was added). Caller decides
     whether the gate fails-open or fails-closed for that case.
     """
-    cache_dir = project_root / "data" / "cache" / slug
-    out_dir = project_root / "data" / "critiques" / slug
+    # Per-slug image cache + critique outputs. Both moved to per-channel
+    # in the 2026-05-05 layout cleanup; we keep legacy ``data/`` reads as
+    # a fallback for half-migrated slugs.
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+
+    paths = RenderPaths.from_channel_dir(channel_dir, project_root=project_root) \
+        if channel_dir else None
+    if paths is not None and paths.cache_for(slug).exists():
+        cache_dir = paths.cache_for(slug)
+    else:
+        cache_dir = project_root / "data" / "cache" / slug
+    if paths is not None and paths.critiques_for(slug).exists():
+        out_dir = paths.critiques_for(slug)
+    else:
+        out_dir = project_root / "data" / "critiques" / slug
     score_path = out_dir / f"{slug}.score.json"
 
     # Reuse cached critique iff the mp4 hasn't changed since.
@@ -734,21 +754,44 @@ def get_channel_sub_count(account: str = "default") -> int:
 
 
 def _part2_pending_path(project_root: Path, channel_dir: str, slug: str) -> Path:
-    return (
-        project_root / "data" / "intermediate" / channel_dir
-        / "part2_pending" / f"{slug}.json"
-    )
+    """Per-channel ``part2_pending/<slug>.json`` sidecar location.
+
+    Lives under the channel root (per-channel ``cache/<slug>/`` would
+    pull this into the regenerable bucket — bad). The
+    ``part2_pending/`` subdir is itself a "channel-wide" concept
+    (cliffhanger Part-2 jobs queued for fulfilment). Migrated from the
+    legacy ``data/intermediate/<channel_dir>/part2_pending/`` location
+    in the 2026-05-05 layout cleanup; legacy reads in
+    ``pipeline.part2_watcher`` fall back to the old path during the
+    transition window.
+    """
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+
+    paths = RenderPaths.from_channel_dir(channel_dir, project_root=project_root)
+    return paths.root / "part2_pending" / f"{slug}.json"
 
 
 def _find_cast_path_for_sidecar(project_root: Path, channel_dir: str, slug: str) -> str | None:
     """Path to the per-story cast.json, if one exists. Returned as a
-    project-root-relative string so the sidecar stays portable."""
-    cast = project_root / "data" / "intermediate" / channel_dir / "cast" / f"{slug}.json"
-    if cast.exists():
-        try:
-            return str(cast.relative_to(project_root))
-        except ValueError:
-            return str(cast)
+    project-root-relative string so the sidecar stays portable.
+
+    Tries the new per-channel layout first (``<channel>/[<niche>/]/cast/<slug>.json``),
+    then falls back to the legacy ``data/intermediate/<channel_dir>/cast/<slug>.json``
+    location for renders authored before the 2026-05-05 layout cleanup.
+    """
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+
+    paths = RenderPaths.from_channel_dir(channel_dir, project_root=project_root)
+    candidates = [
+        paths.cast_for(slug),
+        project_root / "data" / "intermediate" / channel_dir / "cast" / f"{slug}.json",
+    ]
+    for cast in candidates:
+        if cast.exists():
+            try:
+                return str(cast.relative_to(project_root))
+            except ValueError:
+                return str(cast)
     return None
 
 
@@ -926,6 +969,7 @@ def upload_short(
             slug=slug,
             mp4_path=mp4_path,
             project_root=project_root,
+            channel_dir=channel_dir,
             force=force_critic,
         )
         if critique is None:
@@ -959,8 +1003,16 @@ def upload_short(
     if thumbnail_path is None and do_auto_thumb:
         try:
             from pipeline import thumbnails as thumb_mod
+            from pipeline.paths import RenderPaths  # noqa: PLC0415
 
-            cache_dir = project_root / "data" / "cache" / slug
+            # Prefer the per-channel cache when available; fall back to
+            # the legacy data/cache/<slug>/ for half-migrated runs.
+            paths = RenderPaths.from_channel_dir(channel_dir, project_root=project_root) \
+                if channel_dir else None
+            if paths is not None and paths.cache_for(slug).exists():
+                cache_dir = paths.cache_for(slug)
+            else:
+                cache_dir = project_root / "data" / "cache" / slug
             out_thumb = cache_dir / "auto_thumb.jpg"
             generated = thumb_mod.auto_thumbnail(
                 slug=slug,

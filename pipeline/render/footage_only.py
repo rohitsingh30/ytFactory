@@ -268,15 +268,18 @@ def _regen_audio_caps(
     + per-word PNG passes are skipped entirely — saves ~15 min on a
     70-min Hindi narration where Whisper undercounts dense Devanagari
     anyway (channel learning whisper_hindi_undercount.md)."""
-    cache = REPO_ROOT / channel / "cache" / slug
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+
+    paths = RenderPaths.from_channel_dir(channel, project_root=REPO_ROOT)
+    cache = paths.cache_for(slug)
     cache.mkdir(parents=True, exist_ok=True)
     narr_path = cache / "narration.wav"
     beats_path = cache / "beats.json"
 
-    narrations_json = REPO_ROOT / channel / "narrations" / f"{slug}.json"
+    narrations_json = paths.narration_for(slug)
     if not narrations_json.exists():
-        # Try niche-nested location
-        for p in (REPO_ROOT / channel).rglob(f"narrations/{slug}.json"):
+        # Try niche-nested location (legacy: pre-NICHE_CHANNEL writes).
+        for p in paths.channel_root.rglob(f"narrations/{slug}.json"):
             narrations_json = p
             break
     if not narrations_json.exists():
@@ -531,7 +534,10 @@ def _ensure_emoji(tag: str) -> Path:
 def _composited_word_pngs(cache: Path, beat_list: list, channel: str, slug: str) -> Path:
     """Composite flag emoji onto specific word PNGs; return dir of new PNGs."""
     from PIL import Image
-    out_dir = REPO_ROOT / channel / "cache" / slug / "_flagged_words"
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+
+    paths = RenderPaths.from_channel_dir(channel, project_root=REPO_ROOT)
+    out_dir = paths.cache_for(slug) / "_flagged_words"
     out_dir.mkdir(parents=True, exist_ok=True)
     gi = -1
     for b in beat_list:
@@ -686,9 +692,12 @@ def _mux_audio_no_captions(silent: Path, narration_path: Path, out_path: Path) -
 # --- main entry ----------------------------------------------------------
 
 def render(channel: str, slug: str, *, do_upload: bool = False, aspect_override: str | None = None) -> Path:
-    chan_dir = REPO_ROOT / channel
-    cfg = yaml.safe_load((chan_dir / "config.yaml").read_text())
-    shotlist_path = chan_dir / "shotlist" / f"{slug}.json"
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+
+    paths = RenderPaths.from_channel_dir(channel, project_root=REPO_ROOT)
+    chan_dir = paths.root  # backward-compat: subsequent code uses chan_dir
+    cfg = yaml.safe_load(paths.config_yaml.read_text())
+    shotlist_path = paths.shotlist_for(slug)
     if not shotlist_path.exists():
         raise FileNotFoundError(
             f"No shotlist for {slug}. Author "
@@ -715,8 +724,8 @@ def render(channel: str, slug: str, *, do_upload: bool = False, aspect_override:
         or "shorts"
     )
 
-    cache = chan_dir / "cache" / slug
-    scratch = chan_dir / "scratch" / slug
+    cache = paths.cache_for(slug)
+    scratch = paths.scratch_for(slug)
 
     print(f"[cfg] aspect={aspect} caption_mode={caption_mode} channel={channel} slug={slug}")
 

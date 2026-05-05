@@ -92,20 +92,26 @@ def _build_raw(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _rewrite_and_cast(raw: dict, channel_yaml: Path, slug: str, channel_dir: str) -> tuple[Path, Path]:
-    """Run rewrite + cast in parallel (both shell out to claude CLI)."""
+    """Run rewrite + cast in parallel (both shell out to claude CLI).
+
+    Writes per-slug intermediates (raw / narration / cast) to the
+    canonical per-channel layout via :class:`pipeline.paths.RenderPaths`.
+    Replaces the legacy ``data/intermediate/<channel_dir>/{raw,scripts,cast}/``
+    location AND fixes the ``scripts`` → ``narrations`` rename gap that
+    the 2026-05-03 reorg started but didn't finish on the writer side.
+    """
     import yaml as _yaml  # noqa: PLC0415 — lightweight
+    from pipeline.paths import RenderPaths, Subdir  # noqa: PLC0415
 
     cfg = _yaml.safe_load(channel_yaml.read_text()) if channel_yaml.exists() else {}
+    paths = RenderPaths.from_channel_dir(channel_dir, project_root=PROJECT_ROOT)
+    paths.ensure_dirs(Subdir.RAW, Subdir.NARRATIONS, Subdir.CAST)
 
-    inter_root = PROJECT_ROOT / "data" / "intermediate" / channel_dir
-    raw_path = inter_root / "raw" / f"{slug}.json"
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path = paths.raw_for(slug)
     raw_path.write_text(json.dumps(raw, indent=2, ensure_ascii=False))
 
-    script_path = inter_root / "scripts" / f"{slug}.json"
-    cast_path = inter_root / "cast" / f"{slug}.json"
-    script_path.parent.mkdir(parents=True, exist_ok=True)
-    cast_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path = paths.narration_for(slug)
+    cast_path = paths.cast_for(slug)
 
     from pipeline import cast as cast_mod, rewrite as rewrite_mod  # noqa: PLC0415
 
@@ -217,13 +223,17 @@ def _find_outputs(
                 thumb_p if thumb_p and thumb_p.exists() else None,
             )
 
-    # Per-channel scan: tries the new layout first.
-    channel_root = PROJECT_ROOT / channel_dir
-    per_channel_mp4 = channel_root / "shorts" / f"{slug}.mp4"
+    # Per-channel scan: tries the new layout first via paths.py
+    # (canonical: <channel>/[<niche>/]/shorts/<slug>.mp4 +
+    # <channel>/[<niche>/]/shorts/<slug>.thumb.png).
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+
+    paths = RenderPaths.from_channel_dir(channel_dir, project_root=PROJECT_ROOT)
+    per_channel_mp4 = paths.short_for(slug)
     per_channel_thumb_candidates = [
-        channel_root / "thumbs" / f"{slug}.png",
-        channel_root / "thumb" / f"{slug}.png",
-        channel_root / "shorts" / f"{slug}.thumb.png",
+        paths.short_thumb_for(slug),
+        paths.root / "thumbs" / f"{slug}.png",  # older variant
+        paths.root / "thumb" / f"{slug}.png",   # older variant
     ]
 
     # Legacy data/ fallback for half-migrated runs.
@@ -245,11 +255,46 @@ def _find_outputs(
 
 
 def _cleanup_intermediate(slug: str, channel_dir: str) -> None:
-    """Best-effort: remove per-slug files in data/intermediate after success.
+    """Best-effort: remove per-slug intermediates after a successful render.
 
-    Keeps the laptop's data/intermediate from accumulating per-render state.
-    Model weights in data/cache and channel-level branding stay put.
+    Removes the per-slug raw / narration / cast / thumb / voice JSONs +
+    the per-slug image cache. Keeps the laptop's per-channel ``cache/``
+    parent dir from accumulating stale per-render state across many runs.
+    Channel-wide things (config.yaml, learnings/, scripts/, branding/,
+    music/) are NEVER touched. ML model weights under
+    ``data/cache/`` (Kokoro / F5 / Whisper checkpoints) also stay put.
+
+    Cleans BOTH the canonical per-channel layout (since the 2026-05-05
+    layout cleanup) AND the legacy ``data/intermediate/<channel_dir>/``
+    location for half-migrated runs.
     """
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+
+    paths = RenderPaths.from_channel_dir(channel_dir, project_root=PROJECT_ROOT)
+
+    # Per-channel canonical layout: delete per-slug JSON / PNG / WAV.
+    canonical_files = [
+        paths.raw_for(slug),
+        paths.narration_for(slug),
+        paths.cast_for(slug),
+        paths.short_thumb_for(slug),
+    ]
+    for p in canonical_files:
+        try:
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
+
+    # Per-slug image cache (canonical: <channel>/[<niche>/]/cache/<slug>/).
+    canonical_cache = paths.cache_for(slug)
+    if canonical_cache.exists():
+        try:
+            shutil.rmtree(canonical_cache, ignore_errors=True)
+        except OSError:
+            pass
+
+    # Legacy fallback: data/intermediate/<channel_dir>/{raw,scripts,cast,thumbs,thumb,voices}/<slug>.{json,png,wav}
     inter_root = PROJECT_ROOT / "data" / "intermediate" / channel_dir
     for sub in ("raw", "scripts", "cast", "thumbs", "thumb", "voices"):
         for ext in (".json", ".png", ".wav"):
@@ -259,11 +304,11 @@ def _cleanup_intermediate(slug: str, channel_dir: str) -> None:
                     p.unlink()
             except OSError:
                 pass
-    # Per-slug image cache.
-    cache_dir = PROJECT_ROOT / "data" / "cache" / slug
-    if cache_dir.exists():
+    # Legacy global per-slug image cache (data/cache/<slug>/).
+    legacy_cache = PROJECT_ROOT / "data" / "cache" / slug
+    if legacy_cache.exists():
         try:
-            shutil.rmtree(cache_dir, ignore_errors=True)
+            shutil.rmtree(legacy_cache, ignore_errors=True)
         except OSError:
             pass
     # Per-slug shorts mp4 stays on disk briefly for inspection but goes

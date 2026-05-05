@@ -80,10 +80,14 @@ def load_credentials(account: str = "default") -> dict:
 def _record_path(project_root: Path, channel_dir: str, slug: str) -> Path:
     """Per-render X sidecar — sits next to the YouTube record.
 
-    YouTube writes ``<channel>/uploads/<slug>.json``; X writes
-    ``<channel>/uploads/<slug>.x.json``. Two platforms, one render dir.
+    YouTube writes ``<channel>/[<niche>/]/uploads/<slug>.json``; X writes
+    ``<channel>/[<niche>/]/uploads/<slug>.x.json``. Two platforms, one
+    render dir. Routes through :class:`pipeline.paths.RenderPaths`
+    (canonical layout module since 2026-05-05).
     """
-    return project_root / channel_dir / "uploads" / f"{slug}.x.json"
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+
+    return RenderPaths.from_channel_dir(channel_dir, project_root=project_root).x_upload_record_for(slug)
 
 
 def existing_post(project_root: Path, channel_dir: str, slug: str) -> dict | None:
@@ -400,17 +404,22 @@ def _cli() -> int:
 
     project_root = Path(__file__).resolve().parent.parent
     channel_dir = args.channel
-    yaml_path = project_root / channel_dir / "config.yaml"
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+    paths = RenderPaths.from_channel_dir(channel_dir, project_root=project_root)
+    yaml_path = paths.config_yaml
     if not yaml_path.exists():
         print(f"error: {yaml_path} not found", flush=True)
         return 2
     channel_yaml = yaml.safe_load(yaml_path.read_text()) or {}
 
-    mp4_path = Path(args.mp4) if args.mp4 else (project_root / channel_dir / "uploads" / f"{args.slug}.mp4")
+    # Default mp4 location: <channel>/[<niche>/]/shorts/<slug>.mp4
+    # (legacy default was uploads/, but renders never landed there —
+    # 2026-05-05 fix). Caller can still pass --mp4 to override.
+    mp4_path = Path(args.mp4) if args.mp4 else paths.short_for(args.slug)
 
     # Load script + raw the same way pipeline/upload.py does.
-    script_path = project_root / channel_dir / "narrations" / f"{args.slug}.json"
-    raw_path = project_root / channel_dir / "raw" / f"{args.slug}.json"
+    script_path = paths.narration_for(args.slug)
+    raw_path = paths.raw_for(args.slug)
     if not script_path.exists():
         print(f"error: script not found at {script_path}", flush=True)
         return 2
