@@ -363,10 +363,23 @@ Generate" — that handoff is dead. The render command is:
     --slug <slug>
 ```
 
+**Do NOT pass `--out`.** As of 2026-05-05 `make_shorts.py` resolves the
+output root from `--channel` via `pipeline.niches.NICHE_CHANNEL` —
+`sports_ranked` lands cache + shorts + uploads under
+`sportstoriesanimated/ranked/`. The legacy `data/` root is the
+fallback only when nothing matches, with a loud warning. Pre-2026-05-05
+runs that wrote to `data/shorts/<slug>.mp4` were a bug; per-channel
+layout is the rule (memory: `feedback_channels_subdir_layout`).
+
 Run this with `run_in_background: true` on the Bash tool. Shorts take
 roughly 5-15 min end-to-end (TTS + footage trim + compose + critic +
 upload). The user will be notified when the render completes; you do
 NOT need to poll or sleep.
+
+Output mp4 lands at `sportstoriesanimated/ranked/shorts/<slug>.mp4`.
+If you see `data/shorts/<slug>.mp4` in the log, something failed
+upstream of channel-dir resolution and you must investigate before
+shipping.
 
 Channel YAML's `upload.auto_upload` controls whether Stage 8 ships to
 YouTube on success. If you want to force-disable upload for a dry run,
@@ -404,6 +417,12 @@ the render. **Don't silently ship a rivalry recap with <N cuts.**
   web UI at :8765 — that handoff was retired 2026-05-05 because telling
   the user "open this link and click Generate" is friction the skill
   should absorb. The skill owns the full author → render path.
+- **Never pass `--out data` (or any `--out`) when invoking
+  `make_shorts.py`.** The script resolves the per-channel state root
+  from `--channel`. Passing `--out data` was the legacy default and
+  silently violated the per-channel layout rule. If you find yourself
+  about to set `--out`, stop — figure out why the channel resolution
+  is failing and fix that instead. Memory: `feedback_channels_subdir_layout`.
 - The skill itself only authors narration + cast + footage plan; the
   TTS / footage trim / compose / critic / upload stages run inside
   `make_shorts.py`. You are NOT writing those.

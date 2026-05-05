@@ -1404,8 +1404,12 @@ def main() -> int:
             import mlx.core as _mx  # type: ignore
             _mx.metal.clear_cache()
             from pipeline import audio as _aud
-            _aud._F5_MODEL = None
-            _aud._F5_REF_CACHE.clear()
+            # Was: _aud._F5_MODEL = None; _aud._F5_REF_CACHE.clear() —
+            # but those mutations only updated the audio.py compat-facade
+            # locals, not the real singletons in pipeline/tts/f5.py.
+            # The reset_f5_state() API drops the underlying singleton +
+            # ref cache atomically; same intent, actually works post-split.
+            _aud.reset_f5_state()
             _mx.metal.clear_cache()
             print("[mem] dropped F5-TTS singleton + cleared Metal cache before image gen")
         except Exception as e:
