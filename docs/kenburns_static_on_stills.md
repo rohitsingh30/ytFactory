@@ -4,13 +4,13 @@
 
 ## What broke
 
-`scripts/historyrecapped/render_footage_only.py` previously used a `zoompan` filter to add slow zoom-in motion to image-only windows. On looped still inputs the filter is pathologically slow — a single 10.5-second 9:16 clip took 30+ minutes on M2 Max, and the renderer silently appeared to hang.
+`historyrecapped/scripts/render_footage_only.py` previously used a `zoompan` filter to add slow zoom-in motion to image-only windows. On looped still inputs the filter is pathologically slow — a single 10.5-second 9:16 clip took 30+ minutes on M2 Max, and the renderer silently appeared to hang.
 
 Surfaced 2026-05-05 during the first cosmos-decoder render (`eddington-1919-eclipse-short`). All 7 beats are stills. With 4 parallel workers the renderer locked the machine for ~30 min before being killed. Same pathology hit `pipeline/cosmos_footage_prep.py` in its first version.
 
 ## What was changed
 
-1. **`scripts/historyrecapped/render_footage_only.py::_ken_burns_filter`** — drop the `zoompan` layer; replace with a static scale + pad (`scale=W:H:force_original_aspect_ratio=decrease,overlay`). Foreground sits centered on a blurred letterbox of the same source.
+1. **`historyrecapped/scripts/render_footage_only.py::_ken_burns_filter`** — drop the `zoompan` layer; replace with a static scale + pad (`scale=W:H:force_original_aspect_ratio=decrease,overlay`). Foreground sits centered on a blurred letterbox of the same source.
 2. **Image clip ffmpeg command** — add `-preset ultrafast -tune stillimage -crf 23 -framerate 30` for the still-image encode path.
 3. **`pipeline/cosmos_footage_prep.py::_kenburns`** — same static treatment, also with `-tune stillimage`.
 

@@ -86,8 +86,8 @@ Before adding anything new, audit:
   `/make-ranking` / `/make-sports-doc` instead? If yes, do that and
   this whole skill becomes a 30-line config delta.
 - **Existing helper script reuse** — check
-  `scripts/<channel>/`, `scripts/historyrecapped/`,
-  `scripts/sportstoriesanimated/` for helpers that already do the
+  `scripts/<channel>/`, `historyrecapped/scripts/`,
+  `sportstoriesanimated/scripts/` for helpers that already do the
   research / scrape / render step.
 - **Cache reuse** — content-hashed image cache, F5-TTS-MLX singleton,
   whisper-mlx cache, vidlens collections — call out which the new
@@ -118,12 +118,12 @@ Output of stage 2: an integration plan.
 ```
 reuse:
   - pipeline/audio.py (F5-TTS-MLX path)
-  - scripts/sportstoriesanimated/research_rivalry.py (rename helper)
+  - sportstoriesanimated/scripts/research_rivalry.py (rename helper)
   - <channel>/cast/<slug>.json convention
 extend:
   - pipeline/footage.py: add covers_full_rank span attach (Path A)
 new:
-  - scripts/sportstoriesanimated/render_tactics.py (only if no existing
+  - sportstoriesanimated/scripts/render_tactics.py (only if no existing
     renderer fits; justify in the doc)
 inherits_from_channel:
   closer: "LIKE if you were there. COMMENT next rivalry to recap."

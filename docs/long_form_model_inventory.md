@@ -1,7 +1,7 @@
 # Long-form (footage-only) renderer — model inventory + memory ceiling
 
 Last updated 2026-05-04. Snapshot of every ML model that loads into MLX /
-unified memory during a `scripts/historyrecapped/render_long_form.py` run
+unified memory during a `historyrecapped/scripts/render_long_form.py` run
 **after the 2026-05-04 image-panels retirement.** If a future change adds
 another model, update this file.
 

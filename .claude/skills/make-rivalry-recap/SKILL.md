@@ -56,7 +56,7 @@ winner.
 Run the helper:
 
 ```bash
-.venv/bin/python scripts/sportstoriesanimated/research_rivalry.py \
+.venv/bin/python sportstoriesanimated/scripts/research_rivalry.py \
     --entity-a "Manchester United" --entity-b "Liverpool" --last 5 \
     --slug "mufc-vs-lfc-last5" \
     --out sportstoriesanimated/ranked

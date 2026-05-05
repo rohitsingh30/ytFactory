@@ -117,15 +117,15 @@ class CliShimsTest(unittest.TestCase):
         self.assertIn("--script", out)
 
     def test_render_long_form_shim_help(self):
-        rc, out = self._shim_help("scripts/historyrecapped/render_long_form.py")
+        rc, out = self._shim_help("historyrecapped/scripts/render_long_form.py")
         self.assertEqual(rc, 0, f"render_long_form.py --help exited {rc}: {out[-300:]}")
 
     def test_render_footage_only_shim_help(self):
-        rc, out = self._shim_help("scripts/historyrecapped/render_footage_only.py")
+        rc, out = self._shim_help("historyrecapped/scripts/render_footage_only.py")
         self.assertEqual(rc, 0, f"render_footage_only.py --help exited {rc}: {out[-300:]}")
 
     def test_render_long_form_doc_shim_help(self):
-        rc, out = self._shim_help("scripts/sportstoriesanimated/render_long_form_doc.py")
+        rc, out = self._shim_help("sportstoriesanimated/scripts/render_long_form_doc.py")
         self.assertEqual(rc, 0, f"render_long_form_doc.py --help exited {rc}: {out[-300:]}")
 
 

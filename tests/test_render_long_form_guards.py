@@ -1,5 +1,5 @@
 """Tests for the engineering-level guard rails in
-``scripts/historyrecapped/render_long_form.py``.
+``historyrecapped/scripts/render_long_form.py``.
 
 What this guards:
 - TTS provider guard: long-form must hard-reject any non-F5 provider.
@@ -37,10 +37,10 @@ import yaml
 from tests._helpers import PROJECT_ROOT  # noqa: F401
 
 
-# Import the renderer module. Used to live under scripts/historyrecapped/
+# Import the renderer module. Used to live under historyrecapped/scripts/
 # (and tests imported it via sys.path manipulation); after the
 # 2026-05-05 renderer-promotion refactor it lives at
-# pipeline.render.long_form. The thin scripts/historyrecapped/render_long_form.py
+# pipeline.render.long_form. The thin historyrecapped/scripts/render_long_form.py
 # CLI shim still works for invocations, but tests should target the
 # real implementation directly.
 from pipeline.render import long_form as render_long_form  # noqa: E402

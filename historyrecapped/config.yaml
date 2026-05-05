@@ -46,7 +46,7 @@ name: History Recapped
 source_adapter: historyrecapped_manual  # manual curator flow, no auto-pull
 
 # render_style: footage_only — workers/heavy/render_short.py routes this
-# channel through scripts/historyrecapped/render_footage_only.py instead
+# channel through historyrecapped/scripts/render_footage_only.py instead
 # of the standard image-gen path. 100% archival footage with our narrator
 # on top + word captions + inline flag emojis. Image-gen is skipped.
 # Each slug needs a sidecar at historyrecapped/shotlist/<slug>.json with
@@ -204,8 +204,8 @@ upload:
 # History Recapped also publishes 60-120 min long-form sleep videos to the
 # SAME channel (rsinghtomar54@gmail.com / @HistoryRecapped). 16:9 horizontal,
 # soft narrator, ambient music bed, periodic inline like/sub asks.
-# Renderer: scripts/historyrecapped/render_long_form.py
-#   .venv/bin/python scripts/historyrecapped/render_long_form.py \
+# Renderer: historyrecapped/scripts/render_long_form.py
+#   .venv/bin/python historyrecapped/scripts/render_long_form.py \
 #       --channel historyrecapped --slug <long-slug>
 # See learnings/long_form_channel.md, long_form_support_asks.md, long_form_sources.md
 long_form:
@@ -214,7 +214,7 @@ long_form:
   # path is RETIRED 2026-05-04 — z_image_turbo on 89-panel runs hits Metal
   # GPU command-buffer timeouts and re-loads the 1.35GB checkpoint mid-render.
   # render_long_form.py hard-errors on render_mode == image_panels to enforce
-  # the pivot at code level (see scripts/historyrecapped/render_long_form.py).
+  # the pivot at code level (see historyrecapped/scripts/render_long_form.py).
   render_mode: archival_footage
   # Voice — F5-TTS-MLX zero-shot voice clone of the soft female sleep
   # narrator. Ref clip at pipeline/voice_refs/sarah.wav (24 kHz mono,

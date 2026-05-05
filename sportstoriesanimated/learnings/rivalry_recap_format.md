@@ -28,7 +28,7 @@ curatorial prompt tight rather than branching one bloated skill.
 
 - **User asks for "last 5 X vs Y"** → invoke `/make-rivalry-recap`.
   - "Top 5 X" / "best X of all time" / generic ranking → `/make-ranking`.
-- Run `scripts/sportstoriesanimated/research_rivalry.py` first to pull the
+- Run `sportstoriesanimated/scripts/research_rivalry.py` first to pull the
   last N fixtures from the rivalry's Wikipedia article.
   - **WARNING (verified the hard way 2026-05-04):** The rivalry's main
     Wikipedia page summarises *notable* matches, not strictly the last N.
@@ -105,7 +105,7 @@ result, and the closer panel is the only LIKE/SUBSCRIBE prompt.
 ## Files shipped 2026-05-04
 
 - `.claude/skills/make-rivalry-recap/SKILL.md` — the skill itself.
-- `scripts/sportstoriesanimated/research_rivalry.py` — fixture-pull helper
+- `sportstoriesanimated/scripts/research_rivalry.py` — fixture-pull helper
   (Wikipedia article → claude CLI structured output → raw JSON with
   per-fixture metadata + YouTube research queries).
 - `sportstoriesanimated/ranked/raw/mufc-vs-lfc-last5-template.json` +

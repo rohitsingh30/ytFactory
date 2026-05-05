@@ -1,6 +1,6 @@
 ---
 name: make-cosmos-decoder
-description: Author a "How We Knew" physics+space deep-dive for Cosmos Decoded — pairs a physics prediction with the experiment/mission/observation that confirmed it. Three-act (prediction → experiment → consequence) 25-40 min long-form (16:9) PLUS a paired 50-60s Short (9:16) isolating the act-2 measurement. Footage-only (NASA / NTRS / ESA / CERN / LIGO / Wikimedia / arXiv / LoC / Smithsonian / stock — NO AI image gen, NEVER YouTube re-uploads). Produces narrations/<slug>.json + shotlist/<slug>.json AND narrations/<slug>-short.json + shotlist/<slug>-short.json, then hands off to scripts/historyrecapped/render_long_form.py and render_footage_only.py — both --channel cosmosdecoded. Use when the user says "make me a cosmos decoder", "how we knew <X>", "physics decoder on <Y>", "long-form physics", "Eddington 1919 video", "LIGO video", "JWST decoder". For 50-60s science-news Shorts use /make-script. For Top-10 science countdowns use /make-top10. For sports docs use /make-sports-doc.
+description: Author a "How We Knew" physics+space deep-dive for Cosmos Decoded — pairs a physics prediction with the experiment/mission/observation that confirmed it. Three-act (prediction → experiment → consequence) 25-40 min long-form (16:9) PLUS a paired 50-60s Short (9:16) isolating the act-2 measurement. Footage-only (NASA / NTRS / ESA / CERN / LIGO / Wikimedia / arXiv / LoC / Smithsonian / stock — NO AI image gen, NEVER YouTube re-uploads). Produces narrations/<slug>.json + shotlist/<slug>.json AND narrations/<slug>-short.json + shotlist/<slug>-short.json, then hands off to historyrecapped/scripts/render_long_form.py and render_footage_only.py — both --channel cosmosdecoded. Use when the user says "make me a cosmos decoder", "how we knew <X>", "physics decoder on <Y>", "long-form physics", "Eddington 1919 video", "LIGO video", "JWST decoder". For 50-60s science-news Shorts use /make-script. For Top-10 science countdowns use /make-top10. For sports docs use /make-sports-doc.
 learnings_consulted:
   - cosmosdecoded/learnings/channel.md
   - cosmosdecoded/config.yaml
@@ -432,11 +432,11 @@ Both renderers exist and are channel-parametric. NO new code.
 
 ```bash
 # Long-form (16:9, 25-40 min)
-caffeinate -dimsu .venv/bin/python -u scripts/historyrecapped/render_long_form.py \
+caffeinate -dimsu .venv/bin/python -u historyrecapped/scripts/render_long_form.py \
     --channel cosmosdecoded --slug eddington-1919-eclipse
 
 # Shorts (9:16, 50-60s) — letterboxes still_ken_burns/16:9 windows to 9:16
-.venv/bin/python -u scripts/historyrecapped/render_footage_only.py \
+.venv/bin/python -u historyrecapped/scripts/render_footage_only.py \
     --channel cosmosdecoded --slug eddington-1919-eclipse-short
 ```
 
@@ -469,9 +469,9 @@ quality gates:
   ⏳ /critique-audio gate — run after first TTS chunk
 
 next:
-  1. .venv/bin/python -u scripts/historyrecapped/render_long_form.py --channel cosmosdecoded --slug eddington-1919-eclipse
+  1. .venv/bin/python -u historyrecapped/scripts/render_long_form.py --channel cosmosdecoded --slug eddington-1919-eclipse
   2. /critique-audio cosmosdecoded/cache/eddington-1919-eclipse/narration.wav
-  3. .venv/bin/python -u scripts/historyrecapped/render_footage_only.py --channel cosmosdecoded --slug eddington-1919-eclipse-short
+  3. .venv/bin/python -u historyrecapped/scripts/render_footage_only.py --channel cosmosdecoded --slug eddington-1919-eclipse-short
 ```
 
 ### 10. Self-learning hook (heuristics #39-#44)

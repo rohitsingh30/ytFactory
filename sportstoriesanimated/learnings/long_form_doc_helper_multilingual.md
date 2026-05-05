@@ -4,7 +4,7 @@
 
 ## Symptom
 
-`scripts/sportstoriesanimated/find_match_clips.py` whisper-aligns each
+`sportstoriesanimated/scripts/find_match_clips.py` whisper-aligns each
 source clip then fuzzy-matches a list of moment phrases against the
 transcript. On the Ronaldinho doc (Portuguese GLOBO + Spanish TUDN
 + Spanish Telefuturo + English skills compilations across 7

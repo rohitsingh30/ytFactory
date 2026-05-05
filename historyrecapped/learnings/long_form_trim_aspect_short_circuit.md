@@ -4,7 +4,7 @@ description: _trim_clip_letterbox in render_long_form.py applies a gblur+split+o
 type: feedback
 ---
 
-`_trim_clip_letterbox` in `scripts/historyrecapped/render_long_form.py` is designed to letterbox 4:3 archival sources into a 16:9 output canvas using a blurred copy of the same frame as side bars. That is the right thing for `archive.org` 480p Capra documentaries. It is the **wrong thing** for 1080p YouTube re-uploads of 16:9 documentaries, which already match the output canvas.
+`_trim_clip_letterbox` in `historyrecapped/scripts/render_long_form.py` is designed to letterbox 4:3 archival sources into a 16:9 output canvas using a blurred copy of the same frame as side bars. That is the right thing for `archive.org` 480p Capra documentaries. It is the **wrong thing** for 1080p YouTube re-uploads of 16:9 documentaries, which already match the output canvas.
 
 **Why:** v0.1 of `western-front-1914-1918-sleep` (2026-05-04) used a single 5640s clip from the 1080p Apocalypse documentary (`fAdzgcpfedk`). The trim ran for 35+ min at 240% CPU on a single ffmpeg process applying `[bg]gblur sigma=22 + scale; [fg]scale; [bg2][fg2]overlay; fps=30; libx264 -preset veryfast -crf 20`, then crashed with `RuntimeError: ffmpeg failed` — no useful stderr because the renderer wraps ffmpeg with `-loglevel error` and the actual ffmpeg signal was opaque. Bypassing the function manually with `ffmpeg -ss 60 -t 5640 -c:v copy -an` finished in **3 seconds** and produced a clean 4 GB clip that the rest of the pipeline accepted unchanged.
 

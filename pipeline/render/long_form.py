@@ -34,7 +34,7 @@ NOT done by this script (yet — track in TODOs):
     - music-bed sourcing (manual: drop a wav into historyrecapped/music/)
 
 Usage:
-    .venv/bin/python scripts/historyrecapped/render_long_form.py \
+    .venv/bin/python historyrecapped/scripts/render_long_form.py \
         --channel historyrecapped --slug pacific-war-1941-1942-sleep
 """
 from __future__ import annotations
@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any
 
 # Repo root = parent.parent of pipeline/render/long_form.py (was parent.parent.parent
-# when this file lived under scripts/historyrecapped/).
+# when this file lived under historyrecapped/scripts/).
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 import yaml
@@ -1785,7 +1785,7 @@ def main() -> int:
 
 
 def cli_main() -> int:
-    """CLI entry point. Invoked by ``scripts/historyrecapped/render_long_form.py``."""
+    """CLI entry point. Invoked by ``historyrecapped/scripts/render_long_form.py``."""
     return main()
 
 

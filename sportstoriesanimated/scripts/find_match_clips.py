@@ -44,7 +44,7 @@ Per feedback_sports_footage_window_must_include_buildup.md, the scorer
 penalizes windows that start AT the climax word — buildup matters.
 
 Usage:
-    .venv/bin/python scripts/sportstoriesanimated/find_match_clips.py \\
+    .venv/bin/python sportstoriesanimated/scripts/find_match_clips.py \\
         --subject "Argentina France 2022 final" \\
         --urls "https://www.youtube.com/watch?v=...,https://..." \\
         --moments "Messi opener,Di Maria second,Mbappé first,Mbappé volley,Messi extra-time,Mbappé hat-trick penalty" \\

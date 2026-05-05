@@ -1,0 +1,29 @@
+# ytFactory TTS Cloud Run service requirements
+# Pinned to versions known to work together on CUDA 12.4 (Cloud Run L4).
+# IMPORTANT: torch is installed in the Dockerfile via the cu124 wheel index;
+# do NOT list it here or pip will pull the CPU build by default.
+
+fastapi==0.116.0
+uvicorn[standard]==0.32.1
+pydantic==2.9.2
+soundfile==0.12.1
+numpy==1.26.4
+
+# F5-TTS upstream PyTorch implementation. NOT the MLX fork.
+# Pinned to current latest known-good version (PyPI as of 2026-05-05).
+# Upgrades require a smoke test against the local MLX output to confirm
+# voice character is unchanged — small lib bumps have changed defaults.
+f5-tts==1.1.20
+
+# Helper used by the Dockerfile pre-download step + by f5_tts internally
+# for HF asset pinning. Keep here so requirements.txt is the single
+# source of truth.
+cached-path==1.6.3
+
+# GCS for >5MB WAV handoff (long-form chunks). Cloud Run service account
+# auto-authenticates via metadata server; no creds file needed.
+google-cloud-storage==2.18.2
+
+# Phase 3 (lazy-imported in models/* — keep deps off the critical path):
+#   chatterbox-tts, boson-higgs-audio (TBD pkg name), cosyvoice
+# Don't add until Phase 3 deploy or the first cold-start balloons.

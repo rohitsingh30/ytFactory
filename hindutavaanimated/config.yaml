@@ -98,7 +98,7 @@ closer_hold_s: 1.5
 
 # ---- Long-form kathaa mode (NEW 2026-05-05) ---------------------------
 # Companion format to the Shorts. Authored via /make-katha; rendered
-# via scripts/historyrecapped/render_footage_only.py --aspect 16:9.
+# via historyrecapped/scripts/render_footage_only.py --aspect 16:9.
 # Same Kokoro hf_alpha voice; 16:9 horizontal; no captions by default;
 # 6-10 chapters per video; 2 embedded asks.
 kathaa:

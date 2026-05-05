@@ -30,7 +30,7 @@ Output:
     }
 
 Usage:
-    .venv/bin/python scripts/sportstoriesanimated/find_b_roll.py \\
+    .venv/bin/python sportstoriesanimated/scripts/find_b_roll.py \\
         --subject "Lusail Stadium Doha" \\
         --kinds stadium_ext,fans,city_skyline \\
         --urls "https://...stadium_walkthrough,https://...fans_reaction,https://...doha_skyline" \\

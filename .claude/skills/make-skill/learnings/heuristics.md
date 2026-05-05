@@ -140,8 +140,8 @@ SKILL.md cross-reference if the wording changes.
     - Existing-skill reuse — can `/make-script` / `/make-ranking` /
       `/make-sports-doc` be extended instead?
     - Existing helper-script reuse —
-      `scripts/<channel>/`, `scripts/historyrecapped/`,
-      `scripts/sportstoriesanimated/` already cover the step?
+      `scripts/<channel>/`, `historyrecapped/scripts/`,
+      `sportstoriesanimated/scripts/` already cover the step?
     - Cache reuse — content-hashed image cache, F5-TTS-MLX singleton,
       whisper-mlx cache, vidlens collections.
     - Redundancy across skills — if ≥2 skills do the same step,

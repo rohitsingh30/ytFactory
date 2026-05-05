@@ -4,7 +4,7 @@ Goal: soft AND clearly audible. af_nicole was rejected as too whispery.
 Outputs at historyrecapped/cache/_kokoro_samples/<voice>.wav.
 
 Usage:
-    .venv/bin/python scripts/historyrecapped/kokoro_voice_samples.py
+    .venv/bin/python historyrecapped/scripts/kokoro_voice_samples.py
 """
 from __future__ import annotations
 

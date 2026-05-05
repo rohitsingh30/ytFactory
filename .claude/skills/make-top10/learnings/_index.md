@@ -18,4 +18,4 @@ holds one-off notes + pointers to class-of-bug topic files.
   fix: gates G11-G17 added to SKILL.md §7; ban contract at
   `wallpaper_mode_ban.md`; renderer `caption_mode` default for 16:9
   flipped from `"none"` → `"long_form"` in
-  `scripts/historyrecapped/render_footage_only.py`.
+  `historyrecapped/scripts/render_footage_only.py`.

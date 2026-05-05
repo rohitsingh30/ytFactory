@@ -59,11 +59,11 @@ config block (`long_form_doc:` vs. `long_form:`) because:
 2. Skill walks 20 parameters across 4 stages (Subject+Spine →
    Voice+Hook → Footage → Visual+Audio+Distribution).
 3. For Bucket D (footage), the skill calls helper scripts:
-   - `scripts/sportstoriesanimated/find_match_clips.py` — scores
+   - `sportstoriesanimated/scripts/find_match_clips.py` — scores
      broadcast clips against narration moment phrases via whisper.
-   - `scripts/sportstoriesanimated/find_commentary_takes.py` — scores
+   - `sportstoriesanimated/scripts/find_commentary_takes.py` — scores
      pundit/podcaster soundbites with spice-token boosting.
-   - `scripts/sportstoriesanimated/find_b_roll.py` — picks evenly-
+   - `sportstoriesanimated/scripts/find_b_roll.py` — picks evenly-
      spaced windows across stadium/fan/training source URLs, with
      scene-cut snapping.
 4. Output two JSONs:
@@ -74,7 +74,7 @@ config block (`long_form_doc:` vs. `long_form:`) because:
 5. User reviews both, redirects if needed, then renders:
    ```
    caffeinate -i .venv/bin/python -u \
-       scripts/sportstoriesanimated/render_long_form_doc.py \
+       sportstoriesanimated/scripts/render_long_form_doc.py \
        --channel sportstoriesanimated --slug <slug>
    ```
 
@@ -130,7 +130,7 @@ in there:
 **Phase 1 — landed 2026-05-04 (this commit):**
 - Skill at `.claude/skills/make-sports-doc/SKILL.md`
 - Config block `long_form_doc:` in `sportstoriesanimated/config.yaml`
-- Render orchestrator at `scripts/sportstoriesanimated/render_long_form_doc.py`
+- Render orchestrator at `sportstoriesanimated/scripts/render_long_form_doc.py`
 - Helpers: `find_match_clips.py`, `find_commentary_takes.py`, `find_b_roll.py`
 - This learnings doc + memory entry
 
@@ -142,7 +142,7 @@ in there:
   `music/<mood>/` and crossfade
 - Narration-ducking sidechain — proper sidechain compression instead of
   v1's amix weights
-- Thumbnail builder fork — `scripts/sportstoriesanimated/build_long_form_thumbnail.py`
+- Thumbnail builder fork — `sportstoriesanimated/scripts/build_long_form_thumbnail.py`
 - `/critique-video` extension — long-form-specific lenses (footage
   density, chapter-card cadence, talking-head balance)
 

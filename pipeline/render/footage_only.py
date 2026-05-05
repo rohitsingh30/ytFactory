@@ -804,7 +804,7 @@ def main() -> None:
 
 
 def cli_main() -> None:
-    """CLI entry point. Invoked by ``scripts/historyrecapped/render_footage_only.py``."""
+    """CLI entry point. Invoked by ``historyrecapped/scripts/render_footage_only.py``."""
     main()
 
 

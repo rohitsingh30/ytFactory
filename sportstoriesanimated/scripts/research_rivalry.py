@@ -26,12 +26,12 @@ authoritative fixture metadata so prose-writing has facts to lean on.
 
 Usage:
 
-    .venv/bin/python scripts/sportstoriesanimated/research_rivalry.py \
+    .venv/bin/python sportstoriesanimated/scripts/research_rivalry.py \
         --entity-a "Manchester United" --entity-b "Liverpool" --last 5 \
         --slug "mufc-vs-lfc-last5" \
         --out sportstoriesanimated/ranked
 
-    .venv/bin/python scripts/sportstoriesanimated/research_rivalry.py \
+    .venv/bin/python sportstoriesanimated/scripts/research_rivalry.py \
         --entity-a "Real Madrid" --entity-b "FC Barcelona" --last 5 \
         --wiki-list-url "https://en.wikipedia.org/wiki/List_of_El_Cl%C3%A1sico_matches" \
         --slug "madrid-vs-barca-last5" \

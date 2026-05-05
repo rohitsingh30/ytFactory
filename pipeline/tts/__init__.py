@@ -14,9 +14,9 @@ Subpackages:
 The public router ``synthesize()`` and the public ``normalize_for_tts()``
 both stay in :mod:`pipeline.audio`, which is now a thin compatibility
 facade re-exporting everything here. Existing callers
-(``scripts/historyrecapped/render_long_form.py``, ``web/server.py``,
+(``historyrecapped/scripts/render_long_form.py``, ``web/server.py``,
 ``tests/test_audio_tts_providers.py``, ``historyrecapped/scripts/regen_audio_caps.py``,
-``scripts/historyrecapped/kokoro_voice_samples.py``) keep working
+``historyrecapped/scripts/kokoro_voice_samples.py``) keep working
 unchanged.
 
 This split was driven by 1,873-line ``pipeline/audio.py`` becoming

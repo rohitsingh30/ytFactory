@@ -40,7 +40,7 @@ In particular:
   underlying singletons in :mod:`pipeline.tts.f5` — which is why the
   old pattern needs the explicit reset API.
 * ``audio._kokoro`` — the Kokoro model accessor (used by
-  ``scripts/historyrecapped/kokoro_voice_samples.py:18``).
+  ``historyrecapped/scripts/kokoro_voice_samples.py:18``).
 """
 from __future__ import annotations
 
@@ -134,7 +134,7 @@ def reset_f5_state() -> None:
 
     Long-form renderers call this between the TTS pass and the image-gen
     pass so MLX has contiguous heap headroom for z_image_turbo. See
-    ``scripts/historyrecapped/render_long_form.py``.
+    ``historyrecapped/scripts/render_long_form.py``.
     """
     _f5_mod.reset_state()
 

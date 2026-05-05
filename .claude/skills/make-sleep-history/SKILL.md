@@ -1,6 +1,6 @@
 ---
 name: make-sleep-history
-description: Author a 60-120 min calming history-for-sleep video for the History Recapped channel — Sleepy Time History parity (`@SleepyTimeHistory`, 148K subs, 14.8M views). Soothing F5-TTS Sarah voice over warm-firelight-graded archival footage (or Z-Image-Turbo graphic-novel panels with a small yellow campfire visible in every frame), 16:9, sentence-level yellow italic captions, faint top-right watermark, exactly TWO inline support asks. Produces `historyrecapped/narrations/<slug>-sleep.json` + `historyrecapped/shotlist/<slug>-sleep.json`, then hands off to `scripts/historyrecapped/render_long_form.py`. Use when the user says "make me a sleep history", "long-form history for sleep", "narrate <era> for sleep", "Sleepy Time History style on <X>", "calming history narration on <Y>", "bedtime <war/era> video". For 50-60s history Shorts use `/make-script`. For Top-10 long-form use `/make-top10`. For Hindu kathaa use `/make-katha`. For physics how-we-knew use `/make-cosmos-decoder`.
+description: Author a 60-120 min calming history-for-sleep video for the History Recapped channel — Sleepy Time History parity (`@SleepyTimeHistory`, 148K subs, 14.8M views). Soothing F5-TTS Sarah voice over warm-firelight-graded archival footage (or Z-Image-Turbo graphic-novel panels with a small yellow campfire visible in every frame), 16:9, sentence-level yellow italic captions, faint top-right watermark, exactly TWO inline support asks. Produces `historyrecapped/narrations/<slug>-sleep.json` + `historyrecapped/shotlist/<slug>-sleep.json`, then hands off to `historyrecapped/scripts/render_long_form.py`. Use when the user says "make me a sleep history", "long-form history for sleep", "narrate <era> for sleep", "Sleepy Time History style on <X>", "calming history narration on <Y>", "bedtime <war/era> video". For 50-60s history Shorts use `/make-script`. For Top-10 long-form use `/make-top10`. For Hindu kathaa use `/make-katha`. For physics how-we-knew use `/make-cosmos-decoder`.
 learnings_consulted:
   - historyrecapped/learnings/channel.md
   - historyrecapped/learnings/long_form_channel.md
@@ -36,7 +36,7 @@ You become **the narrator-novelist**: a researcher who tells one war,
 one century, one geography, slowly, in the voice of an evening, with
 the lights low. The output is two JSON files. Stages 4-7 (TTS,
 ffmpeg, captions, mux, watermark, upload) live in
-`scripts/historyrecapped/render_long_form.py` — not in this skill.
+`historyrecapped/scripts/render_long_form.py` — not in this skill.
 
 The five locked specs (reverse-engineered 2026-05-04, all already in
 project docs — DO NOT paraphrase):
@@ -420,7 +420,7 @@ Renderer exists, fully wired. NO new code. Bash-execute in the
 background:
 
 ```bash
-caffeinate -dimsu .venv/bin/python -u scripts/historyrecapped/render_long_form.py \
+caffeinate -dimsu .venv/bin/python -u historyrecapped/scripts/render_long_form.py \
     --channel historyrecapped --slug <slug>-sleep \
     > /tmp/render_<slug>-sleep.log 2>&1 &
 ```
@@ -471,7 +471,7 @@ power preflight (manual):
   - close other heavy MLX processes (pgrep -fa python | grep mlx)
 
 renderer kicked (background):
-  caffeinate -dimsu .venv/bin/python -u scripts/historyrecapped/render_long_form.py \
+  caffeinate -dimsu .venv/bin/python -u historyrecapped/scripts/render_long_form.py \
       --channel historyrecapped --slug <slug>-sleep \
       > /tmp/render_<slug>-sleep.log 2>&1 &
 
@@ -495,7 +495,7 @@ output:
      documentary voice at the 2k-word mark, every Path B render OOMs
      at panel 18) → fix in the OWNING module:
        - Pipeline bug → `pipeline/audio.py` / `pipeline/captions.py` /
-         `scripts/historyrecapped/render_long_form.py`
+         `historyrecapped/scripts/render_long_form.py`
        - Prompt bug → this SKILL.md
        - Channel rule → `historyrecapped/learnings/<topic>.md`
      Then append a regression note to
@@ -536,7 +536,7 @@ output:
 ## Why this skill is separate from /make-top10, /make-katha, /make-cosmos-decoder
 
 All four skills produce long-form footage-only output and ride on
-`scripts/historyrecapped/render_long_form.py` (or its
+`historyrecapped/scripts/render_long_form.py` (or its
 `render_footage_only.py` cousin). The reason this is a separate
 skill, not a `--variant` flag on an existing one:
 

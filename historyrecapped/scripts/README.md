@@ -6,7 +6,7 @@ with our narrator on top, word-by-word captions, and inline national-flag
 emojis — *not* the sports format (animations + 1 footage cut at the climax).
 
 The channel's `config.yaml` sets `render_style: footage_only` which routes
-`workers/heavy/render_short.py` through `scripts/historyrecapped/render_footage_only.py`
+`workers/heavy/render_short.py` through `historyrecapped/scripts/render_footage_only.py`
 instead of the standard image-gen path. Image-gen is skipped entirely.
 
 ## End-to-end recipe
@@ -49,7 +49,7 @@ For a new story (e.g. `pointe-du-hoc-1944`):
    trim/concat/blurred-letterbox 9:16, narration mux with `tpad`, inline-flag
    composite, and caption burn with cut-aware clamping:
    ```bash
-   .venv/bin/python scripts/historyrecapped/render_footage_only.py \
+   .venv/bin/python historyrecapped/scripts/render_footage_only.py \
        --channel historyrecapped --slug <slug>
    ```
    Output: `historyrecapped/shorts/<slug>.mp4`. Total runtime ~1-2 min.

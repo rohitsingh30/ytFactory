@@ -1,6 +1,6 @@
 ---
 name: HindutavaAnimated long-form kathaa format
-description: 50-70 min Hindu scripture kathaa videos (Mahabharat / Ramayan / Gita / Puraan) authored via /make-katha — Kokoro hf_alpha Hindi narration over footage-only visuals (Wikimedia, archive.org, museum open-access, CC0 stock). NO AI image gen. Uses scripts/historyrecapped/render_footage_only.py with --aspect 16:9. Channel publishes BOTH 50-60s Shorts AND 50-70 min kathaa to the same YouTube channel.
+description: 50-70 min Hindu scripture kathaa videos (Mahabharat / Ramayan / Gita / Puraan) authored via /make-katha — Kokoro hf_alpha Hindi narration over footage-only visuals (Wikimedia, archive.org, museum open-access, CC0 stock). NO AI image gen. Uses historyrecapped/scripts/render_footage_only.py with --aspect 16:9. Channel publishes BOTH 50-60s Shorts AND 50-70 min kathaa to the same YouTube channel.
 type: project
 ---
 
@@ -98,7 +98,7 @@ chapters per video, two embedded support asks.
 - **Render command:**
   ```bash
   caffeinate -i .venv/bin/python -u \
-    scripts/historyrecapped/render_footage_only.py \
+    historyrecapped/scripts/render_footage_only.py \
     --channel hindutavaanimated --slug <slug> --aspect 16:9
   ```
   `caffeinate -i` + `python -u` per
@@ -138,7 +138,7 @@ chapters per video, two embedded support asks.
 ```yaml
 # ---- Long-form kathaa mode (NEW 2026-05-05) ---------------------------
 # Companion format to the Shorts. Authored via /make-katha; rendered
-# via scripts/historyrecapped/render_footage_only.py --aspect 16:9.
+# via historyrecapped/scripts/render_footage_only.py --aspect 16:9.
 # Same Kokoro hf_alpha voice; 16:9 horizontal; no captions by default;
 # 6-10 chapters per video; 2 embedded asks.
 kathaa:

@@ -1,6 +1,6 @@
 ---
 name: make-top10
-description: Author a 28-32 minute long-form Top-10 list video — footage-only (stock + archival + news clips + document scans + website photos; NO AI image gen), 16:9, continuous narrative connecting #10 → #1, and TWO embedded LIKE+SUBSCRIBE asks (one ~3-4 min in, one in closer). Produces narrations/<slug>.json + shotlist/<slug>.json, then hands off to scripts/historyrecapped/render_footage_only.py with --aspect 16:9. Use when the user says "top 10 <topic>", "10 unsolved cases", "make a top 10 alien abduction list", "30-minute countdown video", or "list-format long-form". For 50-60s Top-5 Shorts use /make-ranking. For single-subject long-form deep-dives use /make-sports-doc. For "last-N rivalry" Shorts use /make-rivalry-recap. Channel is parametric — pass `channel: <slug>`; skill refuses if `<channel>/config.yaml` is missing.
+description: Author a 28-32 minute long-form Top-10 list video — footage-only (stock + archival + news clips + document scans + website photos; NO AI image gen), 16:9, continuous narrative connecting #10 → #1, and TWO embedded LIKE+SUBSCRIBE asks (one ~3-4 min in, one in closer). Produces narrations/<slug>.json + shotlist/<slug>.json, then hands off to historyrecapped/scripts/render_footage_only.py with --aspect 16:9. Use when the user says "top 10 <topic>", "10 unsolved cases", "make a top 10 alien abduction list", "30-minute countdown video", or "list-format long-form". For 50-60s Top-5 Shorts use /make-ranking. For single-subject long-form deep-dives use /make-sports-doc. For "last-N rivalry" Shorts use /make-rivalry-recap. Channel is parametric — pass `channel: <slug>`; skill refuses if `<channel>/config.yaml` is missing.
 ---
 
 # /make-top10 — long-form Top-10 footage-only countdown
@@ -108,11 +108,11 @@ For each of the ~30-50 footage queries (3-5 per rank × 10 ranks),
 find a real clip. The skill prefers (in order):
 
 1. **archive.org public-domain** — zero ContentID risk. See
-   `scripts/historyrecapped/download_long_form_sources.py` for
+   `historyrecapped/scripts/download_long_form_sources.py` for
    the fetch pattern.
 2. **Pexels / Pixabay stock** — CC0; safe for monetization.
    `scripts/_shared/find_footage.py` (extract from
-   `scripts/sportstoriesanimated/find_b_roll.py` — see efficiency
+   `sportstoriesanimated/scripts/find_b_roll.py` — see efficiency
    wins below) wraps the search.
 3. **News broadcast clips** — fair-use under commentary doctrine
    for unsolved-case content; document the justification in the
@@ -483,7 +483,7 @@ Mechanical, not advisory. Each blocks emit on hit.
 ### 8. Renderer handoff
 
 ```bash
-.venv/bin/python scripts/historyrecapped/render_footage_only.py \
+.venv/bin/python historyrecapped/scripts/render_footage_only.py \
     --channel <channel-slug> \
     --slug <slug> \
     --aspect 16:9
@@ -552,7 +552,7 @@ output of this skill:
 next: render via http://127.0.0.1:8765 — pick <channel>, slug
 <slug>, hit Generate. Or run:
   caffeinate -i .venv/bin/python -u \
-    scripts/historyrecapped/render_footage_only.py \
+    historyrecapped/scripts/render_footage_only.py \
     --channel <channel> --slug <slug> --aspect 16:9
 ```
 

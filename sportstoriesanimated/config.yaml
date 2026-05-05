@@ -154,7 +154,7 @@ upload:
 #   sportstoriesanimated/narrations/<slug>.json   (chapters + prose + asks + meta)
 #   sportstoriesanimated/footage_plan/<slug>.json (match + heads + b-roll + archival)
 # Rendered via:
-#   caffeinate -i .venv/bin/python -u scripts/sportstoriesanimated/render_long_form_doc.py \
+#   caffeinate -i .venv/bin/python -u sportstoriesanimated/scripts/render_long_form_doc.py \
 #       --channel sportstoriesanimated --slug <slug>
 # See learnings/long_form_doc_format.md
 long_form_doc:

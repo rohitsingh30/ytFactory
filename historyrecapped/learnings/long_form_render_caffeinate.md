@@ -1,6 +1,6 @@
 # Long-form renders need caffeinate + unbuffered python
 
-When launching `scripts/historyrecapped/render_long_form.py` for any
+When launching `historyrecapped/scripts/render_long_form.py` for any
 panels-mode (Z-Image-Turbo) episode, wrap with `caffeinate -i` and run
 python with `-u`.
 
@@ -23,7 +23,7 @@ python with `-u`.
 
 ```bash
 nohup caffeinate -i .venv/bin/python -u \
-    scripts/historyrecapped/render_long_form.py \
+    historyrecapped/scripts/render_long_form.py \
     --channel historyrecapped --slug <slug> \
     > logs/<slug>.log 2>&1 &
 disown

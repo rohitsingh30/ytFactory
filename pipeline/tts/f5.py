@@ -33,7 +33,7 @@ def reset_state() -> None:
 
     Call this when you're done with TTS and need MLX heap headroom for
     the next stage (e.g. image gen via z_image_turbo). The renderer in
-    ``scripts/historyrecapped/render_long_form.py`` invokes this between
+    ``historyrecapped/scripts/render_long_form.py`` invokes this between
     the TTS pass and the image-panel pass — without it, MLX runs out of
     contiguous memory part-way through panel generation.
 

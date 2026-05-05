@@ -16,7 +16,7 @@ Every one of those bugs vanishes the moment we feed the authored text instead of
 
 **How to apply:**
 
-- `build_caption_pngs_from_chunks(narration_text, chunk_wavs, join_silence_s, ...)` in `scripts/historyrecapped/render_long_form.py` is the new default path. It:
+- `build_caption_pngs_from_chunks(narration_text, chunk_wavs, join_silence_s, ...)` in `historyrecapped/scripts/render_long_form.py` is the new default path. It:
   1. Re-splits the authored narration with the same `_split_into_chunks(text, target_chars)` algorithm used during TTS, producing a chunk-text list of identical length to the cached chunk wavs (asserted at runtime).
   2. ffprobes each chunk wav for its post-atempo duration.
   3. Each chunk i starts at `sum(prev durations) + i * join_silence_s` from the start of `narration.wav`.
@@ -29,7 +29,7 @@ Every one of those bugs vanishes the moment we feed the authored text instead of
   ```bash
   rm historyrecapped/cache/<slug>/captions/cap_*.png
   rm historyrecapped/shorts/<slug>.mp4
-  .venv/bin/python scripts/historyrecapped/render_long_form.py --channel historyrecapped --slug <slug>
+  .venv/bin/python historyrecapped/scripts/render_long_form.py --channel historyrecapped --slug <slug>
   ```
   TTS chunks and the trimmed clip cache survive; only the captions stage + final mux re-run.
 

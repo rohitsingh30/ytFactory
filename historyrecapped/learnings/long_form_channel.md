@@ -18,7 +18,7 @@ History Recapped publishes BOTH 50-60s Shorts AND 60-120 min long-form sleep vid
   - `footage/long_sources/` — HD source MP4s (DroneScapes-class compilations + archive.org PD)
   - `music/` — royalty-free ambient beds (currently the renderer falls back to a synthetic ambient drone if no `<music_bed_default>.wav` exists in this dir)
   - `shorts/<slug>.mp4` — final outputs land here regardless of mode (dir name is misleading; it's the output dir for both Shorts AND long-form)
-  - Renderers split: `scripts/historyrecapped/render_footage_only.py` for Shorts, `scripts/historyrecapped/render_long_form.py` for long-form sleep mode
+  - Renderers split: `historyrecapped/scripts/render_footage_only.py` for Shorts, `historyrecapped/scripts/render_long_form.py` for long-form sleep mode
 
 - **Format vs Shorts.**
   - 60-120 min (vs 50-60s)
@@ -44,7 +44,7 @@ History Recapped publishes BOTH 50-60s Shorts AND 60-120 min long-form sleep vid
 
 - **Render command.**
   ```bash
-  .venv/bin/python scripts/historyrecapped/render_long_form.py \
+  .venv/bin/python historyrecapped/scripts/render_long_form.py \
       --channel historyrecapped --slug <long-form-slug>
   ```
   Stages: chunked Kokoro TTS → trim source clips with blurred 16:9 letterbox → concat → ambient music bed (synthetic placeholder if no wav in `historyrecapped/music/`) → final mux. Pipeline is fully resumable; cached TTS chunks are skipped on re-run. Use `--tts-only` for iterative narration testing without burning ffmpeg time on the video stage.

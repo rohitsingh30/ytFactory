@@ -1,7 +1,7 @@
 """Build a custom YouTube thumbnail for a long-form sleep episode.
 
 Usage:
-    .venv/bin/python scripts/historyrecapped/build_long_form_thumbnail.py \
+    .venv/bin/python historyrecapped/scripts/build_long_form_thumbnail.py \
         --slug pacific-war-1941-1942-sleep \
         --frame-time 60 \
         --title "THE PACIFIC WAR" \

@@ -35,7 +35,7 @@ name: Cosmos Decoded
 source_adapter: cosmosdecoded_manual  # manual curator flow, no auto-pull yet
 
 # render_style: footage_only — workers/heavy/render_short.py routes this
-# channel through scripts/historyrecapped/render_footage_only.py. Each
+# channel through historyrecapped/scripts/render_footage_only.py. Each
 # slug needs a sidecar at cosmosdecoded/shotlist/<slug>.json with
 # source_url + windows[] (each {in_s, out_s, match_text}).
 render_style: footage_only
@@ -160,8 +160,8 @@ upload:
 # ~3-4 min in, one closer) per long_form_support_asks pattern from
 # HistoryRecapped.
 #
-# Renderer: scripts/historyrecapped/render_long_form.py
-#   .venv/bin/python scripts/historyrecapped/render_long_form.py \
+# Renderer: historyrecapped/scripts/render_long_form.py
+#   .venv/bin/python historyrecapped/scripts/render_long_form.py \
 #       --channel cosmosdecoded --slug <long-slug>
 # (The renderer is channel-parametric — `--channel cosmosdecoded`
 # pulls this config block.)

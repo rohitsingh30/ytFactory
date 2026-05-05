@@ -1,6 +1,6 @@
 ---
 name: make-katha
-description: Author a 50-70 minute Hindu scripture kathaa for the HindutavaAnimated channel — soothing, calming, premier-quality Hindi narration of Mahabharat / Ramayan / Bhagavad Gita / Puraan chapters, with footage-only visuals (stock photography, Wikimedia / public-domain temple imagery, archive.org devotional footage, slow Ken Burns on still icons) and NO AI image gen. You become the kathaa-vyaas — investigative scripture-writer + devotional curator + audio-first showrunner — and produce narrations/<slug>.json + shotlist/<slug>.json, then hand off to scripts/historyrecapped/render_footage_only.py with --aspect 16:9. Use when the user says "make me a kathaa", "1 hour Hindu scripture video", "Gita adhyay 2 narration", "Ramayan Sundarkand", "Mahabharat Bhishma parva", or any "long-form devotional" / "calming Hindu narration" ask. For 50-60s mythology Shorts use /make-script. For Top-10 list long-form use /make-top10. For sports docs use /make-sports-doc.
+description: Author a 50-70 minute Hindu scripture kathaa for the HindutavaAnimated channel — soothing, calming, premier-quality Hindi narration of Mahabharat / Ramayan / Bhagavad Gita / Puraan chapters, with footage-only visuals (stock photography, Wikimedia / public-domain temple imagery, archive.org devotional footage, slow Ken Burns on still icons) and NO AI image gen. You become the kathaa-vyaas — investigative scripture-writer + devotional curator + audio-first showrunner — and produce narrations/<slug>.json + shotlist/<slug>.json, then hand off to historyrecapped/scripts/render_footage_only.py with --aspect 16:9. Use when the user says "make me a kathaa", "1 hour Hindu scripture video", "Gita adhyay 2 narration", "Ramayan Sundarkand", "Mahabharat Bhishma parva", or any "long-form devotional" / "calming Hindu narration" ask. For 50-60s mythology Shorts use /make-script. For Top-10 list long-form use /make-top10. For sports docs use /make-sports-doc.
 ---
 
 # /make-katha — long-form Hindu scripture kathaa for HindutavaAnimated
@@ -170,10 +170,10 @@ chapters), find a real visual. Prefer in this order:
    photographs and scanned manuscripts. Zero ContentID risk.
 2. **archive.org** public-domain — old devotional reels, scanned
    Gita Press editions, public-domain Indian art. Use the existing
-   helper at `scripts/historyrecapped/download_long_form_sources.py`.
+   helper at `historyrecapped/scripts/download_long_form_sources.py`.
 3. **Pexels / Pixabay** — CC0 stock for temple ambience, river
    ghats, oil-lamp diyas, marigold garlands, sunrise over hills.
-   Search via `scripts/sportstoriesanimated/find_b_roll.py` (the
+   Search via `sportstoriesanimated/scripts/find_b_roll.py` (the
    helper is channel-agnostic; reusing it is the right call —
    memory: heuristic #51).
 4. **Met Museum / Indian Museum / British Museum open access** —
@@ -380,7 +380,7 @@ Strict structure:
 #### `hindutavaanimated/shotlist/<slug>.json`
 
 Reuses the existing footage-only shotlist schema (matches
-`scripts/historyrecapped/render_footage_only.py`):
+`historyrecapped/scripts/render_footage_only.py`):
 
 ```json
 {
@@ -508,7 +508,7 @@ voice in the repo.
 
 ```bash
 caffeinate -i .venv/bin/python -u \
-  scripts/historyrecapped/render_footage_only.py \
+  historyrecapped/scripts/render_footage_only.py \
   --channel hindutavaanimated --slug <slug> --aspect 16:9
 ```
 
@@ -606,10 +606,10 @@ likely first-bug surfaces, derived from channel learnings):
 next:
   prerequisites — confirm both before render:
     [ ] hindutavaanimated/config.yaml has `kathaa:` block (handoff prints YAML diff if missing)
-    [ ] scripts/historyrecapped/render_footage_only.py supports --aspect 16:9
+    [ ] historyrecapped/scripts/render_footage_only.py supports --aspect 16:9
   then:
     caffeinate -i .venv/bin/python -u \
-      scripts/historyrecapped/render_footage_only.py \
+      historyrecapped/scripts/render_footage_only.py \
       --channel hindutavaanimated --slug <slug> --aspect 16:9
 ```
 

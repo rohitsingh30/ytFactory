@@ -1,0 +1,12 @@
+# Don't ship local junk into the build context.
+__pycache__/
+*.pyc
+*.pyo
+.venv*/
+.pytest_cache/
+.mypy_cache/
+*.wav
+*.mp4
+data/
+logs/
+# Keep models/ — that's our package source, not weights.

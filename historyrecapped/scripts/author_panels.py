@@ -17,7 +17,7 @@ Each panel scene must:
   - Read as a single comma-joined sentence ~30-60 words.
 
 Usage:
-    .venv/bin/python scripts/historyrecapped/author_panels.py \\
+    .venv/bin/python historyrecapped/scripts/author_panels.py \\
         --channel historyrecapped --slug western-front-1914-1918-sleep
 """
 from __future__ import annotations

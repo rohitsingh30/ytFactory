@@ -39,7 +39,7 @@ Output JSON:
     }
 
 Usage:
-    .venv/bin/python scripts/sportstoriesanimated/find_commentary_takes.py \\
+    .venv/bin/python sportstoriesanimated/scripts/find_commentary_takes.py \\
         --subject "Mbappé 2022 World Cup Final" \\
         --urls "https://www.youtube.com/watch?v=...,..." \\
         --takes "Mbappé carried France,Argentina deserved it,Lloris errors" \\

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Long-form sports documentary renderer (16:9, 20-30 min, real footage).
 
-Distinct from scripts/historyrecapped/render_long_form.py (sleep mode, soft
+Distinct from historyrecapped/scripts/render_long_form.py (sleep mode, soft
 narrator, single ambient bed). Sports doc is intense-podcast register with
 real broadcast match footage + commentator/YouTuber talking-head clips +
 b-roll + chapter cards + lower-thirds.
@@ -55,7 +55,7 @@ NOT in v1 (stubbed gracefully — won't crash):
 
 Usage:
     caffeinate -i .venv/bin/python -u \\
-        scripts/sportstoriesanimated/render_long_form_doc.py \\
+        sportstoriesanimated/scripts/render_long_form_doc.py \\
         --channel sportstoriesanimated --slug <slug>
 """
 from __future__ import annotations
@@ -79,7 +79,7 @@ import yaml
 # These are battle-tested across 3+ shipped long-form sleep videos and
 # already handle resumable chunked F5-TTS-MLX synthesis, atempo post-pass,
 # and authored-text caption alignment. Lives in pipeline.render.long_form
-# now (was scripts/historyrecapped/render_long_form.py before the
+# now (was historyrecapped/scripts/render_long_form.py before the
 # 2026-05-05 renderer-promotion refactor).
 from pipeline.render.long_form import (  # type: ignore
     synth_long_narration,
@@ -651,7 +651,7 @@ def main() -> int:
         raise SystemExit(
             f"{args.channel}/config.yaml has no `long_form_doc:` block — "
             "this renderer is sports-doc-specific. For sleep history use "
-            "scripts/historyrecapped/render_long_form.py."
+            "historyrecapped/scripts/render_long_form.py."
         )
 
     narration_path = paths.narration_for(args.slug)
@@ -1013,7 +1013,7 @@ def main() -> int:
 
 
 def cli_main() -> int:
-    """CLI entry point. Invoked by ``scripts/sportstoriesanimated/render_long_form_doc.py``."""
+    """CLI entry point. Invoked by ``sportstoriesanimated/scripts/render_long_form_doc.py``."""
     return main()
 
 

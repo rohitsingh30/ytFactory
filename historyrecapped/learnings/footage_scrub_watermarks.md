@@ -18,7 +18,7 @@ ones. Decided 2026-05-04 — applies retroactively going forward.
 **How to apply:**
 - Add the scrub pass between download and the existing letterbox/fps-unify
   step in `pipeline/footage.py` (Shorts) and the long-form footage stitcher
-  used by `scripts/historyrecapped/render_footage_only.py` /
+  used by `historyrecapped/scripts/render_footage_only.py` /
   `historyrecapped/scripts/build_100footage.sh`.
 - Detection: per-source bbox table (DroneScapes / CriticalPast / Periscope
   Film logos sit in the same corner across their entire library) → ffmpeg
