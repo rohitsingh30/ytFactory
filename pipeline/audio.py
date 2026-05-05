@@ -28,10 +28,6 @@ Backends:
       description of the desired voice. Default for hindutavaanimated.
       Apache 2.0.
 
-    * ``cartesia`` — Cartesia Sonic-2 (paid API). Pre-2026-05-04 default;
-      now retained as a per-channel override for ship-quality renders
-      where the cost is justified. Requires ``CARTESIA_API_KEY``.
-
 All local providers download their model on first synth into the HF
 cache (or ``~/.cache/ytfactory/`` for kokoro). The optional providers
 require the matching pip-install; see ``requirements.txt`` for the
@@ -400,101 +396,6 @@ def _synth_kokoro(
     return out_path
 
 
-# ---------- cartesia (Sonic-2, paid API) -----------------------------------
-#
-# Cartesia Sonic-2 is the production narration backbone for AITA / sports /
-# History Recapped channels (user decision 2026-05-03 after A/B vs ElevenLabs;
-# see `scripts/tts_ab_spike.py` and memory project_cartesia_tts_upgrade.md).
-# Pricing: Sonic Starter $9/mo for 100k chars (~100 shorts/mo) — covers
-# typical channel cadence with 5× headroom; Pro $39/mo for 1.25M chars
-# if/when we scale to compilations.
-#
-# Voice IDs are channel-configurable. Default below is "Sarah" — US female
-# narrator that the user approved on the spike. Channels override via
-# `tts_voice: <cartesia voice uuid>` in their YAML (the `tts_voice` field
-# is interpreted per-provider — Kokoro voice id for kokoro, ref-WAV path
-# for f5_tts, Cartesia voice UUID for cartesia).
-#
-# API key is read from `CARTESIA_API_KEY` at synth time; fails fast with a
-# pointer to https://play.cartesia.ai/keys if unset. Never hardcoded.
-
-_CARTESIA_DEFAULT_VOICE = "694f9389-aac1-45b6-b726-9d9369183238"  # Sarah, US female
-_CARTESIA_TTS_URL = "https://api.cartesia.ai/tts/bytes"
-_CARTESIA_API_VERSION = "2024-11-13"
-
-
-def _synth_cartesia(
-    text: str,
-    voice: str,
-    out_path: Path,
-    speed: float,
-    language: str = "en",
-) -> Path:
-    """Cartesia Sonic-2 synthesis via the REST `/tts/bytes` endpoint.
-
-    Single-shot synthesis (no per-sentence modulation, unlike the Kokoro
-    path) — the model emits one continuous WAV for the full narration.
-    Per-sentence speed modulation is Kokoro-specific; if a channel needs
-    it, the channel should stay on Kokoro.
-
-    `speed` is mapped to Cartesia's `__experimental_controls.speed` knob,
-    which accepts `slow|normal|fast` (string) or a float in [-1.0, 1.0].
-    Channels declare `tts_speed` at human pace (e.g. 0.95 for war
-    history, 0.90 for AITA); we map ≤0.95 → "slow", ≥1.05 → "fast",
-    everything else → "normal", which is the closest analogue Cartesia
-    supports without needing per-channel calibration.
-    """
-    import os
-
-    api_key = os.environ.get("CARTESIA_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "tts_provider=cartesia requires CARTESIA_API_KEY env var.\n"
-            "Get a key: https://play.cartesia.ai/keys\n"
-            "Set in shell: export CARTESIA_API_KEY=sk_car_..."
-        )
-
-    if speed <= 0.95:
-        cartesia_speed = "slow"
-    elif speed >= 1.05:
-        cartesia_speed = "fast"
-    else:
-        cartesia_speed = "normal"
-
-    import json as _json
-
-    body = _json.dumps({
-        "model_id": "sonic-2",
-        "transcript": text,
-        "voice": {"mode": "id", "id": voice or _CARTESIA_DEFAULT_VOICE},
-        "output_format": {
-            "container": "wav",
-            "encoding": "pcm_s16le",
-            "sample_rate": 44100,
-        },
-        "language": language,
-        "__experimental_controls": {"speed": cartesia_speed},
-    }).encode("utf-8")
-    headers = {
-        "X-API-Key": api_key,
-        "Cartesia-Version": _CARTESIA_API_VERSION,
-        "Content-Type": "application/json",
-    }
-    req = urllib.request.Request(_CARTESIA_TTS_URL, data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            audio_bytes = resp.read()
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"Cartesia HTTP {e.code} from {_CARTESIA_TTS_URL}\n{detail}"
-        ) from None
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(audio_bytes)
-    return out_path
-
-
 # ---------- audio trim helpers (sung-channel duration cap) -----------------
 
 
@@ -817,6 +718,59 @@ def synth_via_sunoapi(
 
 
 # ---------- f5_tts (zero-shot voice cloning, opt-in) -----------------------
+#
+# IMPORTANT: do NOT call f5_tts_mlx.generate.generate() per-chunk. Upstream's
+# generate() instantiates F5TTS.from_pretrained inside the function body
+# (cfm.py line 131), so every call reloads the 1.35 GB checkpoint and
+# re-triggers mx.compile of the ODE step fn. On long-form (178 chunks of a
+# 50k-char narration) that turned a ~30s/chunk job into a ~3-5 min/chunk job,
+# pushing total render time from ~1.5 hr to ~9 hr.
+#
+# We side-step it: load F5TTS once into a module-level singleton, cache the
+# loaded ref audio per (path, text) pair, and call f5tts.sample() directly,
+# replicating the body of upstream generate() (lines 144-195) minus the load.
+
+_F5_MODEL = None  # F5TTS singleton — survives across synth calls
+_F5_REF_CACHE: dict[str, tuple] = {}  # (audio mx.array, ref_audio_duration) keyed by ref_audio_path
+
+
+def _f5_get_model(quantization_bits: int | None = None):
+    """Lazy-load + cache the F5TTS model singleton."""
+    global _F5_MODEL
+    if _F5_MODEL is None:
+        try:
+            from f5_tts_mlx.cfm import F5TTS  # type: ignore
+        except ImportError as e:
+            raise RuntimeError(
+                "TTS provider 'f5_tts' requires the f5-tts-mlx package.\n"
+                "  install: .venv/bin/pip install f5-tts-mlx\n"
+                f"  underlying error: {e}"
+            ) from e
+        _F5_MODEL = F5TTS.from_pretrained(
+            "lucasnewman/f5-tts-mlx", quantization_bits=quantization_bits
+        )
+    return _F5_MODEL
+
+
+def _f5_get_ref(ref_audio_path: str):
+    """Load ref audio once per path, RMS-normalize, cache as mx.array."""
+    if ref_audio_path in _F5_REF_CACHE:
+        return _F5_REF_CACHE[ref_audio_path]
+    import mlx.core as mx  # type: ignore
+    import soundfile as sf  # type: ignore
+    audio_np, sr = sf.read(ref_audio_path)
+    if sr != 24_000:
+        raise RuntimeError(
+            f"f5_tts ref audio must be 24 kHz mono; got sr={sr} for {ref_audio_path}"
+        )
+    audio = mx.array(audio_np)
+    rms = mx.sqrt(mx.mean(mx.square(audio)))
+    target_rms = 0.1
+    if rms < target_rms:
+        audio = audio * target_rms / rms
+    duration_s = audio.shape[0] / 24_000
+    _F5_REF_CACHE[ref_audio_path] = (audio, duration_s)
+    return _F5_REF_CACHE[ref_audio_path]
 
 
 def _synth_f5_tts(
@@ -825,6 +779,9 @@ def _synth_f5_tts(
     ref_audio_text: str,
     out_path: Path,
     speed: float,
+    steps: int = 8,
+    method: str = "rk4",
+    quantization_bits: int | None = None,
 ) -> Path:
     """Zero-shot voice cloning via F5-TTS-MLX.
 
@@ -832,36 +789,57 @@ def _synth_f5_tts(
 
         .venv/bin/pip install f5-tts-mlx
 
-    On first call, fetches the F5-TTS-MLX checkpoint (~1.35 GB) into the
-    HuggingFace cache. ``ref_audio_path`` should be a 5–15s WAV of the
-    target voice; ``ref_audio_text`` is the transcript of that clip.
+    First call fetches the F5-TTS-MLX checkpoint (~1.35 GB) into the HF cache
+    AND loads it into memory; subsequent calls reuse the cached model and
+    cached ref audio (keyed by ``ref_audio_path``), so per-chunk cost drops
+    from ~3-5 min (full reload + recompile) to ~25-35 s (steady-state sample
+    only) on M2 Max with the default rk4/steps=8 settings.
+
+    Replicates upstream f5_tts_mlx.generate.generate() body (cfm.py /
+    generate.py lines 144-195) without the per-call ``F5TTS.from_pretrained``.
     """
-    try:
-        from f5_tts_mlx.generate import generate as f5_generate  # type: ignore
-    except ImportError as e:
-        raise RuntimeError(
-            "TTS provider 'f5_tts' requires the f5-tts-mlx package.\n"
-            "  install: .venv/bin/pip install f5-tts-mlx\n"
-            f"  underlying error: {e}"
-        ) from e
+    import datetime
+    import re as _re
+
+    import mlx.core as mx  # type: ignore
+    import numpy as np  # type: ignore
+    import soundfile as sf  # type: ignore
+    from f5_tts_mlx.utils import convert_char_to_pinyin  # type: ignore
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    # estimate_duration=True: the library's default is False, which makes
-    # generate() emit a fixed ~1.4s clip regardless of input text length —
-    # produced a 1.41s output for a 145-word narration on first contact.
-    # With estimate_duration=True the library extrapolates target duration
-    # from text length using the ref clip's tempo, which is the correct
-    # behaviour for narration synthesis.
-    # steps=8: the library default. Lower (4-6) is faster but visibly
-    # noisier. Worth tuning per-host if generation latency is the bottleneck.
-    f5_generate(
-        generation_text=text,
-        ref_audio_path=ref_audio_path,
-        ref_audio_text=ref_audio_text,
-        output_path=str(out_path),
+
+    f5 = _f5_get_model(quantization_bits=quantization_bits)
+    audio, _ = _f5_get_ref(ref_audio_path)
+
+    # estimate_duration replicated from generate.py:104 — the library's
+    # generate() calls this when estimate_duration=True. Duration prediction
+    # via the model's predictor is the upstream default but the heuristic is
+    # what generate() uses, so we mirror it for consistent output length.
+    SAMPLE_RATE = 24_000
+    HOP_LENGTH = 256
+    FRAMES_PER_SEC = SAMPLE_RATE / HOP_LENGTH
+    ref_audio_len = audio.shape[0] // HOP_LENGTH
+    zh_pause_punc = r"。，、；：？！"
+    ref_text_len = len(ref_audio_text.encode("utf-8")) + 3 * len(_re.findall(zh_pause_punc, ref_audio_text))
+    gen_text_len = len(text.encode("utf-8")) + 3 * len(_re.findall(zh_pause_punc, text))
+    duration_in_frames = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / speed)
+
+    prepped = convert_char_to_pinyin([ref_audio_text + " " + text])
+    wave, _ = f5.sample(
+        mx.expand_dims(audio, axis=0),
+        text=prepped,
+        duration=duration_in_frames,
+        steps=steps,
+        method=method,
         speed=speed,
-        estimate_duration=True,
+        cfg_strength=2.0,
+        sway_sampling_coef=-1.0,
+        seed=None,
     )
+    wave = wave[audio.shape[0]:]
+    mx.eval(wave)
+
+    sf.write(str(out_path), np.array(wave), SAMPLE_RATE)
     return out_path
 
 
@@ -1470,7 +1448,7 @@ _RE_CURRENCY = _re.compile(r"\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]+
 # the negative-lookahead for `:` and digit-hyphen prevents matching the
 # left half of those patterns. Class-of-bug fix 2026-05-03 — without the
 # comma-grouping branch, "2,500" matched twice (as "2" and "500") and
-# Cartesia narrated "two-comma-five hundred". `_expand_bare_int` strips
+# the TTS narrated "two-comma-five hundred". `_expand_bare_int` strips
 # the commas before int() conversion.
 _RE_INTEGER = _re.compile(
     r"(?<![-:\d])\b(\d{1,3}(?:,\d{3})+|\d{1,9})\b(?![-:.\d])"
@@ -1889,18 +1867,7 @@ def synthesize(
             out_path=out_path,
             speed=speed,
         )
-    if provider == "cartesia":
-        # Channel YAML declares `tts_language: hi` (or es/fr/etc.) for
-        # non-English narration; passes through here as the `language`
-        # kwarg. Default English.
-        return _synth_cartesia(
-            text,
-            voice=voice,
-            out_path=out_path,
-            speed=speed,
-            language=language,
-        )
     raise ValueError(
         f"unknown TTS provider {provider!r} "
-        "(choices: kokoro, f5_tts, chatterbox, styletts2, indic_parler, cartesia)"
+        "(choices: kokoro, f5_tts, chatterbox, styletts2, indic_parler)"
     )

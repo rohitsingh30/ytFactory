@@ -1,6 +1,6 @@
 ---
 name: HindutavaAnimated channel (hindutavaanimated)
-description: Hindi devotional Hindu mythology channel — Amar Chitra Katha aesthetic, Cartesia Sneha narration. 2 episodes shipped (Mahabharat + Ramayan). Locked format + custom compose path.
+description: Hindi devotional Hindu mythology channel — Amar Chitra Katha aesthetic, Kokoro hf_alpha Hindi narration. 2 episodes shipped (Mahabharat + Ramayan). Locked format + custom compose path.
 type: project
 originSessionId: 757022d5-5a62-421f-b1a1-80fe5002bcdf
 ---
@@ -47,11 +47,12 @@ marigold yellow / emerald green / antique gold. Locked in
 - Diffusion treats QUOTED PHRASES in prompts as text-to-render targets (beat 04 hanuman v1 rendered "this is where you must go." in English; beat 10 v1 rendered gibberish Devanagari because the prompt mentioned "negative space for caption to sit"). **Never quote descriptive composition language; never reference "where text goes."**
 - Single iconic Unicode glyph (ॐ) renders cleanly because training data has it as a graphic; multi-character Devanagari/Indic does not.
 
-## TTS — Cartesia Sonic-2 + Sneha
-- Voice id `6b02ffe5-e3cb-48c0-a023-c72f85953375` at speed 0.85 (`slow` mapping)
-- Devanagari conjuncts handled natively. The `_HINDI_TATSAMA_RESPELLINGS` table in pipeline/audio.py is a no-op for Cartesia (kept for the kokoro fallback path).
-- Requires `CARTESIA_API_KEY` (in .env)
-- **Kokoro fallback**: flip `tts_provider: kokoro` + `tts_voice: hm_psi` for free/offline rendering
+## TTS — Kokoro hf_alpha (Hindi female)
+- The only Hindi voice in Kokoro; F5-TTS-MLX (production English default
+  elsewhere) doesn't speak Hindi.
+- Devanagari conjuncts handled via `_HINDI_TATSAMA_RESPELLINGS` table in
+  `pipeline/audio.py` — re-spells common conjuncts before TTS.
+- Per-name overrides go in the per-story dossier's `pronunciation_dict`.
 
 ## Compose path (custom harness, NOT make_shorts.py)
 Channel uses `source_adapter: manual` — make_shorts.py would re-author
@@ -60,7 +61,7 @@ episodes. The actual compose flow is `/tmp/compose_episode.py`-style
 (slug-aware, BGM-aware):
 
 1. Render images via `pipeline.images.generate()` directly from `prompts/<slug>.json` (cast tokens like `{narrator:hanuman}` inlined from `cast/<slug>.json`)
-2. Synthesize audio via `pipeline.audio._synth_cartesia()` (or `_synth_kokoro` fallback)
+2. Synthesize audio via `pipeline.audio._synth_kokoro()` (Hindi `hf_alpha` voice)
 3. Optionally generate BGM via `pipeline.audio.synth_via_sunoapi()` with instrumental-bhajan style prompt
 4. Run `pipeline.beats.transcribe_words()` for Whisper word timestamps
 5. **CLAMP word durations to ≤1.5s** before passing to compose — Whisper-mlx-4bit hallucinates 20+ second word durations on dense Hindi (caused the "stuck on hogi" bug in hanuman v1). See `whisper_hindi_word_clamp.md`.
@@ -117,7 +118,7 @@ The 3-shipped-episodes pattern that works:
 - `/tmp/compose_episode.py <slug> "<closer_format>"` — Whisper-transcribe, time-proportional beats (with ≥2.5s clamp + redistribute), word-clamp to 1.5s max display, compose with word-captions + Ken Burns, mix BGM at 12% + 1.5s fade-out, overlay closer panel last 4s. Output: `<slug>_FINAL.mp4`.
 - `/tmp/upload_episode.py <slug> "<title>"` — auth via cached token, upload public to HindutavaAnimated.
 
-The Cartesia audio synth + Suno BGM gen are one-shot bash invocations — see channel.md history sections.
+The Kokoro audio synth + Suno BGM gen are one-shot bash invocations — see channel.md history sections.
 
 ## Whisper Hindi quality varies by audio
 Of 3 episodes:
@@ -127,8 +128,15 @@ Of 3 episodes:
 
 No clear pattern on which audio Whisper handles well. The clamp + script-proportional fallback survives both cases, but caption coverage degrades when Whisper undercounts (the un-transcribed range has no on-screen captions). Future: chunked-Whisper approach (split at silence points, transcribe each chunk separately) per `whisper_hindi_undercount.md`.
 
+## Long-form kathaa format (NEW 2026-05-05)
+A 5th format ships alongside the Shorts: 50-70 min Hindu scripture kathaa videos (Mahabharat / Ramayan / Bhagavad Gita / Puraan) in pure Hindi, footage-only (Wikimedia / archive.org / CC0 stock / museum open-access — NO AI image gen), Kokoro hf_alpha narration, 16:9 horizontal, 6-10 chapters per video, 2 embedded support asks (Mangalaacharan + Upsanhar). Authored via `/make-katha`; rendered via `scripts/historyrecapped/render_footage_only.py --aspect 16:9`. See [long_form_kathaa.md](long_form_kathaa.md) for the full format spec, the YAML diff to add a `kathaa:` block to `config.yaml`, and the renderer-extension prerequisite.
+
 ## Open / TODO
 1. Upload `icon_03_om_lotus.png` + upscaled `banner_01_kurukshetra.png` to YouTube Studio (manual — no API endpoint in our pipeline)
 2. Wire `--use-existing-cache` into make_shorts.py so the website renders work for manual-source channels
 3. **Whisper Hindi transcription regression**: whisper-mlx-4bit misses ~50% of dense Hindi narration words (44s audio came back as 65 words). For now we clamp + script-proportional, but a chunked Whisper pass (split audio at silence points, transcribe each chunk) would recover the lost captions in the CTA section. See `whisper_hindi_undercount.md`.
 4. Author 3-5 more episodes for catalog depth before promoting the channel
+
+
+## Upload throttle
+Uploads on this channel auto-enforce a ≥1h gap between consecutive public moments — see [docs/upload_throttle.md](../../docs/upload_throttle.md). Override by passing an explicit `publish_at` (dashboard "Publish at" picker).

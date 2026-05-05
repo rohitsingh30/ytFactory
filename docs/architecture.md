@@ -135,7 +135,7 @@ Pure functions that take a payload from GCS and write outputs to GCS.
 Invoked exclusively by the laptop agent's runner.
 
 - `images.py` — mflux / Z-Image-Turbo / SDXL via diffusers
-- `tts.py` — Kokoro + F5-TTS-MLX + Chatterbox (free local) + Cartesia Sonic-2 (paid API, current production default). StyleTTS2 + Indic Parler-TTS dispatchers also live in `pipeline/audio.py` but are not installable in this venv (dep conflicts) — see `README.md` "Optional free local TTS providers". + Chatterbox + StyleTTS2 + Indic Parler-TTS (all free/local; Cartesia retained as opt-in paid fallback)
+- `tts.py` — Kokoro + F5-TTS-MLX + Chatterbox (free local). StyleTTS2 + Indic Parler-TTS dispatchers also live in `pipeline/audio.py` but are not installable in this venv (dep conflicts) — see `README.md` "Optional free local TTS providers".
 - `asr.py` — whisper_mlx
 - `compose.py` — ffmpeg slideshow + Ken Burns
 - `footage.py` — broadcast clip trim + blurred-letterbox

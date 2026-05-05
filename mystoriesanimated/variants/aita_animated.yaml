@@ -13,12 +13,10 @@ source_adapter: reddit_video
 # the work to compensate. Override per-job in the UI by picking a clone
 # (e.g. libri_phil_ohenry — F5-TTS will run for that single render and
 # it'll take ~minutes, but you'll hear actual interpretive prosody).
-# TTS — Cartesia Sarah (US female), shared across the AITA family.
-# Free Cartesia tier covers initial dev/testing; subscribe to Sonic
-# Starter $9/mo when production cadence hits the cap.
-# Requires CARTESIA_API_KEY env var at render time.
-tts_provider: cartesia
-tts_voice: 694f9389-aac1-45b6-b726-9d9369183238  # Sarah, US female
+# TTS — F5-TTS-MLX zero-shot voice clone (Sarah ref).
+tts_provider: f5_tts
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 0.90
 
 # Image gen — Z-Image-Turbo 6B via mflux (local, MLX-native).

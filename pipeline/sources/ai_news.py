@@ -53,7 +53,7 @@ AI_KEYWORDS: tuple[str, ...] = (
     "gpt", "claude", "anthropic", "openai", "chatgpt", "gemini", "deepmind",
     "mistral", "llama", "meta ai", "grok", "xai", "perplexity", "cohere",
     "huggingface", "hugging face", "stability ai", "stable diffusion",
-    "midjourney", "sora", "runway", "elevenlabs", "cartesia",
+    "midjourney", "sora", "runway", "elevenlabs",
     " ai ", " ai,", " ai.", " ai:", " ai-", "(ai)", "ai/", "ai/ml",
     "llm ", " llm,", " llm.", " llms", "agentic", "agent ", "agents,",
     "rag ", "retrieval", "embedding", "transformer", "mixture of experts",

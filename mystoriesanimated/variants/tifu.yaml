@@ -1,12 +1,14 @@
 name: TIFU Animated
 source_adapter: reddit_video
 
-# TTS — Cartesia Sonic-2 + "Theo" (steady male). Migrated 2026-05-03
-# from kokoro/am_liam. TIFU narrators are owning a screw-up, not
-# litigating someone else's, so we run slightly slower than the AITA
-# female default to land the chagrin. Requires CARTESIA_API_KEY env var.
-tts_provider: cartesia
-tts_voice: 79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e  # Theo, US male narrator
+# TTS — F5-TTS-MLX zero-shot voice clone.
+# Note: theo.wav was lost in the 2026-05-04 recovery wipe — using
+# sarah.wav (female) until a male reference is re-recorded. Voice
+# identity differs from AITA family until then; record a male ref
+# at pipeline/voice_refs/theo.wav to restore the male narrator.
+tts_provider: f5_tts
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 0.90
 
 # Image gen — Flux Schnell, same engine and aesthetic as aita_animated.

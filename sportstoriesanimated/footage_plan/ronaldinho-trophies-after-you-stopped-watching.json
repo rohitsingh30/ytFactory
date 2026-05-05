@@ -1,0 +1,310 @@
+{
+  "slug": "ronaldinho-trophies-after-you-stopped-watching",
+  "_authoring_notes": "v1 windows are estimated from highlight-compression ratios; the renderer aligns overlays to narration via whisper-on-narration so source-side (in_s,out_s) just needs to bracket the action. Helpers find_match_clips.py + find_b_roll.py were run in parallel — refine these windows from sportstoriesanimated/footage_plan/_candidates_match.json + _candidates_broll.json once they complete.",
+  "match_footage": [
+    {
+      "id": "mf01",
+      "narration_anchor": "this man lifted the Copa Libertadores",
+      "url": "https://www.youtube.com/watch?v=wJ7bE-b0s0E",
+      "in_s": 558.0,
+      "out_s": 578.0,
+      "what_happens": "Ronaldinho hoisting the Copa Libertadores trophy at the Mineirão, July 2013, end of extended highlights",
+      "mode": "duck_narration",
+      "lower_third": "Mineirão, July 24th 2013",
+      "audio_mix": 1.0
+    },
+    {
+      "id": "mf02",
+      "narration_anchor": "Final score: Santos four, Flamengo five",
+      "url": "https://www.youtube.com/watch?v=ycpt3nSK4QE",
+      "in_s": 540.0,
+      "out_s": 568.0,
+      "what_happens": "End of the 5-4 comeback at Vila Belmiro — Wagner Love winner + Ronaldinho celebration. GLOBO HD broadcast call.",
+      "mode": "duck_narration",
+      "lower_third": "Santos 4–5 Flamengo · Brasileirão 2011",
+      "audio_mix": 1.0
+    },
+    {
+      "id": "mf03",
+      "narration_anchor": "Hat-trick. Two assists. Three goals down at half-time",
+      "url": "https://www.youtube.com/watch?v=ycpt3nSK4QE",
+      "in_s": 200.0,
+      "out_s": 226.0,
+      "what_happens": "First Ronaldinho free kick goal in the second-half comeback, GLOBO commentary",
+      "mode": "underlay",
+      "audio_mix": 0.4
+    },
+    {
+      "id": "mf04",
+      "narration_anchor": "their goalkeeper later admits he did not see",
+      "url": "https://www.youtube.com/watch?v=Ggam4fGI7RQ",
+      "in_s": 90.0,
+      "out_s": 110.0,
+      "what_happens": "Free-kick goal compilation — used here as a Ronaldinho free-kick visual reference (tournament-context footage)",
+      "mode": "underlay",
+      "audio_mix": 0.0
+    },
+    {
+      "id": "mf05",
+      "narration_anchor": "The second goal arrives in the ninety-fourth minute",
+      "url": "https://www.youtube.com/watch?v=RE_7KHGye18",
+      "in_s": 96.0,
+      "out_s": 118.0,
+      "what_happens": "Olimpia's 94th-minute second goal in Asunción — the goal that made the second leg a 2-0 hole",
+      "mode": "duck_narration",
+      "lower_third": "Olimpia 2–0 Atlético · 1st leg, Asunción",
+      "audio_mix": 0.85
+    },
+    {
+      "id": "mf06",
+      "narration_anchor": "Diego Tardelli equalises on aggregate",
+      "url": "https://www.youtube.com/watch?v=Xy36_dxP21Y",
+      "in_s": 2580.0,
+      "out_s": 2608.0,
+      "what_happens": "Tardelli equaliser vs Newell's — 2nd-half-only full broadcast, 88th-minute call",
+      "mode": "duck_narration",
+      "lower_third": "Atlético 2–0 Newell's · SF 2nd leg",
+      "audio_mix": 0.85
+    },
+    {
+      "id": "mf07",
+      "narration_anchor": "twenty minutes after the final whistle",
+      "url": "https://www.youtube.com/watch?v=Xy36_dxP21Y",
+      "in_s": 4720.0,
+      "out_s": 4760.0,
+      "what_happens": "Newell's penalty shootout — Victor's saves, Atlético advance to final",
+      "mode": "duck_narration",
+      "audio_mix": 0.85
+    },
+    {
+      "id": "mf08",
+      "narration_anchor": "kneeling, holding his head",
+      "url": "https://www.youtube.com/watch?v=Xy36_dxP21Y",
+      "in_s": 4810.0,
+      "out_s": 4840.0,
+      "what_happens": "Ronaldinho on his knees, head in hands, after the Newell's shootout victory",
+      "mode": "underlay",
+      "audio_mix": 0.0
+    },
+    {
+      "id": "mf09",
+      "narration_anchor": "the corner is met, by Diego Tardelli",
+      "url": "https://www.youtube.com/watch?v=wJ7bE-b0s0E",
+      "in_s": 268.0,
+      "out_s": 292.0,
+      "what_happens": "Ronaldinho corner met by Tardelli volley — Atlético 1-0 Olimpia, aggregate 2-1",
+      "mode": "duck_narration",
+      "lower_third": "Atlético 2–0 Olimpia · Final 2nd leg",
+      "audio_mix": 1.0
+    },
+    {
+      "id": "mf10",
+      "narration_anchor": "heads a Diego Tardelli cross",
+      "url": "https://www.youtube.com/watch?v=wJ7bE-b0s0E",
+      "in_s": 380.0,
+      "out_s": 405.0,
+      "what_happens": "Jô header, Atlético 2-0, aggregate level",
+      "mode": "duck_narration",
+      "audio_mix": 1.0
+    },
+    {
+      "id": "mf11",
+      "narration_anchor": "win the shootout, four-three",
+      "url": "https://www.youtube.com/watch?v=wJ7bE-b0s0E",
+      "in_s": 510.0,
+      "out_s": 560.0,
+      "what_happens": "Penalty shootout climax — Donizete winning kick + Mineirão eruption",
+      "mode": "duck_narration",
+      "lower_third": "Penalties: Atlético 4–3 Olimpia",
+      "audio_mix": 1.0
+    },
+    {
+      "id": "mf12",
+      "narration_anchor": "In the twenty-third minute",
+      "url": "https://www.youtube.com/watch?v=02ayS6C0H5Q",
+      "in_s": 145.0,
+      "out_s": 175.0,
+      "what_happens": "Ronaldinho 23rd-minute free kick into Moisés Muñoz's top corner — TUDN broadcast",
+      "mode": "duck_narration",
+      "lower_third": "América 0–4 Querétaro · Estadio Azteca, April 18 2015",
+      "audio_mix": 1.0
+    },
+    {
+      "id": "mf13",
+      "narration_anchor": "a half-volley from twenty yards",
+      "url": "https://www.youtube.com/watch?v=02ayS6C0H5Q",
+      "in_s": 440.0,
+      "out_s": 478.0,
+      "what_happens": "Ronaldinho 72nd-minute half-volley — Azteca crowd reaction begins",
+      "mode": "duck_narration",
+      "audio_mix": 1.0
+    },
+    {
+      "id": "mf14",
+      "narration_anchor": "Not after the match. Not after the second goal",
+      "url": "https://www.youtube.com/watch?v=02ayS6C0H5Q",
+      "in_s": 480.0,
+      "out_s": 525.0,
+      "what_happens": "Standing ovation from América fans behind the goal — Ronaldinho visibly tearing up, kissing his shirt",
+      "mode": "duck_narration",
+      "lower_third": "Standing ovation · América supporters",
+      "audio_mix": 1.0
+    },
+    {
+      "id": "mf15",
+      "narration_anchor": "in his late-career third act",
+      "url": "https://www.youtube.com/watch?v=IkdelvXg4qY",
+      "in_s": 192.0,
+      "out_s": 218.0,
+      "what_happens": "Ronaldinho goal in Liga MX final 2nd leg vs Santos Laguna",
+      "mode": "duck_narration",
+      "lower_third": "Querétaro 3–0 Santos · Liga MX Final 2nd leg, June 2015",
+      "audio_mix": 1.0
+    }
+  ],
+  "talking_heads": [],
+  "b_roll": [
+    {
+      "id": "br01",
+      "kind": "stadium_ext",
+      "narration_anchor": "loudest atmosphere in Brazilian club football this decade",
+      "url": "https://www.youtube.com/watch?v=dNIdydTxYCA",
+      "in_s": 99.02,
+      "out_s": 104.02,
+      "audio_mix": 0.0,
+      "_note": "Mineirão aerial drone 4K (helper-validated window)"
+    },
+    {
+      "id": "br02",
+      "kind": "stadium_ext",
+      "narration_anchor": "refused to leave the stadium for three hours",
+      "url": "https://www.youtube.com/watch?v=dNIdydTxYCA",
+      "in_s": 196.05,
+      "out_s": 201.05,
+      "audio_mix": 0.0
+    },
+    {
+      "id": "br03",
+      "kind": "stadium_ext",
+      "narration_anchor": "The same stadium where Maradona scored the goal of the century",
+      "url": "https://www.youtube.com/watch?v=8OgaRCvkEsg",
+      "in_s": 78.24,
+      "out_s": 83.24,
+      "audio_mix": 0.0,
+      "_note": "Azteca scene-snapped (helper-validated)"
+    },
+    {
+      "id": "br04",
+      "kind": "stadium_ext",
+      "narration_anchor": "the team that almost every neutral Mexican fan loves to hate",
+      "url": "https://www.youtube.com/watch?v=8OgaRCvkEsg",
+      "in_s": 154.85,
+      "out_s": 159.85,
+      "audio_mix": 0.0
+    },
+    {
+      "id": "br05",
+      "kind": "stadium_ext",
+      "narration_anchor": "travel to Mexico City to play",
+      "url": "https://www.youtube.com/watch?v=dYXRgn6_qy0",
+      "in_s": 122.84,
+      "out_s": 127.84,
+      "audio_mix": 0.0,
+      "_note": "APT Sports Azteca scene-snapped (helper-validated)"
+    },
+    {
+      "id": "br06",
+      "kind": "stadium_ext",
+      "narration_anchor": "is not, in football terms, a glamour city",
+      "url": "https://www.youtube.com/watch?v=dNIdydTxYCA",
+      "in_s": 2.0,
+      "out_s": 7.0,
+      "audio_mix": 0.0
+    }
+  ],
+  "archival_footage": [
+    {
+      "id": "af01",
+      "decade": "2000s",
+      "narration_anchor": "a story of two halves",
+      "url": "https://www.youtube.com/watch?v=eY0N3J9_PdQ",
+      "in_s": 60.0,
+      "out_s": 78.0,
+      "audio_mix": 0.0,
+      "_note": "Barcelona-era Ronaldinho prime — used as 'rise' archival in Ch5/closer to contrast Barcelona half vs post-Barcelona half"
+    },
+    {
+      "id": "af02",
+      "decade": "2000s",
+      "narration_anchor": "two-time FIFA World Player of the Year",
+      "url": "https://www.youtube.com/watch?v=Ggam4fGI7RQ",
+      "in_s": 8.0,
+      "out_s": 22.0,
+      "audio_mix": 0.0,
+      "_note": "Ronaldinho prime skills compilation — used in cold-open context shot establishing 'rise' before chronological lost-years arc begins"
+    }
+  ],
+  "motion_graphics": [
+    {
+      "id": "mg01",
+      "kind": "stat_card",
+      "narration_anchor": "won eight major trophies",
+      "deferred": true,
+      "payload": {
+        "header": "RONALDINHO 2008–2015",
+        "stats": [
+          "8 trophies",
+          "100+ goals",
+          "Bola de Ouro 2012",
+          "Copa Libertadores 2013",
+          "Liga MX final 2015"
+        ]
+      }
+    },
+    {
+      "id": "mg02",
+      "kind": "stat_card",
+      "narration_anchor": "thirty-five goals in fifty-eight matches",
+      "deferred": true,
+      "payload": {
+        "header": "FLAMENGO 2011–12",
+        "stats": [
+          "58 apps",
+          "35 goals",
+          "3 regional titles",
+          "Taça Guanabara"
+        ]
+      }
+    },
+    {
+      "id": "mg03",
+      "kind": "stat_card",
+      "narration_anchor": "four goals and seven assists across the tournament",
+      "deferred": true,
+      "payload": {
+        "header": "LIBERTADORES 2013",
+        "stats": [
+          "Group + 4 KO rounds",
+          "4 goals · 7 assists",
+          "Best Player of Tournament",
+          "Atlético's 1st in 115 years"
+        ]
+      }
+    },
+    {
+      "id": "mg04",
+      "kind": "stat_card",
+      "narration_anchor": "eight goals, seven assists, and a Liga MX final appearance",
+      "deferred": true,
+      "payload": {
+        "header": "QUERÉTARO 2014–15",
+        "stats": [
+          "30 apps",
+          "8 goals · 7 assists",
+          "First Liga MX final in club history",
+          "Lost 5–3 agg vs Santos Laguna"
+        ]
+      }
+    }
+  ]
+}

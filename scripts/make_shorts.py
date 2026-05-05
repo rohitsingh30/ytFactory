@@ -280,15 +280,14 @@ def _voice_fingerprint(
         fp["sunoapi_lyrics"] = (suno_prompt.get("lyrics") or "")[:2000]
         return fp
 
-    # tts mode (default — kokoro/cartesia/f5_tts)
+    # tts mode (kokoro / f5_tts / chatterbox / styletts2 / indic_parler)
     fp.update({
         "provider": cfg.get("tts_provider", "kokoro"),
         "voice": cfg.get("tts_voice"),
         "ref_text": cfg.get("tts_ref_text"),
         "speed": cfg.get("tts_speed", 1.0),
-        # Cartesia language tag — switching from en→hi must bust the
-        # cache so the new language re-synths instead of replaying the
-        # English audio.
+        # Language tag — switching from en→hi must bust the cache so the
+        # new language re-synths instead of replaying the English audio.
         "language": cfg.get("tts_language", "en"),
         # Modulation block: tweaking a factor in the channel YAML
         # invalidates the cached narration.wav so the new tempo curve
@@ -548,27 +547,104 @@ def _attach_footage_to_beats(beat_list: list, footage_overrides: list[dict]) -> 
     Match strategy: case-insensitive substring of ``match_text`` against
     the beat's ``text``. First-match-wins per override. Logs a warning
     for any override that didn't match a beat (likely typo in the script).
+
+    When an override has ``covers_full_rank: true`` (the
+    /make-rivalry-recap footage-only contract), the attach SPANS from
+    the matching anchor beat through (but excluding) the next override's
+    anchor beat — or to end-of-beat-list for the last anchor. Each beat
+    in the span gets its OWN sliced ``in_s``/``out_s``, proportional to
+    its audio duration vs the span's total duration. ``black_intro``
+    only applies to the first beat in the span; later beats reset it to
+    avoid prepending black silence per fragment.
     """
-    n_matched = 0
+    # First pass: locate the primary anchor beat for each override and
+    # remember its order. We need positions before applying spans because
+    # `covers_full_rank` reads NEXT-anchor's index.
+    anchors: list[tuple[int, dict]] = []  # (beat_index, override)
+    used_idx: set[int] = set()
     for ov in footage_overrides:
-        needle = ov["match_text"].lower().strip()
+        needle = (ov.get("match_text") or "").lower().strip()
         if not needle:
             continue
         hit = False
-        for b in beat_list:
-            if b.kind == "footage":
-                continue  # don't double-assign
+        for i, b in enumerate(beat_list):
+            if i in used_idx:
+                continue
             if needle in (b.text or "").lower():
-                b.kind = "footage"
-                # Copy the whole override dict so newer per-cut flags
-                # (black_intro, pre_pad_s, …) flow through to footage.py
-                # and compose.py without each call site listing fields.
-                b.footage = dict(ov)
-                n_matched += 1
+                anchors.append((i, ov))
+                used_idx.add(i)
                 hit = True
                 break
         if not hit:
             print(f"[footage] WARN: no beat matched match_text={ov['match_text']!r}")
+    anchors.sort(key=lambda t: t[0])
+
+    n_matched = 0
+    for k, (anchor_idx, ov) in enumerate(anchors):
+        if not ov.get("covers_full_rank"):
+            # Single-beat attach (legacy /make-ranking + /make-script paths).
+            b = beat_list[anchor_idx]
+            b.kind = "footage"
+            b.footage = dict(ov)
+            n_matched += 1
+            continue
+
+        # Span [anchor_idx, next_anchor_idx) — or to end of beat_list
+        # for the last anchor.
+        next_idx = anchors[k + 1][0] if k + 1 < len(anchors) else len(beat_list)
+        span = list(range(anchor_idx, next_idx))
+        src_in = float(ov.get("in_s") or 0.0)
+        src_out = float(ov.get("out_s") or 0.0)
+
+        # Slice 1:1 with audio: each fragment is exactly the beat's
+        # audio duration, walked forward from src_in. The author's
+        # `out_s` is the upper bound (where to stop reading source) but
+        # not a stretch target — if total audio is shorter than
+        # `out_s - in_s`, the trailing source is unused. Stretching
+        # (proportional slicing) blew up the timeline because
+        # compose_hybrid pads each audio slot with silence to fit a
+        # longer footage fragment, and a 12s source window for 5s of
+        # rank audio added 7s of silence per rank — pushed a 58s Short
+        # to 75s. Class-of-bug fix 2026-05-05.
+        src_cursor = src_in
+        for j, i in enumerate(span):
+            b = beat_list[i]
+            # Tiny / zero-duration beats (silence between sentences,
+            # punctuation-only sub-beats from the splitter) get a 0.20s
+            # floor — small enough that compose's silence-pad doesn't
+            # bloat the Short, big enough for ffmpeg trim + fade pair.
+            frag_dur = max(b.duration, 0.20)
+            frag_in = src_cursor
+            frag_out = src_cursor + frag_dur
+            # Hard-clamp to the source window. If we run past it, the
+            # last fragment shrinks to whatever's left; subsequent
+            # fragments freeze on the tail (`compose_hybrid` extends
+            # the audio slot with silence — preferable to ffmpeg
+            # erroring on an out-of-bounds trim).
+            if frag_out > src_out:
+                frag_out = src_out
+                if frag_out - frag_in < 0.20:
+                    frag_in = max(src_out - 0.20, src_in)
+            src_cursor = frag_out
+            b.kind = "footage"
+            b.footage = dict(ov)
+            b.footage["in_s"] = round(frag_in, 3)
+            b.footage["out_s"] = round(frag_out, 3)
+            # Only the leading beat of a span keeps the black-intro pad;
+            # otherwise we'd prepend N black intros (one per fragment).
+            if j > 0:
+                b.footage.pop("black_intro", None)
+                b.footage.pop("black_intro_buffer_s", None)
+                b.footage.pop("pre_pad_s", None)
+            n_matched += 1
+        used_src_dur = src_cursor - src_in
+        total_beat_dur = sum(max(beat_list[i].duration, 0.20) for i in span)
+        print(
+            f"[footage] covers_full_rank: anchor beat {anchor_idx} → "
+            f"spanned {len(span)} beat(s) {span}; src window "
+            f"{src_in:.2f}-{src_out:.2f}s, used {used_src_dur:.2f}s "
+            f"(audio sum {total_beat_dur:.2f}s)"
+        )
     return n_matched
 
 
@@ -1081,16 +1157,15 @@ def make_short(
             # a config block, sensible defaults from
             # ``audio._DEFAULT_MODULATION`` apply (hook + closer slower,
             # exclamation faster, ellipsis-trail slower). Kokoro-only;
-            # Cartesia/f5_tts ignore this.
+            # f5_tts ignores this.
             modulation=cfg.get("tts_modulation"),
             # Phonetic respellings from the per-story dossier (e.g.
             # "Aguero" → "Ah-GWAIR-oh"). Original spelling stays in
             # ``text`` for downstream alignment and caption rendering.
             pronunciation_dict=pronunciation_dict,
-            # Cartesia language tag — channel YAML's `tts_language: hi`
-            # cues Sonic-2 for Hindi (hindutavaanimated etc.); defaults
-            # to English. Kokoro reads its own lang_for_voice() — this
-            # field is a no-op for kokoro/f5_tts.
+            # Language tag — channel YAML's `tts_language: hi` cues Hindi
+            # for hindutavaanimated; defaults to English. Kokoro reads its
+            # own lang_for_voice() — this field is a no-op for kokoro/f5_tts.
             language=cfg.get("tts_language", "en"),
         )
         fp_path.write_text(json.dumps(fp_now, indent=2))
@@ -1294,6 +1369,23 @@ def make_short(
         )
     else:
         # ---- slideshow path (current default) -------------------------
+        # Footage attach moved up — must happen BEFORE image gen so
+        # footage beats can skip the GPU. Pre-2026-05-05 the attach ran
+        # in Stage 7 (compose), which meant a 25-beat rivalry recap
+        # tagged 5 beats as footage but still ran 25 image gens, timing
+        # out the Metal GPU around beat 15. Class-of-bug fix paired with
+        # `covers_full_rank` span attach in `_attach_footage_to_beats`.
+        # The yt-dlp/ffmpeg fetch stays in Stage 7 — only the tagging
+        # moved.
+        footage_overrides = []
+        script_path_lookup = _find_script_path(slug)
+        if script_path_lookup is not None:
+            footage_overrides = _load_footage_overrides(script_path_lookup)
+        n_footage_matched = 0
+        if footage_overrides:
+            n_footage_matched = _attach_footage_to_beats(beat_list, footage_overrides)
+            print(f"[footage] tagged {n_footage_matched} beat(s) for footage cut-in (pre-image-gen)")
+
         custom_prompts = images.load_prompts(
             prompts_path,
             n_beats=len(beat_list),
@@ -1378,6 +1470,18 @@ def make_short(
         for i, b in enumerate(beat_list):
             p = cache / f"img_{i:02d}.png"
             hash_path = cache / f"img_{i:02d}.prompt.sha256"
+
+            # Footage beats use the broadcast clip in compose; generating
+            # an image is wasted GPU. The placeholder path keeps
+            # `image_paths` index-aligned with `beat_list` for compose's
+            # downstream `image_paths[i]` reads. The missing-file pre-flight
+            # below filters footage indices so the placeholder doesn't
+            # trip the existence check.
+            if b.kind == "footage":
+                print(f"     [{i+1}/{len(beat_list)}] footage beat — skip image gen")
+                image_paths.append(p)
+                print(f"[image-done] beat {i} of {len(beat_list)}")
+                continue
 
             # Decide IP-Adapter reference for THIS beat.
             if not use_ip:
@@ -1635,7 +1739,10 @@ def make_short(
         # time the image stage ate. Fail fast here with a structured
         # error the latency view can fingerprint, instead of letting
         # ffmpeg explode opaquely.
-        missing = [p for p in image_paths if not p.exists()]
+        missing = [
+            p for i, p in enumerate(image_paths)
+            if beat_list[i].kind != "footage" and not p.exists()
+        ]
         if missing:
             names = ", ".join(p.name for p in missing[:5])
             extra = "" if len(missing) <= 5 else f" (+{len(missing)-5} more)"
@@ -1696,19 +1803,11 @@ def make_short(
                 print("[compose] ranked_chips=true but no beat opens with "
                       "'Number five/four/three/two/one' — chips skipped")
 
-        # If the script JSON declared per-beat footage cuts, fetch those
-        # mp4s now and tag the matching beats. The hybrid compose path
-        # below stitches them in place of the static image. Done here
-        # (after image gen + critic regen) so the broadcast clip cache
-        # only fills when we actually need it.
-        footage_overrides = []
-        script_path_lookup = _find_script_path(slug)
-        if script_path_lookup:
-            footage_overrides = _load_footage_overrides(script_path_lookup)
-        n_footage_matched = 0
-        if footage_overrides:
-            n_footage_matched = _attach_footage_to_beats(beat_list, footage_overrides)
-            print(f"[footage] tagged {n_footage_matched} beat(s) for footage cut-in")
+        # Per-beat footage attach already happened pre-image-gen (see
+        # block at slideshow path entry). Here we just fetch the
+        # broadcast mp4s for already-tagged beats; no second tagging
+        # pass. `n_footage_matched` is recomputed from the tagged beats.
+        n_footage_matched = sum(1 for b in beat_list if b.kind == "footage")
         footage_clip_paths: dict[int, Path] = {}
         if n_footage_matched:
             from pipeline import footage as _footage
@@ -2016,7 +2115,19 @@ def main() -> None:
     )
     ap.add_argument("--channel", default="mystoriesanimated/variants/aita_animated.yaml")
     ap.add_argument("--slug", default=None, help="Override the slug (default: from --script, else 'sample01')")
-    ap.add_argument("--out", default="data")
+    ap.add_argument(
+        "--out",
+        default=None,
+        help=(
+            "Output root for cache/, shorts/, uploads/, etc. Default "
+            "derives from --channel via the per-channel layout: variant "
+            "channels resolve via pipeline.niches.NICHE_CHANNEL "
+            "(sports_ranked → sportstoriesanimated/ranked); simple "
+            "channels with config.yaml at <root>/config.yaml use <root>. "
+            "Pass an explicit --out only to override (legacy data/ root, "
+            "scratch dir for testing, etc)."
+        ),
+    )
     ap.add_argument(
         "--no-critic",
         action="store_true",
@@ -2067,10 +2178,17 @@ def main() -> None:
     if args.require_critic and args.no_critic:
         ap.error("--require-critic and --no-critic are mutually exclusive")
 
+    channel_path = Path(args.channel)
+    if args.out is None:
+        out_dir = _resolve_channel_out_dir(channel_path)
+        print(f"[out] resolved from --channel: out_dir={out_dir}")
+    else:
+        out_dir = Path(args.out)
+
     make_short(
         text=text,
-        channel_path=Path(args.channel),
-        out_dir=Path(args.out),
+        channel_path=channel_path,
+        out_dir=out_dir,
         slug=slug,
         source_story=source_story,
         run_critic=not args.no_critic,
@@ -2078,6 +2196,55 @@ def main() -> None:
         tts_voice_override=args.tts_voice,
         upload_override=upload_override,
     )
+
+
+def _resolve_channel_out_dir(channel_path: Path) -> Path:
+    """Map channel YAML path → per-channel state root (cache/shorts/uploads/...).
+
+    Per-channel layout (memory: feedback_channels_subdir_layout) puts
+    every channel's runtime state under a per-channel root, NEVER
+    under the global ``data/`` dir. Lookup precedence:
+
+    1. ``pipeline.niches.NICHE_CHANNEL`` — authoritative for variant
+       channels (sports_ranked, aita, oddities, tih, …) where YAML and
+       state dir don't share a path prefix.
+    2. ``<channel_root>/config.yaml`` simple-channel convention —
+       state dir is the YAML's parent.
+    3. ``<channel_root>/variants/<variant>.yaml`` fallback — when a
+       variant YAML isn't registered in NICHE_CHANNEL yet, default to
+       the parent-of-parent (the channel root), accepting that all
+       variants of that channel will share state. New variants should
+       add a NICHE_CHANNEL entry to disambiguate.
+
+    Falls back to legacy ``Path("data")`` only as a last resort with a
+    loud warning so the regression is visible in logs. The 2026-05-05
+    rivalry-recap render hit this when nothing was registered for a
+    new slug — the mp4 landed in ``data/shorts/`` instead of
+    ``sportstoriesanimated/ranked/shorts/``.
+    """
+    try:
+        from pipeline import niches as _niches
+    except Exception:
+        _niches = None
+
+    yaml_str = str(channel_path).replace("\\", "/")
+    if _niches is not None:
+        for chan_dir, chan_yaml in _niches.NICHE_CHANNEL.values():
+            if yaml_str.endswith(chan_yaml):
+                return Path(chan_dir)
+
+    if channel_path.name == "config.yaml":
+        return channel_path.parent
+
+    if channel_path.parent.name == "variants":
+        return channel_path.parent.parent
+
+    print(
+        f"[out] WARN: could not resolve channel state dir from "
+        f"{channel_path!r}; falling back to legacy 'data/' root. Add a "
+        f"pipeline.niches.NICHE_CHANNEL entry to fix."
+    )
+    return Path("data")
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ CLI smoke test:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -88,27 +89,98 @@ def _download_source(url: str, cache_dir: Path) -> Path:
     # only if the module form fails (e.g. yt-dlp installed system-wide
     # via Homebrew but not pip).
     cmd_base = [
-        "-q",
         # Prefer mp4 + m4a so ffmpeg doesn't have to remux exotic codecs.
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "--merge-output-format", "mp4",
         "-o", str(dest),
         f"https://www.youtube.com/watch?v={video_id}",
     ]
-    print(f"[footage] yt-dlp downloading {video_id}…")
-    try:
-        subprocess.run([sys.executable, "-m", "yt_dlp", *cmd_base], check=True)
-    except subprocess.CalledProcessError as e:
-        if e.returncode == 1 and "No module named" in (e.stderr or ""):
-            try:
-                subprocess.run(["yt-dlp", *cmd_base], check=True)
-            except FileNotFoundError as fnf:
-                raise RuntimeError(
-                    "yt-dlp not available — install with `pip install yt-dlp` "
-                    "(into the venv) or `brew install yt-dlp`"
-                ) from fnf
+    # Cookie strategy (added 2026-05-05): YouTube blocks anonymous
+    # yt-dlp on a sizeable share of videos with "Sign in to confirm
+    # you're not a bot". yt-dlp is the canonical footage download path
+    # (no Playwright mixing — see memory feedback_footage_yt_dlp_canonical
+    # for the principle). Auth precedence:
+    #
+    #   1. YTFACTORY_YTDLP_COOKIES=/path/to/cookies.txt  (Netscape format)
+    #      — preferred. One-time export, survives Chrome restarts, no
+    #      Keychain prompts, works in headless renders. Use a browser
+    #      extension like "Get cookies.txt LOCALLY" → save to e.g.
+    #      ~/.config/ytdlp/youtube_cookies.txt → export the env var.
+    #
+    #   2. YTFACTORY_YTDLP_BROWSER=chrome  (or firefox / chrome:Default)
+    #      — live-extraction fallback. On macOS the first run prompts
+    #      for Keychain access and Chrome must be quit completely.
+    #      Brittle, but no manual export.
+    #
+    #   3. Anonymous yt-dlp — last resort. Still works for videos that
+    #      aren't bot-flagged.
+    cookies_file = os.environ.get("YTFACTORY_YTDLP_COOKIES", "")
+    cookies_file_args: list[str] = []
+    if cookies_file:
+        if Path(cookies_file).exists():
+            cookies_file_args = ["--cookies", cookies_file]
         else:
-            raise
+            print(
+                f"[footage] WARN: YTFACTORY_YTDLP_COOKIES={cookies_file!r} "
+                f"does not exist; falling through to browser extraction"
+            )
+
+    browser = os.environ.get("YTFACTORY_YTDLP_BROWSER", "chrome")
+    cookie_args = ["--cookies-from-browser", browser] if browser else []
+    print(f"[footage] yt-dlp downloading {video_id}…")
+
+    def _try(args: list[str]) -> bool:
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "yt_dlp", *args],
+                check=True, capture_output=True, text=True,
+            )
+            return True
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "")[-500:]
+            if "No module named" in stderr:
+                try:
+                    subprocess.run(
+                        ["yt-dlp", *args],
+                        check=True, capture_output=True, text=True,
+                    )
+                    return True
+                except FileNotFoundError as fnf:
+                    raise RuntimeError(
+                        "yt-dlp not available — install with `pip install "
+                        "yt-dlp` (into the venv) or `brew install yt-dlp`"
+                    ) from fnf
+                except subprocess.CalledProcessError as e2:
+                    print(f"[footage] yt-dlp stderr: {(e2.stderr or '')[-500:]}")
+                    return False
+            print(f"[footage] yt-dlp stderr: {stderr}")
+            return False
+
+    ok = False
+    if cookies_file_args:
+        ok = _try([*cookies_file_args, *cmd_base])
+        if not ok:
+            print(
+                f"[footage] cookies file ({cookies_file}) auth failed; "
+                f"trying browser extraction"
+            )
+    if not ok and cookie_args:
+        ok = _try([*cookie_args, *cmd_base])
+        if not ok:
+            print(
+                f"[footage] cookie auth ({browser}) failed; retrying "
+                f"without cookies"
+            )
+    if not ok:
+        ok = _try(cmd_base)
+    if not ok:
+        raise RuntimeError(
+            f"yt-dlp could not download {video_id} — set "
+            f"YTFACTORY_YTDLP_COOKIES=/path/to/cookies.txt (preferred; "
+            f"one-time Netscape-format export from a logged-in YouTube "
+            f"session), or quit Chrome and grant Keychain access on the "
+            f"YTFACTORY_YTDLP_BROWSER live-extraction fallback"
+        )
     if not dest.exists():
         raise RuntimeError(f"yt-dlp did not produce {dest}")
     return dest

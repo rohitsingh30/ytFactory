@@ -33,19 +33,17 @@ source_adapter: sports_moments_manual  # adapter ID (internal); not the channel 
 # preventing.
 narrator_visual_mode: voice_only
 
-# TTS — F5-TTS-MLX with a 9.5s ref clip of the original Cartesia "Theo"
-# narration (cloned voice). Migrated 2026-05-04 from cartesia/Theo
-# after the $5 prepay exhausted in <1h. Free, no API cap, MLX-native on
-# Apple Silicon. Tifo's vibe is measured, not hype, so we keep tts_speed
-# a hair under 1.0; F5-TTS honours speed natively.
-#
-# Cartesia fallback (paid, ship-quality): re-enable by reverting these
-# lines to:
-#   tts_provider: cartesia
-#   tts_voice: 79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e  # Theo
+# TTS — F5-TTS-MLX zero-shot voice clone, the only TTS provider for
+# this repo. Free, no API cap, MLX-native on Apple Silicon. Tifo's
+# vibe is measured not hype, so tts_speed sits a hair under 1.0;
+# F5-TTS honours speed natively.
+# Note: theo.wav was lost in the 2026-05-04 recovery wipe — using
+# sarah.wav (female) until a male reference is re-recorded. Drop a
+# 5-15s 24kHz mono male WAV at pipeline/voice_refs/theo.wav + update
+# tts_ref_text to its transcript to restore the original male voice.
 tts_provider: f5_tts
-tts_voice: pipeline/voice_refs/theo.wav
-tts_ref_text: "May 1940. The German blitzkrieg has cut through France in three weeks. Three hundred and thirty-eight thousand British and French soldiers"
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 0.98
 
 # Visuals — static-image-per-beat slideshow path (Ken Burns zoom in
@@ -143,3 +141,179 @@ upload:
     ━━━━━━━━━━━━━━━━━━━━
 
     #shorts #football #soccer #footballshorts #footballmoments
+
+# ---- Long-form documentary mode ---------------------------------------
+# 20-30 min sports docs with REAL match footage + commentator/YouTuber
+# talking-head clips. Distinct from historyrecapped's `long_form:` sleep
+# mode — different tone (intense-podcast vs. soothing), faster cadence,
+# no atempo stretch, captions ON with stronger weight (not italic),
+# music bed cycles section-mood (not single ambient loop), lower-thirds
+# overlay every talking-head clip, chapter cards every 4-6 min.
+#
+# Authored via /make-sports-doc skill — produces:
+#   sportstoriesanimated/narrations/<slug>.json   (chapters + prose + asks + meta)
+#   sportstoriesanimated/footage_plan/<slug>.json (match + heads + b-roll + archival)
+# Rendered via:
+#   caffeinate -i .venv/bin/python -u scripts/sportstoriesanimated/render_long_form_doc.py \
+#       --channel sportstoriesanimated --slug <slug>
+# See learnings/long_form_doc_format.md
+long_form_doc:
+  # Voice — Kokoro am_michael (intense male narrator, ~300 MB local
+  # model, zero API cost). Switched from F5-TTS-MLX 2026-05-04 because
+  # theo.wav (channel default narrator clone ref) was lost in the
+  # recovery wipe and sarah.wav is tonally wrong for sports-doc
+  # register. Kokoro also matches the user's "least memory" preference
+  # (~300 MB vs F5's ~1.5 GB) and doesn't need a voice-clone ref.
+  # Switch back to f5_tts + theo.wav once theo is re-clipped from a
+  # shipped Short. tts_speed 0.98 matches the Shorts default; sports
+  # doc wants ~155 wpm, not 135 wpm sleep cadence (post_atempo 1.0).
+  tts_provider: kokoro
+  tts_voice: am_michael
+  tts_speed: 0.98
+  tts_post_atempo: 1.0
+  tts_chunk_target_chars: 380
+  tts_chunk_join_silence_s: 0.35
+  # Tone overrides — applied per narration JSON's `narrator_tone` field.
+  # The renderer reads narrator_tone and bumps tts_speed / atempo:
+  #   tifo-academic   → speed 0.98, atempo 1.00 (default)
+  #   intense-podcast → speed 1.02, atempo 0.97
+  #   playful-spicy   → speed 1.00, atempo 1.00
+  #   serious-doc     → speed 0.95, atempo 0.92
+
+  # Audio mix
+  audio_narration_db: -5
+  audio_music_bed_db: -22       # music a bit louder than sleep mode (-28)
+  audio_clip_duck_db: -22       # narration ducks to -22 dB during footage clips with mode=duck_narration
+  audio_source_mix: 0.0         # default mute source; per-clip override via audio_mix in footage_plan
+
+  # Output — 16:9 horizontal, 30 fps. Long-form NEVER 9:16.
+  duration_target_s: [1200, 1800]   # 20-30 min
+  output_resolution: [1920, 1080]
+  output_fps: 30
+
+  # Captions — ON. Sports doc viewers half-watch on phones; captions
+  # rescue the prose. Style is bolder than sleep mode (white + drop
+  # shadow, NOT yellow italic — the yellow italic is a sleep-niche
+  # signature owned by Sleepy Time History et al).
+  captions_enabled: true
+  caption_align: authored          # authored narration text aligned to TTS chunks (not whisper)
+  caption_style:
+    text_rgba: [255, 255, 255, 255]
+    italic: false
+    font_size: 40
+    weight: bold
+
+  # Channel watermark — top-right, faint white, smaller than Shorts logo.
+  watermark:
+    enabled: true
+    text: "SPORTS STORIES"
+    font_size: 28
+    text_rgba: [255, 255, 255, 130]
+    margin: 32
+
+  # Visual grade — slight teal-shadow / orange-highlight push to unify
+  # disparate footage sources (broadcast clips have wildly different
+  # color science — one network is warm, another is cool, archive
+  # clips are washed). Light grade keeps cuts feeling cohesive.
+  visual_grade:
+    enabled: true
+    filter: "eq=gamma=1.02:saturation=1.05,colorbalance=rs=-0.04:gs=-0.01:bs=0.06:rm=0.06:gm=0.02:bm=-0.03:rh=0.03:bh=-0.02,vignette=PI/6"
+
+  # Lower-thirds — overlaid on every talking-head clip with speaker
+  # name + handle. Renderer reads `speaker` + `speaker_handle` from
+  # footage_plan.talking_heads[].
+  lower_third:
+    enabled: true
+    bg_rgba: [10, 22, 38, 215]      # deep teal slab, ~85% opacity
+    text_rgba: [255, 255, 255, 255]
+    accent_rgba: [255, 168, 0, 255] # warm orange underline
+    font_size: 36
+    handle_font_size: 24
+    margin_x: 60                     # px from left
+    margin_y: 110                    # px from bottom (above caption band)
+    fade_in_s: 0.4
+    fade_out_s: 0.4
+    hold_min_s: 2.5                  # always show at least 2.5s even on shorter clips
+
+  # Chapter cards — full-frame title cards between chapters, ~3s hold
+  # with crossfade in/out. Renderer reads `chapters[].title` from
+  # narration JSON and inserts cards at `chapters[].start_s`.
+  chapter_card:
+    enabled: true
+    bg_rgba: [10, 22, 38, 240]
+    number_color: [255, 168, 0, 255]
+    number_font_size: 48
+    title_font_size: 72
+    duration_s: 3.0
+    fade_s: 0.6
+
+  # Music bed — section-mood cycling. Drop royalty-free wavs into
+  # sportstoriesanimated/music/<mood>/ and the renderer picks one per
+  # section, crossfading between sections.
+  #   moods: cinematic / tense-strings / lo-fi-piano / uplifting / silent_under_clip
+  music_dir: music
+  music_section_crossfade_s: 2.0
+  music_silent_under_clip: true     # auto-mute music bed during talking_heads + match_footage clips that have audio_mix > 0
+
+  # Footage cache — shared with Shorts.
+  footage_dir: footage/sources
+
+  # Engagement asks — INLINE in narration text, NOT separate audio
+  # inserts. /make-sports-doc generates 3 asks per 25-min doc (early
+  # like, mid-doc subscribe, closer comment_prompt). Renderer reads
+  # narration JSON's `engagement_asks[]` only for at-time-of-render
+  # validation (e.g. flag if any are < 30s apart, or > 5 total).
+
+  # ---- Long-form upload metadata ------------------------------------------
+  # Separate from Shorts upload block above. Long-form goes to the SAME
+  # AnimatedSportsStories channel (single shared OAuth token), but with
+  # documentary tags + chapter-stamped description.
+  upload:
+    privacy: private               # promote to public after format sign-off on first ship
+    made_for_kids: false
+    category_id: "17"              # Sports
+    auto_upload: false
+    tags:
+      - football documentary
+      - football history
+      - football deep dive
+      - sports documentary
+      - football breakdown
+      - football tactics
+      - tifo football style
+      - football analysis
+      - world cup
+      - champions league
+      - long form football
+      - football doc
+    # description_template tokens (resolved at upload time):
+    #   {script.title}        — narration JSON `title`
+    #   {script.hook}         — narration JSON `hook` (one-paragraph pitch)
+    #   {script.thesis}       — narration JSON `thesis`
+    #   {chapters_block}      — auto-generated from narration JSON `chapters`
+    #                           array of {start_s, title} → "MM:SS Title" lines
+    #   {sources_block}       — auto-generated from footage_plan urls
+    description_template: |
+      {script.hook}
+
+      {script.thesis}
+
+      ━━━━━━━━━━━━━━━━━━━━
+      🔔 SUBSCRIBE for more football deep-dives
+      👍 LIKE if this changed how you see it
+      💬 COMMENT your take below
+      ━━━━━━━━━━━━━━━━━━━━
+
+      📖 Chapters:
+      {chapters_block}
+
+      🎞️ Footage credits:
+      {sources_block}
+
+      A note on process: we use AI tools to help with research drafting,
+      narration, and post-production while we shape the argument and
+      verify the facts. Footage is used under fair-use commentary; if
+      you're a rights-holder and want a clip removed, reply to the
+      pinned comment and we'll cut it within 24 h.
+
+      #footballdocumentary #footballhistory #footballbreakdown #footballanalysis #sportsdocumentary

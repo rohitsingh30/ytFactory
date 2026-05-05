@@ -125,11 +125,6 @@ gcloud secrets versions access latest --secret=ytfactory-agent-token \
 #   - hindutavaanimated → Kokoro hf_alpha (Hindi female)
 #   - historyrecapped long-form → Kokoro bf_isabella + atempo
 
-# Cartesia is now an OPTIONAL ship-quality fallback (per-render override
-# in the channel YAML). Set the key only if you choose to flip a channel
-# back to tts_provider: cartesia for a one-off premium render:
-# export CARTESIA_API_KEY=sk_car_...
-
 # Run the agent — points at production by default
 YTFACTORY_AGENT_TOKEN=$(cat .agent-token) \
   .venv/bin/python -m agent.main
@@ -143,28 +138,19 @@ commercial-licensed** — `$0/render`, no per-character caps:
 
 | Channel | Provider | Voice / config | License |
 |---|---|---|---|
-| historyrecapped (Shorts) | `f5_tts` | clones from `pipeline/voice_refs/theo.wav` | MIT |
-| historyrecapped (long-form sleep) | `kokoro` | `bf_isabella` + atempo 0.6 | Apache 2.0 |
-| mystoriesanimated | `chatterbox` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
-| sportstoriesanimated | `f5_tts` | clones from `pipeline/voice_refs/theo.wav` | MIT |
+| historyrecapped (Shorts) | `kokoro` | `am_michael` (US male documentary) | Apache 2.0 |
+| historyrecapped (long-form sleep) | `f5_tts` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
+| mystoriesanimated (parent) | `chatterbox` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
+| mystoriesanimated/variants/* | `f5_tts` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
+| sportstoriesanimated | `f5_tts` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
 | hindutavaanimated | `kokoro` | `hf_alpha` (Hindi female) | Apache 2.0 |
-| airecap | `kokoro` | `af_bella` | Apache 2.0 |
+| airecap | `kokoro` | `am_michael` | Apache 2.0 |
 | rhymetimejunction | n/a (sung audio via Suno) | external_song | n/a |
 
-**Why this changed:** Cartesia Sonic-2 was the production backbone from
-2026-05-03 to 2026-05-04. The user's $5 prepay exhausted in <1h on a
-10-pack of historyrecapped Shorts + a long-form sleep render — Cartesia
-charges $50–100 per million characters, which compounds fast at our
-cadence. The 4 production channels were migrated to free local
-equivalents on 2026-05-04. Cartesia is retained as a per-channel
-fallback (the previous YAML config is preserved in the comments above
-each `tts_provider:` line) for one-off ship-quality renders.
-
 **Voice cloning details:** F5-TTS-MLX and Chatterbox both clone from a
-9.5s reference WAV. The reference clips at `pipeline/voice_refs/{theo,
-sarah}.wav` were captured from the original Cartesia renders so the
-cloned voices preserve the documentary/narrator identity the channels
-were originally tuned for. To refresh a clip see
+9.5s reference WAV. The reference clip at `pipeline/voice_refs/sarah.wav`
+is the only English ref currently on disk (`theo.wav` was lost in the
+2026-05-04 recovery wipe). To refresh or add a clip, see
 `pipeline/voice_refs/README.md`.
 
 **Indic Parler-TTS interface differs:** It is description-conditioned,

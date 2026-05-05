@@ -72,7 +72,7 @@ class SynthesizeDispatcherTest(unittest.TestCase):
         # Error message must enumerate the legal choices so the operator
         # can fix the YAML without grepping.
         for prov in ("kokoro", "f5_tts", "chatterbox", "styletts2",
-                     "indic_parler", "cartesia"):
+                     "indic_parler"):
             self.assertIn(prov, msg, f"choice list missing {prov!r}")
 
     def test_f5_tts_requires_ref_audio_text(self):
@@ -153,20 +153,6 @@ class SynthesizeDispatcherTest(unittest.TestCase):
             mock.assert_called_once()
             self.assertEqual(mock.call_args.kwargs["description"], desc)
 
-    def test_cartesia_routes_with_language(self):
-        with patch.object(audio, "_synth_cartesia") as mock:
-            mock.return_value = Path("/tmp/x.wav")
-            audio.synthesize(
-                "नमस्कार",
-                voice="6b02ffe5-uuid",
-                out_path=Path("/tmp/x.wav"),
-                provider="cartesia",
-                language="hi",
-            )
-            mock.assert_called_once()
-            self.assertEqual(mock.call_args.kwargs["language"], "hi")
-
-
 # ---------- 2. Channel YAML configuration ---------------------------------
 
 
@@ -180,7 +166,6 @@ _PRODUCTION_CHANNELS = [
 
 _VALID_PROVIDERS = {
     "kokoro", "f5_tts", "chatterbox", "styletts2", "indic_parler",
-    "cartesia",
 }
 
 # Providers that interpret tts_voice as a filesystem path to a ref WAV.
@@ -272,7 +257,12 @@ class VoiceRefClipsTest(unittest.TestCase):
     silently degrades cloning quality. Catch problems at test time."""
 
     REF_DIR = PROJECT_ROOT / "pipeline" / "voice_refs"
-    EXPECTED_REFS = ["theo", "sarah"]
+    # theo.wav was lost in the 2026-05-04 recovery wipe; sarah.wav is
+    # the only F5-TTS ref currently on disk. Channels that previously
+    # used Theo (male) now run sarah.wav. Re-add "theo" to this list
+    # once a 5-15s 24kHz mono male WAV is dropped at
+    # pipeline/voice_refs/theo.wav.
+    EXPECTED_REFS = ["sarah"]
 
     def test_all_expected_refs_exist(self):
         for name in self.EXPECTED_REFS:

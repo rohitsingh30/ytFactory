@@ -1,0 +1,9 @@
+{
+  "narrator": {
+    "description": "calm analytical sports historian",
+    "default_emotion": "measured",
+    "age_band": "middle-aged",
+    "gender": "unspecified"
+  },
+  "supporting": []
+}

@@ -23,7 +23,9 @@
 #      ASR-noisy on sung Hindi). Karaoke-style captions per beat.
 #
 # PIPELINE WIRE-UP STATUS (as of 2026-05-03):
-#   ✅ tts_provider: cartesia path — works for spoken bridges (Arushi)
+#   ⚠️  spoken-bridge TTS path — needs a Hindi-capable engine. F5-TTS
+#       (the production English default) is English-only; Kokoro
+#       hf_alpha is the working Hindi option if/when bridges ship.
 #   ⏳ external_song audio mode — NOT wired yet in pipeline/audio.py;
 #      first render will need that branch added (planned: skip synth,
 #      copy <slug>/song.wav into the audio path, run ASR for beat
@@ -41,11 +43,11 @@ source_adapter: manual  # curator hand-authors scripts/<slug>.json
 
 # ---- Audio — Suno via sunoapi.org (sung, fully automated) -------------
 # Decision 2026-05-03 round 2: user picked Suno via sunoapi.org wrapper
-# after rejecting both manual Suno ("I ain't doing shit") and Cartesia
-# spoken ("it is not singing at all"). Suno V4_5 is the best public AI
-# singing model for Hinglish + kids' content; sunoapi.org provides REST
-# access (https://api.sunoapi.org), pay-per-generation (~$0.05-0.10/song,
-# top up at https://sunoapi.org/topup).
+# after rejecting manual Suno ("I ain't doing shit") and a spoken-only
+# fallback ("it is not singing at all"). Suno V4_5 is the best public
+# AI singing model for Hinglish + kids' content; sunoapi.org provides
+# REST access (https://api.sunoapi.org), pay-per-generation
+# (~$0.05-0.10/song, top up at https://sunoapi.org/topup).
 #
 # Pipeline contract (audio_provider: sunoapi mode in make_shorts.py +
 # pipeline/audio.synth_via_sunoapi):
@@ -62,10 +64,12 @@ source_adapter: manual  # curator hand-authors scripts/<slug>.json
 # goes down: switch back to audio_provider: external_song and generate
 # manually on suno.com.
 #
-# tts_provider/voice/language stay set so audio.synthesize() still works
-# for any future spoken-bridge clips on this channel (Dadi intros) —
-# Cartesia Arushi handles those when the pipeline calls TTS independently
-# of the song path.
+# tts_provider/voice stay set so audio.synthesize() still works for any
+# future spoken-bridge clips on this channel (Dadi intros) — but the
+# main audio path is Suno (sung song). F5-TTS-MLX is English-only;
+# spoken Hindi/Hinglish bridges via this config would mangle. If/when
+# spoken bridges ship, swap to Kokoro hf_alpha (the only Hindi-capable
+# provider in the repo).
 # NOTE 2026-05-03: rendering Hathi Raja v0 with audio_provider: external_song
 # (v2 Suno WAV pre-generated and dropped at songs/<slug>.wav) to avoid
 # re-burning credits on a render that's primarily testing visuals + the
@@ -75,9 +79,9 @@ audio_provider: external_song
 # audio_provider: sunoapi
 sunoapi_model: V4_5            # current best for kids' content; V5 also available
 sunoapi_vocal_gender: f         # female lead (matches kid-rhyme convention)
-tts_provider: cartesia
-tts_voice: 95d51f79-c397-46f9-b49a-23763d3eaa2d  # Arushi, Hinglish female (for spoken bridges)
-tts_language: hi
+tts_provider: f5_tts
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 1.0
 
 # ---- Image gen — 2D cartoon, kid-safe palette, mascot lock ------------

@@ -79,3 +79,7 @@ To switch to a production handle later: run
 `scripts/setup_x_credentials.py airecap` again with the new handle's
 keys; it overwrites in place and re-verifies. No config changes
 needed.
+
+
+## Upload throttle
+Uploads on this channel auto-enforce a ≥1h gap between consecutive public moments — see [docs/upload_throttle.md](../../docs/upload_throttle.md). Override by passing an explicit `publish_at` (dashboard "Publish at" picker).

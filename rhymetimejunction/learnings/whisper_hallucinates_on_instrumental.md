@@ -19,7 +19,7 @@ Whisper-large-v3-mlx transcribed the 0-3.5s instrumental as `'Suno bachcho, Junc
 **Don't:**
 - Don't try to "fix" by re-running Whisper with different parameters — the hallucination is on the model/audio side, not configurable.
 - Don't drop the audio energy mask in favor of relying on `no_speech_prob` from Whisper — that field is unreliable on sung input (the model thinks there IS speech when it's just music).
-- Don't apply this filter to spoken-audio channels (Cartesia/Kokoro narration) — those don't have instrumental sections, and the RMS check would just slow down the render.
+- Don't apply this filter to spoken-audio channels (Kokoro / F5-TTS narration) — those don't have instrumental sections, and the RMS check would just slow down the render.
 
 **Related class-of-bug from same session:**
 - `feedback_whisper_sung_audio_overlapping_words.md` — overlapping word timestamps from Whisper on multi-voice sung audio

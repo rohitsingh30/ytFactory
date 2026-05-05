@@ -16,7 +16,7 @@ CACHE.mkdir(parents=True, exist_ok=True)
 SCRIPT = ROOT / "historyrecapped/narrations/battle-of-britain-few.json"
 CHANNEL = ROOT / "historyrecapped/config.yaml"
 
-# Load .env so CARTESIA_API_KEY is set.
+# Load .env for any provider env vars that pipeline.audio expects.
 env = (ROOT / ".env").read_text()
 for line in env.splitlines():
     line = line.strip()

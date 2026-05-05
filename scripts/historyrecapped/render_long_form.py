@@ -12,9 +12,9 @@ Output:
 
 Pipeline (very different from the Shorts footage_only path):
     1. Chunked TTS — split narration into ~25-30s chunks, render each via
-       Cartesia, post-process each with ffmpeg atempo (channel YAML
-       tts_post_atempo) for true sleep-cadence. Concatenate with silence
-       joiners → narration.wav.
+       F5-TTS-MLX (the only supported provider), post-process each with
+       ffmpeg atempo (channel YAML tts_post_atempo) for true sleep-cadence.
+       Concatenate with silence joiners → narration.wav.
     2. Trim each shotlist clip from its source mp4. 16:9 letterbox/scale to
        1920x1080. Long windows (60-300s each) are preferred — jarring cuts
        wake the viewer.
@@ -72,11 +72,7 @@ def _load_env(repo_root: Path) -> None:
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
-# ---------- chunked Cartesia TTS ------------------------------------------
-
-
-_CARTESIA_URL = "https://api.cartesia.ai/tts/bytes"
-_CARTESIA_VERSION = "2024-11-13"
+# ---------- chunked TTS ----------------------------------------------------
 
 
 def _split_into_chunks(text: str, target_chars: int = 380) -> list[str]:
@@ -108,77 +104,62 @@ def _split_into_chunks(text: str, target_chars: int = 380) -> list[str]:
     return chunks
 
 
-def _cartesia_chunk(
+# ---------- per-chunk TTS adapters ----------------------------------------
+# `synth_long_narration` is the shared chunked+resumable+atempo'd long-form
+# narration synth used by historyrecapped (sleep), sportstoriesanimated
+# (sports docs), and any future long-form channel. The historyrecapped
+# RENDERER rejects tts_provider != f5_tts upstream (strict-F5 rule), so the
+# shared function can support multiple providers without violating it.
+
+
+def _f5_chunk(
     text: str,
-    voice_id: str,
-    api_key: str,
+    ref_audio_path: str,
+    ref_audio_text: str,
     out_wav: Path,
-    speed: str = "slow",
+    speed: float = 0.95,
 ) -> None:
-    """Single Cartesia call → wav at out_wav."""
-    body = json.dumps({
-        "model_id": "sonic-2",
-        "transcript": text,
-        "voice": {"mode": "id", "id": voice_id},
-        "output_format": {
-            "container": "wav",
-            "encoding": "pcm_s16le",
-            "sample_rate": 44100,
-        },
-        "language": "en",
-        "__experimental_controls": {"speed": speed},
-    }).encode("utf-8")
-    headers = {
-        "X-API-Key": api_key,
-        "Cartesia-Version": _CARTESIA_VERSION,
-        "Content-Type": "application/json",
-    }
-    req = urllib.request.Request(_CARTESIA_URL, data=body, headers=headers, method="POST")
-    last_err: Exception | None = None
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(req, timeout=180) as r:
-                out_wav.write_bytes(r.read())
-            return
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
-            last_err = e
-            time.sleep(2 ** attempt)
-    raise RuntimeError(f"Cartesia failed after 3 retries: {last_err}")
+    """Single F5-TTS-MLX synth → wav at out_wav (zero-shot voice cloning).
 
-
-# ---------- Kokoro local TTS (free, unlimited) ----------------------------
-
-
-_KOKORO_INSTANCE = None
-
-
-def _kokoro_get():
-    """Lazy-load the project's Kokoro instance from pipeline.audio."""
-    global _KOKORO_INSTANCE
-    if _KOKORO_INSTANCE is None:
-        from pipeline import audio as _aud
-        _KOKORO_INSTANCE = _aud._kokoro()
-    return _KOKORO_INSTANCE
+    Delegates to pipeline.audio._synth_f5_tts so the same code path is shared
+    with the Shorts pipeline. ref_audio_path resolves relative to the repo
+    root if not absolute.
+    """
+    from pipeline import audio as _aud
+    ref_path = ref_audio_path
+    if not Path(ref_path).is_absolute():
+        ref_path = str(REPO_ROOT / ref_path)
+    out_wav.parent.mkdir(parents=True, exist_ok=True)
+    _aud._synth_f5_tts(
+        text=text,
+        ref_audio_path=ref_path,
+        ref_audio_text=ref_audio_text,
+        out_path=out_wav,
+        speed=speed,
+    )
 
 
 def _kokoro_chunk(
     text: str,
     voice: str,
     out_wav: Path,
-    speed: float = 0.80,
-    lang: str = "en-us",
+    speed: float = 1.0,
 ) -> None:
-    """Single Kokoro synth → wav at out_wav. No modulation, flat soft delivery.
+    """Single Kokoro chunk synth → wav at out_wav.
 
-    Kokoro speed is continuous (unlike Cartesia's bucketed slow/normal/fast),
-    so we set speed directly here and the long_form atempo post-pass is
-    typically set to 1.0 (no further stretch needed).
+    Delegates to pipeline.audio._synth_kokoro (per-sentence internally with
+    modulation). Used by long-form renderers whose channel config picks
+    ``tts_provider: kokoro`` — currently sportstoriesanimated long-form doc
+    after theo.wav was lost in the 2026-05-04 recovery wipe.
     """
-    import soundfile as sf
-    kk = _kokoro_get()
-    samples, sample_rate = kk.create(text, voice=voice, speed=speed, lang=lang)
+    from pipeline import audio as _aud
     out_wav.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(out_wav), samples, sample_rate)
+    _aud._synth_kokoro(
+        text=text,
+        voice=voice,
+        out_path=out_wav,
+        speed=speed,
+    )
 
 
 def _ffmpeg(args: list[str]) -> None:
@@ -223,33 +204,55 @@ def synth_long_narration(
     atempo: float,
     chunk_target_chars: int = 380,
     join_silence_s: float = 0.4,
-    provider: str = "cartesia",
     speed: float = 0.80,
+    ref_audio_text: str | None = None,
+    provider: str = "f5_tts",
 ) -> tuple[Path, list[Path]]:
-    """Chunked TTS + atempo. Returns (final narration.wav path, list of chunk wavs).
+    """Chunked TTS + atempo. Returns (final narration.wav, list of chunk wavs).
 
     Resumable: skips chunks whose stretched wav already exists.
 
-    provider:
-        "cartesia" → paid Cartesia Sonic-2 (per-char billing); 'speed' is
-            mapped to slow/normal/fast bucket; atempo is typically 0.85 to
-            reach true sleep cadence.
-        "kokoro"   → free local Kokoro (M2 Max ~1-2x realtime); 'speed' is
-            continuous so atempo is typically 1.0 (skip extra stretch).
+    Providers:
+      * ``f5_tts`` (default, historyrecapped sleep) — zero-shot voice clone.
+        ``voice_id`` is the path to a 5-15s reference WAV; ``ref_audio_text``
+        is its transcript (required). The model is held in a singleton at
+        pipeline/audio.py to avoid the 1.35GB checkpoint re-load.
+      * ``kokoro`` (sportstoriesanimated long-form doc) — Kokoro 82M voice
+        catalogue. ``voice_id`` is a Kokoro voice id (e.g. ``am_michael``).
+        ``ref_audio_text`` is unused.
     """
-    api_key = None
-    if provider == "cartesia":
-        api_key = os.environ.get("CARTESIA_API_KEY")
-        if not api_key:
-            raise RuntimeError("CARTESIA_API_KEY env var not set")
+    if provider == "f5_tts" and not ref_audio_text:
+        raise RuntimeError(
+            "long-form F5-TTS requires `tts_ref_text` in long_form config "
+            "(the spoken transcript of the ref WAV at tts_voice)"
+        )
+    if provider not in ("f5_tts", "kokoro"):
+        raise RuntimeError(
+            f"synth_long_narration: unsupported provider {provider!r}. "
+            "Supported: f5_tts, kokoro."
+        )
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     chunks = _split_into_chunks(text, target_chars=chunk_target_chars)
     print(f"[tts] {len(text)} chars → {len(chunks)} chunks via {provider} (target {chunk_target_chars} chars each)")
 
+    # MLX heap hygiene: F5 builds up cached graphs / intermediate tensors
+    # across sample() calls. On a 200+ chunk run that growth can push us
+    # into Metal's command-buffer timeout territory (the "memory error" the
+    # user kept hitting). Flush every N chunks. mx.clear_cache() is a no-op
+    # if MLX isn't loaded yet, so it's safe to call unconditionally.
+    try:
+        import mlx.core as _mx  # type: ignore
+        _has_mlx = True
+    except Exception:
+        _mx = None
+        _has_mlx = False
+    MLX_FLUSH_EVERY = int(os.environ.get("YTFACTORY_MLX_FLUSH_EVERY", "10"))
+
     chunk_dir = cache_dir / "tts_chunks"
     chunk_dir.mkdir(exist_ok=True)
     final_chunks: list[Path] = []
+    synthed_this_run = 0
     for i, chunk_text in enumerate(chunks):
         raw = chunk_dir / f"raw_{i:04d}.wav"
         stretched = chunk_dir / f"chunk_{i:04d}.wav"
@@ -258,13 +261,24 @@ def synth_long_narration(
             continue
         if not raw.exists() or raw.stat().st_size < 1024:
             t0 = time.time()
-            if provider == "cartesia":
-                _cartesia_chunk(chunk_text, voice_id, api_key, raw, speed="slow")
-            elif provider == "kokoro":
+            if provider == "kokoro":
                 _kokoro_chunk(chunk_text, voice_id, raw, speed=speed)
             else:
-                raise RuntimeError(f"unknown TTS provider: {provider!r}")
+                _f5_chunk(chunk_text, voice_id, ref_audio_text, raw, speed=speed)
             print(f"[tts] chunk {i:04d}/{len(chunks)-1}: {len(chunk_text)} chars in {time.time()-t0:.1f}s")
+            synthed_this_run += 1
+            # Periodic Metal heap flush. Cheap; prevents the slow leak that
+            # turns chunk N into a Metal-timeout grenade. (No-op for Kokoro
+            # since Kokoro uses ONNX runtime, not MLX/Metal.)
+            if _has_mlx and synthed_this_run % MLX_FLUSH_EVERY == 0:
+                try:
+                    if hasattr(_mx, "clear_cache"):
+                        _mx.clear_cache()
+                    elif hasattr(_mx, "metal") and hasattr(_mx.metal, "clear_cache"):
+                        _mx.metal.clear_cache()
+                    print(f"[mem] flushed Metal cache after {synthed_this_run} chunks")
+                except Exception as _e:
+                    print(f"[mem] flush failed: {_e}")
         if abs(atempo - 1.0) < 1e-3:
             shutil.copy2(raw, stretched)
         else:
@@ -289,20 +303,52 @@ def _probe_duration(path: Path) -> float:
 def _trim_clip_letterbox(
     src: Path, in_s: float, out_s: float, out_path: Path,
     out_w: int = 1920, out_h: int = 1080, fps: int = 30,
+    grade_filter: str | None = None,
 ) -> None:
     """Trim [in_s, out_s] from src, scale to fit 16:9 with blurred letterbox.
 
     For 4:3 sources (640x480, 320x240) this gives a centered scaled-up
     image with a blurred copy of the same frame filling the side bars —
     same aesthetic as the Shorts blurred-letterbox filter, just sideways.
+
+    If grade_filter is set, it's appended after the overlay step — this is
+    where the warm-firelight color grade lives (long_form_visual_signature.md).
+    Single ffmpeg pass: grade applies to the composited 1920x1080 frame so
+    both the foreground subject and the blurred letterbox bars share the
+    same warm tone — keeps the lantern-lit feel consistent across letterboxed
+    4:3 archival sources.
+
+    Aspect-equality short-circuit: when src is already out_w x out_h AND no
+    grade_filter is needed, stream-copy the trim. The blurred letterbox is a
+    no-op on aspect-matched sources, and re-encoding 1+ hours of 1080p with
+    gblur sigma=22 burns 30-40 minutes of CPU and can fail on long single
+    clips (observed on western-front-1914-1918-sleep, 5640s, 2026-05-04).
     """
     duration = max(0.1, out_s - in_s)
+    if grade_filter is None:
+        try:
+            probe = subprocess.check_output([
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(src),
+            ]).decode().strip().splitlines()
+            src_w, src_h = int(probe[0]), int(probe[1])
+            if src_w == out_w and src_h == out_h:
+                print(f"[trim] aspect-match {src_w}x{src_h} == {out_w}x{out_h} — stream-copy")
+                _ffmpeg([
+                    "-ss", f"{in_s}", "-t", f"{duration}", "-i", str(src),
+                    "-an", "-c:v", "copy", str(out_path),
+                ])
+                return
+        except (subprocess.CalledProcessError, ValueError, IndexError):
+            pass  # fall through to filter chain
+    grade_tail = f",{grade_filter}" if grade_filter else ""
     vf = (
         f"[0:v]split=2[bg][fg];"
         f"[bg]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
         f"crop={out_w}:{out_h},gblur=sigma=22[bg2];"
         f"[fg]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[fg2];"
-        f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2,fps={fps},format=yuv420p"
+        f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2,fps={fps}{grade_tail},format=yuv420p"
     )
     _ffmpeg([
         "-ss", f"{in_s}", "-t", f"{duration}", "-i", str(src),
@@ -314,6 +360,135 @@ def _trim_clip_letterbox(
     ])
 
 
+def build_image_panels_video(
+    panels: list[dict[str, Any]],
+    style_prefix: str,
+    image_provider: str,
+    image_seed: int,
+    image_steps: int,
+    image_width: int,
+    image_height: int,
+    cache_dir: Path,
+    out_w: int = 1920,
+    out_h: int = 1080,
+    fps: int = 30,
+    crossfade_s: float = 1.5,
+    zoom_factor: float = 1.08,
+) -> Path:
+    """Path B render: comic-illustrated panels via Z-Image-Turbo + Ken Burns.
+
+    For each panel:
+      1. Generate the still via pipeline.images.generate (cached on disk).
+      2. Render a slow Ken-Burns video segment — zoom from 1.00x to
+         `zoom_factor` over the panel's `hold_s` duration.
+      3. Concat all segments with `xfade` cross-fades of `crossfade_s`
+         between adjacent panels.
+
+    Each `panel` dict expects keys:
+      - `scene` (str, required) — the descriptive scene prompt; the
+        long-form image_style_prefix is appended automatically.
+      - `hold_s` (float, optional, default 20) — how long to hold the panel.
+      - `seed_offset` (int, optional, default panel_index) — added to the
+        channel-level image_seed so each panel gets a distinct generation
+        but the channel stays consistent.
+
+    See learnings/long_form_visual_signature.md for the locked style prefix
+    and per-panel scene authoring rules (must explicitly name a small warm
+    light source — diffusion drops it otherwise).
+    """
+    from pipeline import images
+
+    panel_dir = cache_dir / "panels"
+    panel_dir.mkdir(parents=True, exist_ok=True)
+    seg_dir = cache_dir / "panel_segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+
+    # Stage 1 — generate all panel stills (cached)
+    panel_pngs: list[Path] = []
+    for i, p in enumerate(panels):
+        png = panel_dir / f"panel_{i:03d}.png"
+        if not png.exists() or png.stat().st_size < 4096:
+            scene = (p.get("scene") or "").strip()
+            if not scene:
+                raise ValueError(f"panel {i} missing 'scene' field")
+            seed = int(image_seed) + int(p.get("seed_offset", i))
+            print(f"[panel] {i+1}/{len(panels)} gen → {png.name} (seed {seed})")
+            images.generate(
+                prompt=scene,
+                style_prefix=style_prefix,
+                seed=seed,
+                out_path=png,
+                width=int(image_width),
+                height=int(image_height),
+                steps=int(image_steps),
+                provider=image_provider,
+            )
+        panel_pngs.append(png)
+
+    # Stage 2 — Ken-Burns segment per panel (cached).
+    #
+    # zoompan's `d=N` semantics: it re-runs the zoom cycle every N output
+    # frames. Pairing `-loop 1 -t hold_s` (which produces a looping still
+    # at the demuxer's default ~25fps) with `d=hold_s*fps` causes a multi-
+    # plicative blow-up — the segment ends up ~150× too long. The fix is
+    # to FIRST drive the looped still up to our target fps, THEN run
+    # zoompan with `d=1` so it emits exactly one output frame per input
+    # frame and ramps `zoom` once across the whole clip.
+    seg_paths: list[tuple[Path, float]] = []
+    for i, (png, p) in enumerate(zip(panel_pngs, panels)):
+        hold_s = float(p.get("hold_s", 20))
+        seg = seg_dir / f"seg_{i:03d}.mp4"
+        if not seg.exists() or seg.stat().st_size < 4096:
+            n_frames = max(1, int(round(hold_s * fps)))
+            ramp = (zoom_factor - 1.0) / max(1, n_frames - 1)
+            zp = (
+                f"fps={fps},"
+                f"scale={out_w*2}:{out_h*2}:flags=lanczos,"
+                f"zoompan=z='min(zoom+{ramp:.6f},{zoom_factor:.4f})':"
+                f"d=1:s={out_w}x{out_h}:fps={fps},format=yuv420p"
+            )
+            print(f"[seg ] {i+1}/{len(panels)} {hold_s:.1f}s zoom→{zoom_factor:.2f} ({n_frames}f) → {seg.name}")
+            _ffmpeg([
+                "-loop", "1", "-t", f"{hold_s}", "-i", str(png),
+                "-filter_complex", zp,
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p", str(seg),
+            ])
+        seg_paths.append((seg, hold_s))
+
+    # Stage 3 — xfade chain. With N segments we run N-1 transitions.
+    video_path = cache_dir / "video.mp4"
+    if len(seg_paths) == 1:
+        _ffmpeg(["-i", str(seg_paths[0][0]), "-c", "copy", str(video_path)])
+        return video_path
+
+    inputs: list[str] = []
+    for seg, _ in seg_paths:
+        inputs += ["-i", str(seg)]
+
+    flt_parts: list[str] = []
+    cur_label = "[0:v]"
+    cumtime = seg_paths[0][1] - crossfade_s
+    for i in range(1, len(seg_paths)):
+        out_label = f"[v{i}]"
+        flt_parts.append(
+            f"{cur_label}[{i}:v]xfade=transition=fade:"
+            f"duration={crossfade_s:.3f}:offset={cumtime:.3f}{out_label}"
+        )
+        cur_label = out_label
+        cumtime += seg_paths[i][1] - crossfade_s
+    flt = ";".join(flt_parts)
+
+    print(f"[xfade] {len(seg_paths)} panels → {video_path.name} (crossfade={crossfade_s}s)")
+    _ffmpeg(inputs + [
+        "-filter_complex", flt,
+        "-map", cur_label,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", str(video_path),
+    ])
+    return video_path
+
+
 def build_video_track(
     shotlist: dict[str, Any],
     sources_dir: Path,
@@ -322,6 +497,7 @@ def build_video_track(
     out_w: int = 1920,
     out_h: int = 1080,
     fps: int = 30,
+    grade_filter: str | None = None,
 ) -> Path:
     """Trim each shotlist clip, concat into one silent video.mp4.
 
@@ -335,15 +511,27 @@ def build_video_track(
     long_clip_dir = cache_dir / "long_clips"
     long_clip_dir.mkdir(exist_ok=True)
     clip_paths: list[Path] = []
+    pending_jobs: list = []
     for i, clip in enumerate(clips):
         src = sources_dir / clip["source"]
         if not src.exists():
             raise FileNotFoundError(f"shotlist clip {i} source missing: {src}")
         out = long_clip_dir / f"clip_{i:03d}.mp4"
-        if not out.exists() or out.stat().st_size < 1024:
-            print(f"[trim] {i+1}/{len(clips)} {clip['in_s']:.1f}-{clip['out_s']:.1f}s of {src.name}")
-            _trim_clip_letterbox(src, float(clip["in_s"]), float(clip["out_s"]), out, out_w, out_h, fps)
         clip_paths.append(out)
+        if out.exists() and out.stat().st_size > 1024:
+            continue
+
+        # Capture loop vars in default args so each closure binds its own values.
+        def _job(src=src, in_s=float(clip["in_s"]), out_s=float(clip["out_s"]),
+                 out=out, idx=i, total=len(clips)):
+            print(f"[trim] {idx+1}/{total} {in_s:.1f}-{out_s:.1f}s of {src.name}")
+            _trim_clip_letterbox(src, in_s, out_s, out, out_w, out_h, fps, grade_filter)
+
+        pending_jobs.append(_job)
+
+    if pending_jobs:
+        from pipeline.parallel import run_parallel
+        run_parallel(pending_jobs, label="trim")
 
     # Concat-demux. Re-encoding sidestepped because all clips share params.
     list_txt = cache_dir / "_concat_clips.txt"
@@ -501,6 +689,8 @@ def build_caption_pngs(
     canvas_w: int = 1920,
     max_chars_per_line: int = 70,
     max_lines_per_cue: int = 2,
+    text_color: tuple = (255, 217, 61, 255),  # warm yellow #FFD93D
+    italic: bool = True,
 ) -> list[tuple[Path, float, float]]:
     """Whisper-align narration → one PNG per sentence with sleep styling.
 
@@ -530,13 +720,21 @@ def build_caption_pngs(
     if cur:
         sentences.append(cur)
 
-    # Pick a soft sans-serif font. Fallback to PIL default if not found.
-    font_paths = [
+    # Pick an italic sans-serif font when italic=True (matches the Sleepy
+    # Time History yellow-italic caption signature). Fall back through a
+    # chain of system italic faces, then to plain Helvetica, then PIL default.
+    italic_paths = [
+        "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
+        "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf",
+        "/Library/Fonts/Arial Italic.ttf",
+    ]
+    plain_paths = [
         "/System/Library/Fonts/Helvetica.ttc",
         "/System/Library/Fonts/HelveticaNeue.ttc",
         "/System/Library/Fonts/Avenir.ttc",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
     ]
+    font_paths = (italic_paths + plain_paths) if italic else plain_paths
     font: ImageFont.FreeTypeFont | None = None
     for fp in font_paths:
         if Path(fp).exists():
@@ -577,10 +775,195 @@ def build_caption_pngs(
             ce = cs + per
             png = out_dir / f"cap_{idx:04d}_{j}.png"
             if not png.exists():
-                _render_caption_png(ch, png, canvas_w=canvas_w, font=font)
+                _render_caption_png(ch, png, canvas_w=canvas_w, font=font, text_color=text_color)
             cues.append((png, cs, ce))
     print(f"[cap] {len(cues)} sentence PNGs (cached: {sum(1 for c in cues if c[0].exists())})")
     return cues
+
+
+def build_caption_pngs_from_chunks(
+    narration_text: str,
+    chunk_wavs: list[Path],
+    join_silence_s: float,
+    out_dir: Path,
+    canvas_w: int = 1920,
+    max_chars_per_line: int = 70,
+    max_lines_per_cue: int = 2,
+    text_color: tuple = (255, 217, 61, 255),
+    italic: bool = True,
+    chunk_target_chars: int = 380,
+) -> list[tuple[Path, float, float]]:
+    """Generate sentence-level caption PNGs from the AUTHORED narration text,
+    timed against the cached TTS chunk durations.
+
+    Why this exists: the whisper-aligned variant (build_caption_pngs) re-
+    transcribes the rendered audio, which (a) drops case + punctuation, (b)
+    mistranscribes proper nouns (Bar-le-Duc → barladuk), and (c) hallucinates
+    sentences during quiet stretches. We have the canonical narration text and
+    the per-chunk audio — that's a perfect time anchor for forced alignment
+    without running whisper at all.
+
+    Algorithm:
+      1. Re-split the authored narration into chunks using the same algorithm
+         as the TTS stage (_split_into_chunks). Must produce exactly len(chunk_wavs).
+      2. ffprobe each chunk wav to get its post-atempo duration.
+      3. Each chunk i starts at sum(prev durations) + i * join_silence_s.
+      4. Inside each chunk, split its text on .!? into sentences, then
+         distribute time proportionally to character count.
+      5. Render each sentence to a PNG (cached idempotently).
+    """
+    import re as _re
+    from PIL import ImageFont
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[cap] authored-aligning narration ({len(chunk_wavs)} chunks)…")
+
+    chunk_texts = _split_into_chunks(narration_text, target_chars=chunk_target_chars)
+    if len(chunk_texts) != len(chunk_wavs):
+        raise RuntimeError(
+            f"chunk count mismatch: authored split → {len(chunk_texts)} chunks, "
+            f"cached wav count → {len(chunk_wavs)}. Caption alignment requires "
+            f"the same chunk_target_chars used during TTS synth."
+        )
+
+    # Probe durations once per chunk (cached lookup is fast, ~1s for 200 chunks).
+    chunk_durs: list[float] = [_probe_duration(p) for p in chunk_wavs]
+
+    # Pick font. Same chain as build_caption_pngs.
+    italic_paths = [
+        "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
+        "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf",
+        "/Library/Fonts/Arial Italic.ttf",
+    ]
+    plain_paths = [
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/HelveticaNeue.ttc",
+        "/System/Library/Fonts/Avenir.ttc",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+    ]
+    font_paths = (italic_paths + plain_paths) if italic else plain_paths
+    font: ImageFont.FreeTypeFont | None = None
+    for fp in font_paths:
+        if Path(fp).exists():
+            try:
+                font = ImageFont.truetype(fp, 38)
+                break
+            except Exception:
+                continue
+    if font is None:
+        font = ImageFont.load_default()
+
+    # Build the cue manifest first (cheap, sequential — timing math + text wrap)
+    # then fan out the PIL renders. Decoupling lets us cap the worker pool
+    # independently of cue count; PIL releases the GIL inside its C draw
+    # routines so a ThreadPool gets near-linear speedup on N cores.
+    cues: list[tuple[Path, float, float]] = []
+    cue_idx = 0
+    chunk_start = 0.0
+    pending_renders: list = []
+    for ci, (ctext, cdur) in enumerate(zip(chunk_texts, chunk_durs)):
+        # Chunk text → sentences. Keep punctuation. Empty paragraphs collapse.
+        sentences = _re.findall(r"[^.!?]+[.!?]+(?:\s|$)|\S[^.!?]*$", ctext)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        if not sentences:
+            chunk_start += cdur + join_silence_s
+            continue
+        total_chars = sum(len(s) for s in sentences) or 1
+        # Distribute time within chunk proportionally to character count.
+        cursor = chunk_start
+        for sent in sentences:
+            frac = len(sent) / total_chars
+            sent_dur = cdur * frac
+            sent_start = cursor
+            sent_end = cursor + sent_dur
+            cursor = sent_end
+
+            # Soft-wrap to <= max_chars_per_line.
+            wrapped: list[str] = []
+            cur_line = ""
+            for tok in sent.split():
+                if not cur_line:
+                    cur_line = tok
+                elif len(cur_line) + 1 + len(tok) <= max_chars_per_line:
+                    cur_line = f"{cur_line} {tok}"
+                else:
+                    wrapped.append(cur_line)
+                    cur_line = tok
+            if cur_line:
+                wrapped.append(cur_line)
+            # Split into multi-cue if more than max_lines_per_cue lines.
+            sub_chunks = [wrapped[i:i+max_lines_per_cue] for i in range(0, len(wrapped), max_lines_per_cue)]
+            per = sent_dur / max(1, len(sub_chunks))
+            for j, ch in enumerate(sub_chunks):
+                cs = sent_start + j * per
+                ce = cs + per
+                png = out_dir / f"cap_{cue_idx:04d}_{j}.png"
+                cues.append((png, cs, ce))
+                if not png.exists():
+                    def _job(ch=ch, png=png):
+                        _render_caption_png(ch, png, canvas_w=canvas_w, font=font, text_color=text_color)
+                    pending_renders.append(_job)
+            cue_idx += 1
+        chunk_start += cdur + join_silence_s
+
+    if pending_renders:
+        # PIL is fast (~2-3 ms per PNG). Use a wider pool than for ffmpeg.
+        from pipeline.parallel import run_parallel
+        run_parallel(pending_renders, max_workers=8, label="caption-png")
+
+    print(f"[cap] {len(cues)} authored sentence PNGs across {len(chunk_wavs)} chunks")
+    return cues
+
+
+def render_watermark_png(
+    text: str,
+    out_path: Path,
+    font_size: int = 28,
+    text_color: tuple = (255, 255, 255, 140),  # ~55% opacity white
+    italic: bool = False,
+) -> Path:
+    """Generate a transparent PNG of the channel name for top-right overlay.
+
+    Match the Sleepy Time History watermark spec: faint white sans-serif in
+    the top-right corner of every frame, low opacity so it doesn't dominate.
+    Cached at <branding_dir>/watermark_topright.png — re-render only when the
+    file is missing.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    italic_paths = [
+        "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
+        "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf",
+    ]
+    plain_paths = [
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/HelveticaNeue.ttc",
+        "/System/Library/Fonts/Avenir.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+    ]
+    font_paths = (italic_paths + plain_paths) if italic else plain_paths
+    font: ImageFont.FreeTypeFont | None = None
+    for fp in font_paths:
+        if Path(fp).exists():
+            try:
+                font = ImageFont.truetype(fp, font_size)
+                break
+            except Exception:
+                continue
+    if font is None:
+        font = ImageFont.load_default()
+
+    dummy = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    bb = ImageDraw.Draw(dummy).textbbox((0, 0), text, font=font)
+    w = bb[2] - bb[0] + 6
+    h = bb[3] - bb[1] + 6
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.text((-bb[0] + 3, -bb[1] + 3), text, font=font, fill=text_color)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(str(out_path))
+    return out_path
 
 
 def _render_caption_png(
@@ -588,15 +971,16 @@ def _render_caption_png(
     out_path: Path,
     canvas_w: int,
     font,
-    text_color=(245, 245, 245, 255),
-    shadow_color=(0, 0, 0, 200),
+    text_color=(255, 217, 61, 255),  # warm yellow #FFD93D
+    shadow_color=(0, 0, 0, 220),
     shadow_offset=(2, 3),
     line_spacing: int = 8,
     pad_y: int = 12,
 ) -> None:
-    """Render one cue (1-2 lines) as a transparent PNG, sleep styling.
+    """Render one cue (1-2 lines) as a transparent PNG, sleep-history styling.
 
-    Soft white text with a subtle drop shadow (no harsh outline). PNG is
+    Yellow italic text (matches Sleepy Time History caption signature) with
+    a subtle drop shadow for legibility on busy/light backgrounds. PNG is
     sized to the bounding box of the longest line and overlaid bottom-
     centered by ffmpeg.
     """
@@ -744,34 +1128,60 @@ def final_mux(
     out_path: Path, narration_db: float = -6.0, music_db: float = -28.0,
     caption_cues: list[tuple[Path, float, float]] | None = None,
     margin_v: int = 80,
+    watermark_png: Path | None = None,
+    watermark_margin: int = 32,
 ) -> Path:
     """Mix narration + music; mux against the silent video track.
 
     If caption_cues is provided, builds an N-overlay filter chain that
     shows each PNG only during its [start, end] window. Bottom-centered
-    with margin_v from the bottom edge. Pure overlay = no libass needed
-    on the local ffmpeg build.
+    with margin_v from the bottom edge.
+
+    If watermark_png is provided, it's overlaid in the TOP-RIGHT corner of
+    every frame for the full duration (matches Sleepy Time History channel
+    watermark style).
     """
     a_flt = (
         f"[1:a]volume={narration_db}dB[narr];"
         f"[2:a]volume={music_db}dB[bed];"
         f"[narr][bed]amix=inputs=2:duration=first:dropout_transition=2[a]"
     )
-    if caption_cues:
-        # Inputs: 0=video, 1=narration, 2=music, then each PNG starts at index 3.
+
+    needs_filter = bool(caption_cues) or bool(watermark_png)
+    if needs_filter:
+        # Inputs ordering: 0=video, 1=narration, 2=music, 3=watermark (if any),
+        # then each caption PNG follows.
         v_chain_parts: list[str] = []
         cur_label = "[0:v]"
-        for i, (_png, cs, ce) in enumerate(caption_cues):
-            in_label = f"[{i+3}:v]"
-            out_label = f"[v{i}]"
+        next_input = 3
+
+        # Watermark first — renders under captions if both present, but they
+        # don't spatially overlap (watermark top-right, captions bottom-center).
+        if watermark_png:
+            wm_label = f"[{next_input}:v]"
+            out_label = "[vwm]"
             ov = (
-                f"{cur_label}{in_label}overlay="
-                f"x=(W-w)/2:y=H-h-{margin_v}:"
-                f"enable='between(t,{cs:.3f},{ce:.3f})'"
+                f"{cur_label}{wm_label}overlay="
+                f"x=W-w-{watermark_margin}:y={watermark_margin}"
                 f"{out_label}"
             )
             v_chain_parts.append(ov)
             cur_label = out_label
+            next_input += 1
+
+        if caption_cues:
+            for i, (_png, cs, ce) in enumerate(caption_cues):
+                in_label = f"[{next_input + i}:v]"
+                out_label = f"[v{i}]"
+                ov = (
+                    f"{cur_label}{in_label}overlay="
+                    f"x=(W-w)/2:y=H-h-{margin_v}:"
+                    f"enable='between(t,{cs:.3f},{ce:.3f})'"
+                    f"{out_label}"
+                )
+                v_chain_parts.append(ov)
+                cur_label = out_label
+
         v_chain = ";".join(v_chain_parts)
         full_flt = f"{v_chain};{a_flt}"
         cmd: list[str] = [
@@ -779,8 +1189,11 @@ def final_mux(
             "-i", str(narration_wav),
             "-i", str(music_wav),
         ]
-        for png, _cs, _ce in caption_cues:
-            cmd += ["-i", str(png)]
+        if watermark_png:
+            cmd += ["-i", str(watermark_png)]
+        if caption_cues:
+            for png, _cs, _ce in caption_cues:
+                cmd += ["-i", str(png)]
         cmd += [
             "-filter_complex", full_flt,
             "-map", cur_label, "-map", "[a]",
@@ -809,14 +1222,74 @@ def final_mux(
 # ---------- driver ---------------------------------------------------------
 
 
+def _preflight_power_check() -> None:
+    """Refuse to start a long MLX render under power conditions that
+    routinely crash the WindowServer watchdog.
+
+    Symptom (incident F743A4C5, 2026-05-04): a long-form run on battery
+    with Low Power Mode + display off blocked WindowServer for >40s while
+    F5-TTS-MLX held the Metal command queue. The kernel watchdog killed
+    WindowServer; from the user's POV that looks like a "memory error" /
+    crash because the system logs out or kernel-panics.
+
+    Conditions we refuse:
+        - macOS Low Power Mode ON (`pmset -g` → ``lowpowermode 1``).
+          The CPU/GPU are clocked down and Metal command buffers stretch
+          to the watchdog ceiling.
+        - Running on battery with the display off (lid closed).
+          GPU contexts are aggressively suspended; long Metal jobs hang.
+
+    Override with ``YTFACTORY_SKIP_POWER_CHECK=1`` if you're sure (e.g.
+    desktop M2 Studio, dev iteration, recovery from a crashed run).
+    """
+    if os.environ.get("YTFACTORY_SKIP_POWER_CHECK") == "1":
+        return
+    if sys.platform != "darwin":
+        return
+    try:
+        out = subprocess.check_output(
+            ["pmset", "-g"], text=True, stderr=subprocess.DEVNULL, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return  # pmset unavailable; don't block
+
+    low_power = bool(re.search(r"lowpowermode\s+1\b", out))
+    on_battery = "Battery Power" in out
+    if low_power:
+        raise SystemExit(
+            "Low Power Mode is ON. Long-form renders hold the Metal command\n"
+            "queue for tens of seconds at a time; under Low Power Mode the\n"
+            "WindowServer watchdog times out and the system logs out or panics.\n"
+            "Disable Low Power Mode (Settings → Battery), or set\n"
+            "YTFACTORY_SKIP_POWER_CHECK=1 to override at your own risk."
+        )
+    if on_battery:
+        # Don't hard-block — running on battery is sometimes intentional.
+        # Just warn and recommend caffeinate -dimsu (display, idle, mouse,
+        # system, user).
+        print(
+            "[preflight] WARNING: running on battery. For long-form renders prefer\n"
+            "            AC power + lid open. If you must run on battery, wrap\n"
+            "            with `caffeinate -dimsu` (NOT just -i) so the display\n"
+            "            stays on — display-off + heavy MLX crashes WindowServer.",
+            file=sys.stderr,
+        )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--channel", required=True)
     ap.add_argument("--slug", required=True)
     ap.add_argument("--tts-only", action="store_true",
                     help="synthesize narration but skip video build (for iterative dev)")
+    ap.add_argument("--render-mode", choices=["archival_footage", "image_panels"], default=None,
+                    help="override config.yaml long_form.render_mode for this run")
+    ap.add_argument("--no-grade", action="store_true",
+                    help="skip the visual_grade filter chain — lets the aspect-match "
+                         "short-circuit stream-copy 1080p sources (avoids the long-clip crash)")
     args = ap.parse_args()
 
+    _preflight_power_check()
     _load_env(REPO_ROOT)
 
     channel_dir = REPO_ROOT / args.channel
@@ -840,19 +1313,35 @@ def main() -> int:
         )
     voice_id = lf["tts_voice"]
     atempo = float(lf.get("tts_post_atempo", 0.85))
+    # Long-form is strictly F5-TTS-MLX. Other tts_provider values are
+    # hard-rejected so the run fails fast instead of silently picking a
+    # stale path.
+    provider = str(lf.get("tts_provider", "f5_tts"))
+    if provider != "f5_tts":
+        raise SystemExit(
+            f"long-form tts_provider={provider!r} is not supported. "
+            "Long-form is strictly F5-TTS-MLX. Set `long_form.tts_provider: f5_tts` "
+            "(or remove the key) and provide tts_voice (ref WAV path) + tts_ref_text."
+        )
+    speed = float(lf.get("tts_speed", 0.80))
+    chunk_target_chars = int(lf.get("tts_chunk_target_chars", 380))
+    join_silence_s = float(lf.get("tts_chunk_join_silence_s", 0.4))
+    ref_audio_text = lf.get("tts_ref_text")
 
     text = script.get("narration") or "\n\n".join(s["text"] for s in script.get("sections", []))
     if not text:
         raise SystemExit("narration JSON has neither 'narration' nor non-empty 'sections'")
 
-    print(f"[1/5] chunked TTS via cartesia voice={voice_id} atempo={atempo}…")
+    print(f"[1/5] chunked TTS via f5_tts voice={voice_id} speed={speed} atempo={atempo}…")
     narration_wav, chunks = synth_long_narration(
         text=text,
         voice_id=voice_id,
         cache_dir=cache_dir,
         atempo=atempo,
-        chunk_target_chars=380,
-        join_silence_s=0.4,
+        chunk_target_chars=chunk_target_chars,
+        join_silence_s=join_silence_s,
+        speed=speed,
+        ref_audio_text=ref_audio_text,
     )
     dur = float(subprocess.check_output([
         "ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -864,25 +1353,120 @@ def main() -> int:
         print("[done] --tts-only set; stopping after narration synth")
         return 0
 
-    # Stage 2 — trim + letterbox + concat
-    shotlist_path = channel_dir / "shotlist" / f"{args.slug}.json"
-    if not shotlist_path.exists():
-        raise SystemExit(
-            f"missing shotlist: {shotlist_path}\n"
-            "Long-form needs a shotlist with `clips: [{source, in_s, out_s}, ...]`."
-        )
-    shotlist = json.loads(shotlist_path.read_text())
-    sources_dir = channel_dir / lf.get("footage_dir", "footage/long_sources")
+    # Stage 2 — video track. Two paths controlled by long_form.render_mode:
+    #   "image_panels" (Path B) — comic-illustrated Z-Image-Turbo panels with
+    #       Ken-Burns + cross-fade. Reads `panels: [{scene, hold_s, seed_offset}]`
+    #       from the narration JSON. Default for new sleep episodes.
+    #   "archival_footage" (Path A) — trim + letterbox + concat of source
+    #       clips listed in shotlist/<slug>.json with the warm-firelight grade.
+    #       Used for episodes that already have a curated shotlist.
     out_w, out_h = lf.get("output_resolution", [1920, 1080])
     fps = int(lf.get("output_fps", 30))
-    print(f"[2/5] trim {len(shotlist['clips'])} clips → {out_w}x{out_h} {fps}fps blurred letterbox…")
-    video_path = build_video_track(
-        shotlist=shotlist,
-        sources_dir=sources_dir,
-        cache_dir=cache_dir,
-        target_duration_s=dur,
-        out_w=out_w, out_h=out_h, fps=fps,
-    )
+    render_mode = (args.render_mode or lf.get("render_mode") or "archival_footage").strip()
+
+    # 2026-05-04: image_panels (z_image_turbo) caused Metal GPU command-buffer
+    # timeouts on the 89-panel run for western-front-1914-1918-sleep. Root
+    # causes (see docs/long_form_model_inventory.md):
+    #   1. F5-TTS-MLX (1.35 GB) stays resident from stage 1 → ~5 GB MLX state
+    #      by the time image gen schedules its compute buffers
+    #   2. Long pure-diffusion timelines fragment unified memory faster than
+    #      Metal's watchdog allows
+    #
+    # Fix at engineering level (not a hard ban — image renders are still
+    # available for limited / hybrid use):
+    #   (a) Cap the panel count. Pure 89-panel runs are out; <= panel_max_count
+    #       (configurable, default 24) is fine. Author shotlists for the rest.
+    #   (b) Free MLX cache + drop the F5 singleton between TTS and image stages
+    #       so image gen starts on a clean Metal heap.
+    PANEL_HARD_CAP = int(lf.get("panel_max_count", 24))
+
+    if render_mode == "image_panels":
+        panels = script.get("panels") or []
+        if not panels:
+            raise SystemExit(
+                f"render_mode=image_panels but narration JSON has no `panels` field.\n"
+                "Author per-panel scene strings (see learnings/long_form_visual_signature.md)\n"
+                "or switch render_mode to 'archival_footage'."
+            )
+        if len(panels) > PANEL_HARD_CAP:
+            raise SystemExit(
+                f"render_mode=image_panels with {len(panels)} panels exceeds "
+                f"PANEL_HARD_CAP={PANEL_HARD_CAP}.\n"
+                "Pure long-form image-panel runs hit Metal command-buffer "
+                "timeouts (see docs/long_form_model_inventory.md). Use "
+                "archival_footage for the bulk of the timeline and reserve "
+                "image gen for chapter cards / hero shots. Raise "
+                "long_form.panel_max_count in config.yaml only if you've "
+                "verified the new ceiling on a test render."
+            )
+        # Free MLX heap before image gen — F5-TTS-MLX is no longer needed.
+        try:
+            import mlx.core as _mx  # type: ignore
+            _mx.metal.clear_cache()
+            from pipeline import audio as _aud
+            _aud._F5_MODEL = None
+            _aud._F5_REF_CACHE.clear()
+            _mx.metal.clear_cache()
+            print("[mem] dropped F5-TTS singleton + cleared Metal cache before image gen")
+        except Exception as e:
+            print(f"[mem] could not clear MLX cache before image gen: {e}")
+        # Auto-pad hold_s if total panel duration < narration duration.
+        total_panel_s = sum(float(p.get("hold_s", 20)) for p in panels)
+        if total_panel_s < dur - 1.0:
+            shortfall = dur - total_panel_s
+            extra_per_panel = shortfall / len(panels)
+            print(f"[2/5] panels total {total_panel_s:.1f}s < narration {dur:.1f}s "
+                  f"— extending each by {extra_per_panel:.1f}s to fill")
+            for p in panels:
+                p["hold_s"] = float(p.get("hold_s", 20)) + extra_per_panel
+        elif total_panel_s > dur + 1.0:
+            # If panels exceed narration, scale them down proportionally so the
+            # final mux's -shortest still trims to narration end.
+            scale = dur / total_panel_s
+            print(f"[2/5] panels total {total_panel_s:.1f}s > narration {dur:.1f}s "
+                  f"— scaling holds by {scale:.3f}")
+            for p in panels:
+                p["hold_s"] = float(p.get("hold_s", 20)) * scale
+        print(f"[2/5] image_panels: {len(panels)} panels → {out_w}x{out_h} {fps}fps "
+              f"with Ken-Burns + cross-fade…")
+        video_path = build_image_panels_video(
+            panels=panels,
+            style_prefix=lf.get("image_style_prefix", "").strip().replace("\n", " "),
+            image_provider=lf.get("image_provider", "z_image_turbo"),
+            image_seed=int(lf.get("image_seed", 1944)),
+            image_steps=int(lf.get("image_steps", 4)),
+            image_width=int(lf.get("image_width", 1344)),
+            image_height=int(lf.get("image_height", 768)),
+            cache_dir=cache_dir,
+            out_w=out_w, out_h=out_h, fps=fps,
+            crossfade_s=float(lf.get("panel_crossfade_s", 1.5)),
+            zoom_factor=float(lf.get("panel_zoom_factor", 1.08)),
+        )
+    else:
+        shotlist_path = channel_dir / "shotlist" / f"{args.slug}.json"
+        if not shotlist_path.exists():
+            raise SystemExit(
+                f"missing shotlist: {shotlist_path}\n"
+                "Long-form needs a shotlist with `clips: [{source, in_s, out_s}, ...]`\n"
+                "(or switch render_mode to 'image_panels')."
+            )
+        shotlist = json.loads(shotlist_path.read_text())
+        sources_dir = channel_dir / lf.get("footage_dir", "footage/long_sources")
+        grade_cfg = lf.get("visual_grade") or {}
+        grade_filter = grade_cfg.get("filter") if grade_cfg.get("enabled") else None
+        if args.no_grade:
+            grade_filter = None
+        grade_label = "warm-firelight grade" if grade_filter else "no grade"
+        print(f"[2/5] archival_footage: trim {len(shotlist['clips'])} clips → "
+              f"{out_w}x{out_h} {fps}fps blurred letterbox + {grade_label}…")
+        video_path = build_video_track(
+            shotlist=shotlist,
+            sources_dir=sources_dir,
+            cache_dir=cache_dir,
+            target_duration_s=dur,
+            out_w=out_w, out_h=out_h, fps=fps,
+            grade_filter=grade_filter,
+        )
     video_dur = _probe_duration(video_path)
     print(f"[2/5] video → {video_path.name} {video_dur:.1f}s")
 
@@ -901,11 +1485,39 @@ def main() -> int:
         print(f"[3/5] {music_default} missing — synthesizing ambient placeholder ({dur:.1f}s)")
         build_music_bed(music_wav, dur)
 
-    # Stage 4 — captions (whisper sentence PNGs + ffmpeg overlay chain)
+    # Stage 4 — captions
+    # Default path: build_caption_pngs_from_chunks uses the AUTHORED narration
+    # text + cached TTS chunk durations as the alignment anchor. Captions show
+    # the canonical case + punctuation + proper nouns from the JSON, never a
+    # whisper transcript of our own audio (which loses case, mangles names like
+    # Bar-le-Duc → "barladuk", and hallucinates phrases during quiet stretches).
+    # Set long_form.caption_align: whisper to fall back to the old whisper path.
     caption_cues: list[tuple[Path, float, float]] | None = None
     if bool(lf.get("captions_enabled", False)):
         cap_dir = cache_dir / "captions"
-        caption_cues = build_caption_pngs(narration_wav, cap_dir)
+        cap_style = lf.get("caption_style") or {}
+        cap_color = tuple(cap_style.get("text_rgba", (255, 217, 61, 255)))
+        cap_italic = bool(cap_style.get("italic", True))
+        align_mode = str(lf.get("caption_align", "authored"))
+        if align_mode == "authored":
+            # Nuke stale whisper-text PNGs so the new authored text actually renders.
+            if cap_dir.exists():
+                for old in cap_dir.glob("cap_*.png"):
+                    old.unlink()
+            caption_cues = build_caption_pngs_from_chunks(
+                narration_text=text,
+                chunk_wavs=chunks,
+                join_silence_s=join_silence_s,
+                out_dir=cap_dir,
+                text_color=cap_color,
+                italic=cap_italic,
+                chunk_target_chars=chunk_target_chars,
+            )
+        else:
+            caption_cues = build_caption_pngs(
+                narration_wav, cap_dir,
+                text_color=cap_color, italic=cap_italic,
+            )
     else:
         print("[cap] captions_enabled=false — skipping subtitle burn")
 
@@ -915,10 +1527,30 @@ def main() -> int:
     out_path = out_dir / f"{args.slug}.mp4"
     nb = float(lf.get("audio_narration_db", -6.0))
     mb = float(lf.get("audio_music_bed_db", -28.0))
+
+    # Channel watermark (top-right, faint white) — render once, cache in branding/.
+    wm_cfg = lf.get("watermark") or {}
+    wm_text = wm_cfg.get("text") or config.get("name", "").upper() or "HISTORY RECAPPED"
+    wm_enabled = bool(wm_cfg.get("enabled", True))
+    watermark_png: Path | None = None
+    if wm_enabled:
+        wm_path = channel_dir / "branding" / "watermark_topright.png"
+        if not wm_path.exists():
+            print(f"[wm ] rendering watermark '{wm_text}' → {wm_path.name}")
+            render_watermark_png(
+                wm_text, wm_path,
+                font_size=int(wm_cfg.get("font_size", 28)),
+                text_color=tuple(wm_cfg.get("text_rgba", (255, 255, 255, 140))),
+            )
+        watermark_png = wm_path
+
     print(f"[4/4] muxing video + (narration {nb:+.0f}dB + music {mb:+.0f}dB) "
-          f"+ {'captions (' + str(len(caption_cues)) + ' cues)' if caption_cues else 'no captions'} → {out_path.name}…")
+          f"+ {'captions (' + str(len(caption_cues)) + ' cues)' if caption_cues else 'no captions'}"
+          f"{' + watermark' if watermark_png else ''} → {out_path.name}…")
     final_mux(video_path, narration_wav, music_wav, out_path,
-              narration_db=nb, music_db=mb, caption_cues=caption_cues)
+              narration_db=nb, music_db=mb, caption_cues=caption_cues,
+              watermark_png=watermark_png,
+              watermark_margin=int(wm_cfg.get("margin", 32)))
     final_dur = _probe_duration(out_path)
     final_size = out_path.stat().st_size // 1024 // 1024
     print(f"[done] {out_path} — {final_dur:.1f}s ({final_dur/60:.1f} min), {final_size} MB")

@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +77,82 @@ def _record_path(project_root: Path, channel_dir: str, slug: str) -> Path:
     ``mystoriesanimated/reddit_amitheasshole/uploads/<slug>.json``.
     """
     return project_root / channel_dir / "uploads" / f"{slug}.json"
+
+
+# ---- per-account publish throttle --------------------------------------
+#
+# YouTube prefers a steady publish cadence over bursty same-hour drops,
+# and a tight cluster of public videos cannibalises each other's first
+# 24h impressions. We enforce a minimum gap (default 1h) between
+# consecutive PUBLIC moments on the same account: if the latest record
+# (uploaded_at, or publish_at if scheduled) is within the gap, the next
+# upload is auto-scheduled to ``latest + gap`` instead of going public
+# immediately. The user can still pass an explicit ``publish_at`` to
+# override.
+
+DEFAULT_PUBLISH_GAP = timedelta(hours=1)
+
+
+def _parse_iso(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _latest_publish_for_account(project_root: Path, account: str) -> datetime | None:
+    """Return the most recent effective-publish time across all upload
+    records on this account, or ``None`` if no priors.
+
+    Effective publish = ``publish_at`` if scheduled, else ``uploaded_at``
+    (immediate publish). Scans every ``<channel>/uploads/**/*.json`` under
+    the project root and filters by the record's ``account`` field — robust
+    to compound channel_dir layouts and to account != folder-name drift.
+    """
+    latest: datetime | None = None
+    for record_path in project_root.glob("*/uploads/**/*.json"):
+        try:
+            rec = json.loads(record_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if rec.get("account") != account:
+            continue
+        eff = _parse_iso(rec.get("publish_at")) or _parse_iso(rec.get("uploaded_at"))
+        if eff is None:
+            continue
+        if latest is None or eff > latest:
+            latest = eff
+    return latest
+
+
+def compute_throttled_publish_at(
+    project_root: Path,
+    account: str,
+    *,
+    gap: timedelta = DEFAULT_PUBLISH_GAP,
+    now: datetime | None = None,
+) -> str | None:
+    """RFC 3339 timestamp for the next free publish slot, or ``None`` if
+    we can publish immediately (no recent uploads within ``gap``).
+
+    Stable under queueing: scheduled publishes also count toward the
+    latest, so issuing N back-to-back uploads spaces them out 1h apart
+    automatically.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    latest = _latest_publish_for_account(project_root, account)
+    if latest is None:
+        return None
+    next_slot = latest + gap
+    if next_slot <= now:
+        return None
+    return next_slot.isoformat().replace("+00:00", "Z")
 
 
 class UploadError(RuntimeError):
@@ -903,6 +979,15 @@ def upload_short(
             # Don't block upload on thumbnail glitches; YouTube will
             # auto-pick a frame in that case.
             print(f"[upload] auto-thumbnail skipped (non-fatal): {e}")
+
+    if not publish_at:
+        throttled = compute_throttled_publish_at(project_root, account)
+        if throttled:
+            print(
+                f"[upload] throttle: {account} published recently — "
+                f"scheduling {slug} for {throttled} (≥1h gap on this channel)"
+            )
+            publish_at = throttled
 
     print(
         f"[upload] {slug} → YouTube (account={account}, "

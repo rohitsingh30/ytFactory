@@ -1,0 +1,26 @@
+{
+  "slug": "mufc-vs-lfc-last5-template",
+  "title": "Manchester United vs Liverpool — last 5 head-to-head moments (TEMPLATE)",
+  "body": "TEMPLATE for the /make-rivalry-recap format (FOOTAGE-ONLY). Five most recent competitive Manchester United vs Liverpool meetings, ordered chronologically (oldest = #5, most recent = #1). Each fixture's defining moment is shown via real broadcast footage covering the full rank duration (~10s). No AI-generated imagery on this format. Replace metadata.fixtures with real fixture rows from research_rivalry.py before authoring the narration; replace footage URLs / in_s / out_s with the chosen broadcast clip windows.",
+  "source": "manual:rivalry_recap_template",
+  "url": "https://en.wikipedia.org/wiki/Liverpool_F.C.%E2%80%93Manchester_United_F.C._rivalry",
+  "metadata": {
+    "kind": "rivalry_recap",
+    "rank_count": 5,
+    "template": true,
+    "visual_mode": "footage_only",
+    "rivalry": {
+      "entity_a": "Manchester United",
+      "entity_b": "Liverpool",
+      "fixture_filter": "competitive (PL + FA Cup + League Cup + Europe), exclude friendlies",
+      "as_of_date": "2026-05-04"
+    },
+    "fixtures": [
+      { "rank": 5, "date": "TODO", "competition": "TODO", "venue": "TODO", "score": "TODO", "moment": "TODO" },
+      { "rank": 4, "date": "TODO", "competition": "TODO", "venue": "TODO", "score": "TODO", "moment": "TODO" },
+      { "rank": 3, "date": "TODO", "competition": "TODO", "venue": "TODO", "score": "TODO", "moment": "TODO" },
+      { "rank": 2, "date": "TODO", "competition": "TODO", "venue": "TODO", "score": "TODO", "moment": "TODO" },
+      { "rank": 1, "date": "TODO", "competition": "TODO", "venue": "TODO", "score": "TODO", "moment": "TODO" }
+    ]
+  }
+}

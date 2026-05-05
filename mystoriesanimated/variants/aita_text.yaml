@@ -1,10 +1,10 @@
 name: AITA Text
 source_adapter: reddit_api
 
-# TTS — Cartesia Sarah (US female), shared across the AITA family for
-# narrator-identity parity. Requires CARTESIA_API_KEY env var.
-tts_provider: cartesia
-tts_voice: 694f9389-aac1-45b6-b726-9d9369183238  # Sarah, US female
+# TTS — F5-TTS-MLX zero-shot voice clone (Sarah ref).
+tts_provider: f5_tts
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 1.05
 
 # Image gen — Z-Image-Turbo 6B via mflux (MLX-native).

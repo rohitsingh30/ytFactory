@@ -2,7 +2,7 @@
 
 Reproducible scripts for the **History Recapped** channel (channel slug `historyrecapped`,
 display name `History Recapped`). This channel ships **100% archival war footage**
-with our Cartesia narrator on top, word-by-word captions, and inline national-flag
+with our narrator on top, word-by-word captions, and inline national-flag
 emojis — *not* the sports format (animations + 1 footage cut at the climax).
 
 The channel's `config.yaml` sets `render_style: footage_only` which routes

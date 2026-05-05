@@ -41,11 +41,15 @@ Shotlist JSON:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -56,21 +60,214 @@ import yaml
 
 from pipeline import audio, beats as beats_mod, align, compose, footage as footage_mod  # noqa: E402
 
-LETTERBOX_FILTER = (
+# Two aspect-specific blurred-letterbox filters. Selection is driven by
+# shotlist["aspect"] in _build_silent_video below — defaults to 9:16
+# (Shorts) when the field is absent, preserving prior behaviour for
+# every existing footage_only Shorts shotlist.
+LETTERBOX_FILTER_9_16 = (
     "[0:v]split=2[bg][fg];"
     "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
     "crop=1080:1920,gblur=sigma=24,eq=brightness=-0.15[bg_blur];"
     "[fg]scale=1080:-2[fg_scaled];"
     "[bg_blur][fg_scaled]overlay=(W-w)/2:(H-h)/2,setsar=1[vout]"
 )
+LETTERBOX_FILTER_16_9 = (
+    "[0:v]split=2[bg][fg];"
+    "[bg]scale=1920:1080:force_original_aspect_ratio=increase,"
+    "crop=1920:1080,gblur=sigma=24,eq=brightness=-0.15[bg_blur];"
+    "[fg]scale=-2:1080[fg_scaled];"
+    "[bg_blur][fg_scaled]overlay=(W-w)/2:(H-h)/2,setsar=1[vout]"
+)
+LETTERBOX_FILTERS = {"9:16": LETTERBOX_FILTER_9_16, "16:9": LETTERBOX_FILTER_16_9}
+# Back-compat alias — older callers / tests imported LETTERBOX_FILTER directly.
+LETTERBOX_FILTER = LETTERBOX_FILTER_9_16
+
+ASPECT_DIMS: dict[str, tuple[int, int]] = {"9:16": (1080, 1920), "16:9": (1920, 1080)}
+
+
+def _ken_burns_filter(aspect: str, duration_s: float, fps: int = 30) -> str:
+    """Composite one still image onto a blurred-letterbox background of the
+    same image. Used for image-only windows (Wikimedia stills / manuscript
+    scans / museum open-access).
+
+    Speed-tuned 2026-05-05: previously used a `zoompan` motion filter
+    which is pathologically slow on looped stills (a single 10s
+    portrait clip took 30+ minutes to encode at full HD on M2 Max).
+    Replaced with a static composite — no on-clip zoom motion, but the
+    cuts between beats provide enough motion for a ~5-15s/beat cadence,
+    and the cosmosdecoded long-form prep pipeline assumed this anyway."""
+    w, h = ASPECT_DIMS[aspect]
+    return (
+        "[0:v]split=2[bg][fg];"
+        f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h},gblur=sigma=24,eq=brightness=-0.15[bg_blur];"
+        f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease[fg_scaled];"
+        "[bg_blur][fg_scaled]overlay=(W-w)/2:(H-h)/2,setsar=1[vout]"
+    )
+
+
+# --- per-window asset resolution (Wikimedia / archive.org / direct media) ---
+
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+_VIDEO_EXTS = (".mp4", ".mov", ".webm", ".mkv", ".m4v")
+
+
+_WIKIMEDIA_FILE_RE = re.compile(r"/wiki/(?:File|Image)(?::|%3A)(.+)$", re.IGNORECASE)
+
+
+def _looks_like_image(url: str) -> bool:
+    p = url.split("?")[0].lower()
+    if p.endswith(_IMAGE_EXTS):
+        return True
+    m = _WIKIMEDIA_FILE_RE.search(url)
+    if m:
+        ext = "." + m.group(1).rsplit(".", 1)[-1].lower()
+        return ext in _IMAGE_EXTS
+    return False
+
+
+def _looks_like_video(url: str) -> bool:
+    return url.split("?")[0].lower().endswith(_VIDEO_EXTS)
+
+
+def _is_youtube(url: str) -> bool:
+    return "youtube.com" in url or "youtu.be" in url
+
+
+def _safe_filename(name: str, fallback_seed: str = "") -> str:
+    name = urllib.parse.unquote(name)
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    if not name or name in ("_", "."):
+        name = hashlib.sha1(fallback_seed.encode()).hexdigest()[:16]
+    return name[:200]
+
+
+def _wikimedia_filename(page_url: str) -> str:
+    m = _WIKIMEDIA_FILE_RE.search(page_url)
+    if not m:
+        raise ValueError(f"not a Wikimedia File: URL: {page_url}")
+    return urllib.parse.unquote(m.group(1))
+
+
+def _resolve_wikimedia_file_url(page_url: str) -> str:
+    fname = _wikimedia_filename(page_url)
+    return f"https://commons.wikimedia.org/wiki/Special:FilePath/{urllib.parse.quote(fname)}"
+
+
+def _resolve_archive_org_details(details_url: str) -> str:
+    """Resolve archive.org/details/<id> → direct download URL of the largest
+    .mp4 derivative via the public metadata API."""
+    m = re.search(r"archive\.org/details/([^/?#]+)", details_url)
+    if not m:
+        raise ValueError(f"not an archive.org details URL: {details_url}")
+    item = m.group(1)
+    meta_url = f"https://archive.org/metadata/{item}"
+    with urllib.request.urlopen(meta_url, timeout=30) as r:
+        meta = json.loads(r.read())
+    files = meta.get("files", [])
+    candidates = [f for f in files if f.get("name", "").lower().endswith(".mp4")]
+    if not candidates:
+        raise RuntimeError(
+            f"archive.org item '{item}' has no .mp4 derivative; pick a "
+            f"different item or use a direct archive.org/download/<id>/<file> URL."
+        )
+    candidates.sort(key=lambda f: int(f.get("size", 0) or 0), reverse=True)
+    return f"https://archive.org/download/{item}/{urllib.parse.quote(candidates[0]['name'])}"
+
+
+def _urlretrieve(url: str, dest: Path) -> None:
+    """urllib download with a UA header (Wikimedia rejects default UA)."""
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "ytFactory-render/1.0 (+https://github.com/anthropics/claude-code)"}
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp, dest.open("wb") as out:
+        while True:
+            chunk = resp.read(64 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+
+
+def _resolve_asset(url: str, cache_dir: Path) -> tuple[Path, str]:
+    """Download `url` into cache_dir. Returns (path, kind ∈ {"image","video"}).
+
+    Supported sources (no auth required):
+      - YouTube                                → existing yt-dlp path
+      - Wikimedia Commons File:/Image: pages   → Special:FilePath redirect
+      - archive.org/details/<id>               → metadata API → largest mp4
+      - archive.org/download/<id>/<file>       → direct
+      - Direct media URL (.mp4/.jpg/.png/...)  → direct
+
+    Pexels / Unsplash / Shutterstock page URLs are NOT resolvable here —
+    swap to a direct asset URL in the shotlist before rendering.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    if _is_youtube(url):
+        return footage_mod._download_source(url, cache_dir), "video"
+
+    if "wikimedia.org/wiki/" in url and _WIKIMEDIA_FILE_RE.search(url):
+        fname = _safe_filename(_wikimedia_filename(url), fallback_seed=url)
+        dest = cache_dir / fname
+        if dest.exists() and dest.stat().st_size > 1024:
+            return dest, "image"
+        resolved = _resolve_wikimedia_file_url(url)
+        print(f"[footage] wikimedia → {fname}")
+        _urlretrieve(resolved, dest)
+        return dest, "image"
+
+    if re.search(r"archive\.org/details/", url):
+        resolved = _resolve_archive_org_details(url)
+        fname = _safe_filename(Path(urllib.parse.urlparse(resolved).path).name, fallback_seed=url)
+        dest = cache_dir / fname
+        if dest.exists() and dest.stat().st_size > 1024:
+            return dest, "video"
+        print(f"[footage] archive.org → {fname}")
+        _urlretrieve(resolved, dest)
+        return dest, "video"
+
+    if re.search(r"archive\.org/download/", url):
+        fname = _safe_filename(Path(urllib.parse.urlparse(url).path).name, fallback_seed=url)
+        dest = cache_dir / fname
+        kind = "image" if _looks_like_image(url) else "video"
+        if dest.exists() and dest.stat().st_size > 1024:
+            return dest, kind
+        print(f"[footage] archive.org direct → {fname}")
+        _urlretrieve(url, dest)
+        return dest, kind
+
+    if _looks_like_image(url) or _looks_like_video(url):
+        fname = _safe_filename(Path(urllib.parse.urlparse(url).path).name, fallback_seed=url)
+        dest = cache_dir / fname
+        kind = "image" if _looks_like_image(url) else "video"
+        if dest.exists() and dest.stat().st_size > 1024:
+            return dest, kind
+        print(f"[footage] direct → {fname}")
+        _urlretrieve(url, dest)
+        return dest, kind
+
+    raise RuntimeError(
+        f"Unsupported source URL: {url!r}\n"
+        f"Supported: YouTube, Wikimedia Commons File: pages, archive.org "
+        f"details/ pages, archive.org/download/ direct URLs, direct "
+        f".mp4/.jpg/.png/.webp/.webm URLs.\n"
+        f"Pexels / Unsplash / etc. page URLs must be swapped to direct "
+        f"asset URLs in the shotlist."
+    )
 
 
 # --- regen audio + beats + word PNGs (call once per slug) ----------------
 
-def _regen_audio_caps(channel: str, slug: str, cfg: dict) -> tuple[Path, Path, list]:
-    """Synthesize TTS, run whisper, write word PNGs. Returns (narration_path,
-    beats_path, beat_list). Re-runs if any of the three outputs is missing.
-    """
+def _regen_audio_caps(
+    channel: str, slug: str, cfg: dict, *, caption_mode: str = "shorts",
+) -> tuple[Path, Path | None, list]:
+    """Synthesize TTS, optionally run whisper + word PNGs. Returns
+    (narration_path, beats_path_or_None, beat_list).
+
+    When ``caption_mode == "none"`` (long-form kathaa default) the Whisper
+    + per-word PNG passes are skipped entirely — saves ~15 min on a
+    70-min Hindi narration where Whisper undercounts dense Devanagari
+    anyway (channel learning whisper_hindi_undercount.md)."""
     cache = REPO_ROOT / channel / "cache" / slug
     cache.mkdir(parents=True, exist_ok=True)
     narr_path = cache / "narration.wav"
@@ -105,6 +302,11 @@ def _regen_audio_caps(channel: str, slug: str, cfg: dict) -> tuple[Path, Path, l
     else:
         print(f"[1/5] TTS cached: {narr_path.name}")
 
+    if caption_mode == "none":
+        print(f"[2/5] caption_mode=none → skip whisper + beat split")
+        print(f"[3/5] caption_mode=none → skip word PNG prerender")
+        return narr_path, None, []
+
     # 2. ASR + beats (skip if cached)
     if not beats_path.exists():
         print(f"[2/5] whisper_mlx + beat split…")
@@ -136,27 +338,132 @@ def _build_silent_video(channel: str, slug: str, shotlist: dict, scratch: Path) 
     filter, concat into one silent mp4. Returns its path."""
     scratch.mkdir(parents=True, exist_ok=True)
 
-    src_url = shotlist["source_url"]
+    aspect = shotlist.get("aspect", "9:16")
+    if aspect not in LETTERBOX_FILTERS:
+        raise ValueError(f"unsupported aspect {aspect!r}; expected one of {list(LETTERBOX_FILTERS)}")
+    letterbox = LETTERBOX_FILTERS[aspect]
+
+    # Asset resolution: top-level source_url is the legacy Shorts pattern
+    # (one source video for every window). Per-window source_url is the
+    # long-form kathaa pattern (each window from a distinct asset, possibly
+    # mixing image stills + video clips). Both shapes are honoured here.
     cache_dir = REPO_ROOT / channel / "footage" / "sources"
-    src_path = footage_mod._download_source(src_url, cache_dir)
+    default_src_path: Path | None = None
+    default_src_kind: str | None = None
+    legacy_src_url = shotlist.get("source_url")
+    if legacy_src_url:
+        default_src_path, default_src_kind = _resolve_asset(legacy_src_url, cache_dir)
+
+    # Pre-resolve every per-window source up front so we fail fast on bad
+    # URLs (rather than mid-trim after some windows already succeed).
+    resolved: dict[int, tuple[Path, str]] = {}
+    for i, w in enumerate(shotlist["windows"]):
+        win_src = w.get("source_url")
+        if not win_src:
+            continue
+        try:
+            resolved[i] = _resolve_asset(win_src, cache_dir)
+        except Exception as exc:
+            raise RuntimeError(
+                f"window {i} ({(w.get('match_text') or '')[:50]!r}): "
+                f"failed to resolve {win_src!r}: {exc}"
+            ) from exc
 
     clip_paths: list[Path] = []
+    pending_jobs: list = []
+    n_windows = len(shotlist["windows"])
     for i, w in enumerate(shotlist["windows"]):
         in_s = float(w["in_s"])
         out_s = float(w["out_s"])
+        if i in resolved:
+            asset_path, asset_kind = resolved[i]
+        elif default_src_path is not None:
+            asset_path, asset_kind = default_src_path, default_src_kind  # type: ignore[assignment]
+        else:
+            raise ValueError(
+                f"window {i}: no source_url at window level and no top-level "
+                f"shotlist['source_url'] to fall back on"
+            )
+
         clip_path = scratch / f"clip_{i:02d}.mp4"
-        cmd = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-ss", f"{in_s:.3f}", "-t", f"{out_s - in_s:.3f}",
-            "-i", str(src_path),
-            "-filter_complex", LETTERBOX_FILTER,
-            "-map", "[vout]", "-an",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30",
-            str(clip_path),
-        ]
-        print(f"[footage] trim {i}: {in_s:.1f}-{out_s:.1f}s → {clip_path.name}")
-        subprocess.run(cmd, check=True)
         clip_paths.append(clip_path)
+        if clip_path.exists() and clip_path.stat().st_size > 1024:
+            continue
+
+        if asset_kind == "image":
+            duration = max(0.05, out_s - in_s)
+            kb_filter = _ken_burns_filter(aspect, duration)
+
+            def _job(asset=asset_path, dur=duration, clip=clip_path, idx=i, filt=kb_filter):
+                cmd = [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-loop", "1", "-framerate", "30", "-t", f"{dur:.3f}",
+                    "-i", str(asset),
+                    "-filter_complex", filt,
+                    "-map", "[vout]", "-an",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+                    "-crf", "23", "-pix_fmt", "yuv420p", "-r", "30",
+                    str(clip),
+                ]
+                print(f"[footage] image {idx}/{n_windows-1}: {dur:.1f}s ken-burns → {clip.name}")
+                subprocess.run(cmd, check=True)
+
+            pending_jobs.append(_job)
+        else:
+            # Aspect short-circuit: when src aspect matches output aspect (within
+            # 1% tolerance), skip the blurred-letterbox gblur+overlay chain and
+            # use a plain scale. The heavy filter on aspect-matched 1080p sources
+            # OOMs the parallel-4 ffmpeg fanout (SIGKILL-9 on M2 Max with 4
+            # concurrent libx264 + gblur sigma=24). Mirrors the
+            # long_form_trim_aspect_short_circuit.md learning.
+            target_w, target_h = (1920, 1080) if aspect == "16:9" else (1080, 1920)
+            target_ratio = target_w / target_h
+            try:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                     "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                     str(asset_path)],
+                    capture_output=True, text=True, check=True,
+                )
+                sw, sh = (int(x) for x in probe.stdout.strip().split(","))
+                src_ratio = sw / sh
+                aspect_match = abs(src_ratio - target_ratio) / target_ratio < 0.01
+            except Exception:
+                aspect_match = False
+
+            if aspect_match:
+                vf = f"scale={target_w}:{target_h}:flags=lanczos,setsar=1"
+                def _job(asset=asset_path, in_=in_s, out=out_s, clip=clip_path, idx=i, vf=vf):
+                    cmd = [
+                        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                        "-ss", f"{in_:.3f}", "-t", f"{out - in_:.3f}",
+                        "-i", str(asset),
+                        "-vf", vf, "-an",
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                        "-pix_fmt", "yuv420p", "-r", "30",
+                        str(clip),
+                    ]
+                    print(f"[footage] trim {idx}/{n_windows-1}: {in_:.1f}-{out:.1f}s (passthrough) → {clip.name}")
+                    subprocess.run(cmd, check=True)
+            else:
+                def _job(asset=asset_path, in_=in_s, out=out_s, clip=clip_path, idx=i):
+                    cmd = [
+                        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                        "-ss", f"{in_:.3f}", "-t", f"{out - in_:.3f}",
+                        "-i", str(asset),
+                        "-filter_complex", letterbox,
+                        "-map", "[vout]", "-an",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30",
+                        str(clip),
+                    ]
+                    print(f"[footage] trim {idx}/{n_windows-1}: {in_:.1f}-{out:.1f}s (letterbox) → {clip.name}")
+                    subprocess.run(cmd, check=True)
+
+            pending_jobs.append(_job)
+
+    if pending_jobs:
+        from pipeline.parallel import run_parallel
+        run_parallel(pending_jobs, label="footage-trim")
 
     concat_list = scratch / "concat.txt"
     concat_list.write_text("\n".join(f"file '{p.name}'" for p in clip_paths) + "\n")
@@ -166,6 +473,7 @@ def _build_silent_video(channel: str, slug: str, shotlist: dict, scratch: Path) 
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-f", "concat", "-safe", "0", "-i", str(concat_list),
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", "-an",
+        "-fflags", "+genpts",
         "-movflags", "+faststart",
         str(silent),
     ]
@@ -344,9 +652,40 @@ def _burn_video(
     print(f"[done] {out_path}")
 
 
+def _mux_audio_no_captions(silent: Path, narration_path: Path, out_path: Path) -> None:
+    """Long-form / kathaa path: tpad the silent concat to narration length
+    and mux audio. No caption overlays, no emoji compositing — saves the
+    word-PNG + per-word ffmpeg overlay pass entirely (the most expensive
+    step on dense Hindi narration)."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _dur(p: Path) -> float:
+        r = subprocess.check_output([
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(p),
+        ]).strip()
+        return float(r)
+
+    silent_dur = _dur(silent)
+    narr_dur = _dur(narration_path)
+    pad = max(0.0, narr_dur - silent_dur)
+    print(f"[mux] silent={silent_dur:.2f}s narration={narr_dur:.2f}s pad={pad:.2f}s (no captions)")
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(silent), "-i", str(narration_path),
+        "-filter_complex", f"[0:v]tpad=stop_mode=clone:stop_duration={pad:.3f}[vout]",
+        "-map", "[vout]", "-map", "1:a",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest", "-movflags", "+faststart",
+        str(out_path),
+    ], check=True)
+    print(f"[done] {out_path}")
+
+
 # --- main entry ----------------------------------------------------------
 
-def render(channel: str, slug: str, *, do_upload: bool = False) -> Path:
+def render(channel: str, slug: str, *, do_upload: bool = False, aspect_override: str | None = None) -> Path:
     chan_dir = REPO_ROOT / channel
     cfg = yaml.safe_load((chan_dir / "config.yaml").read_text())
     shotlist_path = chan_dir / "shotlist" / f"{slug}.json"
@@ -356,15 +695,42 @@ def render(channel: str, slug: str, *, do_upload: bool = False) -> Path:
             f"{shotlist_path.relative_to(REPO_ROOT)} with source_url + windows."
         )
     shotlist = json.loads(shotlist_path.read_text())
+    if aspect_override:
+        shotlist["aspect"] = aspect_override
+
+    aspect = shotlist.get("aspect") or (cfg.get("kathaa") or {}).get("aspect") or "9:16"
+    if aspect not in ASPECT_DIMS:
+        raise ValueError(f"unsupported aspect {aspect!r}; must be 9:16 or 16:9")
+
+    # caption_mode resolution: shotlist > kathaa block > shorts default.
+    # 2026-05-05: post-mortem of top10-alien-abductions-202605 flipped
+    # the 16:9 default from "none" → "shorts". Kathaa renders still opt
+    # out by setting `cfg.kathaa.caption_mode = "none"` (their channel
+    # config has the kathaa block; everything else doesn't). For
+    # /make-top10 list-format long-form, captions are mandatory — see
+    # .claude/skills/make-top10/learnings/wallpaper_mode_ban.md.
+    caption_mode = (
+        shotlist.get("caption_mode")
+        or (cfg.get("kathaa") or {}).get("caption_mode")
+        or "shorts"
+    )
 
     cache = chan_dir / "cache" / slug
     scratch = chan_dir / "scratch" / slug
 
-    narration_path, _, beat_list = _regen_audio_caps(channel, slug, cfg)
+    print(f"[cfg] aspect={aspect} caption_mode={caption_mode} channel={channel} slug={slug}")
+
+    narration_path, _, beat_list = _regen_audio_caps(channel, slug, cfg, caption_mode=caption_mode)
     silent = _build_silent_video(channel, slug, shotlist, scratch)
-    words_dir = _composited_word_pngs(cache, beat_list, channel, slug)
-    out = chan_dir / "shorts" / f"{slug}.mp4"
-    _burn_video(silent, narration_path, words_dir, beat_list, _scene_cuts(shotlist), out)
+
+    out_dir = chan_dir / ("long_form" if aspect == "16:9" else "shorts")
+    out = out_dir / f"{slug}.mp4"
+
+    if caption_mode == "none":
+        _mux_audio_no_captions(silent, narration_path, out)
+    else:
+        words_dir = _composited_word_pngs(cache, beat_list, channel, slug)
+        _burn_video(silent, narration_path, words_dir, beat_list, _scene_cuts(shotlist), out)
 
     if do_upload:
         from pipeline import upload as up_mod
@@ -396,10 +762,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--channel", required=True, help="Channel slug (e.g. historyrecapped)")
     ap.add_argument("--slug", required=True, help="Story slug (e.g. pointe-du-hoc-1944)")
+    ap.add_argument("--aspect", default=None, help="Override shotlist aspect (e.g. 16:9)")
     ap.add_argument("--upload", action="store_true", help="Upload to YouTube on success")
     args = ap.parse_args()
 
-    # Source .env for CARTESIA_API_KEY etc.
+    # Source .env for any provider env vars (HF tokens, etc.).
     env_path = REPO_ROOT / ".env"
     if env_path.exists():
         for line in env_path.read_text().splitlines():
@@ -409,7 +776,7 @@ def main() -> None:
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip())
 
-    render(args.channel, args.slug, do_upload=args.upload)
+    render(args.channel, args.slug, do_upload=args.upload, aspect_override=args.aspect)
 
 
 if __name__ == "__main__":

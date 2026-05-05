@@ -27,10 +27,12 @@
 name: SportsStoriesAnimatedRanked
 source_adapter: sports_moments_manual
 
-# TTS — same Cartesia Theo narrator as the parent sports channel.
-# Migrated 2026-05-03 from kokoro/am_michael.
-tts_provider: cartesia
-tts_voice: 79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e  # Theo, US male narrator
+# TTS — F5-TTS-MLX zero-shot voice clone (Sarah ref).
+# theo.wav was lost in the 2026-05-04 recovery wipe — using sarah.wav
+# until a male reference is re-recorded.
+tts_provider: f5_tts
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 0.98
 
 # Visuals — same minimalist Tifo aesthetic. Different seed so the channel
@@ -116,6 +118,14 @@ closer_format: "LIKE if you agree, COMMENT who you'd swap in"
 # pipeline/compose rank-chip overlay slot (FOLLOW-UP — see
 # tasks/notes elsewhere, not yet implemented).
 ranked_chips: true
+
+# Opt out of strict AITA-class hook/CTA gating in pipeline/script_check.
+# Sports countdowns (and rivalry recaps in particular) end on a "LIKE if
+# you were there / COMMENT next rivalry" beat, not an "Am I wrong?"
+# question — script_check_strict: false downgrades the missing_cta and
+# weak_hook errors to warnings so render proceeds. Same escape hatch
+# rhymetimejunction uses for sung kid-rhymes.
+script_check_strict: false
 
 # Upload — separate YouTube account/auth from the parent sports channel
 # so analytics on the ranked format stay clean. Auto-upload off until

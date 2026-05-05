@@ -14,7 +14,7 @@ History Recapped publishes BOTH 50-60s Shorts AND 60-120 min long-form sleep vid
   - `config.yaml` has both top-level Shorts settings AND a `long_form:` block (Kokoro voice, ask cadence, 16:9 output)
   - `narrations/<slug>.json` — same dir for both modes; long-form slugs end in `-sleep` (e.g. `pacific-war-1941-1942-sleep.json`)
   - `shotlist/<slug>.json` — same dir, long-form shotlists are `clips: [{source, in_s, out_s}]` and reference `footage/long_sources/*.mp4`
-  - `cache/<slug>/tts_chunks/` — long-form caches pile up here (resumable, see `feedback_cartesia_402_resumable.md`)
+  - `cache/<slug>/tts_chunks/` — long-form caches pile up here (resumable; the chunk-level cache in `synth_long_narration` lets a re-run pick up where a previous run failed)
   - `footage/long_sources/` — HD source MP4s (DroneScapes-class compilations + archive.org PD)
   - `music/` — royalty-free ambient beds (currently the renderer falls back to a synthetic ambient drone if no `<music_bed_default>.wav` exists in this dir)
   - `shorts/<slug>.mp4` — final outputs land here regardless of mode (dir name is misleading; it's the output dir for both Shorts AND long-form)
@@ -23,16 +23,22 @@ History Recapped publishes BOTH 50-60s Shorts AND 60-120 min long-form sleep vid
 - **Format vs Shorts.**
   - 60-120 min (vs 50-60s)
   - 1920×1080 horizontal (vs 1080×1920 Shorts)
-  - Soft narrator (vs Cartesia/Theo punchy doc cadence)
+  - Soft narrator (vs Kokoro am_michael's punchy Shorts cadence)
   - NO captions (eyes closed)
   - Continuous LONG footage windows 30-50 min each (vs 5-7s Shorts cuts) — jarring cuts wake the viewer
   - Ambient music bed at -28 dB under narration (Shorts has none)
   - Periodic support asks every ~18 min, **inline narration only — no animated screens, no video cut, no music dip** (Shorts uses end-only closer panel)
   - Long-form YouTube upload category 27 (Education), NOT a Short
 
-- **Voice (locked 2026-05-04).** Kokoro local TTS, voice `af_nicole` at speed 1.0 (continuous; no atempo post-pass). Yields ~105 wpm — the right sleep-narration zone. Free, unlimited, runs on M2 Max at ~0.4× realtime per chunk. Cartesia/Sarah is a fallback for when paid credits are restored — see the commented-out block in `historyrecapped/config.yaml` `long_form:`. The 3-way A/B (British Lady / Sarah / Sneha at +atempo 0.85) is cached at `historyrecapped/cache/_voice_samples/` as historical reference.
+- **Voice (locked 2026-05-04).** F5-TTS-MLX zero-shot voice clone of Sarah from `pipeline/voice_refs/sarah.wav` at speed 0.95 + ffmpeg atempo 0.7 → ~105 wpm sleep cadence. Free local synth, ~25-35s/chunk on M2 Max with the singleton fix in `pipeline/audio.py` (see `/docs/f5_tts_mlx_singleton.md` — naively calling `f5_tts_mlx.generate.generate()` reloads the 1.35GB checkpoint per chunk and balloons render time to ~9 hr). Kokoro local TTS (`bf_isabella` / speed 1.0 / atempo 0.6) is the zero-API fallback.
 
-- **Periodic support asks.** See `long_form_support_asks.md`. Inline narration sentences, NOT animated screens. Cadence ~18 min. Vary wording slightly so the line doesn't read as a loop. Final ask doubles as the closer; no separate "thanks for watching" outro.
+- **Support asks (REVISED 2026-05-04 against Sleepy Time History reference).** See `long_form_support_asks.md`. **Two asks per video, not five** — one soft ask at ~3-4 min, one closer. Inline narration only, no animated screens. Earlier ~18 min cadence is RETIRED. Final ask doubles as the closer; no separate "thanks for watching" outro.
+
+- **Hook structure (NEW 2026-05-04).** First 90 seconds must follow the 6-beat novelistic template in `long_form_hook_template.md` — sensory immersion before any topic anchor, second-person identification, central question, myth-bust setup. No "Welcome back to History Recapped" openers.
+
+- **Prose style (NEW 2026-05-04).** Second-person novelistic register throughout — see `long_form_prose_style.md`. Each chapter opens with one mythbust ("Here's what nobody tells you..."). Sensory-led sentences, varied length distribution, anchor-phrase repetition. Third-person documentary voice is a kill-on-sight anti-pattern.
+
+- **Visual signature (NEW 2026-05-04).** Warm-firelight + cool-dawn palette — every frame should have a small warm-yellow light source. See `long_form_visual_signature.md`: Path A (warm color grade on archival footage, immediate, applies to all current renders via `visual_grade:` config block) and Path B (painterly illustrated stills via Z-Image-Turbo, replaces footage entirely on selected episodes).
 
 - **Source strategy.** See `long_form_sources.md`. The realistic HD-2hr-free path is DroneScapes-class YouTube re-uploaders (1080p restored) with private upload + ContentID dispute fallback. archive.org PD caps at 480p which the user rejected as "not HD." Paid stock (Pond5, Storyblocks) is the only zero-risk HD path.
 

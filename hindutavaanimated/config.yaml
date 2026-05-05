@@ -38,16 +38,11 @@ source_adapter: manual
 # Hindi TTS lib. Indic Parler code stays in pipeline/audio.py for
 # anyone willing to set up a separate venv.
 #
-# Cartesia fallback (paid, ship-quality): re-enable by replacing these
-# lines with:
-#   tts_provider: cartesia
-#   tts_voice: 6b02ffe5-e3cb-48c0-a023-c72f85953375  # Sneha
-#   tts_language: hi
-#   tts_speed: 0.85
-#
 # Kokoro Devanagari handling: pipeline/audio._HINDI_TATSAMA_RESPELLINGS
 # table re-spells common conjuncts before TTS. Per-name overrides go
-# in the per-story dossier's pronunciation_dict.
+# in the per-story dossier's pronunciation_dict. Kokoro hf_alpha is
+# the only Hindi-capable provider in the repo (F5-TTS-MLX is English-
+# only at the configured model).
 tts_provider: kokoro
 tts_voice: hf_alpha   # Hindi female (Kokoro's only female Hindi voice)
 tts_language: hi
@@ -100,6 +95,38 @@ output_resolution: [1080, 1920]
 # and the closer panel is a simple namaste + subscribe overlay.
 closer_format: "जय श्री कृष्णा 🙏  SUBSCRIBE"
 closer_hold_s: 1.5
+
+# ---- Long-form kathaa mode (NEW 2026-05-05) ---------------------------
+# Companion format to the Shorts. Authored via /make-katha; rendered
+# via scripts/historyrecapped/render_footage_only.py --aspect 16:9.
+# Same Kokoro hf_alpha voice; 16:9 horizontal; no captions by default;
+# 6-10 chapters per video; 2 embedded asks.
+kathaa:
+  aspect: "16:9"
+  output_resolution: [1920, 1080]
+  duration_band: [50, 70]      # minutes
+  caption_mode: none           # 'none' | 'devanagari'
+  tts_speed: 1.0
+  music_bed_db: -28            # ambient bed under narration
+  closer_hold_s: 1.5
+  upload_category_id: "22"     # People & Blogs (move to 27 Education if pivoting)
+  description_template: |
+    {script.metadata.invocation}
+
+    🕉️ कथा: {script.metadata.episode}
+    📿 अध्याय / कांड: {script.metadata.section}
+
+    {chapter_timestamps_block}
+
+    📖 स्रोत:
+    {sources_block}
+
+    ━━━━━━━━━━━━━━━━━━━━
+    🙏 {script.blessing_close}
+    🔔 SUBSCRIBE for more such kathaa
+    ━━━━━━━━━━━━━━━━━━━━
+
+    #hindukatha #bhagavadgita #ramayan #mahabharat #hindumythology #devotional #spiritualhindi #meditation
 
 # ---- Upload (Stage 8) — NOT WIRED YET ---------------------------------
 # Channel doesn't exist on YouTube yet. To enable:

@@ -1,10 +1,12 @@
 name: Wiki Oddities
 source_adapter: wikipedia
 
-# TTS — Cartesia Sonic-2 + "Theo" (warm-curious male narrator suits
-# oddities). Requires CARTESIA_API_KEY env var at render time.
-tts_provider: cartesia
-tts_voice: 79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e  # Theo, US male narrator
+# TTS — F5-TTS-MLX zero-shot voice clone.
+# Note: theo.wav was lost in the 2026-05-04 recovery wipe — using
+# sarah.wav (female) until a male reference is re-recorded.
+tts_provider: f5_tts
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 1.0
 
 # Image gen — Z-Image-Turbo 6B via mflux (MLX-native).

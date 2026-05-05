@@ -1,11 +1,11 @@
 ---
 name: Whisper-mlx-4bit undercounts dense Hindi narration ~50%
-description: Cartesia renders the full Hindi script but Whisper-mlx-4bit transcribes only half the words and hallucinates 20+ second word durations on the missing range. Symptom — caption "stuck on हो़ी" for 21 seconds.
+description: TTS renders the full Hindi script but Whisper-mlx-4bit transcribes only half the words and hallucinates 20+ second word durations on the missing range. Symptom — caption "stuck on हो़ी" for 21 seconds.
 type: feedback
 ---
 
 ## Symptom (hanuman-sanjivani-parvat v3, 2026-05-03)
-44-second Cartesia Sneha narration of a 130-word Hindi script came back from
+44-second Hindi narration of a 130-word script came back from
 `pipeline.beats.transcribe_words(provider='whisper_mlx')` as **65 words**.
 The last transcribed word before the unmapped section was assigned a
 21.5-second duration:
@@ -23,7 +23,7 @@ spoke the entire CTA ("Like करें, Comment में लिखें, Sub
 ## Root cause
 Whisper-mlx-4bit's quantisation hurts Hindi recall. ffmpeg silencedetect
 shows MANY natural pauses scattered through 21-41s but no contiguous silence
-> 1s — Cartesia is speaking continuously, Whisper just stops transcribing
+> 1s — TTS is speaking continuously, Whisper just stops transcribing
 mid-narration and absorbs the missing audio into the previous word's
 duration.
 

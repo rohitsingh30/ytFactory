@@ -1,0 +1,12 @@
+{
+  "slug": "20260503-openai-s-o1-correctly-diagnosed-67-of-er-patients-v",
+  "hook": "OpenAI's o1 just out-diagnosed ER doctors in a Harvard triage trial.",
+  "narration": "OpenAI's o1 just out-diagnosed ER doctors in a Harvard triage trial. In the study, o1 correctly diagnosed 67% of emergency room patients. Human triage doctors landed between 50 and 55% on the same charts, same vitals, same intake notes. The base model wasn't even fine-tuned for medicine. Triage is the highest-stakes 90 seconds in medicine — a wrong call sends a stroke patient to the waiting room for hours. A 12-point accuracy gap means hospitals will pilot models like o1 as a second reader, not a replacement. EHR vendors are racing to wire it in. Malpractice insurers will price the gap in either way. Residents training today will graduate into a workflow where the model reads the chart first, and the human signs off. Expect the FDA, not OpenAI, to set the pace from here. FOLLOW for daily AI recaps. LIKE if this saved you a tab.",
+  "title_options": [
+    "OpenAI's o1 beat ER doctors 67% to 55% on triage",
+    "Why hospitals will deploy o1 as a second reader",
+    "The day the model read the chart first"
+  ],
+  "source_url": "https://www.theguardian.com/technology/2026/apr/30/ai-outperforms-doctors-in-harvard-trial-of-emergency-triage-diagnoses",
+  "source": "hackernews:topstories"
+}

@@ -1,0 +1,13 @@
+{
+  "slug": "20260503-openai-s-o1-correctly-diagnosed-67-of-er-patients-v",
+  "title": "OpenAI's o1 correctly diagnosed 67% of ER patients vs. 50-55% by triage doctors",
+  "body": "OpenAI's o1 correctly diagnosed 67% of ER patients vs. 50-55% by triage doctors\n\nAI outperforms doctors in Harvard trial of emergency triage diagnoses | The Guardian. Harvard study compared OpenAI's o1 reasoning model to human triage doctors on the same charts, vitals, and intake notes. o1 correctly diagnosed 67% of ER patients; human doctors landed between 50% and 55%. The base model wasn't fine-tuned for medicine.\n\nHN discussion: https://news.ycombinator.com/item?id=47991981 (score=123)",
+  "source": "hackernews:topstories",
+  "url": "https://www.theguardian.com/technology/2026/apr/30/ai-outperforms-doctors-in-harvard-trial-of-emergency-triage-diagnoses",
+  "metadata": {
+    "hn_id": 47991981,
+    "hn_score": 123,
+    "host": "www.theguardian.com",
+    "fetched_at": "2026-05-03T20:32:20+00:00"
+  }
+}

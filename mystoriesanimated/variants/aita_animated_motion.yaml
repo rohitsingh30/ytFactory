@@ -6,13 +6,10 @@ source_adapter: reddit_video
 # the parakeet-mlx package isn't installed yet.
 asr_provider: parakeet_mlx
 
-# TTS — Cartesia Sarah (US female), shared across the AITA family.
-# Switch to f5_tts (with tts_voice = path to a 5–15s reference WAV and
-# tts_ref_text = its transcript) for cloned voices, or back to
-# kokoro/af_bella as a zero-API-cost fallback if the Cartesia tier caps
-# out. Requires CARTESIA_API_KEY env var at render time.
-tts_provider: cartesia
-tts_voice: 694f9389-aac1-45b6-b726-9d9369183238  # Sarah, US female
+# TTS — F5-TTS-MLX zero-shot voice clone (Sarah ref).
+tts_provider: f5_tts
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 1.05
 
 # Visuals — animation path. Each beat becomes an AnimateLCM clip
