@@ -21,11 +21,20 @@ replicating the body of upstream generate() (lines 144-195) minus the load.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 
 
 _F5_MODEL = None  # F5TTS singleton — survives across synth calls
-_F5_REF_CACHE: dict[str, tuple] = {}  # (audio mx.array, ref_audio_duration) keyed by ref_audio_path
+
+# Cache of (audio mx.array, ref_audio_duration) keyed by ref_audio_path.
+# OrderedDict so we can evict LRU when the cache fills up — multi-voice
+# runs (e.g. cosmosdecoded short + historyrecapped sleep in one process,
+# or per-story cloned voices) used to grow this dict unbounded, with each
+# ref WAV pinning ~0.5 MB of mx.array. Capped at _F5_REF_CACHE_MAX so a
+# day-long batch run stays predictable.
+_F5_REF_CACHE: OrderedDict[str, tuple] = OrderedDict()
+_F5_REF_CACHE_MAX = 4  # 4 distinct ref voices kept warm; ~2 MB total max
 
 
 def reset_state() -> None:
@@ -66,8 +75,16 @@ def _f5_get_model(quantization_bits: int | None = None):
 
 
 def _f5_get_ref(ref_audio_path: str):
-    """Load ref audio once per path, RMS-normalize, cache as mx.array."""
+    """Load ref audio once per path, RMS-normalize, cache as mx.array.
+
+    LRU-bounded by ``_F5_REF_CACHE_MAX``: hits move to MRU, misses load
+    + insert at MRU and evict LRU if the cache is over capacity. Single
+    ref voice (the steady-state for one render) → cache stays size 1
+    forever, no churn.
+    """
     if ref_audio_path in _F5_REF_CACHE:
+        # LRU bookkeeping: refresh recency on hit.
+        _F5_REF_CACHE.move_to_end(ref_audio_path)
         return _F5_REF_CACHE[ref_audio_path]
     import mlx.core as mx  # type: ignore
     import soundfile as sf  # type: ignore
@@ -83,6 +100,10 @@ def _f5_get_ref(ref_audio_path: str):
         audio = audio * target_rms / rms
     duration_s = audio.shape[0] / 24_000
     _F5_REF_CACHE[ref_audio_path] = (audio, duration_s)
+    # Evict LRU until we're back at the cap. Keeps multi-voice batch
+    # runs from drifting into unified-memory pressure.
+    while len(_F5_REF_CACHE) > _F5_REF_CACHE_MAX:
+        _F5_REF_CACHE.popitem(last=False)
     return _F5_REF_CACHE[ref_audio_path]
 
 

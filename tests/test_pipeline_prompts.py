@@ -21,11 +21,27 @@ from tests._helpers import PROJECT_ROOT, FakeBeat  # noqa: F401
 # resolves without triggering torch. _validate_and_clean uses both
 # images.lint_prompt and images.strip_text_bait (the latter dedupes the
 # text-bait stripper between the author path and the critic path —
-# pipeline/critic.py:regenerate_with_corrections also calls it).
+# pipeline/llm/critic.py:regenerate_with_corrections also calls it).
+#
+# 2026-05-05: stub also exposes the singletons + reset_image_state so
+# downstream tests that touch pipeline.images post-stub
+# (test_refactor_quick_wins.ResetImageStateTests) don't crash. The
+# stub for those is intentionally inert — no side effects, just the
+# attribute surface.
 if "pipeline.images" not in sys.modules:
     _stub = types.ModuleType("pipeline.images")
     _stub.lint_prompt = lambda scene: []
     _stub.strip_text_bait = lambda scene: (scene, [])
+    _stub._PIPE = None
+    _stub._IP_ADAPTER_LOADED = False
+    _stub._FLUX_PIPE = None
+    _stub._ZIMAGE_PIPE = None
+    def _stub_reset_image_state():  # noqa: D401
+        _stub._PIPE = None
+        _stub._IP_ADAPTER_LOADED = False
+        _stub._FLUX_PIPE = None
+        _stub._ZIMAGE_PIPE = None
+    _stub.reset_image_state = _stub_reset_image_state
     sys.modules["pipeline.images"] = _stub
 
 from pipeline.llm.prompts import _validate_and_clean  # noqa: E402

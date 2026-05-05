@@ -406,6 +406,7 @@ def _build_silent_video(channel: str, slug: str, shotlist: dict, scratch: Path) 
                     "-map", "[vout]", "-an",
                     "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
                     "-crf", "23", "-pix_fmt", "yuv420p", "-r", "30",
+                    "-threads", "3",
                     str(clip),
                 ]
                 print(f"[footage] image {idx}/{n_windows-1}: {dur:.1f}s ken-burns → {clip.name}")
@@ -444,6 +445,7 @@ def _build_silent_video(channel: str, slug: str, shotlist: dict, scratch: Path) 
                         "-vf", vf, "-an",
                         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
                         "-pix_fmt", "yuv420p", "-r", "30",
+                        "-threads", "3",
                         str(clip),
                     ]
                     print(f"[footage] trim {idx}/{n_windows-1}: {in_:.1f}-{out:.1f}s (passthrough) → {clip.name}")
@@ -457,6 +459,7 @@ def _build_silent_video(channel: str, slug: str, shotlist: dict, scratch: Path) 
                         "-filter_complex", letterbox,
                         "-map", "[vout]", "-an",
                         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30",
+                        "-threads", "3",
                         str(clip),
                     ]
                     print(f"[footage] trim {idx}/{n_windows-1}: {in_:.1f}-{out:.1f}s (letterbox) → {clip.name}")
@@ -579,13 +582,8 @@ def _burn_video(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     scratch = silent.parent
 
-    # 1. Probe lengths
-    def _dur(p: Path) -> float:
-        r = subprocess.check_output([
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", str(p),
-        ]).strip()
-        return float(r)
+    # 1. Probe lengths via the memoized helper.
+    from pipeline.probe import probe_duration as _dur  # noqa: PLC0415
 
     silent_dur = _dur(silent)
     narr_dur = _dur(narration_path)
@@ -665,12 +663,7 @@ def _mux_audio_no_captions(silent: Path, narration_path: Path, out_path: Path) -
     step on dense Hindi narration)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def _dur(p: Path) -> float:
-        r = subprocess.check_output([
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", str(p),
-        ]).strip()
-        return float(r)
+    from pipeline.probe import probe_duration as _dur  # noqa: PLC0415
 
     silent_dur = _dur(silent)
     narr_dur = _dur(narration_path)

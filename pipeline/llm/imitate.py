@@ -130,16 +130,10 @@ def _ydl_download_video(video_id: str, dest_dir: Path) -> Path | None:
 
 
 def _probe_duration(video_path: Path) -> float | None:
-    try:
-        proc = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
-            capture_output=True, text=True, check=True,
-        )
-        return float(proc.stdout.strip())
-    except Exception as e:
-        print(f"[imitate] ffprobe failed: {e}")
-        return None
+    # Backward-compat shim over pipeline.probe.probe_duration_or_none.
+    # The /imitate flow wants a None on failure, not a raise.
+    from pipeline.probe import probe_duration_or_none  # noqa: PLC0415
+    return probe_duration_or_none(video_path)
 
 
 def _sample_frames(video_path: Path, n: int, out_dir: Path) -> list[Path]:

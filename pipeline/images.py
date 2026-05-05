@@ -573,6 +573,43 @@ def _z_image_pipe():
     return _ZIMAGE_PIPE
 
 
+def reset_image_state() -> None:
+    """Drop the diffusion-pipe singletons + the SDXL pipe + IP-Adapter flag.
+
+    Mirrors :func:`pipeline.audio.reset_f5_state`. Call this when an
+    image-gen stage finishes and the next stages don't need diffusion
+    — frees ~3-4 GB of MLX state for the Flux/Z-Image case and ~6-7 GB
+    for the SDXL case, so the next Metal-using stage starts on a
+    clean unified-memory heap.
+
+    Wired into :func:`pipeline.preflight.reset_mlx_state` via the
+    ``drop_image=True`` kwarg, so renderers can request the drop in
+    one line:
+
+    .. code-block:: python
+
+        from pipeline.preflight import reset_mlx_state
+        reset_mlx_state(drop_f5=False, drop_image=True,
+                        label="long-form image-panel stage")
+
+    Best-effort — never raises. Safe to call when no diffusion pipe
+    has been loaded yet (the singletons stay None).
+    """
+    global _PIPE, _IP_ADAPTER_LOADED, _FLUX_PIPE, _ZIMAGE_PIPE
+    _PIPE = None
+    _IP_ADAPTER_LOADED = False
+    _FLUX_PIPE = None
+    _ZIMAGE_PIPE = None
+    try:
+        import mlx.core as _mx  # type: ignore  # noqa: PLC0415
+        if hasattr(_mx, "clear_cache"):
+            _mx.clear_cache()
+        elif hasattr(_mx, "metal") and hasattr(_mx.metal, "clear_cache"):
+            _mx.metal.clear_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def warmup(provider: str, *, want_ip_adapter: bool = False) -> None:
     """Eagerly load the diffusion pipeline so the first ``generate()`` call
     doesn't pay the ~15–30 s cold-load tax.

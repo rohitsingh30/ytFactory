@@ -295,10 +295,13 @@ def synth_long_narration(
 
 
 def _probe_duration(path: Path) -> float:
-    return float(subprocess.check_output([
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", str(path),
-    ]).decode().strip())
+    # Backward-compat shim over the canonical helper in
+    # ``pipeline.probe``. New callers should import probe_duration
+    # directly; this module-local alias is kept so the existing
+    # ``from pipeline.render.long_form import _probe_duration`` (used
+    # by sports_doc.py and tests) keeps working unchanged.
+    from pipeline.probe import probe_duration  # noqa: PLC0415
+    return probe_duration(path)
 
 
 def _trim_clip_letterbox(
@@ -1509,10 +1512,8 @@ def main() -> int:
         speed=speed,
         ref_audio_text=ref_audio_text,
     )
-    dur = float(subprocess.check_output([
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", str(narration_wav),
-    ]).decode().strip())
+    from pipeline.probe import probe_duration  # noqa: PLC0415
+    dur = probe_duration(narration_wav)
     print(f"[1/5] narration {len(chunks)} chunks → {narration_wav.name} {dur:.1f}s ({dur/60:.1f} min)")
 
     if args.tts_only:

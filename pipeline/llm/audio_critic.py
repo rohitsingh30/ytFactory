@@ -417,10 +417,10 @@ def _silence_gaps(audio_path: Path, threshold_db: float = -40.0,
 
 
 def _audio_duration(audio_path: Path) -> float:
-    cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-           "-of", "default=nw=1:nk=1", str(audio_path)]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    return float(proc.stdout.strip() or 0.0)
+    # Use the memoized helper. probe_duration_or_none returns None on
+    # failure; legacy call site fell back to 0.0, preserve that.
+    from pipeline.probe import probe_duration_or_none  # noqa: PLC0415
+    return probe_duration_or_none(audio_path) or 0.0
 
 
 def _diff_lines(source_words: list[str], heard_words: list[str]) -> str:
