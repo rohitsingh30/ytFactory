@@ -1,0 +1,19 @@
+# ytFactory TTS-CosyVoice Cloud Run service requirements
+# torch is installed in the Dockerfile via the cu121 wheel index;
+# do NOT list it here.
+#
+# Anything CosyVoice itself pins lives in /opt/CosyVoice/requirements.txt
+# and is installed AFTER this file (so our pins win on overlap).
+
+fastapi==0.116.0
+uvicorn[standard]==0.32.1
+pydantic==2.9.2
+soundfile==0.12.1
+numpy==1.26.4
+
+# Helper for HF asset pinning (CosyVoice weights pre-pulled in Dockerfile).
+huggingface-hub>=0.33.5,<2.0
+
+# GCS for >5MB WAV handoff (long-form chunks). Cloud Run service account
+# auto-authenticates via metadata server.
+google-cloud-storage==2.18.2

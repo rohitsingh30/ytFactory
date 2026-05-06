@@ -119,24 +119,25 @@ def _f5_chunk(
     ref_audio_text: str,
     out_wav: Path,
     speed: float = 0.95,
+    provider: str = "f5_tts",
 ) -> None:
-    """Single F5-TTS-MLX synth → wav at out_wav (zero-shot voice cloning).
-
-    Delegates to pipeline.audio._synth_f5_tts so the same code path is shared
-    with the Shorts pipeline. ref_audio_path resolves relative to the repo
-    root if not absolute.
+    """Single F5 synth → wav. Routes to local f5_tts (MLX) or cloudrun_f5
+    based on ``provider``. Both produce the same voice character because
+    cloud uses the same checkpoint + same flow-matching params (see
+    docs/cloudrun_tts.md and cloud/tts-f5/models/f5.py).
     """
     from pipeline import audio as _aud
     ref_path = ref_audio_path
     if not Path(ref_path).is_absolute():
         ref_path = str(REPO_ROOT / ref_path)
     out_wav.parent.mkdir(parents=True, exist_ok=True)
-    _aud._synth_f5_tts(
+    _aud.synthesize(
         text=text,
-        ref_audio_path=ref_path,
+        voice=ref_path,
         ref_audio_text=ref_audio_text,
         out_path=out_wav,
         speed=speed,
+        provider=provider,
     )
 
 
@@ -214,34 +215,76 @@ def synth_long_narration(
     Resumable: skips chunks whose stretched wav already exists.
 
     Providers:
-      * ``f5_tts`` (default, historyrecapped sleep) — zero-shot voice clone.
-        ``voice_id`` is the path to a 5-15s reference WAV; ``ref_audio_text``
-        is its transcript (required). The model is held in a singleton at
-        pipeline/audio.py to avoid the 1.35GB checkpoint re-load.
-      * ``kokoro`` (sportstoriesanimated long-form doc) — Kokoro 82M voice
-        catalogue. ``voice_id`` is a Kokoro voice id (e.g. ``am_michael``).
-        ``ref_audio_text`` is unused.
+      * ``f5_tts`` (default, historyrecapped sleep) — local MLX zero-shot
+        voice clone. ``voice_id`` is the path to a 5-15s reference WAV;
+        ``ref_audio_text`` is its transcript (required). The model is
+        held in a singleton at pipeline/audio.py to avoid the 1.35GB
+        checkpoint re-load.
+      * ``cloudrun_f5`` — same model, hosted on Cloud Run GPU L4.
+        Eligible for parallel chunk dispatch (see CHUNK_PARALLEL_WORKERS
+        below) — Cloud Run scales to N independent L4 instances, so
+        chunks render concurrently rather than serially. Auto-falls
+        back to local f5_tts on cloud failure (handled inside
+        pipeline.tts.cloudrun).
+      * ``kokoro`` (sportstoriesanimated long-form doc) — Kokoro 82M
+        voice catalogue. ``voice_id`` is a Kokoro voice id (e.g.
+        ``am_michael``). ``ref_audio_text`` is unused. Local-only;
+        not parallelised (Kokoro is fast enough that the fan-out
+        coordination overhead exceeds the savings).
     """
-    if provider == "f5_tts" and not ref_audio_text:
+    if provider in ("f5_tts", "cloudrun_f5") and not ref_audio_text:
         raise RuntimeError(
-            "long-form F5-TTS requires `tts_ref_text` in long_form config "
-            "(the spoken transcript of the ref WAV at tts_voice)"
+            "long-form F5 (local or cloud) requires `tts_ref_text` in "
+            "long_form config (the spoken transcript of the ref WAV at "
+            "tts_voice)"
         )
-    if provider not in ("f5_tts", "kokoro"):
+    if provider not in ("f5_tts", "cloudrun_f5", "kokoro"):
         raise RuntimeError(
             f"synth_long_narration: unsupported provider {provider!r}. "
-            "Supported: f5_tts, kokoro."
+            "Supported: f5_tts, cloudrun_f5, kokoro."
         )
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     chunks = _split_into_chunks(text, target_chars=chunk_target_chars)
     print(f"[tts] {len(text)} chars → {len(chunks)} chunks via {provider} (target {chunk_target_chars} chars each)")
 
-    # MLX heap hygiene: F5 builds up cached graphs / intermediate tensors
-    # across sample() calls. On a 200+ chunk run that growth can push us
-    # into Metal's command-buffer timeout territory (the "memory error" the
-    # user kept hitting). Flush every N chunks. mx.clear_cache() is a no-op
-    # if MLX isn't loaded yet, so it's safe to call unconditionally.
+    # Cloud Run providers can fan out — each chunk hits an independent
+    # L4 instance up to the configured concurrency. Local providers
+    # MUST stay serial (shared M2 Max GPU; concurrent MLX/Metal ops
+    # serialise + fragment unified memory — see
+    # docs/long_form_model_inventory.md "Parallelism" section).
+    is_cloud = provider == "cloudrun_f5"
+    parallel_workers = 0
+    if is_cloud:
+        parallel_workers = int(os.environ.get(
+            "YTFACTORY_CLOUD_TTS_WORKERS", "5",
+        ))
+        # Cap at our quota so we don't get rejected; quota=5 today.
+        parallel_workers = max(1, min(parallel_workers, 5))
+        print(f"[tts] cloud provider — fan out {parallel_workers}-way "
+              f"(scaling each chunk to its own L4 instance)")
+        # PREWARM: hit /readyz once before the fan-out so the first
+        # `parallel_workers` chunks don't all pay simultaneous cold-start.
+        # One pre-warm = one cold-start cost amortised across all chunks
+        # in this render. Subsequent renders within ~15 min reuse warm.
+        try:
+            from pipeline.tts.cloudrun import _service_url, _get_id_token
+            import urllib.request
+            url = _service_url(model="f5")
+            token = _get_id_token(url)
+            req = urllib.request.Request(
+                url=f"{url}/readyz",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                _info = resp.read().decode("utf-8")[:120]
+                print(f"[tts] cloud /readyz: {_info}")
+        except Exception as e:
+            print(f"[tts] prewarm /readyz failed (will pay cold-start "
+                  f"per chunk): {e}")
+
+    # MLX heap hygiene — only matters for local MLX path. Cloud path
+    # doesn't run any MLX ops on the laptop side.
     try:
         import mlx.core as _mx  # type: ignore
         _has_mlx = True
@@ -253,38 +296,84 @@ def synth_long_narration(
     chunk_dir = cache_dir / "tts_chunks"
     chunk_dir.mkdir(exist_ok=True)
     final_chunks: list[Path] = []
-    synthed_this_run = 0
+
+    # ---- Build the work plan: (idx, chunk_text, raw_path, stretched_path) ----
+    # Skip chunks already cached. Parallel and serial paths share this plan.
+    work: list[tuple[int, str, Path, Path]] = []
     for i, chunk_text in enumerate(chunks):
         raw = chunk_dir / f"raw_{i:04d}.wav"
         stretched = chunk_dir / f"chunk_{i:04d}.wav"
         if stretched.exists() and stretched.stat().st_size > 1024:
-            final_chunks.append(stretched)
+            final_chunks.append(stretched)  # already done
             continue
-        if not raw.exists() or raw.stat().st_size < 1024:
-            t0 = time.time()
-            if provider == "kokoro":
-                _kokoro_chunk(chunk_text, voice_id, raw, speed=speed)
-            else:
-                _f5_chunk(chunk_text, voice_id, ref_audio_text, raw, speed=speed)
-            print(f"[tts] chunk {i:04d}/{len(chunks)-1}: {len(chunk_text)} chars in {time.time()-t0:.1f}s")
-            synthed_this_run += 1
-            # Periodic Metal heap flush. Cheap; prevents the slow leak that
-            # turns chunk N into a Metal-timeout grenade. (No-op for Kokoro
-            # since Kokoro uses ONNX runtime, not MLX/Metal.)
-            if _has_mlx and synthed_this_run % MLX_FLUSH_EVERY == 0:
-                try:
-                    if hasattr(_mx, "clear_cache"):
-                        _mx.clear_cache()
-                    elif hasattr(_mx, "metal") and hasattr(_mx.metal, "clear_cache"):
-                        _mx.metal.clear_cache()
-                    print(f"[mem] flushed Metal cache after {synthed_this_run} chunks")
-                except Exception as _e:
-                    print(f"[mem] flush failed: {_e}")
-        if abs(atempo - 1.0) < 1e-3:
-            shutil.copy2(raw, stretched)
-        else:
-            _atempo(raw, stretched, atempo)
+        work.append((i, chunk_text, raw, stretched))
+        # Reserve the slot in final_chunks; we'll fill in order below.
         final_chunks.append(stretched)
+
+    if not work:
+        print(f"[tts] all {len(chunks)} chunks already cached; nothing to synth")
+    elif is_cloud and parallel_workers > 1 and len(work) > 1:
+        # ---- PARALLEL CLOUD PATH ----
+        # Cloud Run cold-starts ~30-60 s for the first instance; warm
+        # calls 2-5 s. Fan-out lets us pay cold-start once across many
+        # chunks instead of once per render-batch.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _do_chunk(item: tuple[int, str, Path, Path]) -> tuple[int, float]:
+            i, chunk_text, raw, stretched = item
+            t0 = time.time()
+            if not raw.exists() or raw.stat().st_size < 1024:
+                _f5_chunk(
+                    chunk_text, voice_id, ref_audio_text, raw,
+                    speed=speed, provider=provider,
+                )
+            if abs(atempo - 1.0) < 1e-3:
+                shutil.copy2(raw, stretched)
+            else:
+                _atempo(raw, stretched, atempo)
+            return (i, time.time() - t0)
+
+        print(f"[tts] cloud fan-out: {len(work)} chunks × {parallel_workers} workers")
+        completed = 0
+        with ThreadPoolExecutor(max_workers=parallel_workers) as pool:
+            futures = {pool.submit(_do_chunk, w): w[0] for w in work}
+            for fut in as_completed(futures):
+                idx, dt = fut.result()
+                completed += 1
+                chunk_text = chunks[idx]
+                print(f"[tts] cloud chunk {idx:04d}/{len(chunks)-1}: "
+                      f"{len(chunk_text)} chars in {dt:.1f}s "
+                      f"({completed}/{len(work)} done)")
+    else:
+        # ---- SERIAL PATH (local provider, OR cloud with workers=1) ----
+        synthed_this_run = 0
+        for i, chunk_text, raw, stretched in work:
+            if not raw.exists() or raw.stat().st_size < 1024:
+                t0 = time.time()
+                if provider == "kokoro":
+                    _kokoro_chunk(chunk_text, voice_id, raw, speed=speed)
+                else:
+                    _f5_chunk(
+                        chunk_text, voice_id, ref_audio_text, raw,
+                        speed=speed, provider=provider,
+                    )
+                print(f"[tts] chunk {i:04d}/{len(chunks)-1}: "
+                      f"{len(chunk_text)} chars in {time.time()-t0:.1f}s")
+                synthed_this_run += 1
+                # Periodic Metal heap flush (no-op for cloud path).
+                if _has_mlx and synthed_this_run % MLX_FLUSH_EVERY == 0 and not is_cloud:
+                    try:
+                        if hasattr(_mx, "clear_cache"):
+                            _mx.clear_cache()
+                        elif hasattr(_mx, "metal") and hasattr(_mx.metal, "clear_cache"):
+                            _mx.metal.clear_cache()
+                        print(f"[mem] flushed Metal cache after {synthed_this_run} chunks")
+                    except Exception as _e:
+                        print(f"[mem] flush failed: {_e}")
+            if abs(atempo - 1.0) < 1e-3:
+                shutil.copy2(raw, stretched)
+            else:
+                _atempo(raw, stretched, atempo)
 
     narration_wav = cache_dir / "narration.wav"
     _wav_concat_with_silence(final_chunks, join_silence_s, narration_wav)
@@ -1482,15 +1571,25 @@ def main() -> int:
         )
     voice_id = lf["tts_voice"]
     atempo = float(lf.get("tts_post_atempo", 0.85))
-    # Long-form is strictly F5-TTS-MLX. Other tts_provider values are
-    # hard-rejected so the run fails fast instead of silently picking a
-    # stale path.
+    # Long-form supports only the F5-family providers today (local
+    # f5_tts MLX and cloudrun_f5 cloud variant). Other tts_provider
+    # values are hard-rejected so the run fails fast instead of
+    # silently picking a stale path. Cloud-first migration 2026-05-06
+    # flipped Shorts to cloudrun_chatterbox, but long-form still
+    # requires F5 because synth_long_narration's chunking + resume +
+    # atempo + parallel-fan-out path is implemented for F5 only. To
+    # add Chatterbox/Higgs/CosyVoice support, extend
+    # synth_long_narration in this module to accept those providers.
     provider = str(lf.get("tts_provider", "f5_tts"))
-    if provider != "f5_tts":
+    if provider not in ("f5_tts", "cloudrun_f5"):
         raise SystemExit(
             f"long-form tts_provider={provider!r} is not supported. "
-            "Long-form is strictly F5-TTS-MLX. Set `long_form.tts_provider: f5_tts` "
-            "(or remove the key) and provide tts_voice (ref WAV path) + tts_ref_text."
+            "Long-form supports only f5_tts (laptop) and cloudrun_f5 "
+            "(cloud). Set `long_form.tts_provider: cloudrun_f5` for "
+            "cloud-first or `f5_tts` for laptop fallback. "
+            "(Shorts can use cloudrun_chatterbox / cloudrun_higgs / etc; "
+            "long-form cannot yet — see synth_long_narration in "
+            "pipeline/render/long_form.py to add them.)"
         )
     speed = float(lf.get("tts_speed", 0.80))
     chunk_target_chars = int(lf.get("tts_chunk_target_chars", 380))

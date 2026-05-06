@@ -53,13 +53,14 @@ render_style: footage_only
 # observatory, satellite, or paper page.
 narrator_visual_mode: voice_only
 
-# ---- TTS — Shorts: Kokoro am_michael (sober explainer male) ------------
-# Same voice as HistoryRecapped Shorts. Steady, enunciating, confident
-# male, zero-API local synthesis. Long-form runs F5-TTS-MLX strictly
-# (see long_form: block below; render_long_form.py rejects any other
-# provider).
-tts_provider: kokoro
-tts_voice: am_michael
+# ---- TTS — Shorts: cloud Chatterbox (cloud-first 2026-05-06) ----------
+# Was Kokoro am_michael (sober explainer male, zero-API local). Flipped
+# to cloudrun_chatterbox with sarah.wav clone for the cloud-first
+# migration. Long-form runs cloudrun_f5 strictly (see long_form: block
+# below; render_long_form.py rejects any other provider).
+tts_provider: cloudrun_chatterbox
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_ref_text: "Tonight we travel to the Western Front of the Great War. Speak softly. Let the lamp grow dim. Slow your breathing. We will walk together from the warm meadows"
 tts_speed: 1.0
 
 # ---- Image gen — DISABLED for production ------------------------------
@@ -179,7 +180,7 @@ long_form:
   # speed=1.0 + atempo=1.0 → ~150 wpm "Veritasium without the host"
   # tempo. NEVER use sleep cadence (0.95 + atempo=0.85) on this channel
   # — physics audience expects engaged narration, not bedtime narration.
-  tts_provider: f5_tts
+  tts_provider: cloudrun_f5
   tts_voice: pipeline/voice_refs/sarah.wav
   tts_ref_text: "Tonight we travel to the Western Front of the Great War. Speak softly. Let the lamp grow dim. Slow your breathing. We will walk together from the warm meadows"
   tts_speed: 1.0

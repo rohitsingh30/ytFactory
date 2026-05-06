@@ -33,14 +33,15 @@ render_style: image_gen
 # All beats depict the AI product / company / concept being explained.
 narrator_visual_mode: voice_only
 
-# ---- TTS — Kokoro am_michael (zero-API, ship-quality male) -------------
-# F5-TTS was attempted on this channel during bring-up (sarah.wav ref
-# worked; theo.wav was lost in the recovery wipe and can't be regenerated
-# yet). Kokoro keeps bring-up shipping while a male F5-TTS reference is
-# recorded; flip this block to f5_tts + sarah.wav (or a future theo.wav)
-# once the voice identity is locked.
-tts_provider: kokoro
-tts_voice: am_michael
+# ---- TTS — cloud Chatterbox with sarah.wav (cloud-first 2026-05-06) ----
+# Was Kokoro am_michael (zero-API, ship-quality male) during bring-up
+# because theo.wav was lost in the 2026-05-04 recovery wipe. Flipped to
+# cloudrun_chatterbox with sarah.wav (only ref WAV currently on disk)
+# for the cloud-first migration. Re-clip a male theo.wav from a shipped
+# Short and update tts_voice when ready.
+tts_provider: cloudrun_chatterbox
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_ref_text: "Tonight we travel to the Western Front of the Great War. Speak softly. Let the lamp grow dim. Slow your breathing. We will walk together from the warm meadows"
 tts_speed: 1.2  # ~165 wpm explainer pace
 
 # ---- Image gen — clean isometric tech-explainer aesthetic --------------

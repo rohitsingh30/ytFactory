@@ -9,7 +9,7 @@ part_two: true
 
 # TTS — F5-TTS-MLX zero-shot voice clone (Sarah ref), same voice as
 # Part 1 + AITA family.
-tts_provider: f5_tts
+tts_provider: cloudrun_chatterbox
 tts_voice: pipeline/voice_refs/sarah.wav
 tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 1.05

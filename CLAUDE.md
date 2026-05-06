@@ -34,6 +34,72 @@ raw activity logs — things that don't belong in the repo.
 
 ---
 
+## Cloud-first TTS migration (2026-05-06 — COMPLETE)
+
+GPU-bound TTS runs on **Cloud Run + NVIDIA L4** in `asia-southeast1`.
+**The laptop is no longer the default TTS engine for any channel** —
+it exists as automatic fallback only. ~10× speedup for English long-form,
+~$6/mo at full throttle against existing $150 GCP credits.
+
+### Per-channel routing (2026-05-06 reality)
+
+- **English channels** (16 YAMLs across mystoriesanimated /
+  historyrecapped / sportstoriesanimated / cosmosdecoded / airecap /
+  rhymetimejunction): `tts_provider: cloudrun_chatterbox` → falls
+  back to local F5-TTS on cloud failure.
+- **Hindi channel** (`hindutavaanimated`): `tts_provider: kokoro`
+  with `hf_alpha` voice (the only on-laptop Hindi). Cloud option
+  `cloudrun_indicparler` exists; better Hindi models being researched.
+
+### Where to find what
+
+- **Top-level Cloud Run TTS runbook:** `docs/cloudrun_tts.md`
+- **Higgs Audio v2 specifics + PierrunoYT mirror post-mortem:** `docs/cloudrun_higgs.md`
+- **Per-channel routing table:** `docs/tts_stack.md`
+- **Container code:** `cloud/tts-{f5,higgs,chatterbox,cosyvoice,indicparler}/`
+- **Laptop client + auto-fallback:** `pipeline/tts/cloudrun.py`
+- **Hindi research (in progress):** `docs/research/hindi_tts_2026.md`
+
+### Laptop fallback policy (2026-05-06)
+
+Established by user: "for laptop we keep F5 for all and kokoro for
+hindutavaanimated; for cloud — all chatterbox; for hindi —
+indicparler today, better models being researched."
+
+| Cloud provider fails → | Local fallback |
+|---|---|
+| `cloudrun_chatterbox` / `cloudrun_f5` / `cloudrun_higgs` / `cloudrun_cosyvoice` | local `f5_tts` (sarah.wav) |
+| `cloudrun_indicparler` | local `kokoro hf_alpha` |
+
+Implemented in `pipeline/tts/cloudrun.py::_synth_cloudrun_*`. Set
+`CLOUDRUN_TTS_DISABLE_FALLBACK=1` in tests to hard-error instead.
+
+### Rollback
+
+`unset CLOUDRUN_TTS_*_URL` — every cloud provider raises
+`CloudRunUnavailable` → fallback path activates. No code change
+required.
+
+## Adding a new Cloud Run service (TTS / image / video / anything)
+
+**Required reading:** `docs/cloud_service_dep_playbook.md`. It encodes
+the 6-step rule born from the Higgs Audio v2 thrash on 2026-05-05 (5
+failed Cloud Builds before a working one). Every step is mandatory:
+
+```
+1. Read upstream requirements.txt + pyproject.toml — FULL
+2. Grep upstream source for ALL imports (vendored code too)
+3. Resolve every transitive conflict against our cross-cutting pins
+4. pip install --dry-run -r requirements.txt — LOCALLY
+5. Verify "Would install" output has no surprises
+6. THEN build once on Cloud Build
+```
+
+Skipping any step has historically cost 3-8 hours of failed build
+iterations. **The playbook saves that.** New service → read it first.
+
+---
+
 ## Layout reference
 
 Per-channel layout is the canonical 2026-05-05 spec. **Use

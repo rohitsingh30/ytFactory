@@ -20,7 +20,7 @@ source_adapter: reddit_video
 # Chatterbox's emotion-exaggeration knob is the right fit for AITA's
 # escalating-drama narration arc. Free, no API cap, runs locally on
 # M2 Max via MPS.
-tts_provider: chatterbox
+tts_provider: cloudrun_chatterbox
 tts_voice: pipeline/voice_refs/sarah.wav
 tts_speed: 0.90
 

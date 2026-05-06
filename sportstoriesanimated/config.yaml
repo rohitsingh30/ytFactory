@@ -41,7 +41,7 @@ narrator_visual_mode: voice_only
 # sarah.wav (female) until a male reference is re-recorded. Drop a
 # 5-15s 24kHz mono male WAV at pipeline/voice_refs/theo.wav + update
 # tts_ref_text to its transcript to restore the original male voice.
-tts_provider: f5_tts
+tts_provider: cloudrun_chatterbox
 tts_voice: pipeline/voice_refs/sarah.wav
 tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 0.98

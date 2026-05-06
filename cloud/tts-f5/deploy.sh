@@ -24,12 +24,16 @@ IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/server:${TAG}"
 cd "$(dirname "$0")"
 
 echo "==> Building + pushing ${IMAGE}"
+# Region/machine-type omitted — use Cloud Build default (global,
+# e2-medium). e2-highcpu-32 in asia-southeast1 needs a separate Cloud
+# Build worker quota we don't have. Default builds are slower (~10 min
+# for our v2 6 GB image, ~30-50 min expected for v3's 14 GB) but free
+# for the first 120 min/day.
+# 5400s = 90 min ceiling — v3 pulls 4 sets of HF weights (~14 GB).
 gcloud builds submit . \
   --tag="${IMAGE}" \
   --project="${PROJECT}" \
-  --region="${REGION}" \
-  --machine-type=e2-highcpu-32 \
-  --timeout=2400s
+  --timeout=5400s
 
 echo "==> Deploying to Cloud Run (L4 GPU, asia-southeast1)"
 # Why each flag:

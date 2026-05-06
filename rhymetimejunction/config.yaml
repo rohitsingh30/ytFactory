@@ -79,7 +79,7 @@ audio_provider: external_song
 # audio_provider: sunoapi
 sunoapi_model: V4_5            # current best for kids' content; V5 also available
 sunoapi_vocal_gender: f         # female lead (matches kid-rhyme convention)
-tts_provider: f5_tts
+tts_provider: cloudrun_chatterbox
 tts_voice: pipeline/voice_refs/sarah.wav
 tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 1.0

@@ -46,3 +46,25 @@ Theo are running sarah.wav as a stop-gap):
    `pipeline/voice_refs/theo.wav` / its transcript.
 5. Re-add `"theo"` to `EXPECTED_REFS` in
    `tests/test_audio_tts_providers.py`.
+
+## 2026-05-05 — sarah.txt critical fix
+
+Previously `sarah.txt` contained an Anthropic press-release blurb that
+**did not match the actual audio** in `sarah.wav` (which says "Tonight
+we travel to the western front of the Great War. Speak softly. Let
+the lamp grow dim. Slow your breathing. We will walk together from
+the warm meadows of August nineteen fourteen.").
+
+This text-vs-audio mismatch caused F5-TTS to leak words from the WRONG
+ref text into every English render — most visibly the trailing word
+"today" appearing in scripts about WWII, sports, AITA, etc.
+
+**Fix applied 2026-05-05:** sarah.txt now contains the Whisper-verified
+exact transcript of sarah.wav. The wrong file is preserved as
+`sarah.txt.WRONG-2026-05-05` for forensics; do not use it.
+
+If the ref WAV is ever re-recorded:
+1. Re-derive ref text via:
+   `mlx_whisper sarah.wav --model mlx-community/whisper-large-v3-mlx-4bit`
+2. Save the EXACT transcript to sarah.txt — no editing for "cleanliness"
+3. Smoke-test F5 against the new ref before flipping any channel

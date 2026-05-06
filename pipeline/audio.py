@@ -195,6 +195,19 @@ from pipeline.tts.song import (  # noqa: E402, F401
     trim_song_for_short,
 )
 
+# ---- Cloud Run GPU providers (asia-southeast1) ----------------------------
+# Re-exported for the same reason as the local providers above —
+# tests/test_audio_tts_providers.py uses patch.object(audio, '_synth_cloudrun_f5')
+# so the dispatcher must look up the name via this module's __dict__.
+from pipeline.tts.cloudrun import (  # noqa: E402, F401
+    CloudRunUnavailable,
+    _synth_cloudrun_chatterbox,
+    _synth_cloudrun_cosyvoice,
+    _synth_cloudrun_f5,
+    _synth_cloudrun_higgs,
+    _synth_cloudrun_indicparler,
+)
+
 
 # ---- Public dispatcher ----------------------------------------------------
 #
@@ -291,7 +304,54 @@ def synthesize(
             out_path=out_path,
             speed=speed,
         )
+    if provider == "cloudrun_f5":
+        if not ref_audio_text:
+            raise ValueError(
+                "cloudrun_f5 provider requires `ref_audio_text` (the "
+                "transcript of the reference audio at `voice`)"
+            )
+        return _synth_cloudrun_f5(
+            text, ref_audio_path=voice, ref_audio_text=ref_audio_text,
+            out_path=out_path, speed=speed,
+        )
+    if provider == "cloudrun_higgs":
+        # Higgs Audio v2 — multilingual emotional voice clone.
+        # ref_audio_text optional (Higgs handles either path).
+        return _synth_cloudrun_higgs(
+            text, ref_audio_path=voice, ref_audio_text=ref_audio_text,
+            out_path=out_path, speed=speed,
+        )
+    if provider == "cloudrun_cosyvoice":
+        # CosyVoice 2 — multilingual incl Hindi. ref_audio_text REQUIRED
+        # (zero-shot mode needs the ref transcript).
+        if not ref_audio_text:
+            raise ValueError(
+                "cloudrun_cosyvoice provider requires `ref_audio_text` "
+                "(transcript of the reference audio at `voice`)"
+            )
+        return _synth_cloudrun_cosyvoice(
+            text, ref_audio_path=voice, ref_audio_text=ref_audio_text,
+            out_path=out_path, speed=speed,
+        )
+    if provider == "cloudrun_chatterbox":
+        # Chatterbox via cloud — same contract as local (ref_audio_text
+        # ignored). Useful for parity benchmarks.
+        return _synth_cloudrun_chatterbox(
+            text, ref_audio_path=voice, ref_audio_text=ref_audio_text,
+            out_path=out_path, speed=speed,
+        )
+    if provider == "cloudrun_indicparler":
+        # Indic Parler-TTS — Hindi/multi-lingual Indic, description-driven.
+        # `voice` here can be ignored (description is the voice spec); we
+        # pass it through to the cloud client which falls back to a sane
+        # default if no description is supplied.
+        return _synth_cloudrun_indicparler(
+            text, ref_audio_path=voice or None, ref_audio_text=ref_audio_text,
+            out_path=out_path, speed=speed,
+        )
     raise ValueError(
         f"unknown TTS provider {provider!r} "
-        "(choices: kokoro, f5_tts, chatterbox, styletts2, indic_parler)"
+        "(choices: kokoro, f5_tts, chatterbox, styletts2, indic_parler, "
+        "cloudrun_f5, cloudrun_higgs, cloudrun_cosyvoice, "
+        "cloudrun_chatterbox, cloudrun_indicparler)"
     )

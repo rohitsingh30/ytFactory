@@ -1,0 +1,33 @@
+# Chatterbox-only Cloud Run TTS service requirements.
+# Pin to chatterbox-tts's own torch demand (2.6.0) — it's strict about it.
+# We override torch in Dockerfile but install with --no-deps for chatterbox.
+
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.9.2
+soundfile==0.12.1
+google-cloud-storage==2.18.2
+
+# Chatterbox transitive deps we need (installed without chatterbox's
+# own pin since we control torch separately):
+librosa>=0.10
+pooch
+lazy_loader
+audioread
+decorator
+resemble-perth
+s3tokenizer
+conformer
+omegaconf
+scikit-learn
+threadpoolctl
+onnx
+onnxruntime
+ml_dtypes
+antlr4-python3-runtime==4.9.3
+# Chatterbox 0.1.7 also wants these as 'requires':
+diffusers
+pykakasi
+spacy-pkuseg
+safetensors
+transformers

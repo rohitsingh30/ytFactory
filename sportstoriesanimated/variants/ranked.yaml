@@ -30,7 +30,7 @@ source_adapter: sports_moments_manual
 # TTS — F5-TTS-MLX zero-shot voice clone (Sarah ref).
 # theo.wav was lost in the 2026-05-04 recovery wipe — using sarah.wav
 # until a male reference is re-recorded.
-tts_provider: f5_tts
+tts_provider: cloudrun_chatterbox
 tts_voice: pipeline/voice_refs/sarah.wav
 tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 0.98
