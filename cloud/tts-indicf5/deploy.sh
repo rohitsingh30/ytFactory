@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# Build + push + deploy a single-model TTS service to Cloud Run GPU L4.
-# Usage:
-#   ./deploy.sh <service-name> [tag]
-# Example:
-#   ./deploy.sh ytfactory-tts-higgs v1
-#   ./deploy.sh ytfactory-tts-chatterbox
+# Build + push + deploy ytfactory-tts-indicf5 to Cloud Run GPU L4.
+# Mirrors cloud/tts-higgs/deploy.sh but pinned to this service name +
+# indicf5's heavier resource profile (24Gi mem, 8 vCPU — the deployed
+# version 7 spec captured 2026-05-06).
 
 set -euo pipefail
 
-SERVICE="${1:?usage: ./deploy.sh <service-name> [tag]}"
-TAG="${2:-$(date +%Y%m%d-%H%M%S)}"
+TAG="${1:-$(date +%Y%m%d-%H%M%S)}"
+SERVICE="ytfactory-tts-indicf5"
 
 PROJECT="${GCP_PROJECT:-ytfactory-prod}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
-IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE}:${TAG}"
+IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/tts-indicf5:${TAG}"
 
 cd "$(dirname "$0")"
 
@@ -25,8 +23,6 @@ gcloud builds submit . \
   --timeout=5400s
 
 echo "==> Deploying ${SERVICE} to Cloud Run (L4 GPU, ${REGION})"
-# max-instances=2 per single-model service so 3 services × 2 = 6 GPUs
-# stays close to our quota of 5 (one will queue briefly under burst).
 gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --project="${PROJECT}" \
@@ -36,8 +32,8 @@ gcloud run deploy "${SERVICE}" \
   --gpu-type=nvidia-l4 \
   --no-gpu-zonal-redundancy \
   --no-cpu-throttling \
-  --memory=16Gi \
-  --cpu=4 \
+  --memory=24Gi \
+  --cpu=8 \
   --concurrency=1 \
   --max-instances=2 \
   --min-instances=0 \
@@ -52,9 +48,4 @@ URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="
 echo ""
 echo "==> Deployed: ${URL}"
 echo "Set on the laptop:"
-case "${SERVICE}" in
-  ytfactory-tts-higgs)        echo "  export CLOUDRUN_TTS_HIGGS_URL=${URL}" ;;
-  ytfactory-tts-chatterbox)   echo "  export CLOUDRUN_TTS_CHATTERBOX_URL=${URL}" ;;
-  ytfactory-tts-cosyvoice)    echo "  export CLOUDRUN_TTS_COSYVOICE_URL=${URL}" ;;
-  *)                          echo "  export CLOUDRUN_TTS_URL=${URL}" ;;
-esac
+echo "  export CLOUDRUN_TTS_INDICF5_URL=${URL}"

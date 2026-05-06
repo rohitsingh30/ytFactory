@@ -117,6 +117,7 @@ def _service_url(*, model: str | None = None) -> str:
     * cosyvoice   → CLOUDRUN_TTS_COSYVOICE_URL
     * chatterbox  → CLOUDRUN_TTS_CHATTERBOX_URL
     * indicparler → CLOUDRUN_TTS_INDICPARLER_URL
+    * indicf5     → CLOUDRUN_TTS_INDICF5_URL
 
     Each service-specific env falls back to CLOUDRUN_TTS_URL if unset
     so a one-service deployment still works.
@@ -127,6 +128,7 @@ def _service_url(*, model: str | None = None) -> str:
         "cosyvoice":   "CLOUDRUN_TTS_COSYVOICE_URL",
         "chatterbox":  "CLOUDRUN_TTS_CHATTERBOX_URL",
         "indicparler": "CLOUDRUN_TTS_INDICPARLER_URL",
+        "indicf5":     "CLOUDRUN_TTS_INDICF5_URL",
     }
     if model in per_model:
         specific = os.environ.get(per_model[model], "").strip().rstrip("/")
@@ -409,6 +411,50 @@ def _synth_cloudrun_indicparler(
             raise
         logger.warning(
             "cloudrun_indicparler unavailable (%s); falling back to local "
+            "Kokoro hf_alpha (per laptop-fallback policy 2026-05-06)", e,
+        )
+        from pipeline.tts.kokoro import _synth_kokoro
+
+        return _synth_kokoro(
+            text=text, voice="hf_alpha", out_path=out_path, speed=speed,
+        )
+
+
+def _synth_cloudrun_indicf5(
+    text: str,
+    ref_audio_path: str,
+    ref_audio_text: str,
+    out_path: Path,
+    speed: float,
+    seed: int | None = None,
+) -> Path:
+    """AI4Bharat IndicF5 via Cloud Run.
+
+    F5-TTS architecture fine-tuned on 1417h of curated Indian speech;
+    11 Indic languages including Hindi, Bengali, Tamil, etc.
+    Voice-clone style — REQUIRES ref_audio_path + ref_audio_text.
+
+    On cloud failure, fall back to **local Kokoro hf_alpha** (per
+    laptop-fallback policy 2026-05-06: only on-laptop Hindi voice).
+    Kokoro is preset-voice (no clone), so the fallback loses voice
+    identity but stays in Hindi.
+    """
+    if not ref_audio_text:
+        raise ValueError(
+            "cloudrun_indicf5 requires ref_audio_text "
+            "(transcript of the ref WAV; used for prosody anchoring)"
+        )
+    try:
+        return _synth_cloudrun(
+            model="indicf5", text=text, ref_audio_path=ref_audio_path,
+            ref_audio_text=ref_audio_text, out_path=out_path,
+            speed=speed, seed=seed,
+        )
+    except CloudRunUnavailable as e:
+        if _fallback_disabled():
+            raise
+        logger.warning(
+            "cloudrun_indicf5 unavailable (%s); falling back to local "
             "Kokoro hf_alpha (per laptop-fallback policy 2026-05-06)", e,
         )
         from pipeline.tts.kokoro import _synth_kokoro

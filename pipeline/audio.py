@@ -205,6 +205,7 @@ from pipeline.tts.cloudrun import (  # noqa: E402, F401
     _synth_cloudrun_cosyvoice,
     _synth_cloudrun_f5,
     _synth_cloudrun_higgs,
+    _synth_cloudrun_indicf5,
     _synth_cloudrun_indicparler,
 )
 
@@ -349,9 +350,22 @@ def synthesize(
             text, ref_audio_path=voice or None, ref_audio_text=ref_audio_text,
             out_path=out_path, speed=speed,
         )
+    if provider == "cloudrun_indicf5":
+        # AI4Bharat IndicF5 — F5-TTS architecture trained on 1417h of
+        # Indian speech, 11 Indic languages including Hindi. WAV-clone
+        # style; ref_audio_text REQUIRED for prosody anchoring.
+        if not ref_audio_text:
+            raise ValueError(
+                "cloudrun_indicf5 provider requires `ref_audio_text` "
+                "(transcript of the reference audio at `voice`)"
+            )
+        return _synth_cloudrun_indicf5(
+            text, ref_audio_path=voice, ref_audio_text=ref_audio_text,
+            out_path=out_path, speed=speed,
+        )
     raise ValueError(
         f"unknown TTS provider {provider!r} "
         "(choices: kokoro, f5_tts, chatterbox, styletts2, indic_parler, "
         "cloudrun_f5, cloudrun_higgs, cloudrun_cosyvoice, "
-        "cloudrun_chatterbox, cloudrun_indicparler)"
+        "cloudrun_chatterbox, cloudrun_indicparler, cloudrun_indicf5)"
     )

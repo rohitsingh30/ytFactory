@@ -78,6 +78,7 @@ opt in — every render gets its own dedicated L4 instance.
 | `ytfactory-tts-chatterbox` | `https://ytfactory-tts-chatterbox-767262167641.asia-southeast1.run.app` | `cloudrun_chatterbox` | ✅ LIVE |
 | `ytfactory-tts-cosyvoice` | `https://ytfactory-tts-cosyvoice-767262167641.asia-southeast1.run.app` | `cloudrun_cosyvoice` | ✅ LIVE (English only — Hindi proven gibberish) |
 | `ytfactory-tts-indicparler` | `https://ytfactory-tts-indicparler-767262167641.asia-southeast1.run.app` | `cloudrun_indicparler` | ✅ LIVE (Hindi, description-driven) |
+| `ytfactory-tts-indicf5` | `https://ytfactory-tts-indicf5-767262167641.asia-southeast1.run.app` | `cloudrun_indicf5` | ✅ LIVE (v8, AI4Bharat IndicF5 — voice-clone Hindi & 10 other Indic; ~60% naturalness with sarah.wav ref, improves with Indian voice ref) |
 
 **`-atmlrispgq-as.a.run.app` form also resolves** to the same services;
 both formats are valid.

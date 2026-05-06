@@ -64,7 +64,9 @@ gcloud run deploy "${SERVICE}" \
   --timeout=3600 \
   --no-allow-unauthenticated \
   --set-env-vars="GCS_BUCKET=ytfactory-tts-io,LOG_LEVEL=INFO" \
-  --execution-environment=gen2
+  --execution-environment=gen2 \
+  --add-volume="name=weights,type=cloud-storage,bucket=ytfactory-model-weights,readonly=true" \
+  --add-volume-mount="volume=weights,mount-path=/models/hf"
 
 URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="${PROJECT}" --format="value(status.url)")
 echo ""
