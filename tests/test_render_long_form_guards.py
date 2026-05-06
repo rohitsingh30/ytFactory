@@ -197,7 +197,7 @@ class MainProviderGuardTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 self._run_main_with_args(channel_dir, slug)
             self.assertIn("kokoro", str(cm.exception))
-            self.assertIn("F5", str(cm.exception))
+            self.assertIn("f5", str(cm.exception))
 
     def test_cartesia_provider_is_rejected(self):
         import tempfile
