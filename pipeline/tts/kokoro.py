@@ -27,9 +27,10 @@ from __future__ import annotations
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import soundfile as sf
-from kokoro_onnx import Kokoro
+if TYPE_CHECKING:
+    from kokoro_onnx import Kokoro  # heavy import — lazy at runtime
 
 
 _RELEASE = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
@@ -54,6 +55,7 @@ def _download_if_missing(url: str, dest: Path) -> Path:
 def _kokoro() -> Kokoro:
     global _KOKORO
     if _KOKORO is None:
+        from kokoro_onnx import Kokoro
         model_path = _download_if_missing(f"{_RELEASE}/{_MODEL_FILE}", _CACHE_DIR / _MODEL_FILE)
         voices_path = _download_if_missing(f"{_RELEASE}/{_VOICES_FILE}", _CACHE_DIR / _VOICES_FILE)
         _KOKORO = Kokoro(str(model_path), str(voices_path))
@@ -309,6 +311,8 @@ def _synth_kokoro(
         # Empty/whitespace-only text — fall through so the caller
         # still gets a valid (probably empty) WAV instead of a crash.
         sentences = [(0, text)]
+
+    import soundfile as sf
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 

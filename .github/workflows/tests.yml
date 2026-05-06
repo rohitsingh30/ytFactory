@@ -17,6 +17,11 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Install ffmpeg
+        # pipeline/probe.py shells out to ffprobe; a few tests
+        # (probe_duration on a real WAV) need it on the runner.
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Install slim deps
         # Control plane + agent + light pipeline modules.
         # Heavy ML deps (torch / diffusers / kokoro_onnx / mlx_*) are
