@@ -1,7 +1,0 @@
-Source: LibriVox via archive.org
-Identifier: communistmanifesto_librivox
-Chapter: marx_engels_communistmanifesto_2_64kb.mp3
-Clip: 35.0s - 49.0s
-License: Public Domain (CC0)
-Profile: Clear formal newsreader / lecturer tone
-Gender: male

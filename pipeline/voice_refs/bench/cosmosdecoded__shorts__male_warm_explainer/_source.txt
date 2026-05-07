@@ -1,7 +1,0 @@
-Source: LibriVox via archive.org
-Identifier: walden_librivox
-Chapter: walden_c01_p02_64kb.mp3
-Clip: 35.0s - 49.0s
-License: Public Domain (CC0)
-Profile: Warm engaging male explainer — science communication
-Gender: male

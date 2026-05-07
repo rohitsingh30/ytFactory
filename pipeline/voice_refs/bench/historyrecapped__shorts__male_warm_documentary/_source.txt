@@ -1,7 +1,0 @@
-Source: LibriVox via archive.org
-Identifier: thejunglebook_pc_librivox
-Chapter: junglebookthe_02_kipling_64kb.mp3
-Clip: 14.0s - 28.0s
-License: Public Domain (CC0)
-Profile: Warm authoritative tone, documentary-style male reader
-Gender: male

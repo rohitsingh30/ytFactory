@@ -1,7 +1,0 @@
-Source: LibriVox via archive.org
-Identifier: art_war_ps_librivox
-Chapter: artofwar_02_sun_64kb.mp3
-Clip: 35.0s - 49.0s
-License: Public Domain (CC0)
-Profile: Animated, energetic, varied intonation
-Gender: male

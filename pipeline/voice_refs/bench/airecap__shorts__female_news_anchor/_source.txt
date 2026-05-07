@@ -1,7 +1,0 @@
-Source: LibriVox via archive.org
-Identifier: wuthering_heights_rg_librivox
-Chapter: wutheringheights_02_bronte_64kb.mp3
-Clip: 14.0s - 28.0s
-License: Public Domain (CC0)
-Profile: Clear formal newsreader female
-Gender: female

@@ -1,7 +1,0 @@
-Source: LibriVox via archive.org
-Identifier: pride_and_prejudice_librivox
-Chapter: prideandprejudice_04-05_austen_64kb.mp3
-Clip: 35.0s - 49.0s
-License: Public Domain (CC0)
-Profile: Emotional female reader, expressive, AITA-style
-Gender: female

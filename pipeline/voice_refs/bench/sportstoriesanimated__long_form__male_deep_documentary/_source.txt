@@ -1,7 +1,0 @@
-Source: LibriVox via archive.org
-Identifier: richestman_2604_librivox
-Chapter: richestman_03_clason_64kb.mp3
-Clip: 14.0s - 28.0s
-License: Public Domain (CC0)
-Profile: Authoritative deep documentary voice
-Gender: male
