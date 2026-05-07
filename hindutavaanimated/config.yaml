@@ -38,15 +38,35 @@ source_adapter: manual
 # Hindi TTS lib. Indic Parler code stays in pipeline/audio.py for
 # anyone willing to set up a separate venv.
 #
-# Kokoro Devanagari handling: pipeline/audio._HINDI_TATSAMA_RESPELLINGS
-# table re-spells common conjuncts before TTS. Per-name overrides go
-# in the per-story dossier's pronunciation_dict. Kokoro hf_alpha is
-# the only Hindi-capable provider in the repo (F5-TTS-MLX is English-
-# only at the configured model).
-tts_provider: kokoro
-tts_voice: hf_alpha   # Hindi female (Kokoro's only female Hindi voice)
+# ---- TTS ---------------------------------------------------------------
+# Voice matrix bench (2026-05-07) confirmed IndicF5 wins ALL 4 Hindi cells
+# (composite 95-99 vs Indic Parler 84-88, Higgs 77-92, Kokoro 43-65).
+# Production winner: cloudrun_indicf5 with announcer-quality voice ref
+# from AI4Bharat IndicVoices-R (CC-BY-4.0). Falls back to local
+# Kokoro hf_alpha on cloud failure (only on-laptop Hindi voice).
+#
+# Voice ref selection logic:
+#   - Shorts narration → Indian female storyteller voice (announcer
+#     quality, SNR 71 dB, mid-pitch 200-220 Hz, 30-45 age)
+#   - Long-form kathaa → Indian female meditation voice (SNR 70 dB,
+#     calm low-female pitch ~192 Hz, 45-60 age)
+#
+# Both refs live in pipeline/voice_refs/bench/ and were sourced from
+# AI4Bharat IndicVoices-R (CC-BY-4.0) using a 65+dB SNR + low pitch
+# variance + measured speaking rate filter. See
+# scripts/pull_hindi_voices.py for selection criteria.
+#
+# Long-form / Sanskrit history (kept for context):
+#   2026-05-04: Briefly tried indic_parler — broken in default venv
+#     (parler-tts requires transformers <4.49, our venv needs 4.49+).
+#   2026-05-04 → 2026-05-06: Defaulted to local Kokoro hf_alpha.
+#   2026-05-06: Migrated to cloud Hindi (cloudrun_indicparler/indicf5).
+#   2026-05-07: Voice matrix bench → cloudrun_indicf5 wins all cells.
+tts_provider: cloudrun_indicf5
+tts_voice: pipeline/voice_refs/bench/hindutavaanimated__shorts__hindi_female_storyteller/ref.wav
+tts_ref_text: ये काफ़ी अच्छा होता है सेहत के लिए भी लोगों को भाता भी है चाहे कोई भी हो शौक से खाते हैं और शौक से पकाते हैं
 tts_language: hi
-tts_speed: 1.0       # Kokoro at native rate; per-sentence modulation in audio.py drives final pacing.
+tts_speed: 1.0       # Per-sentence modulation in audio.py drives final pacing.
 
 # ---- Image gen — Amar Chitra Katha aesthetic --------------------------
 image_provider: z_image_turbo

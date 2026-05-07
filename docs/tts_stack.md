@@ -65,7 +65,7 @@ Set `CLOUDRUN_TTS_DISABLE_FALLBACK=1` in tests to hard-error instead.
 | airecap | `cloudrun_chatterbox` | `pipeline/voice_refs/sarah.wav` | Was `kokoro am_michael`; flipped to cloud Chatterbox 2026-05-06 |
 | cosmosdecoded | `cloudrun_chatterbox` | `pipeline/voice_refs/sarah.wav` | Was `kokoro`; flipped 2026-05-06 |
 | historyrecapped | `cloudrun_chatterbox` | `pipeline/voice_refs/sarah.wav` | Was `kokoro`; flipped 2026-05-06 |
-| hindutavaanimated | `kokoro` (local) | `hf_alpha` (Hindi female) | **Stays local**; Indic Parler cloud + better Hindi models pending research |
+| hindutavaanimated | `cloudrun_indicf5` | `pipeline/voice_refs/bench/hindutavaanimated__shorts__hindi_female_storyteller/ref.wav` | **Updated 2026-05-07 per voice-matrix bench**; IndicF5 won all 4 Hindi cells (composite 95-99 vs IndicParler 84-88, Higgs 77-92, Kokoro 43-65). Falls back to local `kokoro hf_alpha` on cloud failure. |
 | mystoriesanimated (parent) | `cloudrun_chatterbox` | `pipeline/voice_refs/sarah.wav` | Was `chatterbox` (local); flipped 2026-05-06 |
 | mystoriesanimated/variants/aita_animated.yaml | `cloudrun_chatterbox` | `pipeline/voice_refs/sarah.wav` | Was `f5_tts`; flipped 2026-05-06 |
 | mystoriesanimated/variants/aita_animated_motion.yaml | `cloudrun_chatterbox` | `pipeline/voice_refs/sarah.wav` | flipped 2026-05-06 |
@@ -146,13 +146,19 @@ without the per-call load.
 
 ## Hindi / Hinglish (today + roadmap)
 
-**Today (2026-05-06):**
-- **Production default for hindutavaanimated:** local `kokoro hf_alpha`
-  (the only Hindi-capable laptop voice; female; flat prosody).
-- **Cloud option:** `cloudrun_indicparler` — description-driven, 22
-  Indic languages, Apache 2.0. Has a 30 s truncation issue
-  (max_new_tokens=4096; needs bump to ~16000 to support full kathaa
-  chunks).
+**Today (2026-05-07):**
+- **Production default for hindutavaanimated:** `cloudrun_indicf5` (AI4Bharat
+  IndicF5 cloud service), with announcer-quality voice ref from
+  IndicVoices-R. Voice matrix bench (2026-05-07) confirmed IndicF5 wins
+  all 4 Hindi cells (composite 95-99) vs Indic Parler (84-88), Higgs
+  (77-92), Kokoro (43-65).
+- **Cloud fallback option:** `cloudrun_indicparler` — description-driven,
+  22 Indic languages, Apache 2.0. Strong female Hindi voices but
+  CANNOT generate male Hindi (description bias). Has a 30 s truncation
+  issue (max_new_tokens=4096; needs bump to ~16000 to support full
+  kathaa chunks).
+- **Laptop fallback:** local `kokoro hf_alpha` (the only Hindi-capable
+  laptop voice; female; flat prosody). Activates if cloud is unhealthy.
 - **CosyVoice 2 does NOT speak Hindi** — proven empirically (Whisper
   detects Korean from Hindi-text rendering). Trained on CN/EN/JP/KR +
   EU only.
@@ -191,3 +197,4 @@ back to `f5_tts` / `kokoro`.
 | 2026-05-05 | Cloud Run Chatterbox + CosyVoice + Indic Parler services deployed |
 | 2026-05-06 | Cloud Run Higgs Audio v2 service deployed (PierrunoYT mirror) |
 | 2026-05-06 | **Cloud-first migration complete.** All 17 production channel YAMLs flipped to `cloudrun_chatterbox` (English) or remain on `kokoro` (hindutavaanimated only). Laptop is now fallback-only. |
+| 2026-05-07 | **Voice matrix bench complete (`data/_bench/voice-matrix/20260506-210506/`).** 70 cells judged via Whisper-large WER + resemblyzer speaker similarity + F0 gender + audio health. **Per-channel winners:** Chatterbox (6 cells), CosyVoice (4), Higgs (5 — news anchor + warm explainer), IndicF5 (4 — all hindutava cells). hindutavaanimated flipped to `cloudrun_indicf5`. |

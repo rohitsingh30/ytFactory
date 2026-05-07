@@ -1,0 +1,7 @@
+Source: LibriVox via archive.org
+Identifier: moby_dick_librivox
+Chapter: mobydick_003_melville_64kb.mp3
+Clip: 35.0s - 49.0s
+License: Public Domain (CC0)
+Profile: BBC-documentary-style deep authoritative
+Gender: male

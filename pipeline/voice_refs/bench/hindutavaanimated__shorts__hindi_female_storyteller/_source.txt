@@ -1,0 +1,11 @@
+Source: AI4Bharat IndicVoices-R
+License: CC-BY-4.0
+Speaker ID: S4259206300345231
+Gender: Female
+Age group: 30-45
+Duration: 8.03s
+SNR: 70.6 dB
+Pitch: 200.6 Hz
+Speaking rate: 10.71
+Shard: Hindi/train-00007-of-00099.parquet
+Profile: Hindi female narrator, expressive announcer-quality

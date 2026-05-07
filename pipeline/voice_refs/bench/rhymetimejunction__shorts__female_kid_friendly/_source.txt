@@ -1,0 +1,7 @@
+Source: LibriVox via archive.org
+Identifier: aliceinwonderland_drama_1310_librivox
+Chapter: aliceinwonderland_01_gerstenberg_64kb.mp3
+Clip: 14.0s - 28.0s
+License: Public Domain (CC0)
+Profile: Bright, warm, animated — children's storyteller
+Gender: female

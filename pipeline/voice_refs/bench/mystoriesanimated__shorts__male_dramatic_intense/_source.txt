@@ -1,0 +1,7 @@
+Source: LibriVox via archive.org
+Identifier: moby_dick_librivox
+Chapter: mobydick_001_002_melville_64kb.mp3
+Clip: 35.0s - 49.0s
+License: Public Domain (CC0)
+Profile: Intense narrator, varied pacing, perfect for AITA male variants
+Gender: male

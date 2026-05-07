@@ -1,0 +1,7 @@
+Source: LibriVox via archive.org
+Identifier: little_princess_krs
+Chapter: little_princess_02_burnett_64kb.mp3
+Clip: 14.0s - 28.0s
+License: Public Domain (CC0)
+Profile: Warm friendly female narrator (Little Princess audiobook reader)
+Gender: female

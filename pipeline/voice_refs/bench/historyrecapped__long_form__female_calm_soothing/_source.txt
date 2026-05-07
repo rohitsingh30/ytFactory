@@ -1,0 +1,7 @@
+Source: LibriVox via archive.org
+Identifier: secret_garden_1105_librivox
+Chapter: secretgarden_02_burnett_64kb.mp3
+Clip: 14.0s - 28.0s
+License: Public Domain (CC0)
+Profile: Soft calm female reader, sleep cadence
+Gender: female

@@ -1,0 +1,11 @@
+Source: AI4Bharat IndicVoices-R
+License: CC-BY-4.0
+Speaker ID: S4257095300383130
+Gender: Male
+Age group: 45-60
+Duration: 12.64s
+SNR: 70.3 dB
+Pitch: 100.0 Hz
+Speaking rate: 10.76
+Shard: Hindi/train-00001-of-00099.parquet
+Profile: Hindi male elder, deep voice (announcer-grade, SNR 65+, low std)
