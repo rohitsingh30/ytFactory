@@ -798,6 +798,14 @@ def make_short(
     # ``YTFACTORY_SKIP_POWER_CHECK=1`` if you understand the risk.
     power_check(label="Shorts")
 
+    # Reset the cloud-image circuit breaker per-render. Without this,
+    # a previous render's CloudRunUnavailable would still be tripping
+    # the breaker on this render → all images would skip cloud and go
+    # to local mflux even when the cloud service has recovered. See
+    # pipeline/images_cloudrun.py for breaker semantics.
+    from pipeline.images_cloudrun import reset_circuit_breaker  # noqa: PLC0415
+    reset_circuit_breaker()
+
     cfg = yaml.safe_load(channel_path.read_text())
     # An override that contains no path separator is a Kokoro voice id
     # (e.g. "am_eric"). When the channel default is F5-TTS but the user
@@ -837,6 +845,14 @@ def make_short(
     tts_provider = cfg.get("tts_provider", "kokoro")
     image_provider = cfg.get("image_provider", "sd_turbo")
     motion_provider = cfg.get("motion_provider")  # None → slideshow path
+
+    # Cloud image-gen cold-load is 5-7 min through GCS Fuse. If we wait
+    # to discover that on the first /generate call, the whole Short
+    # blocks for those 5-7 min on the critical path. Instead: kick off
+    # /readyz on a background thread NOW (image_provider is resolved
+    # but we still have ~60-90s of TTS+ASR ahead). Provider-aware:
+    # no-ops for local providers, fires for cloudrun_*.
+    images.warmup(image_provider)
 
     # Class-of-bug guard (see images.validate_provider_config docstring).
     # Channels can pick provider, dims, and steps independently — we

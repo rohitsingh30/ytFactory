@@ -69,7 +69,7 @@ tts_language: hi
 tts_speed: 1.0       # Per-sentence modulation in audio.py drives final pacing.
 
 # ---- Image gen — Amar Chitra Katha aesthetic --------------------------
-image_provider: z_image_turbo
+image_provider: cloudrun_flux2_klein
 image_style_prefix: |
   Amar Chitra Katha Indian comic-book illustration style. Bold black
   ink outlines, flat saturated colors — deep sindoor red, peacock blue,

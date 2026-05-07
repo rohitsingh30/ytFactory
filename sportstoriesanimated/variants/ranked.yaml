@@ -37,7 +37,7 @@ tts_speed: 0.98
 
 # Visuals — same minimalist Tifo aesthetic. Different seed so the channel
 # feels visually distinct from non-ranked sports shorts.
-image_provider: z_image_turbo
+image_provider: cloudrun_flux2_klein
 image_style_prefix: |
   hand-drawn editorial line-art illustration, cream parchment background,
   muted earthy palette of teal burnt-orange and slate, soft halftone

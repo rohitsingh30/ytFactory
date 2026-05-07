@@ -639,6 +639,11 @@ def main() -> int:
     from pipeline.preflight import power_check  # noqa: PLC0415
     power_check(label="sports-doc")
 
+    # Reset the cloud-image circuit breaker per-render — see
+    # pipeline/images_cloudrun.py for breaker semantics.
+    from pipeline.images_cloudrun import reset_circuit_breaker  # noqa: PLC0415
+    reset_circuit_breaker()
+
     _load_env(REPO_ROOT)
 
     from pipeline.paths import RenderPaths  # noqa: PLC0415

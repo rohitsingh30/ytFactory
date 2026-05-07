@@ -58,7 +58,7 @@ tts_speed: 1.2  # ~165 wpm explainer pace
 # CLASS-OF-BUG (diffusion negation trap): pure positive descriptors
 # only. Never "no photography", "no robots". Describe what we WANT
 # (isometric, vector, geometric, restrained palette).
-image_provider: z_image_turbo
+image_provider: cloudrun_flux2_klein
 image_style_prefix: |
   clean isometric editorial illustration, flat vector geometry,
   restrained tech palette of indigo cobalt slate cream and accent

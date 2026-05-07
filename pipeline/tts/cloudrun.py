@@ -54,53 +54,15 @@ logger = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------------- token caching
+#
+# Lifted to `pipeline.cloudrun_auth` 2026-05-07 — see that module for
+# the per-audience cache rationale (multi-service rollout requires
+# audience-scoped tokens, not the original single global cache). This
+# module re-exports `_get_id_token` as a thin wrapper so any existing
+# import paths keep working.
 
 
-_TOKEN: str | None = None
-_TOKEN_EXPIRES_AT: float = 0.0
-# Google ID tokens are valid for 1 h. We refresh at 50 min to leave
-# margin for clock skew between laptop and Cloud Run frontend.
-_TOKEN_TTL_S = 50 * 60
-
-
-def _get_id_token(audience: str) -> str:
-    """Return a Google-issued ID token usable by Cloud Run.
-
-    Service-account ADC supports ``--audiences=<service-url>`` to scope
-    the token. User-account ADC (laptop dev) does not — the issued
-    token has no custom audience and Cloud Run accepts it as long as
-    the user has ``roles/run.invoker`` (or higher, e.g. project
-    owner). We try the service-account path first; if it errors with
-    "Invalid account type", fall back to the user-account path.
-
-    Cached for ~50 min.
-    """
-    global _TOKEN, _TOKEN_EXPIRES_AT
-    now = time.time()
-    if _TOKEN and now < _TOKEN_EXPIRES_AT:
-        return _TOKEN
-    cmds = [
-        ["gcloud", "auth", "print-identity-token", f"--audiences={audience}"],
-        ["gcloud", "auth", "print-identity-token"],  # user-account fallback
-    ]
-    last_err: Exception | None = None
-    for cmd in cmds:
-        try:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            _TOKEN = res.stdout.strip()
-            _TOKEN_EXPIRES_AT = now + _TOKEN_TTL_S
-            return _TOKEN
-        except subprocess.CalledProcessError as e:
-            last_err = e
-            stderr = (e.stderr or "").lower()
-            # User-account error → try the no-audience form. Anything
-            # else (e.g. not logged in) → bubble up after the loop.
-            if "invalid account type" not in stderr and "audiences" not in stderr:
-                raise
-    raise RuntimeError(
-        f"could not get a gcloud ID token; tried both audience-scoped and "
-        f"plain. Last error: {last_err}"
-    )
+from pipeline.cloudrun_auth import get_id_token as _get_id_token  # noqa: E402, F401
 
 
 # ---------------------------------------------------------------- base URL
@@ -246,7 +208,7 @@ def _synth_cloudrun(
         "output": "inline",
     }
     t0 = time.time()
-    resp = _post_synth(payload, model=model)
+    resp = _post_synth(payload)
     _materialise_wav(resp, out_path)
     logger.info(
         "cloudrun_%s ok: chars=%d audio=%.2fs cloud_wall=%.2fs "

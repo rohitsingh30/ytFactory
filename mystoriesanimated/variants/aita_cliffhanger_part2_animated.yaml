@@ -24,7 +24,7 @@ tts_speed: 0.90
 
 # Image gen — same style + steps + seed as the standard aita_animated,
 # so Part 2 looks like a continuation of Part 1 (cast.json reused).
-image_provider: z_image_turbo
+image_provider: cloudrun_flux2_klein
 image_style_prefix: |
   Flat 2D crayon-style children's drawing with thick black outlines and
   soft pastel fill colors (warm beige, dusty pink, mustard yellow,

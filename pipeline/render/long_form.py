@@ -1543,6 +1543,14 @@ def main() -> int:
     _preflight_power_check()
     _load_env(REPO_ROOT)
 
+    # Reset the cloud-image circuit breaker per-render. Even though
+    # long-form sleep videos use archival footage (no cloud image
+    # gen), the image_panels render mode does call into image-gen
+    # providers — keep the reset so that path also gets a fresh
+    # breaker state.
+    from pipeline.images_cloudrun import reset_circuit_breaker  # noqa: PLC0415
+    reset_circuit_breaker()
+
     # Single source of truth for per-slug paths. ``args.channel`` may be
     # a flat channel slug ("historyrecapped") or a compound
     # ``<channel>/<niche>`` form (rare for long-form, but supported via

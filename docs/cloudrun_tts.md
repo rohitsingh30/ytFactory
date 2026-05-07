@@ -376,10 +376,14 @@ gcloud beta quotas info describe \
   reserves that path on certain configurations; use `/readyz` for
   both liveness + warm-up. The synth path `/synth` works fine
   everywhere.
-* **Cold-start varies by service:**
-  * F5: ~10 s (small image, fast HF download)
-  * Higgs: ~65 s (11.5 GB weights download + load to GPU)
-  * Chatterbox / CosyVoice / Indic Parler: 15-30 s
+* **Cold-start varies by service** (post-2026-05-06 GCS-mount rollout):
+  * F5: ~50-68 s
+  * Higgs: ~60 s (no longer paying 5-8 min HF download)
+  * IndicParler: ~37 s (was ~60-90 s)
+  * IndicF5: ~48 s
+  * CosyVoice: ~135 s (multi-component: ASR + vocoder + tokenizer)
+  * Chatterbox: ~4.4 min (with `assign=True` patch, was ~14 min — see
+    `docs/cloudrun_persistent_weights.md` § "Chatterbox cold-start deep dive")
 * **Concurrency hard-pinned at 1.** Mirrors the
   `gpu_one_render_at_a_time` rule from
   `docs/long_form_model_inventory.md`. Two synth calls on one L4

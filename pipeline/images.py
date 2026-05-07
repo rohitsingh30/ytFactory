@@ -468,6 +468,35 @@ _PROVIDER_CAPABILITIES: dict[str, dict] = {
             "Requires FAL_KEY env var. No local GPU; ~2-4s/image network."
         ),
     },
+    "cloudrun_flux2_klein": {
+        "native_dim": (1024, 1024),
+        "max_dim": (1664, 1664),
+        "step_range": (2, 8),
+        "vertical_9_16_safe": True,
+        "description": (
+            "FLUX.2 [klein] 4B (Apache 2.0, BFL Jan 2026) on our "
+            "Cloud Run NVIDIA L4 in asia-southeast1. Distilled to 4 "
+            "inference steps, ~3-4 s warm /generate at 768x1344. "
+            "T2I + multi-reference editing in one model. The new "
+            "default per docs/research/image_gen_2026.md. Falls back "
+            "to local z_image_turbo (mflux) on cloud failure via "
+            "render-level circuit breaker."
+        ),
+    },
+    "cloudrun_z_image_turbo": {
+        "native_dim": (1024, 1024),
+        "max_dim": (1344, 1344),
+        "step_range": (4, 12),
+        "vertical_9_16_safe": True,
+        "description": (
+            "Z-Image-Turbo 6B via Cloud Run (Apache 2.0). Same "
+            "checkpoint as the local z_image_turbo (mflux) path, "
+            "diffusers runtime on NVIDIA L4. Parity / risk-insurance "
+            "lane next to FLUX.2 klein. Falls back to local mflux on "
+            "cloud failure. NOTE 2026-05-07: cold-load reliability "
+            "still WIP — see P3.5 todo."
+        ),
+    },
 }
 
 
@@ -643,6 +672,19 @@ def warmup(provider: str, *, want_ip_adapter: bool = False) -> None:
                 "threaded warmup. Lazy-load on first generate() instead."
             )
             return
+        if provider in ("cloudrun_flux2_klein", "cloudrun_z_image_turbo"):
+            # Cloud providers: fire-and-forget /readyz on a background
+            # thread so the cloud service starts cold-loading (~5-7 min
+            # for FLUX, longer for Z-Image) BEFORE the first /generate
+            # call hits. Hides the cold-load behind concurrent TTS/ASR
+            # work in make_shorts.py. The thread doesn't block this
+            # function — caller doesn't need to .join() it; first
+            # /generate will benefit from the warm container.
+            from pipeline.images_cloudrun import warmup as _cloud_warmup
+            model = provider.removeprefix("cloudrun_")
+            _cloud_warmup(model)
+            print(f"[warmup] {provider} /readyz fired on background thread")
+            return
         if provider in ("sdxl_lightning", "sd_turbo"):
             _pipe(want_ip_adapter=want_ip_adapter)
         else:
@@ -769,10 +811,15 @@ def generate(
     # opts in via `force_positive` block; if absent, we still strip
     # the broken avoid-fold-in (better to ship with a small bug than
     # actively make it worse).
-    if provider in ("mflux", "z_image_turbo", "z_image_turbo_fal"):
+    if provider in (
+        "mflux", "z_image_turbo", "z_image_turbo_fal",
+        "cloudrun_flux2_klein", "cloudrun_z_image_turbo",
+    ):
         # extra_neg_str is intentionally NOT folded in for these
         # providers — see comment above. Channel-level positive tokens
         # are appended via `force_positive` instead.
+        # Both cloud providers are guidance-distilled (FLUX.2 klein at
+        # gs=1.0, Z-Image-Turbo at gs=0.0), same trick applies.
         force_pos_str = ""
         if force_positive:
             if isinstance(force_positive, list):
@@ -820,6 +867,26 @@ def generate(
             height=height,
             steps=steps,
         )
+    elif provider == "cloudrun_flux2_klein":
+        from pipeline.images_cloudrun import _generate_cloudrun_flux2_klein
+        result = _generate_cloudrun_flux2_klein(
+            prompt=final_prompt,
+            seed=seed,
+            out_path=out_path,
+            width=width,
+            height=height,
+            steps=steps,
+        )
+    elif provider == "cloudrun_z_image_turbo":
+        from pipeline.images_cloudrun import _generate_cloudrun_z_image_turbo
+        result = _generate_cloudrun_z_image_turbo(
+            prompt=final_prompt,
+            seed=seed,
+            out_path=out_path,
+            width=width,
+            height=height,
+            steps=steps,
+        )
     elif provider in ("sdxl_lightning", "sd_turbo"):
         result = _generate_sdxl(
             prompt=final_prompt,
@@ -857,6 +924,13 @@ def _is_pipe_loaded(provider: str) -> bool:
         return _ZIMAGE_PIPE is not None
     if provider == "z_image_turbo_fal":
         return True  # hosted; no local pipe to cold-load
+    if provider in ("cloudrun_flux2_klein", "cloudrun_z_image_turbo"):
+        # The cloud service holds its own pipe state; from the laptop
+        # we have no way to know if it's warm without an extra round-
+        # trip, so just always tag as warm. Cold-loads on the cloud
+        # side are visible in the per-call response's `cold_loaded`
+        # field, which `pipeline.images_cloudrun` logs separately.
+        return True
     if provider in ("sdxl_lightning", "sd_turbo"):
         return _PIPE is not None
     return False

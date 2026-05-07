@@ -80,6 +80,78 @@ Implemented in `pipeline/tts/cloudrun.py::_synth_cloudrun_*`. Set
 `CloudRunUnavailable` → fallback path activates. No code change
 required.
 
+---
+
+## Cloud-first image generation migration (2026-05-07 — COMPLETE for FLUX.2 klein)
+
+GPU-bound image generation runs on **Cloud Run + NVIDIA L4** in
+`asia-southeast1`, same pattern as TTS. Render-stage image gen
+~3-4× faster than local mflux Z-Image-Turbo on M2 Max.
+
+### Per-channel routing (2026-05-07 reality)
+
+- **Every channel/variant declaring image gen** (16 YAMLs) now uses
+  `image_provider: cloudrun_flux2_klein` — FLUX.2 [klein] 4B
+  (Apache 2.0, BFL Jan 2026) on Cloud Run NVIDIA L4 with
+  `--min-instances=1` (always-warm container).
+- **One exception:** `mystoriesanimated/variants/tifu.yaml` stays
+  on `image_provider: mflux` (legacy Flux Schnell, low priority).
+- **Falls back to local `z_image_turbo` (mflux)** on cloud failure
+  via render-level circuit breaker.
+
+### Where to find what
+
+- **Top-level Cloud Run image runbook:** `docs/cloudrun_image.md`
+- **Provider matrix:** `docs/image_stack.md`
+- **Model-pick research:** `docs/research/image_gen_2026.md`
+- **End-to-end pipeline latency map (every channel × every stage,
+  laptop vs cloud vs external):** `docs/pipeline_latency_2026.md`
+- **Container code:** `cloud/image-flux2-klein/` (FLUX.2 klein 4B,
+  shipped); `cloud/image-z-image-turbo/` (Z-Image-Turbo 6B parity
+  lane, cold-load reliability WIP — see P3.5);
+  `cloud/image-qwen/` + `cloud/image-hidream/` (scaffolded, not
+  on production path)
+- **Pre-warm before a render:** `cloud/warm_image_services.sh`
+- **Laptop client + auto-fallback:** `pipeline/images_cloudrun.py`
+- **Dispatcher wiring:** `pipeline/images.py` (provider branches +
+  `_PROVIDER_CAPABILITIES` + `warmup()`)
+
+### Render-level circuit breaker (key divergence from TTS)
+
+Each Short renders ~30 images on the critical path. If we per-image
+fall back to local mflux on cloud failure, that's 30 ×
+`CLOUDRUN_IMAGE_TIMEOUT` (900 s × 30 = 7.5 hr) of timeouts in a
+single Short during a cloud outage. Instead, the FIRST
+`CloudRunUnavailable` in a render trips a module-global flag → all
+subsequent calls skip cloud entirely.
+
+`reset_circuit_breaker()` is wired into all four render entry
+points (`make_short`, `render` for footage_only, long_form `main`,
+sports_doc `main`). Set
+`CLOUDRUN_IMAGE_DISABLE_FALLBACK=1` for canary work to hard-error
+instead of falling back.
+
+### Z-Image-Turbo cloud cold-load (P3.5 follow-up)
+
+The Z-Image cloud service exists but cold-load through GCS Fuse
+keeps stalling — Cloud Run replaces the container 3× in 17 min
+during the 25 GB transformer shard reads. Three candidate fixes
+in `memory/feedback_zimage_cloudrun_coldload_stall.md`. Non-blocking:
+FLUX.2 klein is the primary cloud image service.
+
+### Rollback
+
+Single-sed flip of all 16 YAMLs back to `z_image_turbo` (local
+mflux):
+
+```bash
+for f in $(grep -rlE "^[[:space:]]*image_provider: cloudrun_flux2_klein[[:space:]]*$" --include='*.yaml' .); do
+  sed -i '' -E 's/^([[:space:]]*)image_provider: cloudrun_flux2_klein[[:space:]]*$/\1image_provider: z_image_turbo/' "$f"
+done
+```
+
+No service redeploy needed.
+
 ## Adding a new Cloud Run service (TTS / image / video / anything)
 
 **Required reading:** `docs/cloud_service_dep_playbook.md`. It encodes

@@ -167,7 +167,7 @@ _PRODUCTION_CHANNELS = [
 _VALID_PROVIDERS = {
     "kokoro", "f5_tts", "chatterbox", "styletts2", "indic_parler",
     "cloudrun_chatterbox", "cloudrun_f5", "cloudrun_higgs",
-    "cloudrun_cosyvoice", "cloudrun_indicparler",
+    "cloudrun_cosyvoice", "cloudrun_indicparler", "cloudrun_indicf5",
 }
 
 # Providers that interpret tts_voice as a filesystem path to a ref WAV.

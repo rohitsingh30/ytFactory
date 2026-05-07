@@ -12,7 +12,7 @@ tts_speed: 1.0
 # Image gen — Z-Image-Turbo 6B via mflux (MLX-native).
 # Replaced sd_turbo (May 2026) — see wiki_oddities.yaml or
 # images.validate_provider_config for the why.
-image_provider: z_image_turbo
+image_provider: cloudrun_flux2_klein
 image_style_prefix: |
   classic history-book illustration, muted oil-painting style, warm
   amber palette, cinematic lighting, a single key historical scene,

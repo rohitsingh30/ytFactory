@@ -88,7 +88,7 @@ tts_speed: 1.0
 # DO NOT switch to motion_provider — channel design is illustrated
 # stills between archival cut-ins; AnimateDiff is rejected for this
 # channel for the same reason as sports.
-image_provider: z_image_turbo
+image_provider: cloudrun_flux2_klein
 #
 # CLASS-OF-BUG note (channel bring-up): the bare phrase "war scene"
 # pushes diffusion toward generic medieval/fantasy battles or video-game
@@ -321,7 +321,7 @@ long_form:
     framing with small human figures in period dress, atmospheric depth via
     foreground silhouette frame (cave mouth or tree silhouette or rock arch),
     no text, no captions on image, no modern objects, no logo
-  image_provider: z_image_turbo
+  image_provider: cloudrun_flux2_klein
   image_seed: 1944       # locks character/scene look across an episode
   image_steps: 4
   image_width: 1344      # Z-Image-Turbo cap; compose upscales to 1920x1080

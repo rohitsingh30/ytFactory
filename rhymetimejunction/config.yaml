@@ -93,7 +93,7 @@ tts_speed: 1.0
 # style prefix is pure positive descriptors — never "no scary faces",
 # "no horror" etc. — those tokens AMPLIFY in z_image_turbo. Express
 # what we WANT: "warm smiling expressions", "bright sunny daylight".
-image_provider: z_image_turbo
+image_provider: cloudrun_flux2_klein
 # Style prefix mirrors aita_animated.yaml — the proven flat-2D crayon
 # look that the AITA family ships consistently. User feedback round 2
 # (2026-05-03 critique): the earlier custom Pingu/Peppa prefix combined

@@ -37,7 +37,8 @@ gcloud run deploy "${SERVICE}" \
   --no-gpu-zonal-redundancy \
   --no-cpu-throttling \
   --memory=16Gi \
-  --cpu=4 \
+  --cpu=8 \
+  --cpu-boost \
   --concurrency=1 \
   --max-instances=2 \
   --min-instances=0 \
@@ -45,7 +46,7 @@ gcloud run deploy "${SERVICE}" \
   --no-allow-unauthenticated \
   --set-env-vars="GCS_BUCKET=ytfactory-tts-io,LOG_LEVEL=INFO" \
   --execution-environment=gen2 \
-  --add-volume="name=weights,type=cloud-storage,bucket=ytfactory-model-weights,readonly=true" \
+  --add-volume="name=weights,type=cloud-storage,bucket=ytfactory-model-weights" \
   --add-volume-mount="volume=weights,mount-path=/models/hf"
 
 URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="${PROJECT}" --format="value(status.url)")
