@@ -1,8 +1,8 @@
-"""Tests for pipeline.paths — the canonical layout module.
+"""Tests for pipeline.schemas.paths — the canonical layout module.
 
 What's pinned here:
 * Niched channels nest per-slug subdirs under ``<niche>/`` (mystoriesanimated,
-  sportstoriesanimated/ranked) — but channel-wide subdirs stay flat.
+  sportsrecapped/ranked) — but channel-wide subdirs stay flat.
 * Flat channels have no niche segment anywhere.
 * :meth:`from_channel_yaml` resolves variants via NICHE_CHANNEL with
   graceful fallback for unregistered variants.
@@ -15,6 +15,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tests._helpers import PROJECT_ROOT  # noqa: F401
 
@@ -31,13 +32,11 @@ from pipeline.paths import (
 
 # All real channel roots in the repo. Canonical layout MUST handle each.
 _PRODUCTION_CHANNELS = [
-    "airecap",
     "cosmosdecoded",
     "hindutavaanimated",
     "historyrecapped",
     "mystoriesanimated",
     "rhymetimejunction",
-    "sportstoriesanimated",
 ]
 
 
@@ -57,14 +56,15 @@ class FlatChannelLayoutTest(unittest.TestCase):
         self.assertEqual(p.cache,      p.project_root / "historyrecapped" / "cache")
 
     def test_channel_wide_subdirs_at_channel_root(self):
-        p = RenderPaths.for_channel("airecap")
-        self.assertEqual(p.config_yaml, p.project_root / "airecap" / "config.yaml")
-        self.assertEqual(p.learnings,   p.project_root / "airecap" / "learnings")
-        self.assertEqual(p.scripts,     p.project_root / "airecap" / "scripts")
-        self.assertEqual(p.branding,    p.project_root / "airecap" / "branding")
+        # config_yaml, learnings, scripts all live directly under the channel dir.
+        p = RenderPaths.for_channel("cosmosdecoded")
+        self.assertEqual(p.config_yaml, p.project_root / "cosmosdecoded" / "config.yaml")
+        self.assertEqual(p.learnings,   p.project_root / "cosmosdecoded" / "learnings")
+        self.assertEqual(p.scripts,     p.project_root / "cosmosdecoded" / "scripts")
+        self.assertEqual(p.branding,    p.project_root / "cosmosdecoded" / "branding")
 
     def test_channel_dir_string_is_just_channel(self):
-        self.assertEqual(RenderPaths.for_channel("airecap").channel_dir, "airecap")
+        self.assertEqual(RenderPaths.for_channel("cosmosdecoded").channel_dir, "cosmosdecoded")
 
 
 class NichedChannelLayoutTest(unittest.TestCase):
@@ -89,8 +89,8 @@ class NichedChannelLayoutTest(unittest.TestCase):
 
     def test_channel_wide_subdirs_DO_NOT_nest_under_niche(self):
         p = RenderPaths.for_channel("mystoriesanimated", "reddit_amitheasshole")
-        # config.yaml, learnings/, scripts/, branding/ all stay at channel_root,
-        # NOT under the niche dir. Multiple niches share these.
+        # config / learnings / scripts / branding all live under channel_root,
+        # NOT under the niche sub-dir.
         self.assertEqual(p.config_yaml, p.project_root / "mystoriesanimated" / "config.yaml")
         self.assertEqual(p.learnings,   p.project_root / "mystoriesanimated" / "learnings")
         self.assertEqual(p.scripts,     p.project_root / "mystoriesanimated" / "scripts")
@@ -99,14 +99,14 @@ class NichedChannelLayoutTest(unittest.TestCase):
     def test_footage_is_channel_wide(self):
         # Multiple niches share the same yt-dlp source mp4s; footage must
         # never nest under niche or every niche re-downloads the same clips.
-        p = RenderPaths.for_channel("sportstoriesanimated", "ranked")
+        p = RenderPaths.for_channel("sportsrecapped", "ranked")
         self.assertEqual(
             p.footage_sources,
-            p.project_root / "sportstoriesanimated" / "footage" / "sources",
+            p.project_root / "sportsrecapped" / "footage" / "sources",
         )
         self.assertEqual(
             p.footage_long_sources,
-            p.project_root / "sportstoriesanimated" / "footage" / "long_sources",
+            p.project_root / "sportsrecapped" / "footage" / "long_sources",
         )
 
     def test_channel_dir_string_compounds_when_niched(self):
@@ -168,7 +168,7 @@ class FromChannelYamlTest(unittest.TestCase):
         self.assertIsNone(p.niche)
 
     def test_variant_yaml_in_niche_channel_resolves_via_NICHE_CHANNEL(self):
-        # aita_animated.yaml maps to niche "aita" → reddit_amitheasshole dir
+        # aita_animated.yaml maps to niche "aita" → reddit_amitheasshole dir.
         p = RenderPaths.from_channel_yaml(
             Path("mystoriesanimated/variants/aita_animated.yaml")
         )
@@ -286,6 +286,62 @@ class CrossChannelDataDirsTest(unittest.TestCase):
         self.assertEqual(RESEARCH_DIR,     PATHS_PROJECT_ROOT / "data" / "research")
         self.assertEqual(TELEMETRY_DIR,    PATHS_PROJECT_ROOT / "data" / "telemetry")
         self.assertEqual(MODEL_CACHE_DIR,  PATHS_PROJECT_ROOT / "data" / "cache")
+
+
+class MissingPropertyTests(unittest.TestCase):
+    """Cover property accessors and from_channel_yaml flat-channel branch."""
+
+    def _paths(self, channel="mychan", niche=None, tmpdir=None):
+        from pathlib import Path
+        if tmpdir:
+            return RenderPaths.for_channel(channel, niche, project_root=Path(tmpdir))
+        return RenderPaths.for_channel(channel, niche)
+
+    def test_emoji_property(self):
+        p = RenderPaths.for_channel("mychan")
+        self.assertTrue(str(p.emoji).endswith("/emoji"))
+
+    def test_music_property(self):
+        p = RenderPaths.for_channel("mychan")
+        self.assertTrue(str(p.music).endswith("/music"))
+
+    def test_songs_property(self):
+        p = RenderPaths.for_channel("mychan")
+        self.assertTrue(str(p.songs).endswith("/songs"))
+
+    def test_footage_transcripts_property(self):
+        p = RenderPaths.for_channel("mychan")
+        self.assertTrue(str(p.footage_transcripts).endswith("/transcripts"))
+
+    def test_footage_plan_property(self):
+        p = RenderPaths.for_channel("mychan")
+        self.assertTrue(str(p.footage_plan).endswith("/footage_plan"))
+
+    def test_long_form_thumb_for(self):
+        p = RenderPaths.for_channel("mychan")
+        result = p.long_form_thumb_for("my-slug")
+        self.assertTrue(str(result).endswith("my-slug.thumb.png"))
+
+    def test_variants_dir_property(self):
+        p = RenderPaths.for_channel("mychan")
+        # Should return a path (may not exist on disk)
+        self.assertIsNotNone(p.variants_dir)
+
+    def test_from_channel_yaml_flat_chan_dir(self):
+        """Line 248: chan_dir with no '/' in NICHE_CHANNEL triggers flat lookup."""
+        import tempfile
+        from pathlib import Path
+        from pipeline import niches
+
+        # Patch NICHE_CHANNEL to include a flat entry (no '/' in chan_dir)
+        fake_niche = {"flat_chan": ("flatchan", "flatchan/variants/v.yaml")}
+        with patch.dict(niches.NICHE_CHANNEL, fake_niche, clear=False):
+            with tempfile.TemporaryDirectory() as td:
+                p = RenderPaths.from_channel_yaml(
+                    "flatchan/variants/v.yaml",
+                    project_root=Path(td),
+                )
+        self.assertEqual(p.channel, "flatchan")
 
 
 if __name__ == "__main__":

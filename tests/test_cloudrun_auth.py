@@ -1,4 +1,4 @@
-"""Tests for `pipeline.cloudrun_auth.get_id_token`.
+"""Tests for `pipeline.cloud.cloudrun_auth.get_id_token`.
 
 Focus: prove the audience-keyed cache fixes the multi-service-URL
 regression. The original `pipeline.tts.cloudrun._get_id_token` had
@@ -10,6 +10,7 @@ audience-claim mismatch. With multiple Cloud Run services in flight
 from __future__ import annotations
 
 import subprocess
+import time
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -20,10 +21,13 @@ class TestPerAudienceCache(unittest.TestCase):
     def setUp(self) -> None:
         cloudrun_auth._reset_cache_for_tests()
 
+    def tearDown(self) -> None:
+        cloudrun_auth._reset_cache_for_tests()
+
     def _stub_run(self, audience_to_token: dict[str, str]):
         """Build a `subprocess.run` replacement that returns the
         right token for whatever audience the caller asks for."""
-        def fake_run(cmd, capture_output=True, text=True, check=True):  # noqa: ARG001
+        def fake_run(cmd, **kwargs):  # noqa: ARG001
             for arg in cmd:
                 if arg.startswith("--audiences="):
                     aud = arg.split("=", 1)[1]
@@ -88,7 +92,7 @@ class TestPerAudienceCache(unittest.TestCase):
         fall back to the no-audience form."""
         url = "https://ytfactory-tts-chatterbox-foo.run.app"
 
-        def fake_run(cmd, capture_output=True, text=True, check=True):  # noqa: ARG001
+        def fake_run(cmd, **kwargs):  # noqa: ARG001
             if any(a.startswith("--audiences=") for a in cmd):
                 raise subprocess.CalledProcessError(
                     1, cmd, output="",
@@ -108,7 +112,7 @@ class TestPerAudienceCache(unittest.TestCase):
         must NOT be silently swallowed by the user-account fallback."""
         url = "https://ytfactory-tts-chatterbox-foo.run.app"
 
-        def fake_run(cmd, capture_output=True, text=True, check=True):  # noqa: ARG001
+        def fake_run(cmd, **kwargs):  # noqa: ARG001
             raise subprocess.CalledProcessError(
                 1, cmd, output="",
                 stderr="ERROR: (gcloud.auth.print-identity-token) "
@@ -117,6 +121,80 @@ class TestPerAudienceCache(unittest.TestCase):
 
         with patch.object(subprocess, "run", side_effect=fake_run):
             with self.assertRaises(subprocess.CalledProcessError):
+                cloudrun_auth.get_id_token(url)
+
+
+class TestCachedTokenReused(unittest.TestCase):
+    """Test the cache + gcloud path of the simpler cloudrun_auth module."""
+
+    def setUp(self) -> None:
+        cloudrun_auth._reset_cache_for_tests()
+
+    def tearDown(self) -> None:
+        cloudrun_auth._reset_cache_for_tests()
+
+    def test_cached_token_returned_immediately(self):
+        """Unexpired cached token is returned without calling gcloud."""
+        url = "https://service.run.app"
+        cloudrun_auth._TOKENS[url] = ("cached-tok", time.time() + 3600)
+        with patch.object(subprocess, "run") as mock_run:
+            tok = cloudrun_auth.get_id_token(url)
+        self.assertEqual(tok, "cached-tok")
+        mock_run.assert_not_called()
+
+    def test_expired_cache_calls_gcloud(self):
+        """Expired token triggers a fresh gcloud call."""
+        url = "https://service.run.app"
+        cloudrun_auth._TOKENS[url] = ("old-tok", time.time() - 1)
+
+        def fake_run(cmd, **kwargs):
+            res = MagicMock()
+            res.stdout = "fresh-tok\n"
+            return res
+
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            tok = cloudrun_auth.get_id_token(url)
+        self.assertEqual(tok, "fresh-tok")
+
+    def test_successful_call_caches_token(self):
+        """After successful gcloud call, token is cached."""
+        url = "https://service.run.app"
+
+        def fake_run(cmd, **kwargs):
+            res = MagicMock()
+            res.stdout = "new-tok\n"
+            return res
+
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            tok = cloudrun_auth.get_id_token(url)
+
+        self.assertEqual(tok, "new-tok")
+        self.assertIn(url, cloudrun_auth._TOKENS)
+
+    def test_non_audience_error_bubbles_up(self):
+        """A non-account-type error raises immediately."""
+        url = "https://service.run.app"
+
+        with patch.object(subprocess, "run",
+                          side_effect=subprocess.CalledProcessError(
+                              1, [], stderr="You are not logged in")):
+            with self.assertRaises(subprocess.CalledProcessError):
+                cloudrun_auth.get_id_token(url)
+
+    def test_audience_error_falls_through_to_raise(self):
+        """Invalid account type tries bare form, which also fails → RuntimeError."""
+        url = "https://service.run.app"
+        call_n = [0]
+
+        def fake_run(cmd, **kwargs):
+            call_n[0] += 1
+            if "--audiences=" in " ".join(cmd):
+                raise subprocess.CalledProcessError(1, cmd, stderr="invalid account type")
+            # bare form also fails
+            raise subprocess.CalledProcessError(1, cmd, stderr="invalid account type")
+
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError):
                 cloudrun_auth.get_id_token(url)
 
 
