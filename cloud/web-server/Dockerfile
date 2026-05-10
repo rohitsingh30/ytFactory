@@ -51,14 +51,23 @@ COPY pipeline/        /workspace/pipeline/
 # Bake the package into the image so import works at startup.
 COPY control/         /workspace/control/
 
-# Mirrored YouTube channel assets (avatar, banner, account JSONs, analytics
-# cache). Total < 2 MB. /api/channels/{ch}/avatar.jpg + /api/channels/{ch}/banner.jpg
+# Mirrored YouTube channel assets (avatar, banner, account JSONs).
+# Total < 1 MB. /api/channels/{ch}/avatar.jpg + /api/channels/{ch}/banner.jpg
 # read these from disk via pipeline.research.channel_assets.asset_path; without
-# them the studio UI shows monogram fallbacks + nullified subscriber/view stats.
-# .gcloudignore + .dockerignore both whitelist these subdirs explicitly.
+# them the studio UI shows monogram fallbacks. .gcloudignore + .dockerignore
+# both whitelist these subdirs explicitly.
 COPY data/research/channel_assets/ /workspace/data/research/channel_assets/
-COPY data/research/youtube/        /workspace/data/research/youtube/
-COPY data/research/analytics/      /workspace/data/research/analytics/
+
+# data/research/youtube/ + data/research/analytics/ are NO LONGER baked
+# in. Pre-2026-05-10 they were committed to git and copied here, which
+# let a test-fixture leak silently corrupt prod for several deploys
+# (see docs/youtube_stats_refresh.md). Now:
+#   - Dashboard stats: control/routes/dashboard_routes.py reads YouTube
+#     Data API v3 live with YOUTUBE_API_KEY (in-memory cache, no on-disk
+#     dependency).
+#   - Per-account research cache: pipeline/research/youtube.py writes to
+#     gs://$YTFACTORY_STATE_BUCKET/data/research/youtube/<account>.json
+#     in cloud (see B1 in the token-issue plan).
 
 # Channel configs + variants are now centralised under pipeline/
 # (pipeline/channels/<slug>.yaml + pipeline/variants/<slug>/*.yaml)

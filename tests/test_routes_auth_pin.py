@@ -225,6 +225,36 @@ class TestWhoamiEndpoint(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["logged_in"])
 
+    async def test_whoami_surfaces_signed_in_and_is_admin(self) -> None:
+        # Sidebar in web-next reads ``signed_in`` (avatar) and
+        # ``is_admin`` (Cloud / Admin nav gate). In single-tenant PIN
+        # mode the only logged-in user IS the operator/admin, so both
+        # mirror ``logged_in``.
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            # auth disabled → logged_in true → admin true
+            with patch.dict(os.environ, {PIN_ENV: ""}):
+                r = await client.get("/api/auth/whoami")
+            body = r.json()
+            self.assertTrue(body["signed_in"])
+            self.assertTrue(body["is_admin"])
+
+            # auth enabled, no cookie → logged_in false → admin false
+            with patch.dict(os.environ, {PIN_ENV: "pin123"}):
+                r = await client.get("/api/auth/whoami")
+            body = r.json()
+            self.assertFalse(body["signed_in"])
+            self.assertFalse(body["is_admin"])
+
+            # auth enabled, valid cookie → logged_in true → admin true
+            client.cookies.set(COOKIE_NAME, _make_token())
+            with patch.dict(os.environ, {PIN_ENV: "pin123"}):
+                r = await client.get("/api/auth/whoami")
+            body = r.json()
+            self.assertTrue(body["signed_in"])
+            self.assertTrue(body["is_admin"])
+
 
 if __name__ == "__main__":
     unittest.main()

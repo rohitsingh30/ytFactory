@@ -49,8 +49,13 @@ gcloud builds submit . \
 #   flow (oauth_web_routes.py, burner-channel onboarding); separate
 #   client (installed type, localhost:8089 callback).
 #
-# All four mounted via --set-secrets; values rotate by writing a new
-# secret version, no redeploy needed.
+# All five mounted via --set-secrets; values rotate by writing a new
+# secret version, no redeploy needed. NOTE: --set-secrets is destructive
+# (replaces the entire secret list), so every secret used by ytfactory-web
+# MUST be listed here, including:
+#   - YOUTUBE_API_KEY  (added 2026-05-10 for the dashboard cards — without
+#     this, control/routes/dashboard_routes.py reports
+#     "YOUTUBE_API_KEY not set" and stats are blank).
 
 echo "==> Deploying ${SERVICE} to Cloud Run"
 gcloud run deploy "${SERVICE}" \
@@ -66,8 +71,16 @@ gcloud run deploy "${SERVICE}" \
   --timeout=300 \
   --port=8080 \
   --allow-unauthenticated \
-  --set-secrets="^|^AZURE_OPENAI_API_KEY=azure-openai-key:latest|YTFACTORY_CLIENT_SECRET=ytfactory-oauth-client:latest|YTFACTORY_WEB_OAUTH_CLIENT=ytfactory-web-oauth-client:latest|YTFACTORY_SESSION_SECRET=ytfactory-session-secret:latest|YTFACTORY_AGENT_TOKEN=ytfactory-agent-token:latest" \
-  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=ytfactory-prod-v2-artifacts|YTFACTORY_STATE_BUCKET=ytfactory-prod-v2-state|YTFACTORY_QUEUE_BACKEND=firestore|YTFACTORY_SIM_WORKER=0|YTFACTORY_RENDER_BACKEND=cloudrun|YTFACTORY_CLOUDRUN_JOB=ytfactory-render-worker-v2|YTFACTORY_CLOUDRUN_REGION=${REGION}|YTFACTORY_COOKIE_SECURE=1|YTFACTORY_ADMIN_DOMAINS=docx.co.in|YTFACTORY_PUBLIC_FRONTEND_URL=https://ytfactory-web-next-7hwnzw7lya-as.a.run.app|YTFACTORY_AUTH_REDIRECT_URI=https://ytfactory-web-next-7hwnzw7lya-as.a.run.app/api/auth/google/callback|CLOUDRUN_TTS_CHATTERBOX_URL=https://ytfactory-tts-chatterbox-283470729204.${REGION}.run.app|CLOUDRUN_TTS_INDICF5_URL=https://ytfactory-tts-indicf5-283470729204.${REGION}.run.app|CLOUDRUN_IMAGE_FLUX2_KLEIN_URL=https://ytfactory-image-flux2-klein-283470729204.${REGION}.run.app"
+  --set-secrets="^|^AZURE_OPENAI_API_KEY=azure-openai-key:latest|YTFACTORY_CLIENT_SECRET=ytfactory-oauth-client:latest|YTFACTORY_WEB_OAUTH_CLIENT=ytfactory-web-oauth-client:latest|YTFACTORY_SESSION_SECRET=ytfactory-session-secret:latest|YTFACTORY_AGENT_TOKEN=ytfactory-agent-token:latest|YOUTUBE_API_KEY=youtube-api-key:latest" \
+  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=ytfactory-prod-v2-artifacts|YTFACTORY_STATE_BUCKET=ytfactory-prod-v2-state|YTFACTORY_QUEUE_BACKEND=firestore|YTFACTORY_SIM_WORKER=0|YTFACTORY_RENDER_BACKEND=cloudrun|YTFACTORY_CLOUDRUN_JOB=ytfactory-render-worker-v2|YTFACTORY_CLOUDRUN_REGION=${REGION}|YTFACTORY_COOKIE_SECURE=1|YTFACTORY_ADMIN_DOMAINS=docx.co.in|YTFACTORY_PUBLIC_FRONTEND_URL=https://ytfactory-web-next-7hwnzw7lya-as.a.run.app|YTFACTORY_AUTH_REDIRECT_URI=https://ytfactory-web-next-7hwnzw7lya-as.a.run.app/api/auth/google/callback|CLOUDRUN_TTS_CHATTERBOX_URL=https://ytfactory-tts-chatterbox-283470729204.${REGION}.run.app|CLOUDRUN_TTS_INDICF5_URL=https://ytfactory-tts-indicf5-283470729204.${REGION}.run.app|CLOUDRUN_IMAGE_FLUX2_KLEIN_URL=https://ytfactory-image-flux2-klein-283470729204.${REGION}.run.app|AZURE_OPENAI_ENDPOINT=https://testshoffer.openai.azure.com|AZURE_OPENAI_API_VERSION=2025-04-01-preview|AZURE_OPENAI_MODEL=gpt-5.3-chat"
+# AZURE_OPENAI_ENDPOINT/API_VERSION/MODEL are non-secret triplet
+# REQUIRED for chat_service.py and niche_specs_routes.py to talk to
+# Azure (control/chat_service.py:96-105 + control/routes/niche_specs_routes.py:148-151
+# both `return None` if AZURE_OPENAI_ENDPOINT is empty → chat falls back
+# to "AI not configured" + niche-draft falls back to deterministic stub).
+# Pre-2026-05-10 deploys had only AZURE_OPENAI_API_KEY (the secret),
+# leaving the chat assistant + niche-draft auto-generate silently dead.
+# Full post-mortem: docs/azure_openai_deploy_env.md.
 
 URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="${PROJECT}" --format="value(status.url)")
 echo ""

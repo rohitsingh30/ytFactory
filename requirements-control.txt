@@ -20,3 +20,10 @@ openai>=1.50
 google-api-python-client>=2.100
 google-auth-oauthlib>=1.2
 google-auth-httplib2>=0.2
+
+# SSE — web/server.py streams render-job events to the browser via
+# EventSourceResponse from sse_starlette.
+sse-starlette>=2.1
+# Multipart form parsing — used by /api/uploads/* and a few admin
+# endpoints to accept file uploads.
+python-multipart>=0.0.9

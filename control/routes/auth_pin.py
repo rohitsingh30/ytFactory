@@ -11,7 +11,12 @@ Wire-up:
 - ``POST /api/auth/login`` — submit PIN, receive an HttpOnly session
   cookie.
 - ``POST /api/auth/logout`` — clear the cookie.
-- ``GET /api/auth/whoami`` — { logged_in: bool }.
+- ``GET /api/auth/whoami`` — { logged_in, signed_in, is_admin,
+  auth_required }. ``signed_in`` mirrors ``logged_in`` for the
+  web-next sidebar (which uses that name); ``is_admin`` mirrors
+  it too because in single-tenant PIN mode anyone who logged in
+  IS the operator/admin (gates the admin-only nav items like
+  /app/cloud and /app/admin).
 - The Next.js middleware (web-next) calls ``/api/auth/whoami`` and
   redirects unauthenticated users to ``/login``.
 - Backend write endpoints (``/api/render``, ``/api/chat/confirm``,
@@ -128,6 +133,13 @@ class LoginRequest(BaseModel):
 class WhoamiResponse(BaseModel):
     logged_in: bool
     auth_required: bool
+    # Mirrors of ``logged_in`` so the web-next sidebar (which reads
+    # ``signed_in`` for the avatar block and ``is_admin`` to gate the
+    # Cloud / Admin nav items) lights up correctly. Single-tenant PIN
+    # mode → the operator IS the admin. When the multi-tenant SaaS
+    # whoami lands (Firebase Auth), these stop being mirrors.
+    signed_in: bool
+    is_admin: bool
 
 
 @router.post("/login")
@@ -162,7 +174,10 @@ async def logout(response: Response) -> dict:
 
 @router.get("/whoami", response_model=WhoamiResponse)
 async def whoami(yt_session: str | None = Cookie(default=None)) -> WhoamiResponse:
+    logged_in = (not auth_enabled()) or _verify_token(yt_session)
     return WhoamiResponse(
-        logged_in=(not auth_enabled()) or _verify_token(yt_session),
+        logged_in=logged_in,
         auth_required=auth_enabled(),
+        signed_in=logged_in,
+        is_admin=logged_in,
     )
