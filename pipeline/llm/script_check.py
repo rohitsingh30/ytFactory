@@ -12,6 +12,17 @@ Implements Principles #4 and #5 (DESIGN.md §14):
 
 Use ``check_script_text()`` on raw narration text before TTS, or
 ``check_beats()`` on the produced beats after stages 4-5.
+
+CTA + cliffhanger CTA rules below pair each regex with a concrete
+example string that is GUARANTEED to match the regex (enforced by
+``tests/test_llm_script_check_invariants.py``). The
+``pipeline.llm.contracts.rewrite_contract`` orchestrator pulls those
+examples directly into the rewrite prompt — eliminating drift between
+"what we ask the model to write" and "what the validator accepts".
+Before this registry the prompt's GOOD example was hand-typed as
+"what you would have done" while the regex required "what would you
+have done" — Azure faithfully copied the GOOD example and got
+rejected. With paired rules that's impossible.
 """
 
 from __future__ import annotations
@@ -22,7 +33,6 @@ from dataclasses import dataclass
 from ..beats import Beat
 
 
-# Closing CTA — must appear in the LAST sentence/clause.
 # AITA-class verdict acronyms (AITA, WIBTA, YTA, NTA) and the literal
 # phrase "am I the asshole" are BANNED in spoken narration as of
 # 2026-05-03 (user feedback). They're stripped from the audio path by
@@ -32,18 +42,44 @@ from ..beats import Beat
 # generic question/verdict/comment-prompt patterns. The visual closer
 # panel still renders the engagement ask via cfg["closer_format"] —
 # that lives in pixels, never in audio.
-_CTA_PATTERNS = [
-    r"\bam i (the )?wrong\b",
-    r"\bam i the one (in the wrong|wrong here)\b",
-    r"\bwas i (the )?wrong\b",
-    r"\b(was i|am i) out of line\b",
-    r"\bwhat would you (have )?(do|done)\b",
-    r"\bwhat do you think\b",
-    r"\bcomment[s]? (below|your)\b",
-    r"\byour verdict\b",
-    r"\?$",  # any sentence ending in a question mark
-]
+@dataclass(frozen=True)
+class CTARule:
+    """One CTA acceptance rule paired with a guaranteed-matching example.
+
+    The ``example`` field is the source of truth used by prompt-building
+    code (see ``pipeline.llm.contracts.rewrite_contract``). Every rule's
+    example MUST match its own pattern — verified by a unit test. If a
+    pattern needs more variants, add them as separate ``CTARule``
+    entries (each with their own paired example) rather than tweaking
+    one pattern in isolation.
+    """
+    pattern: str
+    example: str
+
+
+# Closing CTA — must appear in the LAST sentence/clause.
+_CTA_RULES: tuple[CTARule, ...] = (
+    CTARule(r"\bam i (the )?wrong\b",                        "Am I wrong here?"),
+    CTARule(r"\bam i the one (in the wrong|wrong here)\b",    "Am I the one in the wrong?"),
+    CTARule(r"\bwas i (the )?wrong\b",                        "Was I wrong?"),
+    CTARule(r"\b(was i|am i) out of line\b",                  "Was I out of line?"),
+    CTARule(r"\bwhat would you (have )?(do|done)\b",          "What would you have done?"),
+    # Same intent in the more natural reverse word order — Azure /
+    # Claude both produce this phrasing readily and it's perfectly
+    # idiomatic English. Pre-2026-05-10 this leaked through the
+    # rewriter prompt as a GOOD example but the regex above didn't
+    # accept it; this rule closes that gap.
+    CTARule(r"\bwhat (you|do you) would (have )?(do|done)\b", "Tell me what you would have done."),
+    CTARule(r"\bwhat do you think\b",                          "What do you think?"),
+    CTARule(r"\bcomment[s]? (below|your)\b",                   "Comment below."),
+    CTARule(r"\byour verdict\b",                               "Drop your verdict."),
+    # Trailing-question-mark catch-all — last so the more specific
+    # phrasings win the example-discovery race for prompt building.
+    CTARule(r"\?$",                                            "Was I right to refuse?"),
+)
+_CTA_PATTERNS = tuple(r.pattern for r in _CTA_RULES)
 _CTA_RE = re.compile("|".join(_CTA_PATTERNS), flags=re.IGNORECASE)
+
 
 # Closer CTA patterns for Part-1 cliffhanger channels
 # (channel_cfg.cliffhanger == True). The standard AITA vote-prompt
@@ -51,18 +87,41 @@ _CTA_RE = re.compile("|".join(_CTA_PATTERNS), flags=re.IGNORECASE)
 # lives in Part 2 — so the gate would otherwise reject every
 # cliffhanger script. Here we accept any phrasing that names Part 2 or
 # subscribes the viewer to it.
-_CLIFFHANGER_CTA_PATTERNS = [
-    r"\bsubscribe\b",
-    r"\bpart\s*(2|two|ii)\b",
-    r"\bnext\s+part\b",
-    r"\b(coming|drops|drop)\s+(up\s+)?(next|soon|tomorrow)\b",
-    r"\bdon'?t\s+miss\b",
-    r"\bhit\s+(the\s+)?(bell|subscribe|follow)\b",
-    r"\bfollow\s+for\s+(the\s+)?(rest|more|part)\b",
-]
+_CLIFFHANGER_CTA_RULES: tuple[CTARule, ...] = (
+    CTARule(r"\bsubscribe\b",                                       "Subscribe for Part 2."),
+    CTARule(r"\bpart\s*(2|two|ii)\b",                                "Part 2 drops next."),
+    CTARule(r"\bnext\s+part\b",                                      "Catch the next part tomorrow."),
+    CTARule(r"\b(coming|drops|drop)\s+(up\s+)?(next|soon|tomorrow)\b", "The finale drops tomorrow."),
+    CTARule(r"\bdon'?t\s+miss\b",                                    "Don't miss the finale."),
+    CTARule(r"\bhit\s+(the\s+)?(bell|subscribe|follow)\b",           "Hit the bell for the finale."),
+    CTARule(r"\bfollow\s+for\s+(the\s+)?(rest|more|part)\b",         "Follow for the rest of the story."),
+)
+_CLIFFHANGER_CTA_PATTERNS = tuple(r.pattern for r in _CLIFFHANGER_CTA_RULES)
 _CLIFFHANGER_CTA_RE = re.compile(
     "|".join(_CLIFFHANGER_CTA_PATTERNS), flags=re.IGNORECASE
 )
+
+
+def cta_examples(*, cliffhanger: bool = False) -> list[str]:
+    """Return the GOOD-example strings for the requested CTA flavour.
+
+    Used by the rewrite-stage orchestrator (``pipeline.llm.contracts.
+    rewrite_contract``) to build the rewrite prompt's "GOOD examples"
+    block from the SAME source the validator uses. Every returned
+    string is guaranteed to satisfy the validator regex — no drift
+    possible.
+    """
+    rules = _CLIFFHANGER_CTA_RULES if cliffhanger else _CTA_RULES
+    # De-dup while preserving order — different rules occasionally
+    # share an example phrasing.
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in rules:
+        if r.example in seen:
+            continue
+        seen.add(r.example)
+        out.append(r.example)
+    return out
 
 # Wedge tokens — concrete nouns / numbers that orient the audience.
 _NUMBER_RE = re.compile(

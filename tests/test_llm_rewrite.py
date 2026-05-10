@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import unittest
 from pathlib import Path
@@ -16,8 +17,20 @@ RAW_STORY = {"slug": "story-slug", "title": "My title", "body": "My body", "url"
 GOOD_OUT = {"hook": " My hook ", "narration": "Wine. Crafts. Just us.", "title_options": [" One ", "Two", "Three", "Four"]}
 
 
+# These tests probe the LEGACY single-shot rewrite path (prompt assembly,
+# CLI invocation, error handling). They were written before the
+# orchestrator landed; opt them into the legacy path explicitly.
+# Tests for the orchestrated path live in test_llm_rewrite_orchestrated.py.
+_LEGACY_ENV = {"YTFACTORY_REWRITE_USE_LEGACY": "1"}
+
+
 class RewriteTest(unittest.TestCase):
+    def setUp(self):
+        self._env_patch = patch.dict(os.environ, _LEGACY_ENV)
+        self._env_patch.start()
+
     def tearDown(self):
+        self._env_patch.stop()
         shutil.rmtree(SCRATCH, ignore_errors=True)
 
     def test_rewrite_success_uses_model_and_lint_fix(self):

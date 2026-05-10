@@ -17,6 +17,7 @@ removes that bottleneck and produces 10-15 beats / images.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -464,16 +465,88 @@ def _closer_block(closer_format: str | None) -> str:
 
 
 def rewrite(raw_story: dict, channel_cfg: dict | None = None) -> Script:
-    """Rewrite a raw story dict into a Script via the claude CLI.
+    """Rewrite a raw story dict into a Script.
+
+    Routes through the orchestrator (constraint-aware prompt + auto-retry
+    on validation failure) by default. Set ``YTFACTORY_REWRITE_USE_LEGACY=1``
+    to fall back to the pre-orchestrator single-shot path while
+    debugging.
 
     ``raw_story`` follows the schema produced by pull_stories.py:
     ``{slug, title, body, source, url, metadata}``.
     """
     title = (raw_story.get("title") or "").strip()
     body = (raw_story.get("body") or "").strip()
-    story_text = f"{title}\n\n{body}" if title else body
-    if not story_text:
+    if not title and not body:
         raise ValueError("raw_story has no title or body")
+
+    cfg = channel_cfg or {}
+
+    # Default path: orchestrator-driven with constraint-aware prompt and
+    # auto-retry on script_check failures. Old single-shot path stays
+    # callable via the env override below.
+    if os.environ.get("YTFACTORY_REWRITE_USE_LEGACY", "0").lower() not in ("1", "true", "yes"):
+        return _rewrite_via_orchestrator(raw_story, cfg)
+
+    return _rewrite_legacy(raw_story, cfg)
+
+
+def _rewrite_via_orchestrator(raw_story: dict, channel_cfg: dict) -> Script:
+    """Orchestrated path — see :class:`pipeline.llm.contracts.RewriteContract`.
+
+    The contract gathers constraints from the SAME validators (script_check
+    + script_lint) the renderer later runs, builds a prompt with examples
+    derived from those validators (drift-impossible), and validates the
+    output inline with the same gates. On failure the orchestrator
+    regenerates with a focused diff prompt up to ``YTFACTORY_LLM_MAX_RETRIES``
+    times before raising.
+    """
+    from .contracts import RewriteContract  # PLC0415 — avoid import cycle
+    from .orchestrator import StageContext, run_stage  # PLC0415
+
+    contract = RewriteContract()
+    ctx = StageContext(
+        channel=channel_cfg.get("channel") or channel_cfg.get("name") or "unknown",
+        channel_cfg=dict(channel_cfg),
+        raw_input=dict(raw_story),
+    )
+
+    print(f"[rewrite] orchestrated rewrite for {raw_story.get('slug')!r} "
+          f"(retries={os.environ.get('YTFACTORY_LLM_MAX_RETRIES', '2')})…")
+    # Pass llm_call through the rewrite module's `llm` binding so existing
+    # tests that ``patch.object(rw.llm, "call_claude_cli", ...)`` continue
+    # to mock both the legacy and orchestrated paths uniformly.
+    result = run_stage(contract, ctx, llm_call=llm.call_claude_cli)
+    raw = result.output
+    if result.attempts > 1:
+        print(f"[rewrite] succeeded on attempt {result.attempts}/"
+              f"{int(os.environ.get('YTFACTORY_LLM_MAX_RETRIES', '2')) + 1}")
+    if result.final_warnings:
+        for w in result.final_warnings:
+            print(f"[rewrite] WARNING {w.constraint}: {w.reason}")
+
+    # The contract validates; we still run script_lint for the auto-fix
+    # side-effect (consecutive fragments collapse, etc.) before persisting.
+    lint = script_lint.lint_and_fix(raw["narration"].strip())
+    if lint.fixed:
+        for fix_msg in lint.fixes_applied:
+            print(f"[rewrite] script_lint: {fix_msg}")
+
+    return Script(
+        slug=raw_story.get("slug") or "untitled",
+        hook=raw["hook"].strip(),
+        narration=lint.narration,
+        title_options=[t.strip() for t in raw["title_options"]][:3],
+        source_url=raw_story.get("url") or "",
+        source=raw_story.get("source") or "",
+    )
+
+
+def _rewrite_legacy(raw_story: dict, channel_cfg: dict) -> Script:
+    """Pre-orchestrator single-shot rewrite path. Kept for fallback debug."""
+    title = (raw_story.get("title") or "").strip()
+    body = (raw_story.get("body") or "").strip()
+    story_text = f"{title}\n\n{body}" if title else body
 
     cfg = channel_cfg or {}
     closer_format = cfg.get("closer_format")
@@ -491,7 +564,7 @@ def rewrite(raw_story: dict, channel_cfg: dict | None = None) -> Script:
     )
 
     print(f"[rewrite] authoring narration via claude CLI for {raw_story.get('slug')!r}…")
-    raw = llm.call_claude_cli(prompt, output_json=True, model=llm.model_for("rewrite"))
+    raw = llm.call_claude_cli(prompt, output_json=True, model=llm.model_for("rewrite"), stage="rewrite")
 
     if not isinstance(raw, dict):
         raise ValueError(f"rewrite expected a JSON object, got {type(raw).__name__}")
@@ -564,7 +637,7 @@ def rewrite_part2(
     )
 
     print(f"[rewrite_part2] authoring Part-2 narration via claude CLI for {raw_story.get('slug')!r}…")
-    raw = llm.call_claude_cli(prompt, output_json=True, model=llm.model_for("rewrite"))
+    raw = llm.call_claude_cli(prompt, output_json=True, model=llm.model_for("rewrite"), stage="rewrite_part2")
 
     if not isinstance(raw, dict):
         raise ValueError(f"rewrite_part2 expected a JSON object, got {type(raw).__name__}")
