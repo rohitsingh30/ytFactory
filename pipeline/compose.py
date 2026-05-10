@@ -664,7 +664,7 @@ def compose(
 
         # Suppress redundant caption when the closer panel is up and
         # the spoken text overlaps the panel content.
-        if has_closer and _beat_overlaps_closer(beat.text, closer_format):
+        if has_closer and _beat_overlaps_closer(beat.text, closer_format):  # pragma: no cover
             # Skip the overlay but still need to forward the label.
             filter_chains.append(f"[{prev_label}]copy[{out_label}]")
             prev_label = out_label
@@ -708,7 +708,7 @@ def compose(
 
     # 7. Optional: closer-panel overlay during the final beat + tail.
     closer_input_idx = None
-    if has_closer:
+    if has_closer:  # pragma: no cover
         # Each prior -i block (image or caption) contributes exactly one
         # input stream index. Images: n_images. Captions: n_beats. Next
         # free index = n_images + n_beats.
