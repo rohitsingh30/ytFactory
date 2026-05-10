@@ -61,10 +61,10 @@ const AUTO_PULL_CHANNELS = new Set([
   "historyrecapped",
   "cosmosdecoded",
 ]);
-// AUTO_PULL_CHANNELS is retained for documentation only — the
-// auto-generate button is now always rendered. Channels not in this
-// set return a 422 from /api/discover/{channel}, which surfaces as a
-// toast asking the user to type the topic manually.
+// AUTO_PULL_CHANNELS retained for documentation only — every channel
+// is now backed by either a native source adapter or an LLM brainstorm
+// fallback (or both), so the auto-generate button is always rendered
+// and always returns a usable suggestion.
 void AUTO_PULL_CHANNELS;
 
 type StepId = "mode" | "channel" | "customize";
@@ -1208,6 +1208,9 @@ function CustomizeReviewStep({
         {topicField && (
           <TopicCard
             channel={channel.key}
+            variant={variant}
+            language={schema.language}
+            values={values}
             field={topicField}
             value={typeof values.topic === "string" ? (values.topic as string) : ""}
             lengthKind={(values.length_kind ?? "short") === "long" ? "long" : "short"}
@@ -1341,6 +1344,9 @@ function CardShell({
 
 function TopicCard({
   channel,
+  variant,
+  language,
+  values: ctxValues,
   field,
   value,
   lengthKind,
@@ -1349,6 +1355,9 @@ function TopicCard({
   sourceLabel,
 }: {
   channel: string;
+  variant: string | null;
+  language: string;
+  values: Record<string, unknown>;
   field: CustomizationField;
   value: string;
   lengthKind: "short" | "long";
@@ -1358,19 +1367,30 @@ function TopicCard({
 }) {
   const [pulling, setPulling] = useState(false);
   const [pulled, setPulled] = useState<DiscoverItem | null>(null);
-  // Button is always available — channels without a discover adapter
-  // surface a 422 toast from the backend so the user can fall back to
-  // typing a topic manually.
+  // Track topics already shown so successive clicks return variety.
+  const [shownTopics, setShownTopics] = useState<string[]>([]);
+  // Button is always available — the backend now blends a native source
+  // (when one exists) with an LLM brainstorm fallback so every channel
+  // returns a usable suggestion.
   const supportsAutoPull = true;
-  void channel;
 
   async function pull() {
     setPulling(true);
     try {
-      const item = await discoverApi.pickOne(channel);
+      const item = await discoverApi.pickOne(channel, {
+        variant,
+        length_kind: lengthKind,
+        language,
+        niche_key: variant,
+        values: ctxValues,
+        avoid: shownTopics,
+      });
       onPullSource(item);
       setPulled(item);
-      toast.success("Topic pulled", { description: item.source_label });
+      setShownTopics((prev) =>
+        prev.includes(item.topic) ? prev : [...prev, item.topic].slice(-20),
+      );
+      toast.success("Topic generated", { description: item.source_label });
     } catch (e) {
       toast.error("Auto-generate failed", { description: e instanceof Error ? e.message : String(e) });
     } finally {

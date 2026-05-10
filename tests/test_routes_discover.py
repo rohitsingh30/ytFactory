@@ -7,6 +7,9 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("YTFACTORY_AGENT_TOKEN", "test-token")
 os.environ.setdefault("YTFACTORY_QUEUE_BACKEND", "memory")
+# Default to LLM disabled in tests — tests that exercise the LLM
+# brainstorm path opt back in via patch("..._llm_disabled", ...).
+os.environ.setdefault("YTFACTORY_DISCOVER_LLM_DISABLE", "1")
 
 import httpx
 from fastapi import FastAPI
@@ -14,9 +17,13 @@ from fastapi import FastAPI
 from control.routes.discover_routes import (
     DiscoverFeed,
     DiscoverItem,
+    DiscoverRequest,
     _ai_news_items,
     _build_feed,
     _excerpt,
+    _filter_avoid,
+    _llm_topic_items,
+    _native_items_for,
     _reddit_items,
     _today_in_history_items,
     router,
@@ -134,6 +141,121 @@ class TestAiNewsItems(unittest.TestCase):
         self.assertEqual(items, [])
 
 
+class TestNativeItemsFor(unittest.TestCase):
+    def test_mystoriesanimated_default_variant_routes_to_aita(self) -> None:
+        stories = [_raw_story()]
+        with patch("pipeline.sources.reddit_api.fetch", return_value=stories) as f:
+            label, items = _native_items_for("mystoriesanimated", DiscoverRequest(), limit=4)
+        self.assertIn("AmItheAsshole", label)
+        self.assertEqual(len(items), 1)
+        # Subreddit threaded into reddit_api.fetch
+        self.assertEqual(f.call_args.kwargs["subreddit"], "AmItheAsshole")
+
+    def test_mystoriesanimated_tifu_variant_routes_to_tifu_subreddit(self) -> None:
+        stories = [_raw_story("TIFU by reading code", "I read it for hours. " * 5)]
+        with patch("pipeline.sources.reddit_api.fetch", return_value=stories) as f:
+            label, items = _native_items_for(
+                "mystoriesanimated", DiscoverRequest(variant="tifu"), limit=4,
+            )
+        self.assertEqual(f.call_args.kwargs["subreddit"], "tifu")
+        self.assertIn("tifu", label)
+        self.assertTrue(items[0].topic.startswith("TIFU"))
+
+    def test_mystoriesanimated_malicious_variant_routes_to_malicious_compliance(self) -> None:
+        with patch("pipeline.sources.reddit_api.fetch", return_value=[_raw_story()]) as f:
+            _native_items_for(
+                "mystoriesanimated", DiscoverRequest(variant="malicious"), limit=4,
+            )
+        self.assertEqual(f.call_args.kwargs["subreddit"], "MaliciousCompliance")
+
+    def test_mystoriesanimated_oddities_variant_routes_to_wikipedia(self) -> None:
+        with patch("pipeline.sources.today_in_history.fetch",
+                   return_value=[_raw_story("Oddity", "Strange thing happened. " * 5)]):
+            label, items = _native_items_for(
+                "mystoriesanimated", DiscoverRequest(variant="oddities"), limit=4,
+            )
+        self.assertIn("wikipedia", label)
+        self.assertEqual(items[0].source_kind, "wikipedia_topic")
+
+    def test_no_native_channel_returns_empty(self) -> None:
+        for ch in ("hindutavaanimated", "sportsrecapped", "rhymetimejunction"):
+            label, items = _native_items_for(ch, DiscoverRequest(), limit=4)
+            self.assertEqual(label, "")
+            self.assertEqual(items, [])
+
+
+class TestFilterAvoid(unittest.TestCase):
+    def test_empty_avoid_passthrough(self) -> None:
+        items = [DiscoverItem(topic="A", source_kind="llm", source_label="x")]
+        self.assertEqual(_filter_avoid(items, []), items)
+
+    def test_blocks_by_topic(self) -> None:
+        items = [
+            DiscoverItem(topic="Keep me", source_kind="llm", source_label="x"),
+            DiscoverItem(topic="Drop me", source_kind="llm", source_label="x"),
+        ]
+        out = _filter_avoid(items, ["drop me"])  # case-insensitive
+        self.assertEqual([it.topic for it in out], ["Keep me"])
+
+    def test_blocks_by_source_ref(self) -> None:
+        items = [
+            DiscoverItem(topic="A", source_kind="reddit_url",
+                         source_ref="https://r/x/1", source_label="x"),
+            DiscoverItem(topic="B", source_kind="reddit_url",
+                         source_ref="https://r/x/2", source_label="x"),
+        ]
+        out = _filter_avoid(items, ["https://r/x/1"])
+        self.assertEqual([it.topic for it in out], ["B"])
+
+
+class TestLlmTopicItems(unittest.TestCase):
+    def test_disabled_via_env(self) -> None:
+        with patch("control.routes.discover_routes._llm_disabled", return_value=True):
+            items = _llm_topic_items("hindutavaanimated", DiscoverRequest())
+        self.assertEqual(items, [])
+
+    def test_returns_parsed_items(self) -> None:
+        result = {"items": [
+            {"topic": "Krishna Sudama", "hook": "What if your best friend was God?"},
+            {"topic": "Karna's last arrow"},
+        ]}
+        with patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm", return_value=result) as call:
+            items = _llm_topic_items(
+                "hindutavaanimated",
+                DiscoverRequest(variant="mahabharat", language="hi"),
+                count=4,
+            )
+        self.assertGreaterEqual(len(items), 2)
+        self.assertEqual(items[0].source_kind, "llm")
+        self.assertEqual(items[0].topic, "Krishna Sudama")
+        self.assertIn("hindutavaanimated", call.call_args.args[0].lower())
+        # Hook is preserved in metadata
+        self.assertEqual(items[0].metadata["hook"], "What if your best friend was God?")
+
+    def test_handles_string_payload(self) -> None:
+        with patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm",
+                   return_value='{"items":[{"topic":"From string"}]}'):
+            items = _llm_topic_items("sportsrecapped", DiscoverRequest(), count=3)
+        self.assertEqual(items[0].topic, "From string")
+
+    def test_returns_empty_on_llm_failure(self) -> None:
+        with patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm", side_effect=RuntimeError("network down")):
+            items = _llm_topic_items("hindutavaanimated", DiscoverRequest())
+        self.assertEqual(items, [])
+
+    def test_dedupes_items(self) -> None:
+        result = {"items": [
+            {"topic": "Same"}, {"topic": "Same"}, {"topic": "Other"},
+        ]}
+        with patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm", return_value=result):
+            items = _llm_topic_items("rhymetimejunction", DiscoverRequest(), count=5)
+        self.assertEqual([it.topic for it in items], ["Same", "Other"])
+
+
 class TestBuildFeed(unittest.TestCase):
     def test_mystoriesanimated(self) -> None:
         stories = [_raw_story()]
@@ -173,11 +295,49 @@ class TestBuildFeed(unittest.TestCase):
         refs = [it.source_ref for it in feed.items]
         self.assertEqual(len(refs), len(set(refs)))
 
-    def test_unknown_channel_raises_422(self) -> None:
+    def test_unknown_channel_with_no_native_and_no_llm_raises_502(self) -> None:
+        """Channels with no native adapter AND LLM disabled → 502 (not 422)."""
         from fastapi import HTTPException
         with self.assertRaises(HTTPException) as ctx:
-            _build_feed("unknownchan")
-        self.assertEqual(ctx.exception.status_code, 422)
+            _build_feed("hindutavaanimated")  # LLM disabled by env in this test module
+        self.assertEqual(ctx.exception.status_code, 502)
+
+    def test_unknown_channel_with_llm_succeeds(self) -> None:
+        """No native adapter + LLM available → returns LLM-only feed."""
+        result = {"items": [{"topic": "Hanuman & Sanjeevani"}]}
+        with patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm", return_value=result):
+            feed = _build_feed("hindutavaanimated", req=DiscoverRequest(variant="ramayan"))
+        self.assertGreaterEqual(len(feed.items), 1)
+        self.assertIn("llm", feed.adapter)
+        self.assertEqual(feed.items[0].source_kind, "llm")
+
+    def test_llm_blended_with_native(self) -> None:
+        """Both native + LLM produce items → adapter shows both."""
+        stories = [_raw_story("AITA story", "I did something. " * 10)]
+        result = {"items": [{"topic": "Brainstormed angle"}]}
+        with patch("pipeline.sources.reddit_api.fetch", return_value=stories), \
+             patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm", return_value=result):
+            feed = _build_feed("mystoriesanimated", req=DiscoverRequest())
+        # Adapter shows both sources
+        self.assertIn("reddit", feed.adapter)
+        self.assertIn("llm", feed.adapter)
+        # Both kinds present in items
+        kinds = {it.source_kind for it in feed.items}
+        self.assertIn("reddit_url", kinds)
+        self.assertIn("llm", kinds)
+
+    def test_avoid_filters_native_items(self) -> None:
+        stories = [
+            _raw_story("Keep this", "x. " * 20, url="https://r/x/keep"),
+            _raw_story("Skip this", "x. " * 20, url="https://r/x/skip"),
+        ]
+        with patch("pipeline.sources.reddit_api.fetch", return_value=stories):
+            feed = _build_feed("mystoriesanimated", req=DiscoverRequest(avoid=["Skip this"]))
+        topics = [it.topic for it in feed.items]
+        self.assertIn("Keep this", topics)
+        self.assertNotIn("Skip this", topics)
 
 
 class TestFeedEndpoint(unittest.IsolatedAsyncioTestCase):
@@ -193,12 +353,24 @@ class TestFeedEndpoint(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["channel"], "mystoriesanimated")
         self.assertIn("items", data)
 
-    async def test_feed_unknown_channel_422(self) -> None:
+    async def test_feed_no_native_no_llm_502(self) -> None:
+        """Channels with no native adapter return 502 when LLM is disabled."""
         app = _make_app()
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            r = await client.get("/api/discover/unknownchan/feed")
-        self.assertEqual(r.status_code, 422)
+            r = await client.get("/api/discover/hindutavaanimated/feed")
+        self.assertEqual(r.status_code, 502)
+
+    async def test_feed_with_variant_query(self) -> None:
+        """Passing variant=tifu in query string routes to r/tifu."""
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        with patch("pipeline.sources.reddit_api.fetch",
+                   return_value=[_raw_story("TIFU", "x. " * 20)]) as f:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.get("/api/discover/mystoriesanimated/feed?variant=tifu")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(f.call_args.kwargs["subreddit"], "tifu")
 
     async def test_feed_upstream_error_502(self) -> None:
         app = _make_app()
@@ -228,6 +400,37 @@ class TestPickOne(unittest.IsolatedAsyncioTestCase):
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 r = await client.post("/api/discover/mystoriesanimated")
         self.assertEqual(r.status_code, 502)
+
+    async def test_pick_one_with_context_body(self) -> None:
+        """POST body carries variant/values/avoid; backend honours them."""
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        stories = [
+            _raw_story("Avoid me", "x. " * 20, url="https://r/x/1"),
+            _raw_story("Pick me", "x. " * 20, url="https://r/x/2"),
+        ]
+        body = {"variant": "tifu", "length_kind": "short",
+                "language": "en", "avoid": ["Avoid me"]}
+        with patch("pipeline.sources.reddit_api.fetch", return_value=stories) as f:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.post("/api/discover/mystoriesanimated", json=body)
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["topic"], "Pick me")
+        self.assertEqual(f.call_args.kwargs["subreddit"], "tifu")
+
+    async def test_pick_one_hindutava_with_llm(self) -> None:
+        """Channel with no native adapter — pick_one succeeds via LLM."""
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        result = {"items": [{"topic": "Bhima vs Jarasandha"}]}
+        with patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm", return_value=result):
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.post("/api/discover/hindutavaanimated",
+                                      json={"variant": "mahabharat", "language": "hi"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["topic"], "Bhima vs Jarasandha")
 
 
 if __name__ == "__main__":

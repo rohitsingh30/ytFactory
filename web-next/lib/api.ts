@@ -178,6 +178,14 @@ export const burnerApi = {
       `/api/burner_channels/${slug}/engage/stop`,
       {},
     ),
+  subscribeAllBurners: () =>
+    api.post<{
+      enqueued_count: number;
+      skipped_count: number;
+      enqueued: { slug: string; task_id: string }[];
+      skipped: { slug: string; reason: string }[];
+      hint?: string;
+    }>(`/api/burner_channels/subscribe_all_burners`, {}),
 };
 
 export const nichesApi = {
@@ -238,9 +246,31 @@ export interface DiscoverFeed {
   items: DiscoverItem[];
 }
 
+export interface DiscoverContext {
+  variant?: string | null;
+  length_kind?: string | null;
+  language?: string | null;
+  niche_key?: string | null;
+  values?: Record<string, unknown>;
+  avoid?: string[];
+}
+
+function discoverFeedQuery(ctx?: DiscoverContext): string {
+  if (!ctx) return "";
+  const params = new URLSearchParams();
+  if (ctx.variant) params.set("variant", ctx.variant);
+  if (ctx.length_kind) params.set("length_kind", ctx.length_kind);
+  if (ctx.language) params.set("language", ctx.language);
+  if (ctx.niche_key) params.set("niche_key", ctx.niche_key);
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
+
 export const discoverApi = {
-  feed: (channel: string) => api.get<DiscoverFeed>(`/api/discover/${channel}/feed`),
-  pickOne: (channel: string) => api.post<DiscoverItem>(`/api/discover/${channel}`),
+  feed: (channel: string, ctx?: DiscoverContext) =>
+    api.get<DiscoverFeed>(`/api/discover/${channel}/feed${discoverFeedQuery(ctx)}`),
+  pickOne: (channel: string, ctx?: DiscoverContext) =>
+    api.post<DiscoverItem>(`/api/discover/${channel}`, ctx ?? undefined),
 };
 
 export interface VoiceInfo {
