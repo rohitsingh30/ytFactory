@@ -1,0 +1,13 @@
+# ytFactory Image — Qwen-Image Cloud Run GPU service requirements
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.9.2
+pillow==10.4.0
+google-cloud-storage==2.18.2
+huggingface-hub>=0.25.0,<2.0
+safetensors>=0.4.0
+transformers==4.46.3
+accelerate==0.34.2
+sentencepiece==0.2.0
+einops>=0.7.0
+ftfy>=6.0

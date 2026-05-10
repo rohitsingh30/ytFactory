@@ -1,0 +1,45 @@
+# Render-worker v2 deps — CPU-only, delegates GPU compute to Cloud Run TTS + image services.
+
+# Core
+pyyaml>=6.0
+requests>=2.31
+httpx>=0.28
+Pillow>=10.0
+numpy>=2.0
+soundfile>=0.12
+
+# Video / audio compose (ffmpeg binary is in the OS layer; these are wrappers)
+imageio>=2.34
+imageio-ffmpeg>=0.5
+
+# ASR for caption alignment — faster-whisper runs CPU-fine.
+# Replaces whisper-mlx (Apple Silicon only) the laptop uses.
+faster-whisper>=1.0.3
+
+# CPU torch for the few pipeline modules that import it at module-load.
+# Inference is delegated to Cloud Run; we only need the imports to succeed.
+torch>=2.4
+torchaudio>=2.4
+
+# Anthropic SDK — kept as an alternative LLM backend.
+# Default backend is Azure OpenAI (reuses the chat assistant's
+# AZURE_OPENAI_* secrets — no separate spend). Anthropic SDK only
+# fires when YTFACTORY_LLM_BACKEND=anthropic_sdk + ANTHROPIC_API_KEY set.
+anthropic>=0.40
+
+# OpenAI SDK — used by the Azure OpenAI LLM backend (default in cloud).
+# Same package the existing chat assistant uses (control/chat_service.py).
+openai>=1.40
+
+# Transformers / diffusers — pipeline.images and pipeline.audio
+# pre-import these even when image_provider/tts_provider is cloudrun_*.
+transformers>=4.44
+diffusers>=0.30
+
+# GCP clients
+google-cloud-storage>=2.14
+google-cloud-firestore>=2.14
+google-cloud-run>=0.10  # used by control/cloud_run.py from inside the worker (not strictly needed)
+
+# Pydantic — pipeline schemas use it
+pydantic>=2.6

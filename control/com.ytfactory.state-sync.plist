@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ytfactory.state-sync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>cd /Users/rohit/ytFactory &amp;&amp; /Users/rohit/ytFactory/scripts/sync_state_to_gcs.sh &gt;&gt; /tmp/ytfactory-state-sync.log 2&gt;&amp;1</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Throttle: don't fire more often than every 60 seconds even if -->
+    <!-- the user is rapidly editing files. -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+    <!-- Trigger when any of these top-level dirs change. macOS launchd -->
+    <!-- watches recursively. Sync runs the full per-channel sweep, so -->
+    <!-- watching the channel roots is enough. -->
+    <key>WatchPaths</key>
+    <array>
+        <string>/Users/rohit/ytFactory/mystoriesanimated/narrations</string>
+        <string>/Users/rohit/ytFactory/mystoriesanimated/cast</string>
+        <string>/Users/rohit/ytFactory/mystoriesanimated/uploads</string>
+        <string>/Users/rohit/ytFactory/cosmosdecoded/narrations</string>
+        <string>/Users/rohit/ytFactory/cosmosdecoded/cast</string>
+        <string>/Users/rohit/ytFactory/cosmosdecoded/shotlist</string>
+        <string>/Users/rohit/ytFactory/cosmosdecoded/uploads</string>
+        <string>/Users/rohit/ytFactory/historyrecapped/narrations</string>
+        <string>/Users/rohit/ytFactory/historyrecapped/cast</string>
+        <string>/Users/rohit/ytFactory/historyrecapped/shotlist</string>
+        <string>/Users/rohit/ytFactory/historyrecapped/uploads</string>
+        <string>/Users/rohit/ytFactory/hindutavaanimated/narrations</string>
+        <string>/Users/rohit/ytFactory/hindutavaanimated/cast</string>
+        <string>/Users/rohit/ytFactory/hindutavaanimated/uploads</string>
+        <string>/Users/rohit/ytFactory/sportsrecapped/narrations</string>
+        <string>/Users/rohit/ytFactory/sportsrecapped/cast</string>
+        <string>/Users/rohit/ytFactory/sportsrecapped/uploads</string>
+        <string>/Users/rohit/ytFactory/scrollpulse/narrations</string>
+        <string>/Users/rohit/ytFactory/scrollpulse/cast</string>
+        <string>/Users/rohit/ytFactory/scrollpulse/uploads</string>
+        <string>/Users/rohit/ytFactory/rhymetimejunction/narrations</string>
+        <string>/Users/rohit/ytFactory/rhymetimejunction/uploads</string>
+    </array>
+    <key>StandardOutPath</key>
+    <string>/tmp/ytfactory-state-sync.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/ytfactory-state-sync.err</string>
+</dict>
+</plist>

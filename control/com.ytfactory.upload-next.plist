@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ytfactory.upload-next</string>
+
+  <!--
+    Run scripts/upload_next.py at 10 slots per day, every 2.4 hrs.
+    Slots in LOCAL system time (configure your Mac to IST if you
+    want IST slots; launchd has no per-job timezone option).
+    Slots: 07:00, 09:24, 11:48, 14:12, 16:36, 19:00, 21:24, 23:48,
+           02:12, 04:36
+  -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>24</integer></dict>
+    <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>48</integer></dict>
+    <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>12</integer></dict>
+    <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>36</integer></dict>
+    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>24</integer></dict>
+    <dict><key>Hour</key><integer>23</integer><key>Minute</key><integer>48</integer></dict>
+    <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>12</integer></dict>
+    <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>36</integer></dict>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/rohit/ytFactory</string>
+
+  <!--
+    Source .env explicitly so CLOUDRUN_* + GCP creds are visible to
+    the upload subprocess. launchd ignores user shell init.
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd /Users/rohit/ytFactory &amp;&amp; set -a &amp;&amp; source .env &amp;&amp; set +a &amp;&amp; PYTHONPATH=. .venv/bin/python scripts/upload_next.py --count 1</string>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/upload_next.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/upload_next.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

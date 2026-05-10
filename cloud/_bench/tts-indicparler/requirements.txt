@@ -1,0 +1,28 @@
+# Indic Parler-TTS only Cloud Run TTS service requirements.
+#
+# Indic Parler-TTS is a fine-tune of Parler-TTS Mini for 21 Indian
+# languages + English. Description-based voice control (NOT WAV
+# clone). Auto-detects language from the prompt.
+#
+# Pin set was VALIDATED LOCALLY with `pip install --dry-run` before
+# pushing to Cloud Build (lesson learned from Higgs v1/v2/v3 thrash).
+
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.9.2
+soundfile==0.12.1
+
+# GCS handoff for >5MB WAVs
+google-cloud-storage==2.18.2
+google-api-core==2.20.0
+google-auth==2.35.0
+googleapis-common-protos==1.65.0
+proto-plus==1.24.0
+
+# Indic Parler core deps. parler-tts only ships from GitHub (no PyPI
+# release), but its setup.py is well-behaved — installs cleanly.
+transformers==4.46.3
+accelerate==0.34.2
+huggingface-hub==0.26.5
+safetensors==0.4.5
+sentencepiece==0.2.0

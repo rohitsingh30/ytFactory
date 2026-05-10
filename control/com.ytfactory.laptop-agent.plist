@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ytfactory.laptop-agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>cd /Users/rohit/ytFactory &amp;&amp; PYTHONPATH=. /Users/rohit/ytFactory/.venv/bin/python -m pipeline.laptop_agent</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Restart on crash -->
+    <key>KeepAlive</key>
+    <true/>
+    <!-- Don't restart faster than every 10s if it keeps dying -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/ytfactory-laptop-agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/ytfactory-laptop-agent.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>YTFACTORY_CONTROL_URL</key>
+        <string>https://ytfactory-control-7hwnzw7lya-as.a.run.app</string>
+        <key>HOME</key>
+        <string>/Users/rohit</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>CLOUDSDK_CONFIG</key>
+        <string>/Users/rohit/.config/gcloud</string>
+    </dict>
+</dict>
+</plist>
