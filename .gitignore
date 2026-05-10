@@ -92,3 +92,10 @@ docs/screenshots/
 .tmp/
 *.bak
 *~
+.env.azure
+.env.*.local
+.env.local
+
+# Coverage runtime
+.coverage
+.coverage.*
