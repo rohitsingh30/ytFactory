@@ -19,6 +19,26 @@ SKILL.md cross-reference if the wording changes.
    always wrong (closers, voices, footage policies differ).
 4. If the request is "every time X happens, do Y", redirect to
    `/update-config` — it's a hook, not a skill.
+
+   **Audit recipe (added 2026-05-10 after retiring 4 cloud-* skills):**
+   even when a skill exists, periodically scan `.claude/skills/` for
+   ones that drifted into harness territory:
+
+   ```bash
+   grep -rEn 'auto-invoked (by )?(cron|every|the GitHub Actions|the cloud|web-server)|fire-and-forget by|auto-fired by cron' \
+     .claude/skills/ ~/.claude/skills/ \
+     | grep -v "make-skill/learnings\|update-docs/learnings\|past tense\|was deleted\|was retired"
+   ```
+
+   Each surviving hit is a candidate for retirement → admin panel +
+   script + cron + renderer-inlined hook. Decision tree:
+   - Body is shell (gcloud, curl, jq, bash) → not a skill.
+   - Operator wants to *see* recurring status → admin tab
+     (`docs/admin_panel_first.md`).
+   - Step happens before every render → renderer entrypoint
+     (`feedback_renderer_owns_universal_pre_steps.md`).
+   - Body is Claude-driven AND auto-fired → keep skill, add CLAUDE.md
+     trigger (`feedback_make_skill_auto_invoked_pattern.md`).
 5. Reject duplicates: grep `.claude/skills/` and `~/.claude/skills/`.
    If overlap ≥60%, extend the existing skill instead of forking.
 6. Reserve a unique trigger phrase. Refuse on collision.
@@ -153,6 +173,21 @@ SKILL.md cross-reference if the wording changes.
 
     **Surface every finding in the stage-4 handoff.** Don't silently
     duplicate. Don't silently fork. Don't silently leave dead code.
+
+---
+
+## H. Cloud-aware scaffolding (52)
+
+52. Every newly authored `/make-*` skill MUST end with the cloud
+    pre-render hook block (verbatim from
+    `docs/cloud_prerender_hook.md` "How `/make-*` skills reference
+    this"). Rationale: skipping the hook reintroduces the cold-load
+    → local-fallback → wrong-WPM failure mode documented in
+    `cloud/warm_tts_services.sh` (doolittle-raid-1942 post-mortem).
+    The retrofit on 2026-05-10 added the hook to all 19 existing
+    `/make-*` skills; future skills inherit it from this rule.
+    Stage-3 emit must include the block; stage-4 review must reject
+    any new `/make-*` SKILL.md that lacks it.
 
 ---
 

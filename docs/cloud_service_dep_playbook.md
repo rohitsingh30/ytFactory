@@ -1,5 +1,9 @@
 # Cloud Run Service — dep resolution playbook
 
+> **Prep status visible in `/app/cloud` Deploys section.** Each step
+> below corresponds to a `cloud/<svc>/.deploy_prep/stepN.ok` marker
+> file the panel reads. See `docs/cloudrun_admin_panel.md`.
+
 > **Status:** required reading before adding any new Cloud Run TTS /
 > image / video service to ytFactory. Born from the Higgs Audio v2
 > deployment thrash on 2026-05-05 (5 failed builds before a working

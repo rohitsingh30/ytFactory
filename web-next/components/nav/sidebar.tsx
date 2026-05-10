@@ -4,8 +4,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
+  Cloud,
   LayoutDashboard,
-  Library,
   ListChecks,
   Settings as SettingsIcon,
   Shield,
@@ -29,10 +29,10 @@ interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { href: "/app", label: "Dashboard", icon: LayoutDashboard, shortcut: "G D" },
   { href: "/app/create", label: "Create", icon: Wand2, shortcut: "C" },
-  { href: "/app/library", label: "Library", icon: Library, shortcut: "G L" },
   { href: "/app/queue", label: "Queue", icon: ListChecks, shortcut: "G Q" },
   { href: "/app/channels", label: "Channels", icon: Tv2, shortcut: "G C" },
   { href: "/app/burner-channels", label: "Burner Channels", icon: ToggleRight, shortcut: "G B" },
+  { href: "/app/cloud", label: "Cloud", icon: Cloud, shortcut: "G I", adminOnly: true },
   { href: "/app/admin", label: "Admin", icon: Shield, shortcut: "G A", adminOnly: true },
   { href: "/app/settings", label: "Settings", icon: SettingsIcon, shortcut: "G S" },
 ];

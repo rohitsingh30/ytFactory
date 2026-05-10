@@ -29,6 +29,77 @@ under `.claude/skills/<trigger>/`.
 
 ## How to run it
 
+### 0. Prefer the cloud `clone-video-worker` when it's available
+
+The cloud service `ytfactory-clone-video-worker` (URL in
+`CLOUDRUN_CLONE_VIDEO_URL`, see `cloud/clone-video-worker/server.py`)
+exposes `POST /analyze` which **does the entire stage 2 + 3 + 4
+locally-bound work in one CPU-bound cloud request**: download via
+yt-dlp (with PO-token sidecar + cookies + JS challenge solver),
+ffmpeg frame extraction, Whisper transcription, and the Azure
+GPT-vision niche fingerprint pass.
+
+Why this exists: the laptop yt-dlp path is fragile (YouTube bot
+checks, geoblocks, transient PO-token failures) and the cloud worker
+already has the hardened invocation core with bgutil sidecar + JS
+challenge plugin + Secret-Manager cookies. Doing analysis locally
+when the cloud can do it better is throwing away the engineering
+investment in `cloud/clone-video-worker/`.
+
+```bash
+# Preflight: confirm the cloud worker is reachable. Either glance at
+# the /app/cloud Health section in web-next (sidebar → Cloud → row
+# `clone-video-worker` should be green) or curl the API:
+curl -s "${YTFACTORY_API_BASE:-http://127.0.0.1:8765}/api/cloud/health" \
+  | jq '.rows[] | select(.short=="clone-video-worker") | {status, latency_ms, error}'
+
+# Then call /analyze in one shot — replaces stages 2 + 3 + 4 below.
+TOKEN="$(gcloud auth print-identity-token)"
+URL="${CLOUDRUN_CLONE_VIDEO_URL%/}"
+curl -sS -m 600 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"url\": \"<source-url>\", \"notes\": \"<optional context>\"}" \
+  "${URL}/analyze" \
+  > data/format_clones/<slug>/cloud_analyze.json
+```
+
+The response includes `frames_b64` (PNG frames at 1 fps + dense hook
+coverage), `transcript` (Whisper segments with timestamps),
+`metadata` (title/duration/fps/aspect from yt-dlp), and a draft
+`fingerprint` produced by the Azure GPT-vision pass. If the response
+parses cleanly and contains a non-empty `transcript` and ≥ 5
+`frames_b64`, **skip stages 1.duration-probe through 4.transcribe**
+— jump directly to step 5 (build/refine the format fingerprint)
+using the cloud-produced artifacts.
+
+Materialize the cloud artifacts to disk so step 5 sees the same
+layout as the local path:
+
+```python
+import base64, json, pathlib
+data = json.load(open("data/format_clones/<slug>/cloud_analyze.json"))
+out = pathlib.Path("data/format_clones/<slug>"); out.mkdir(parents=True, exist_ok=True)
+(out / "frames").mkdir(exist_ok=True)
+for name, b64 in data["frames_b64"].items():
+    (out / "frames" / name).write_bytes(base64.b64decode(b64))
+(out / "transcript.json").write_text(json.dumps(data["transcript"], indent=2))
+(out / "metadata.json").write_text(json.dumps(data["metadata"], indent=2))
+if data.get("fingerprint"):
+    (out / "fingerprint.draft.json").write_text(json.dumps(data["fingerprint"], indent=2))
+```
+
+**Fallback to the local path (stages 1-4 below)** when:
+- `CLOUDRUN_CLONE_VIDEO_URL` is unset
+- The `/app/cloud` Health row for `clone-video-worker` is RED (or the
+  same row in `GET /api/cloud/health`)
+- The cloud `/analyze` returns 5xx or a malformed body
+- The source is `file://` or an absolute path (cloud worker can't see laptop files)
+
+State whether you're on the cloud path or local path in **one line**
+before continuing. Example: `clone-video-format: cloud /analyze (worker
+green) — skipping local download/frames/transcribe`.
+
 ### 1. Confirm the URL and sample budget
 
 Take the URL the user pasted. Detect the platform from the host:

@@ -1,5 +1,9 @@
 # Cloud Run image generation — operational runbook
 
+> **Live status & cost trend:** see the `/app/cloud` admin tab in
+> web-next (sidebar → Cloud) — populated by the daily snapshot in
+> `docs/cloudrun_admin_panel.md`.
+
 > **Status (2026-05-07):** `ytfactory-image-flux2-klein` is LIVE in
 > `asia-southeast1` on NVIDIA L4 with **`--min-instances=0`** (scale
 > to zero when idle, ~$0/mo idle). Cold-load is hidden via the

@@ -98,6 +98,47 @@ This file is the authoritative version of that qualification. Future
 /make-skill runs should consult it before redirecting to
 /update-config.
 
+## 2026-05-10 — the inverse case (shell-driven auto-fire)
+
+The 4 cloud-* skills (`cloud-cost`, `cloud-health`,
+`deploy-cloud-service`, `warm-cloud`) authored 2026-05-10 were the
+**inverse** of the `/update-docs` case above:
+
+- They had auto-fire descriptions ("auto-invoked weekly via cron",
+  "auto-invoked by every make-* skill at script finalization",
+  "auto-invoked by GitHub Actions hourly cron") — same shape as
+  `/update-docs`.
+- BUT their bodies were **shell-driven** (gcloud + curl + jq + bash),
+  not Claude-driven.
+
+Result: all 4 retired the same day, replaced by:
+
+- `pipeline/cloud/` — one importable Python module (health, cost,
+  deploys, warm, snapshot).
+- `control/routes/cloud_routes.py` — FastAPI endpoints.
+- `web-next/app/app/cloud/` — admin tab (Health / Cost / Deploys
+  sections).
+- `scripts/cloud_daily_snapshot.py` + launchd plist — daily cron.
+- `pipeline.cloud.warm.warm_async()` inlined in 4 renderer
+  entrypoints — replaces the per-skill `/warm-cloud` invocation.
+
+**Decision tree for a new auto-fire skill candidate:**
+
+| body type | destination |
+|---|---|
+| Claude-driven (writes prose, classifies, talks to user) | skill + CLAUDE.md auto-invocation rule (this file's primary case) |
+| shell-driven, op wants to *see* status recurrently | admin tab (`docs/admin_panel_first.md`) + cron + script |
+| shell-driven, fires before every render | renderer entrypoint (`feedback_renderer_owns_universal_pre_steps.md`) |
+| shell-driven, fires on file-change / arbitrary event | settings.json hook (the original `/update-config` redirect) |
+
+See also:
+- `docs/admin_panel_first.md` (project doc — where ops/observability
+  belongs)
+- `~/.claude/projects/.../memory/feedback_admin_panel_first.md`
+- `~/.claude/projects/.../memory/feedback_skill_harness_drift_audit.md`
+  (audit recipe for catching drift before the next batch ships)
+- `~/.claude/projects/.../memory/feedback_renderer_owns_universal_pre_steps.md`
+
 ## Reference
 
 - Primary case: `/update-docs` skill at

@@ -1,5 +1,9 @@
 # Cloud Run TTS — operational runbook
 
+> **Live status & cost trend:** see the `/app/cloud` admin tab in
+> web-next (sidebar → Cloud) — populated by the daily snapshot in
+> `docs/cloudrun_admin_panel.md`.
+
 > **Status (2026-05-06):** All 5 single-model TTS services are LIVE in
 > `asia-southeast1` on NVIDIA L4. Each model has its own image,
 > service, and URL — the mega-image approach was abandoned after 5

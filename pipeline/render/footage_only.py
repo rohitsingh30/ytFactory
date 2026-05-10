@@ -789,6 +789,15 @@ def main() -> None:
     ap.add_argument("--upload", action="store_true", help="Upload to YouTube on success")
     args = ap.parse_args()
 
+    # Pre-warm cloud GPU containers this channel will hit. Fire-and-
+    # forget on a daemon thread; no-op when no CLOUDRUN_*_URL set.
+    try:
+        from pipeline.cloud import warm as _cloud_warm  # noqa: PLC0415
+
+        _cloud_warm.warm_async(args.channel)
+    except Exception:  # noqa: BLE001
+        pass
+
     # Source .env for any provider env vars (HF tokens, etc.).
     env_path = REPO_ROOT / ".env"
     if env_path.exists():

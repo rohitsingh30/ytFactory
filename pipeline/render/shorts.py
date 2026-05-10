@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -124,6 +125,44 @@ def _append_last_beat_icons(
 # Repo root = parent.parent.parent of this file (pipeline/render/shorts.py
 # → pipeline/render/ → pipeline/ → repo). Used for channel discovery.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _record_stage_done(
+    stage: str,
+    t0: float,
+    *,
+    slug: str,
+    channel: str,
+    success: bool = True,
+    extra: dict | None = None,
+) -> None:
+    """Emit a `stage_done` telemetry event with `metadata.stage`.
+
+    Lightweight wrapper so the renderer's existing `t0 = time.time()`
+    + `print("done in ...s")` pattern can also feed the latency
+    dashboard's hotspots view (which buckets on `metadata.stage`).
+    Pre-fix: `stage_done` was never emitted by any renderer, so the
+    headline `/api/telemetry/latency` panel was empty. Post-fix: each
+    of the 4 short-render stages (tts / asr+beats / image_gen /
+    compose) plus the optional critic stage logs a row.
+
+    Cheap (one append to the JSONL log); never raises.
+    """
+    md = {
+        "stage": stage,
+        "slug": slug,
+        "niche": channel,
+    }
+    if extra:
+        md.update(extra)
+    tlm.track(
+        "stage_done",
+        category="pipeline",
+        success=success,
+        duration_ms=int((time.time() - t0) * 1000),
+        job_id=os.environ.get("YTFACTORY_JOB_ID") or None,
+        metadata=md,
+    )
 
 
 def _channel_folders() -> list[Path]:
@@ -780,6 +819,63 @@ def _validate_opening_image(prompt: str, directives: dict | None) -> list[str]:
 # character_description and per-beat scene/key_visual.
 
 
+def _apply_form_overrides(cfg: dict, overrides: dict) -> None:
+    """Translate website-form `channel_overrides` keys → channel YAML cfg keys.
+
+    The Customize step on the create page emits a flat dict; this is
+    where each entry lands in the actual cfg the renderer reads. Kept
+    as a separate function so the override→cfg-key map is reviewable in
+    one place — adding a new form knob is one entry here plus the
+    matching schema field in pipeline/schemas/customization.py.
+
+    Quietly skips empty / None values so a YAML default keeps winning
+    when the user didn't touch a field. Unknown keys are ignored on
+    purpose — the form is expected to send a wider superset over time
+    and we don't want a stale form value silently mis-configuring the
+    render.
+    """
+    audio_mode = overrides.get("audio_mode")
+    if audio_mode == "song":
+        # Force Suno even if the channel's YAML defaults to TTS. Will raise
+        # later (with a clear message) if SUNOAPI_API_KEY is missing — that
+        # error is surfacable to the user, which is correct here.
+        cfg["audio_provider"] = "sunoapi"
+    elif audio_mode == "voice":
+        # Force TTS even on a song channel. Channel's tts_voice / tts_provider
+        # is used as-is — for rhymetimejunction this is cloudrun_chatterbox
+        # with sarah.wav, which is set up for the future Dadi-style spoken
+        # bridge. Won't sound like a *song*, but that's the user's choice.
+        cfg["audio_provider"] = "tts"
+
+    song_style = overrides.get("song_style")
+    if isinstance(song_style, str) and song_style.strip():
+        # _audio_fingerprint_for_cache reads cfg["_suno_prompt_override"]["style"]
+        # and the synth path reads it from script.json's suno_prompt block.
+        # Stashing it on cfg here threads it through both consumers
+        # without touching the script authoring flow.
+        suno_override = dict(cfg.get("_suno_prompt_override") or {})
+        suno_override["style"] = song_style.strip()
+        cfg["_suno_prompt_override"] = suno_override
+
+    song_vocal_gender = overrides.get("song_vocal_gender")
+    if song_vocal_gender in ("f", "m"):
+        cfg["sunoapi_vocal_gender"] = song_vocal_gender
+
+    song_model = overrides.get("song_model")
+    if isinstance(song_model, str) and song_model.strip():
+        cfg["sunoapi_model"] = song_model.strip()
+
+    visual_source = overrides.get("visual_source")
+    if visual_source in ("ai", "footage", "both"):
+        # Advisory cfg key consumed at the per-beat decision points
+        # downstream. "ai" leaves the channel's image_provider alone
+        # (default behaviour). "footage"/"both" require the script to
+        # carry footage data per beat — see _attach_footage_to_beats
+        # and the visual_source warning emitted further down in
+        # make_short().
+        cfg["visual_source"] = visual_source
+
+
 def make_short(
     text: str,
     channel_path: Path,
@@ -790,8 +886,11 @@ def make_short(
     tts_voice_override: str | None = None,
     upload_override: bool | None = None,
     require_critic: bool = False,
+    cfg_overrides: dict | None = None,
 ) -> Path:
     from pipeline.preflight import power_check  # noqa: PLC0415
+
+    _render_t0 = time.time()
 
     # Refuse to start in Low Power Mode (the 2026-05-04 / 2026-05-05
     # SIGABRT-on-Metal class of bug). Override with
@@ -807,6 +906,32 @@ def make_short(
     reset_circuit_breaker()
 
     cfg = yaml.safe_load(channel_path.read_text())
+
+    # Apply website-form overrides BEFORE any cfg-driven branching.
+    # `cfg_overrides` arrives as a flat dict from the create-page form
+    # (channel_overrides → CLI --override key=value → here). The keys we
+    # honour map cleanly to existing cfg knobs:
+    #
+    #   audio_mode=song        → cfg.audio_provider = sunoapi (forces Suno
+    #                            even on a TTS channel, raises clearly if
+    #                            SUNOAPI_API_KEY is missing)
+    #   audio_mode=voice       → cfg.audio_provider = tts (force TTS even
+    #                            on a song channel, e.g. for a Dadi-style
+    #                            spoken bridge; uses cfg.tts_voice as-is)
+    #   song_style             → cfg._suno_prompt_override.style (consumed
+    #                            by _audio_fingerprint_for_cache + the
+    #                            sunoapi synth call below)
+    #   song_vocal_gender      → cfg.sunoapi_vocal_gender
+    #   song_model             → cfg.sunoapi_model
+    #   visual_source          → cfg.visual_source (advisory; honoured at
+    #                            the per-beat decision points below)
+    #
+    # Anything not in this map is ignored — pass-through of arbitrary
+    # YAML-style overrides would let the form silently mis-configure
+    # the renderer. New knobs need an entry here.
+    if cfg_overrides:
+        _apply_form_overrides(cfg, cfg_overrides)
+
     # An override that contains no path separator is a Kokoro voice id
     # (e.g. "am_eric"). When the channel default is F5-TTS but the user
     # explicitly picks a Kokoro voice in the web UI, we have to flip
@@ -852,7 +977,28 @@ def make_short(
     # /readyz on a background thread NOW (image_provider is resolved
     # but we still have ~60-90s of TTS+ASR ahead). Provider-aware:
     # no-ops for local providers, fires for cloudrun_*.
-    images.warmup(image_provider)
+    image_warmup_thread = images.warmup(image_provider)
+
+    # 2026-05-10: also prewarm the cloud TTS service. Pre-fix the
+    # Shorts path had no TTS prewarm at all (long_form did at
+    # long_form.py:266); a cold render's worst-case telemetry showed
+    # image_attempt taking 33 min — almost certainly because the
+    # TTS+image cold-loads serialised on the critical path before
+    # the warmup background thread had time to actually warm the
+    # image service. Hitting both /readyz upfront kills that
+    # serialisation. Provider-aware: no-op for local TTS providers
+    # like kokoro/f5_tts.
+    tts_warmup_thread = None
+    if tts_provider.startswith("cloudrun_"):
+        try:
+            from pipeline.tts.cloudrun import warmup as _tts_warmup  # noqa: PLC0415
+            tts_warmup_thread = _tts_warmup(tts_provider)
+            if tts_warmup_thread is not None:
+                print(f"[warmup] {tts_provider} /readyz fired on background thread")
+        except Exception as e:
+            # Fail open — warmup is best-effort. Real /synth will
+            # surface any actual problem with the cloud service.
+            print(f"[warmup] {tts_provider} prewarm failed (non-fatal): {e!r}")
 
     # Class-of-bug guard (see images.validate_provider_config docstring).
     # Channels can pick provider, dims, and steps independently — we
@@ -1194,6 +1340,10 @@ def make_short(
     else:
         print(f"[1/4] TTS cached: {audio_path}")
     print(f"     done in {time.time() - t0:.1f}s")
+    _record_stage_done(
+        "tts", t0, slug=slug, channel=channel_path.stem,
+        extra={"provider": tts_provider},
+    )
 
     # 2026-05-05: drop F5-TTS-MLX (~1.35 GB) at the renderer-stage boundary
     # if F5 was the active provider. Image gen, beats, captions, mux all
@@ -1242,6 +1392,10 @@ def make_short(
     print(f"     {len(beat_list)} beats, total {sum(b.duration for b in beat_list):.1f}s")
     for i, b in enumerate(beat_list):
         print(f"       beat {i}: {b.duration:.2f}s — {b.text[:60]}")
+    _record_stage_done(
+        "asr_beats", t0, slug=slug, channel=channel_path.stem,
+        extra={"provider": asr_provider, "n_beats": len(beat_list)},
+    )
 
     # Stage 5.5 — author per-beat prompts via claude CLI if not already
     # cached. The orchestrator-level cache means re-running on the same
@@ -1385,6 +1539,10 @@ def make_short(
                 print(f"     [{i+1}/{len(beat_list)}] cached")
             clip_paths.append(p)
         print(f"     done in {time.time() - t0:.1f}s")
+        _record_stage_done(
+            "motion_gen", t0, slug=slug, channel=channel_path.stem,
+            extra={"provider": motion_provider, "n_clips": len(clip_paths)},
+        )
 
         # Stage 7 — compose from clips
         t0 = time.time()
@@ -1397,6 +1555,10 @@ def make_short(
             out_path=out_path,
             cache_dir=cache,
             tail_hold_s=float(cfg.get("closer_hold_s", 0.0)),
+        )
+        _record_stage_done(
+            "compose", t0, slug=slug, channel=channel_path.stem,
+            extra={"phase": "compose_clips"},
         )
     else:
         # ---- slideshow path (current default) -------------------------
@@ -1417,6 +1579,35 @@ def make_short(
             n_footage_matched = _attach_footage_to_beats(beat_list, footage_overrides)
             print(f"[footage] tagged {n_footage_matched} beat(s) for footage cut-in (pre-image-gen)")
 
+        # Form-level visual_source override (set by the create-page
+        # Background-visuals card via `cfg_overrides`). v1 contract:
+        #   - "ai"      → no-op; channel renders with its current image_provider.
+        #   - "footage" → real-footage-only path. The Shorts pipeline
+        #                 doesn't have a stock-footage fetcher, so this
+        #                 only "works" on channels whose script.json
+        #                 already carries footage data per beat (e.g.
+        #                 sportsrecapped). On other channels we WARN and
+        #                 fall back to AI rather than silently produce
+        #                 a blank video. The dedicated footage-only
+        #                 entrypoint (pipeline/render/footage_only.py)
+        #                 is the right home for true footage-only
+        #                 history/cosmos renders.
+        #   - "both"    → the existing `compose_hybrid` path already
+        #                 honours per-beat `kind: footage` tags, so this
+        #                 is a no-op WHEN the script carries footage
+        #                 data. On scripts without footage data we WARN.
+        _visual_source = cfg.get("visual_source")
+        if _visual_source in ("footage", "both") and n_footage_matched == 0:
+            print(
+                f"[visual_source] WARNING: requested visual_source="
+                f"{_visual_source!r} but the script for slug={slug!r} carries no "
+                f"per-beat footage data (script.footage[] is empty). "
+                f"Falling back to AI image-gen. To use real footage on this "
+                f"channel, author footage URLs in the script first, or use "
+                f"the dedicated footage_only render path on history/cosmos "
+                f"channels."
+            )
+
         custom_prompts = images.load_prompts(
             prompts_path,
             n_beats=len(beat_list),
@@ -1426,6 +1617,24 @@ def make_short(
             print(f"[3/4] {image_provider}: generating {len(beat_list)} images (custom prompts)…")
         else:
             print(f"[3/4] {image_provider}: generating {len(beat_list)} images (heuristic prompts)…")
+
+        # b2-prewarm-on-render-start (2026-05-10): guarantee the cloud
+        # image service finished its cold-load BEFORE the per-beat
+        # /generate loop starts. Without this, the first /generate
+        # raced the warmup thread and could pay 5-7 min of cold-load
+        # tax on the critical path — the 33-min worst-case
+        # image_attempt event in production was the symptom. Join with
+        # 30s timeout: if /readyz hasn't returned by then, the cold-
+        # load is still in flight and we'll just pay the rest inside
+        # the first /generate (no worse than pre-fix). image_warmup_thread
+        # is None for local providers — the if-guard makes this a no-op
+        # there.
+        if image_warmup_thread is not None and image_warmup_thread.is_alive():
+            print("[warmup] waiting (≤30s) for image-gen /readyz to finish before stage 6…")
+            _t = time.time()
+            image_warmup_thread.join(timeout=30.0)
+            print(f"[warmup] image-gen warmup wait: {time.time()-_t:.1f}s "
+                  f"(still alive={image_warmup_thread.is_alive()})")
 
         # Validate the opening prompt against channel's opening directives
         # (Principle #7). Warn only — don't block the render.
@@ -1498,6 +1707,16 @@ def make_short(
                              str(char_desc or ""), str(seed)])
             return _hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
+        # b4-image-cold-load-budget: track first-image cold-load tax
+        # per render. The metric we care about isn't "how long does
+        # /generate take" (we already have that per-attempt) but "how
+        # much wall-clock did the first image cost relative to the
+        # render's start". A first-image dt of 8 s on a warm container
+        # is healthy; a first-image dt of 33 min on a cold one is the
+        # elephant. Recording it as `cold_load_s` on the FIRST
+        # image_attempt makes the dashboard's image-retry rollup
+        # surface cold-load tax explicitly per render.
+        _first_image_pending = True
         for i, b in enumerate(beat_list):
             p = cache / f"img_{i:02d}.png"
             hash_path = cache / f"img_{i:02d}.prompt.sha256"
@@ -1725,8 +1944,20 @@ def make_short(
                             "qc_reason": (reason if not ok else None),
                             "provider": image_provider,
                             "seed": seed,
+                            # b4: only the FIRST image_attempt of the
+                            # render carries cold_load_s = wall-clock
+                            # delta from render start to this attempt's
+                            # completion. After we emit it once we set
+                            # _first_image_pending = False so subsequent
+                            # attempts don't re-record it.
+                            **(
+                                {"cold_load_s": round(time.time() - _render_t0, 2)}
+                                if _first_image_pending else {}
+                            ),
                         },
                     )
+                    if _first_image_pending:
+                        _first_image_pending = False
                     if ok:
                         break
                     print(
@@ -1761,6 +1992,10 @@ def make_short(
             print(f"[image-done] beat {i} of {len(beat_list)}")
             image_paths.append(p)
         print(f"     done in {time.time() - t0:.1f}s")
+        _record_stage_done(
+            "image_gen", t0, slug=slug, channel=channel_path.stem,
+            extra={"provider": image_provider, "n_images": len(image_paths)},
+        )
 
         # Pre-flight gate: every img_NN.png the compose stage will hand
         # to ffmpeg must exist. We've seen jobs where the image loop
@@ -1894,12 +2129,21 @@ def make_short(
                 rank_chips=rank_chips or None,
             )
             print(f"     done in {time.time() - t0:.1f}s")
+            _record_stage_done(
+                "compose", t0, slug=slug, channel=channel_path.stem,
+                extra={"phase": "compose_hybrid"},
+            )
             print(f"\n✓ wrote {out_path}")
             # v1: footage-bearing renders skip critic regen (Stage 7.5)
             # and auto-upload (Stage 8). Critic doesn't yet route through
             # compose_hybrid, so its recompose would silently drop the
             # footage cuts. Re-render explicitly to iterate.
+            _print_render_summary(slug, channel_path.stem, _render_t0)
             return out_path
+        # Track stage 4 (slideshow compose) start so the stage_done emit
+        # below covers ONLY the ffmpeg compose call, not the image gen
+        # block above (which already emitted "image_gen").
+        compose_t0 = time.time()
         print("[4/4] ffmpeg compose (slideshow)…")
         compose.compose(
             image_paths=image_paths,
@@ -1912,8 +2156,12 @@ def make_short(
             closer_format=closer_format,
             rank_chips=rank_chips or None,
         )
+        print(f"     done in {time.time() - compose_t0:.1f}s")
+        _record_stage_done(
+            "compose", compose_t0, slug=slug, channel=channel_path.stem,
+            extra={"phase": "compose_slideshow"},
+        )
 
-    print(f"     done in {time.time() - t0:.1f}s")
     print(f"\n✓ wrote {out_path}")
 
     # Stage 7.5 — auto-critique. If score < min_critic_score, patch the
@@ -2133,7 +2381,49 @@ def make_short(
     except Exception as e:
         print(f"[research] rebuild skipped (non-fatal): {e}")
 
+    _print_render_summary(slug, channel_path.stem, _render_t0)
     return out_path
+
+
+def _print_render_summary(slug: str, channel: str, render_t0: float) -> None:
+    """Print a one-line summary of the slowest stage and total wall-clock.
+
+    Reads `stage_done` events from this render (filtered by job_id when
+    set, slug otherwise) so the operator can see at a glance which
+    stage burned the most time without opening the dashboard.
+
+    Read-only: pulls events from the in-memory parse cache via
+    `tlm.read_events()`, never raises (latency-summary failure must
+    not fail an otherwise-successful render).
+    """
+    try:
+        events = tlm.read_events(since_ts=render_t0 - 1.0)
+        job_id = os.environ.get("YTFACTORY_JOB_ID") or None
+        stages: list[tuple[str, int]] = []
+        for e in events:
+            if e.get("event") != "stage_done":
+                continue
+            md = e.get("metadata") or {}
+            if md.get("slug") != slug or md.get("niche") != channel:
+                continue
+            if job_id and e.get("job_id") and e["job_id"] != job_id:
+                continue
+            dur = e.get("duration_ms")
+            if dur is None:
+                continue
+            stages.append((md.get("stage") or "?", int(dur)))
+        total_s = time.time() - render_t0
+        if not stages:
+            print(f"[render-summary] slug={slug} total={total_s:.1f}s "
+                  f"(no stage_done events captured)")
+            return
+        slowest = max(stages, key=lambda x: x[1])
+        per_stage = " ".join(f"{n}={d/1000:.0f}s" for n, d in stages)
+        print(f"[render-summary] slug={slug} total={total_s:.1f}s "
+              f"slowest={slowest[0]} ({slowest[1]/1000:.1f}s) | {per_stage}")
+    except Exception as e:
+        # Pure observability — never block a render on a summary print.
+        print(f"[render-summary] skipped (non-fatal): {e!r}")
 
 
 def cli_main() -> None:
@@ -2188,6 +2478,21 @@ def _cli_main_impl() -> None:
         default=None,
         help="Override channel YAML's tts_voice (e.g. 'af_bella', 'bm_george').",
     )
+    ap.add_argument(
+        "--override",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Repeatable. Form-style channel override forwarded to "
+            "make_short(cfg_overrides=...). Honored keys: audio_mode "
+            "(voice|song), song_style, song_vocal_gender (f|m), song_model "
+            "(V4_5|V5), visual_source (ai|footage|both), voice, music_bed, "
+            "captions_density, visibility, schedule_at. Unknown keys are "
+            "passed through to cfg_overrides — translation lives in "
+            "_apply_form_overrides; only known keys take effect."
+        ),
+    )
     upload_grp = ap.add_mutually_exclusive_group()
     upload_grp.add_argument(
         "--upload",
@@ -2200,6 +2505,16 @@ def _cli_main_impl() -> None:
         help="Skip Stage 8 upload even if channel YAML's upload.auto_upload is true.",
     )
     args = ap.parse_args()
+
+    # Pre-warm any cloud GPU containers this channel's render will hit.
+    # Fire-and-forget on a daemon thread — never blocks the render
+    # boot. No-op when no CLOUDRUN_*_URL is configured (laptop-only path).
+    try:
+        from pipeline.cloud import warm as _cloud_warm  # noqa: PLC0415
+
+        _cloud_warm.warm_async(args.channel)
+    except Exception:  # noqa: BLE001
+        pass
 
     if args.script:
         text, script_slug, source_story = _load_script_text(Path(args.script))
@@ -2219,6 +2534,18 @@ def _cli_main_impl() -> None:
     if args.require_critic and args.no_critic:
         ap.error("--require-critic and --no-critic are mutually exclusive")
 
+    # Parse --override KEY=VALUE entries into a flat dict. Bad entries
+    # (no `=`) raise via ap.error so the user sees the typo immediately
+    # rather than the override silently dropping.
+    cfg_overrides: dict | None = None
+    if args.override:
+        cfg_overrides = {}
+        for raw in args.override:
+            if "=" not in raw:
+                ap.error(f"--override expects KEY=VALUE, got: {raw!r}")
+            k, v = raw.split("=", 1)
+            cfg_overrides[k.strip()] = v
+
     channel_path = Path(args.channel)
     if args.out is None:
         out_dir = _resolve_channel_out_dir(channel_path)
@@ -2236,6 +2563,7 @@ def _cli_main_impl() -> None:
         require_critic=args.require_critic,
         tts_voice_override=args.tts_voice,
         upload_override=upload_override,
+        cfg_overrides=cfg_overrides,
     )
 
     # Output manifest — consumed by ``workers/heavy/render_short.py``

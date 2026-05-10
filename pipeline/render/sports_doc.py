@@ -636,6 +636,15 @@ def main() -> int:
                          "stops before video assembly. Useful for verifying anchor matching.")
     args = ap.parse_args()
 
+    # Pre-warm cloud GPU containers this channel will hit. Fire-and-
+    # forget on a daemon thread; no-op when no CLOUDRUN_*_URL set.
+    try:
+        from pipeline.cloud import warm as _cloud_warm  # noqa: PLC0415
+
+        _cloud_warm.warm_async(args.channel)
+    except Exception:  # noqa: BLE001
+        pass
+
     from pipeline.preflight import power_check  # noqa: PLC0415
     power_check(label="sports-doc")
 

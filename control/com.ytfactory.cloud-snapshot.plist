@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ytfactory.cloud-snapshot</string>
+
+    <!-- Daily admin-panel snapshot: writes data/_bench/cloud_{health, -->
+    <!-- cost,deploys}/YYYY-MM-DD.json. Powers the /app/cloud tab. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>cd /Users/rohit/ytFactory &amp;&amp; /Users/rohit/ytFactory/.venv/bin/python /Users/rohit/ytFactory/scripts/cloud_daily_snapshot.py --quiet &gt;&gt; /tmp/ytfactory-cloud-snapshot.log 2&gt;&amp;1</string>
+    </array>
+
+    <!-- Run once a day at 02:00 local (idle hours). Pick a different -->
+    <!-- hour by editing Hour below and reloading the plist. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Catch up on next wake if the laptop was asleep at 02:00. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/ytfactory-cloud-snapshot.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/ytfactory-cloud-snapshot.log</string>
+</dict>
+</plist>

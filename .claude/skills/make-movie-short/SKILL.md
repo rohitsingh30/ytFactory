@@ -416,3 +416,25 @@ prompts.json — re-author the shot list and let prompts get re-derived.
   ``/critique-video`` — mention it in the hand-off line for cases
   where the user wants the markdown reaction in addition to the
   structured score JSON the in-pipeline critic already wrote.
+
+---
+
+## Cloud pre-render hook (mandatory)
+
+Before handing off to `pipeline/render/<entrypoint>.py`, do the
+**routing assertion** documented in
+[`docs/cloud_prerender_hook.md`](/Users/rohit/ytFactory/docs/cloud_prerender_hook.md):
+read the channel `config.yaml` (and variant YAML if applicable) and
+assert `tts_provider` + `image_provider` start with `cloudrun_`
+(except for documented local-only paths like
+`mystoriesanimated/variants/tifu.yaml` and the Hindi `kokoro hf_alpha`
+fallback).
+
+**Pre-warm is now automatic** — the renderer entrypoints call
+`pipeline.cloud.warm.warm_async(channel)` immediately after argparse,
+so the 5-7 min cold-load happens in parallel with the renderer boot.
+**Health is now in the admin tab** — `/app/cloud` (sidebar → Cloud)
+shows green/yellow/red live; for CI use `/api/cloud/health`. The
+`warm-cloud`, `cloud-health`, `cloud-cost`, and
+`deploy-cloud-service` skills were retired on 2026-05-10; same code
+lives in `pipeline/cloud/` + the admin tab.

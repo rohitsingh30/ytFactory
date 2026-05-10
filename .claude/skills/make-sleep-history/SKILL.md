@@ -564,3 +564,25 @@ across all four skills as a separate refactor PR** — the chapter +
 support_asks + sources + title_options shape is now common to four
 skills (was three before this one). That refactor is out of scope
 for this skill's first ship.
+
+---
+
+## Cloud pre-render hook (mandatory)
+
+Before handing off to `pipeline/render/<entrypoint>.py`, do the
+**routing assertion** documented in
+[`docs/cloud_prerender_hook.md`](/Users/rohit/ytFactory/docs/cloud_prerender_hook.md):
+read the channel `config.yaml` (and variant YAML if applicable) and
+assert `tts_provider` + `image_provider` start with `cloudrun_`
+(except for documented local-only paths like
+`mystoriesanimated/variants/tifu.yaml` and the Hindi `kokoro hf_alpha`
+fallback).
+
+**Pre-warm is now automatic** — the renderer entrypoints call
+`pipeline.cloud.warm.warm_async(channel)` immediately after argparse,
+so the 5-7 min cold-load happens in parallel with the renderer boot.
+**Health is now in the admin tab** — `/app/cloud` (sidebar → Cloud)
+shows green/yellow/red live; for CI use `/api/cloud/health`. The
+`warm-cloud`, `cloud-health`, `cloud-cost`, and
+`deploy-cloud-service` skills were retired on 2026-05-10; same code
+lives in `pipeline/cloud/` + the admin tab.
