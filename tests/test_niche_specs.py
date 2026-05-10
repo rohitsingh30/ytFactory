@@ -223,6 +223,195 @@ class TestDeleteNiche(unittest.TestCase):
         self.assertIsNone(get_niche("ch", "del_me"))
 
 
+# ---------------------------------------------------------------------------
+# GCS-backend behaviour. We don't talk to a real bucket — the GCS helpers
+# are patched at module scope so we can verify routing precedence
+# (GCS-first, disk-fallback) and write-through semantics.
+# ---------------------------------------------------------------------------
+
+
+class _FakeGcsBackend:
+    """In-memory stand-in for the four ``_gcs_*`` helpers."""
+
+    def __init__(self, bucket: str = "test-bucket") -> None:
+        self.bucket = bucket
+        # store: { (channel, key): NicheDoc }
+        self.store: dict[tuple[str, str], NicheDoc] = {}
+        self.fail_load = False
+        self.fail_save = False
+
+    def install(self, mod):
+        self._patches = [
+            patch.object(mod, "_state_bucket", side_effect=lambda: self.bucket),
+            patch.object(mod, "_gcs_load", side_effect=self._load),
+            patch.object(mod, "_gcs_list", side_effect=self._list),
+            patch.object(mod, "_gcs_save", side_effect=self._save),
+            patch.object(mod, "_gcs_delete", side_effect=self._delete),
+        ]
+        for p in self._patches:
+            p.start()
+        return self
+
+    def uninstall(self):
+        for p in self._patches:
+            p.stop()
+
+    def _load(self, channel, key):
+        if self.fail_load:
+            return None
+        return self.store.get((channel, key))
+
+    def _list(self, channel):
+        if self.fail_load:
+            return []
+        return [d for (c, _), d in self.store.items() if c == channel]
+
+    def _save(self, channel, doc):
+        if self.fail_save:
+            return False
+        self.store[(channel, doc.key)] = doc
+        return True
+
+    def _delete(self, channel, key):
+        return self.store.pop((channel, key), None) is not None
+
+
+class TestNicheSpecsGcsBackend(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._root = Path(self._td.name)
+        self._root_patch = patch.object(niche_specs, "PROJECT_ROOT", self._root)
+        self._root_patch.start()
+        self.gcs = _FakeGcsBackend().install(niche_specs)
+
+    def tearDown(self):
+        self.gcs.uninstall()
+        self._root_patch.stop()
+        self._td.cleanup()
+
+    def _disk_write(self, channel: str, doc: NicheDoc) -> Path:
+        nd = self._root / channel / "niches"
+        nd.mkdir(parents=True, exist_ok=True)
+        p = nd / f"{doc.key}.json"
+        p.write_text(doc.model_dump_json(indent=2))
+        return p
+
+    # --- get -----------------------------------------------------------------
+
+    def test_get_prefers_gcs_over_disk(self):
+        gcs_doc = NicheDoc(key="aita", label="From GCS")
+        disk_doc = NicheDoc(key="aita", label="From Disk")
+        self.gcs.store[("ch", "aita")] = gcs_doc
+        self._disk_write("ch", disk_doc)
+        got = get_niche("ch", "aita")
+        self.assertIsNotNone(got)
+        self.assertEqual(got.label, "From GCS")  # type: ignore[union-attr]
+
+    def test_get_falls_back_to_disk_on_gcs_miss(self):
+        disk_doc = NicheDoc(key="aita", label="Disk Only")
+        self._disk_write("ch", disk_doc)
+        got = get_niche("ch", "aita")
+        self.assertIsNotNone(got)
+        self.assertEqual(got.label, "Disk Only")  # type: ignore[union-attr]
+
+    def test_get_falls_back_when_gcs_unavailable(self):
+        # Simulate auth/network failure: GCS load returns None for every
+        # call. Disk fallback should still serve the doc.
+        self.gcs.fail_load = True
+        disk_doc = NicheDoc(key="aita", label="Disk Survives")
+        self._disk_write("ch", disk_doc)
+        got = get_niche("ch", "aita")
+        self.assertIsNotNone(got)
+        self.assertEqual(got.label, "Disk Survives")  # type: ignore[union-attr]
+
+    def test_get_returns_none_when_neither_backend_has_it(self):
+        self.assertIsNone(get_niche("ch", "missing"))
+
+    # --- list ----------------------------------------------------------------
+
+    def test_list_merges_gcs_and_disk_dedup_by_key(self):
+        # GCS has a, b. Disk has b (different label) + c. List returns
+        # a, b (GCS wins), c — sorted by label.
+        self.gcs.store[("ch", "a")] = NicheDoc(key="a", label="Alpha (cloud)")
+        self.gcs.store[("ch", "b")] = NicheDoc(key="b", label="Beta (cloud)")
+        self._disk_write("ch", NicheDoc(key="b", label="Beta (disk)"))
+        self._disk_write("ch", NicheDoc(key="c", label="Charlie (disk)"))
+        out = list_niches("ch")
+        self.assertEqual([d.key for d in out], ["a", "b", "c"])
+        # Beta from GCS wins over disk
+        beta = next(d for d in out if d.key == "b")
+        self.assertEqual(beta.label, "Beta (cloud)")
+
+    # --- save ----------------------------------------------------------------
+
+    def test_save_writes_through_to_both_backends(self):
+        doc = NicheDoc(key="new_niche", label="New")
+        save_niche("ch", doc)
+        # GCS got it
+        self.assertIn(("ch", "new_niche"), self.gcs.store)
+        # Disk got it
+        on_disk = self._root / "ch" / "niches" / "new_niche.json"
+        self.assertTrue(on_disk.exists())
+
+    def test_save_disk_failure_does_not_blow_up_in_cloud_mode(self):
+        # Simulate read-only FS: replace _niches_dir's mkdir with one that
+        # raises. With a bucket configured, save should swallow the OSError.
+        doc = NicheDoc(key="cloud_only", label="Cloud Only")
+        with patch.object(niche_specs.Path, "mkdir", side_effect=OSError("read-only")):
+            save_niche("ch", doc)  # must not raise
+        self.assertIn(("ch", "cloud_only"), self.gcs.store)
+
+    # --- delete --------------------------------------------------------------
+
+    def test_delete_removes_from_both(self):
+        doc = NicheDoc(key="bye", label="Goodbye")
+        save_niche("ch", doc)
+        self.assertTrue(delete_niche("ch", "bye"))
+        self.assertNotIn(("ch", "bye"), self.gcs.store)
+        self.assertFalse((self._root / "ch" / "niches" / "bye.json").exists())
+
+    def test_delete_returns_true_for_gcs_only_doc(self):
+        # Doc only exists in GCS — delete still reports success.
+        self.gcs.store[("ch", "ghost")] = NicheDoc(key="ghost", label="Ghost")
+        self.assertTrue(delete_niche("ch", "ghost"))
+
+    def test_delete_returns_false_when_neither_backend_has_it(self):
+        self.assertFalse(delete_niche("ch", "never_existed"))
+
+
+class TestNicheSpecsBucketEnvOff(unittest.TestCase):
+    """When YTFACTORY_STATE_BUCKET is unset, behaviour is pure-disk
+    (the existing tests above cover the happy path; this just guards
+    against a regression where the GCS branch fires without a bucket)."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._root = Path(self._td.name)
+        self._root_patch = patch.object(niche_specs, "PROJECT_ROOT", self._root)
+        self._root_patch.start()
+        # Force-clear bucket env in case the test runner inherited one.
+        self._env_patch = patch.dict(
+            niche_specs.os.environ, {niche_specs._BUCKET_ENV: ""}, clear=False,
+        )
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        self._root_patch.stop()
+        self._td.cleanup()
+
+    def test_bucket_env_unset_returns_none(self):
+        self.assertIsNone(niche_specs._state_bucket())
+
+    def test_no_gcs_calls_attempted_when_bucket_unset(self):
+        # If the env is unset, _gcs_load / _gcs_save / _gcs_delete should
+        # be no-ops (and never try to import google.cloud.storage).
+        self.assertIsNone(niche_specs._gcs_load("ch", "x"))
+        self.assertEqual(niche_specs._gcs_list("ch"), [])
+        self.assertFalse(niche_specs._gcs_save("ch", NicheDoc(key="x", label="X")))
+        self.assertFalse(niche_specs._gcs_delete("ch", "x"))
+
+
 class TestSlugifyLabel(unittest.TestCase):
     def test_simple(self):
         self.assertEqual(slugify_label("My Niche"), "my_niche")

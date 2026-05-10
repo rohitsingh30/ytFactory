@@ -133,5 +133,112 @@ class CheckBeatsTest(unittest.TestCase):
         self.assertNotIn("slow_hook", _codes(check_beats(beats)))
 
 
+# ---- Additional coverage for newer validators ----
+
+import contextlib
+import io
+
+from pipeline.llm import script_check as sc
+
+
+class LastSentenceHelperTest(unittest.TestCase):
+    def test_last_sentence_handles_empty_and_split_text(self):
+        self.assertEqual(sc._last_sentence("First. Last question?"), "Last question?")
+        self.assertEqual(sc._last_sentence(""), "")
+
+
+class CloserTokenAndLeakPatternTest(unittest.TestCase):
+    def test_required_closer_tokens_dedupes_and_drops_glue(self):
+        tokens = sc._required_closer_tokens("LIKE if YTA, COMMENT your worst COMMENT")
+        self.assertEqual(tokens, ["like", "yta", "comment", "worst"])
+
+    def test_leak_patterns_bigram_common_cta_words_and_standalone_acronyms(self):
+        pats = sc._leak_patterns("LIKE if YTA COMMENT your NTA")
+        self.assertTrue(any(p.search("please LIKE if you agree") for p in pats))
+        self.assertTrue(any(p.search("This says YTA early") for p in pats))
+        self.assertFalse(any(p.pattern == r"\bLIKE\b" and p.search("I like this") for p in pats))
+
+    def test_check_beats_flags_cta_leak_before_final_beat(self):
+        beats = [
+            type("B", (), {"text": "I refused with ten dollars. LIKE if YTA", "duration": 1.0})(),
+            type("B", (), {"text": "What would you have done?", "duration": 1.0})(),
+        ]
+        issues = sc.check_beats(beats, channel_cfg={"closer_format": "LIKE if YTA COMMENT if NTA"})
+        leak = next(i for i in issues if i.code == "cta_leak")
+        self.assertEqual(leak.severity, "error")
+
+
+class CheckScriptTextAdditionalBranchesTest(unittest.TestCase):
+    def test_long_narration_warning(self):
+        text = "I refused " + "word " * 170 + "What would you have done?"
+        issues = sc.check_script_text(text)
+        self.assertIn("long_narration", _codes(issues))
+
+    def test_strict_false_keeps_soft_issues_as_warnings(self):
+        text = "Today this bland opening has three cookies. It simply ends."
+        issues = sc.check_script_text(text, channel_cfg={"closer_format": "LIKE if YTA", "script_check_strict": False})
+        self.assertTrue(all(i.severity == "warning" for i in issues if i.code in {"missing_cta", "weak_hook"}))
+
+    def test_cliffhanger_cta_examples_and_acceptance(self):
+        bad = sc.check_script_text("I found three boxes. The door opened.", channel_cfg={"cliffhanger": True})
+        self.assertIn("missing_cta", _codes(bad))
+        good = sc.check_script_text("I found three boxes. Part 2 drops next. Subscribe so you do not miss it.", channel_cfg={"cliffhanger": True})
+        self.assertNotIn("missing_cta", _codes(good))
+
+
+class HookAnaphoraTest(unittest.TestCase):
+    def test_too_short_and_no_anaphora_fail(self):
+        if not hasattr(sc, "check_hook_anaphora"):
+            self.skipTest("hook anaphora gate not present in this source version")
+        self.assertEqual(sc.check_hook_anaphora("One. Two." )[0].code, "hook_too_short")
+        issues = sc.check_hook_anaphora({"clauses": ["Imagine the goal.", "Forty years waiting.", "One night changed it."]})
+        self.assertEqual(issues[0].code, "hook_no_anaphora")
+
+    def test_parallel_clauses_pass_from_text_field(self):
+        if not hasattr(sc, "check_hook_anaphora"):
+            self.skipTest("hook anaphora gate not present in this source version")
+        issues = sc.check_hook_anaphora({"text": "Forty years waiting. Forty years hoping. Forty years hurting."})
+        self.assertEqual(issues, [])
+
+
+class SubscribeCtaAndFootagePlanTest(unittest.TestCase):
+    def test_single_subscribe_cta_all_failures_and_success(self):
+        if not hasattr(sc, "check_single_subscribe_cta"):
+            self.skipTest("single subscribe CTA gate not present in this source version")
+        self.assertEqual(sc.check_single_subscribe_cta({}, channel_display_name="Sports")[0].code, "cta_missing")
+        bad = sc.check_single_subscribe_cta({"cta_text": "Smash this button now without naming anything at all and keep talking for far too many extra words please"}, channel_display_name="Sports", max_words=5)
+        self.assertIn("cta_too_long", _codes(bad))
+        self.assertIn("cta_no_subscribe", _codes(bad))
+        self.assertIn("cta_no_bell", _codes(bad))
+        self.assertIn("cta_no_channel_name", _codes(bad))
+        self.assertIn("cta_smash_banned", _codes(bad))
+        good = sc.check_single_subscribe_cta({"cta_text": "Subscribe to Sports and hit the bell."}, channel_display_name="Sports")
+        self.assertEqual(good, [])
+
+    def test_no_talking_heads_gate(self):
+        if not hasattr(sc, "check_no_talking_heads"):
+            self.skipTest("talking-head gate not present in this source version")
+        self.assertEqual(sc.check_no_talking_heads({}), [])
+        issues = sc.check_no_talking_heads({"commentary_takes": [1], "talking_heads": [1, 2]})
+        self.assertEqual([i.code for i in issues], ["talking_heads_forbidden", "talking_heads_forbidden"])
+
+
+class ReportTest(unittest.TestCase):
+    def test_report_prints_success_warnings_errors_and_raises(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            sc.report([])
+        self.assertIn("no issues", buf.getvalue())
+        issues = [sc.ScriptIssue("warning", "warn", "careful"), sc.ScriptIssue("error", "err", "bad")]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            sc.report(issues, fail_on_error=False)
+        out = buf.getvalue()
+        self.assertIn("⚠ [warn]", out)
+        self.assertIn("✗ [err]", out)
+        with self.assertRaises(ValueError):
+            sc.report(issues, fail_on_error=True)
+
+
 if __name__ == "__main__":
     unittest.main()

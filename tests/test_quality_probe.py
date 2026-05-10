@@ -120,7 +120,7 @@ class TestPreflight(unittest.TestCase):
         """When MLX / images not available, reset_mlx_state never raises."""
         from pipeline import preflight
         # Both MLX and images absent — should be a no-op
-        with patch.dict("sys.modules", {"mlx.core": None, "pipeline.images": None}):
+        with patch.dict("sys.modules", {"mlx.core": None, "pipeline.images.images": None}):
             preflight.reset_mlx_state(drop_f5=True, drop_image=True, label="test")
 
     def test_reset_mlx_with_drop_image_and_images_module(self):
@@ -129,7 +129,7 @@ class TestPreflight(unittest.TestCase):
         mock_images = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
         mock_images.reset_image_state = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
 
-        with patch.dict("sys.modules", {"pipeline.images": mock_images}):
+        with patch.dict("sys.modules", {"pipeline.images.images": mock_images}):
             import importlib
             try:
                 preflight.reset_mlx_state(drop_image=True, label="test")
@@ -142,19 +142,19 @@ class TestPreflight(unittest.TestCase):
         import sys as _sys
         # Build a fake images module that raises
         import types
-        fake_images = types.ModuleType("pipeline.images")
+        fake_images = types.ModuleType("pipeline.images.images")
         fake_images.reset_image_state = lambda: (_ for _ in ()).throw(RuntimeError("boom"))  # type: ignore[assignment]
 
-        original = _sys.modules.get("pipeline.images")
-        _sys.modules["pipeline.images"] = fake_images  # type: ignore[assignment]
+        original = _sys.modules.get("pipeline.images.images")
+        _sys.modules["pipeline.images.images"] = fake_images  # type: ignore[assignment]
         try:
             # Should not raise
             preflight.reset_mlx_state(drop_image=True)
         finally:
             if original is None:
-                _sys.modules.pop("pipeline.images", None)
+                _sys.modules.pop("pipeline.images.images", None)
             else:
-                _sys.modules["pipeline.images"] = original
+                _sys.modules["pipeline.images.images"] = original
 
     def test_reset_mlx_with_mlx_clear_cache(self):
         """When mlx.core has clear_cache, it's called."""
@@ -311,20 +311,20 @@ class TestResetMlxStateDrop(unittest.TestCase):
         """drop_image=True calls images.reset_image_state() when present."""
         from pipeline import preflight
         import types, sys as _sys, pipeline as _pkg
-        fake_images = types.ModuleType("pipeline.images")
+        fake_images = types.ModuleType("pipeline.images.images")
         called = []
         fake_images.reset_image_state = lambda: called.append(1)  # type: ignore[assignment]
-        orig_mod = _sys.modules.get("pipeline.images")
+        orig_mod = _sys.modules.get("pipeline.images.images")
         orig_attr = getattr(_pkg, "images", None)
-        _sys.modules["pipeline.images"] = fake_images  # type: ignore[assignment]
+        _sys.modules["pipeline.images.images"] = fake_images  # type: ignore[assignment]
         setattr(_pkg, "images", fake_images)
         try:
             preflight.reset_mlx_state(drop_image=True)
         finally:
             if orig_mod is None:
-                _sys.modules.pop("pipeline.images", None)
+                _sys.modules.pop("pipeline.images.images", None)
             else:
-                _sys.modules["pipeline.images"] = orig_mod
+                _sys.modules["pipeline.images.images"] = orig_mod
             if orig_attr is None:
                 try:
                     delattr(_pkg, "images")

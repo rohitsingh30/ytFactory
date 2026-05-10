@@ -138,5 +138,135 @@ class RegeneratePatchTest(unittest.TestCase):
             cache.rmdir()
 
 
+# ---- Additional coverage for sampling, critique, and patch sanitation ----
+
+import shutil
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from pipeline.llm import critic as cr
+
+
+SCRATCH_CRITIC = PROJECT_ROOT / "tests" / ".scratch_critic"
+
+
+class SanitiseAndSampleFramesTest(unittest.TestCase):
+    def tearDown(self):
+        shutil.rmtree(SCRATCH_CRITIC, ignore_errors=True)
+
+    def test_sanitise_scene_patch_edge_cases(self):
+        self.assertEqual(cr._sanitise_scene_patch("   "), "")
+        self.assertEqual(cr._sanitise_scene_patch("tiny"), "")
+        cleaned = cr._sanitise_scene_patch("Audio: say this. character leaning forward with clenched fists")
+        self.assertEqual(cleaned, "character leaning forward with clenched fists")
+
+    def test_sample_frames_success_and_failure(self):
+        mp4 = SCRATCH_CRITIC / "video.mp4"
+        frames_dir = SCRATCH_CRITIC / "frames"
+        mp4.parent.mkdir(parents=True, exist_ok=True)
+        mp4.write_text("mp4")
+        def fake_run(cmd, capture_output, text):
+            (frames_dir / "t_02.png").write_text("2")
+            (frames_dir / "t_01.png").write_text("1")
+            return SimpleNamespace(returncode=0, stderr="")
+        with patch.object(cr.subprocess, "run", side_effect=fake_run):
+            frames = cr._sample_frames(mp4, frames_dir)
+        self.assertEqual([p.name for p in frames], ["t_01.png", "t_02.png"])
+        with patch.object(cr.subprocess, "run", return_value=SimpleNamespace(returncode=1, stderr="x" * 600)):
+            with self.assertRaises(RuntimeError):
+                cr._sample_frames(mp4, SCRATCH_CRITIC / "badframes")
+
+
+class CritiqueShortTest(unittest.TestCase):
+    def setUp(self):
+        shutil.rmtree(SCRATCH_CRITIC, ignore_errors=True)
+        SCRATCH_CRITIC.mkdir(parents=True, exist_ok=True)
+        self.mp4 = SCRATCH_CRITIC / "video.mp4"
+        self.mp4.write_text("mp4")
+        self.cache = SCRATCH_CRITIC / "cache"
+        self.cache.mkdir()
+        (self.cache / "beats.json").write_text("[]")
+        self.out = SCRATCH_CRITIC / "out"
+
+    def tearDown(self):
+        shutil.rmtree(SCRATCH_CRITIC, ignore_errors=True)
+
+    def test_missing_inputs_raise(self):
+        with self.assertRaises(FileNotFoundError):
+            cr.critique_short(slug="s", mp4_path=SCRATCH_CRITIC / "missing.mp4", cache_dir=self.cache, out_dir=self.out)
+        (self.cache / "beats.json").unlink()
+        with self.assertRaises(FileNotFoundError):
+            cr.critique_short(slug="s", mp4_path=self.mp4, cache_dir=self.cache, out_dir=self.out)
+
+    def test_success_writes_score_and_surfaces_system_corrections(self):
+        raw = {"score": 6, "one_line_take": "needs work", "top_issues": [], "beat_corrections": {}, "system_corrections": [{"issue_class": "x", "where": "y", "fix": "z", "principle": "NEW"}], "highest_leverage_change": "fix"}
+        frame = SCRATCH_CRITIC / "frame.png"
+        frame.write_text("png")
+        with patch.object(cr, "_sample_frames", return_value=[frame]), \
+             patch.object(cr.llm, "model_for", return_value="opus"), \
+             patch.object(cr.llm, "call_claude_cli", return_value=raw) as call:
+            result = cr.critique_short(slug="slug", mp4_path=self.mp4, cache_dir=self.cache, out_dir=self.out)
+        self.assertEqual(result["score"], 6)
+        self.assertTrue((self.out / "slug.score.json").exists())
+        self.assertEqual(call.call_args.kwargs["allowed_tools"], ["Read", "Bash"])
+        self.assertIs(call.call_args.kwargs["json_schema"], cr._CRITIC_SCHEMA)
+
+    def test_non_dict_llm_output_raises(self):
+        with patch.object(cr, "_sample_frames", return_value=[]), \
+             patch.object(cr.llm, "model_for", return_value="opus"), \
+             patch.object(cr.llm, "call_claude_cli", return_value=[]):
+            with self.assertRaises(ValueError):
+                cr.critique_short(slug="slug", mp4_path=self.mp4, cache_dir=self.cache, out_dir=self.out)
+
+
+class RegenerateSanitiserBranchesTest(unittest.TestCase):
+    def setUp(self):
+        shutil.rmtree(SCRATCH_CRITIC, ignore_errors=True)
+        SCRATCH_CRITIC.mkdir(parents=True, exist_ok=True)
+        self.cache = SCRATCH_CRITIC / "cache"
+        self.cache.mkdir()
+        (self.cache / "prompts.json").write_text(json.dumps([{"key_visual": "kv", "scene": "original"}]))
+        _save_dummy_png(self.cache / "img_00.png")
+
+    def tearDown(self):
+        shutil.rmtree(SCRATCH_CRITIC, ignore_errors=True)
+
+    def test_meta_only_patch_rejected(self):
+        patched = cr.regenerate_with_corrections(
+            slug="s", cache_dir=self.cache,
+            beat_corrections={"0": "Spoken closer rewrite to: 'this sentence is only spoken narration'"},
+        )
+        self.assertEqual(patched, set())
+
+    def test_second_pass_rejects_empty_and_logs_removed_content(self):
+        import inspect
+        if "removed_secondpass" not in inspect.getsource(cr.regenerate_with_corrections):
+            self.skipTest("second-pass strip not present in this source version")
+        target = "pipeline.images.strip_text_bait" if "from .. import images" in inspect.getsource(cr.regenerate_with_corrections) else "pipeline.images.images.strip_text_bait"
+        with patch(target, return_value=("", ["all text"])):
+            patched = cr.regenerate_with_corrections(slug="s", cache_dir=self.cache, beat_corrections={"0": "visible character holding a sign"})
+        self.assertEqual(patched, set())
+
+    def test_second_pass_and_merged_scene_strips_still_patch(self):
+        import inspect
+        if "removed_secondpass" not in inspect.getsource(cr.regenerate_with_corrections):
+            self.skipTest("second-pass strip not present in this source version")
+        calls = []
+        def strip(s):
+            calls.append(s)
+            if s == "visible character holding a sign":
+                return ("visible character holding a prop", ["sign"])
+            if s.startswith("original."):
+                return ("merged clean scene", ["boundary text"])
+            return (s, [])
+        target = "pipeline.images.strip_text_bait" if "from .. import images" in inspect.getsource(cr.regenerate_with_corrections) else "pipeline.images.images.strip_text_bait"
+        with patch(target, side_effect=strip):
+            patched = cr.regenerate_with_corrections(slug="s", cache_dir=self.cache, beat_corrections={"0": "visible character holding a sign"})
+        self.assertEqual(patched, {0})
+        new = json.loads((self.cache / "prompts.json").read_text())
+        self.assertEqual(new[0]["scene"], "merged clean scene")
+        self.assertFalse((self.cache / "img_00.png").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

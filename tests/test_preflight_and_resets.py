@@ -24,7 +24,7 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-from pipeline import preflight
+from pipeline.quality import preflight
 
 
 class PowerCheckTests(unittest.TestCase):
@@ -95,7 +95,7 @@ class PowerCheckTests(unittest.TestCase):
 
 class ResetMlxStateTests(unittest.TestCase):
     """``reset_mlx_state`` is a hygiene call. It must never raise even if
-    pipeline.audio / pipeline.images / mlx aren't importable. And when
+    pipeline.audio.audio / pipeline.images / mlx aren't importable. And when
     they ARE importable, it must actually drop the F5 singleton.
 
     All tests stub out mlx.core so the real Metal device is never
@@ -114,32 +114,25 @@ class ResetMlxStateTests(unittest.TestCase):
     def tearDown(self):
         self._mx_patcher.stop()
 
-    def test_no_raise_when_audio_reset_fails(self):
-        # Simulate audio.reset_f5_state raising — function should swallow.
-        from pipeline import audio as _aud
-        with patch.object(_aud, "reset_f5_state", side_effect=RuntimeError("boom")):
+    def test_no_raise_when_image_reset_fails(self):
+        # Simulate images.reset_image_state raising — function should swallow.
+        from pipeline.images import images as _img
+        with patch.object(_img, "reset_image_state", side_effect=RuntimeError("boom"), create=True):
             try:
-                preflight.reset_mlx_state(drop_f5=True)
+                preflight.reset_mlx_state(drop_image=True)
             except Exception as e:  # noqa: BLE001
                 self.fail(f"reset_mlx_state should not raise: {e}")
 
-    def test_calls_reset_f5_state_when_drop_f5_true(self):
-        # Patch the real pipeline.audio.reset_f5_state — patching sys.modules
-        # doesn't work once pipeline.audio is already imported (the package's
-        # attribute binding wins over sys.modules lookup in `from pkg import x`).
-        from pipeline import audio as _aud
-        with patch.object(_aud, "reset_f5_state") as mock_reset:
-            preflight.reset_mlx_state(drop_f5=True, label="test")
-        mock_reset.assert_called_once()
-
-    def test_does_not_call_reset_f5_when_drop_f5_false(self):
-        from pipeline import audio as _aud
-        with patch.object(_aud, "reset_f5_state") as mock_reset:
-            preflight.reset_mlx_state(drop_f5=False)
-        mock_reset.assert_not_called()
+    def test_drop_f5_is_now_a_noop(self):
+        # 2026-05-09 (laptop nuclear cleanup): the F5-MLX singleton was
+        # removed when local TTS providers were ripped out. drop_f5 stays
+        # in the signature for back-compat but does nothing.
+        preflight.reset_mlx_state(drop_f5=True, label="noop-test")
+        # No assertion — function should just complete without raising
+        # and without calling any non-existent reset_f5_state.
 
     def test_calls_image_reset_when_available(self):
-        from pipeline import images as _img
+        from pipeline.images import images as _img
         # If reset_image_state isn't defined yet (Tier-3 hasn't shipped),
         # add a stub via patch.object — but use create=True to allow it.
         with patch.object(_img, "reset_image_state", MagicMock(), create=True) as mock_reset:
@@ -148,7 +141,7 @@ class ResetMlxStateTests(unittest.TestCase):
 
     def test_skips_image_reset_when_function_missing(self):
         # Temporarily remove the attribute if present, ensure no crash.
-        from pipeline import images as _img
+        from pipeline.images import images as _img
         had_attr = hasattr(_img, "reset_image_state")
         original = getattr(_img, "reset_image_state", None)
         if had_attr:

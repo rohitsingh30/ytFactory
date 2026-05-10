@@ -31,7 +31,7 @@ import yaml
 
 from tests._helpers import PROJECT_ROOT  # noqa: F401
 
-from pipeline import audio
+from pipeline.audio import audio
 
 
 # ---------- helpers --------------------------------------------------------
@@ -159,9 +159,8 @@ class SynthesizeDispatcherTest(unittest.TestCase):
 _PRODUCTION_CHANNELS = [
     "historyrecapped",
     "mystoriesanimated",
-    "sportstoriesanimated",
+    "sportsrecapped",
     "hindutavaanimated",
-    "airecap",
 ]
 
 _VALID_PROVIDERS = {
@@ -178,8 +177,13 @@ class ChannelTtsConfigTest(unittest.TestCase):
     """Every production channel YAML must declare a coherent TTS config."""
 
     def _load(self, channel: str) -> dict:
-        path = PROJECT_ROOT / channel / "config.yaml"
-        self.assertTrue(path.exists(), f"missing config.yaml for {channel}")
+        # Per 2026-05-10 nuclear cleanup, channel render configs live
+        # at pipeline/channels/<slug>.yaml (no channel-named dirs at
+        # repo root). Source the path from pipeline.channels — never
+        # hardcode it here.
+        from pipeline.channels import _channel_yaml_path  # noqa: PLC0415
+        path = PROJECT_ROOT / _channel_yaml_path(channel)
+        self.assertTrue(path.exists(), f"missing config yaml for {channel} at {path}")
         return yaml.safe_load(path.read_text())
 
     def test_every_channel_has_known_provider(self):

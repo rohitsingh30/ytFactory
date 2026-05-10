@@ -56,7 +56,7 @@ class ResearchRoutesTest(unittest.TestCase):
         self.assertEqual({row["kind"] for row in rows}, {"channel"})
         self.assertEqual(
             {row["channel"] for row in rows},
-            {"sportstoriesanimated", "historyrecapped"},
+            {"sportsrecapped", "historyrecapped"},
         )
 
     def test_learnings_route_returns_memory_and_critique(self):

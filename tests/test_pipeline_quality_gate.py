@@ -128,5 +128,107 @@ class CheckImageFailureTest(unittest.TestCase):
             p.unlink(missing_ok=True)
 
 
+# ---- Additional coverage for luminance/OCR/anatomy branches ----
+
+import shutil
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from pipeline.llm import quality_gate as qg
+
+
+SCRATCH_QG = PROJECT_ROOT / "tests" / ".scratch_quality_gate"
+
+
+def _save_qg(img: Image.Image, name="img.png") -> Path:
+    SCRATCH_QG.mkdir(parents=True, exist_ok=True)
+    p = SCRATCH_QG / name
+    img.save(p)
+    return p
+
+
+class OptionalOCRImportTest(unittest.TestCase):
+    def test_reload_with_fake_pytesseract_covers_import_success(self):
+        import importlib
+        import sys
+        fake = SimpleNamespace(image_to_string=lambda *a, **k: "")
+        try:
+            with patch.dict(sys.modules, {"pytesseract": fake}):
+                importlib.reload(qg)
+                self.assertEqual(qg._OCR_BACKEND, "tesseract")
+        finally:
+            importlib.reload(qg)
+
+
+class CheckImageAdditionalFailureTest(unittest.TestCase):
+    def tearDown(self):
+        shutil.rmtree(SCRATCH_QG, ignore_errors=True)
+
+    def test_height_mismatch_rejected_after_width_matches(self):
+        path = _save_qg(_rich_image(w=320, h=240), "height.png")
+        ok, reason = qg.check_image(path, expected_w=320, expected_h=999)
+        self.assertFalse(ok)
+        self.assertIn("height", reason)
+
+    def test_rgba_image_converts_and_passes(self):
+        path = _save_qg(_rich_image().convert("RGBA"), "rgba.png")
+        ok, reason = qg.check_image(path)
+        self.assertTrue(ok, reason)
+
+    def test_mean_luminance_p75_and_edge_density_failures(self):
+        mean_img = Image.new("RGB", (256, 256), (50, 50, 50))
+        draw = ImageDraw.Draw(mean_img)
+        draw.rectangle([0, 0, 127, 255], fill=(100, 100, 100))
+        ok, reason = qg.check_image(_save_qg(mean_img, "mean.png"), min_file_size=0)
+        self.assertFalse(ok)
+        self.assertIn("mean luminance", reason)
+
+        p75_img = Image.new("RGB", (100, 100), (100, 100, 100))
+        draw = ImageDraw.Draw(p75_img)
+        draw.rectangle([76, 0, 99, 99], fill=(255, 255, 255))
+        ok, reason = qg.check_image(_save_qg(p75_img, "p75.png"), min_file_size=0)
+        self.assertFalse(ok)
+        self.assertIn("P75 luminance", reason)
+
+    def test_edge_density_can_be_forced_to_fail_after_other_gates_pass(self):
+        path = _save_qg(_rich_image(), "forced_edge.png")
+        ok, reason = qg.check_image(path, min_edge_density=1.0)
+        self.assertFalse(ok)
+        self.assertIn("edge density", reason)
+
+    def test_text_artefact_detection_and_ocr_exception(self):
+        with patch.object(qg, "_OCR_BACKEND", "tesseract"), \
+             patch.object(qg, "pytesseract", SimpleNamespace(image_to_string=lambda *a, **k: "HELLO WORLD")):
+            found, snippet = qg._has_text_artefact(_rich_image(), max_chars=4)
+        self.assertTrue(found)
+        self.assertEqual(snippet, "HELLO WORLD")
+        with patch.object(qg, "_OCR_BACKEND", "tesseract"), \
+             patch.object(qg, "pytesseract", SimpleNamespace(image_to_string=lambda *a, **k: "abc")):
+            self.assertEqual(qg._has_text_artefact(_rich_image(), max_chars=4), (False, ""))
+        with patch.object(qg, "_OCR_BACKEND", "tesseract"), \
+             patch.object(qg, "pytesseract", SimpleNamespace(image_to_string=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ocr")))):
+            self.assertEqual(qg._has_text_artefact(_rich_image()), (False, ""))
+        with patch.object(qg, "_OCR_BACKEND", None), patch.object(qg, "pytesseract", None):
+            self.assertEqual(qg._has_text_artefact(_rich_image()), (False, ""))
+
+    def test_reject_text_artefacts_and_anatomy_gate(self):
+        path = _save_qg(_rich_image(), "rich.png")
+        with patch.object(qg, "_has_text_artefact", return_value=(True, "TEXT")):
+            ok, reason = qg.check_image(path, reject_text_artefacts=True)
+        self.assertFalse(ok)
+        self.assertIn("text artefact", reason)
+        import inspect
+        if "anatomy_check" not in inspect.signature(qg.check_image).parameters:
+            self.skipTest("anatomy gate not present in this source version")
+        with patch("pipeline.llm.anatomy_check.check_anatomy", return_value=(False, "anatomy: bad hands")) as anatomy:
+            ok, reason = qg.check_image(path, anatomy_check=True)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "anatomy: bad hands")
+        anatomy.assert_called_once_with(path)
+        with patch("pipeline.llm.anatomy_check.check_anatomy", return_value=(True, "")):
+            ok, reason = qg.check_image(path, anatomy_check=True)
+        self.assertTrue(ok, reason)
+
+
 if __name__ == "__main__":
     unittest.main()

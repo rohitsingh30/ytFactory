@@ -10,10 +10,10 @@ os.environ["YTFACTORY_QUEUE_BACKEND"] = "memory"
 
 import httpx  # noqa: E402
 
-from control import jobs as jobs_mod, rate_limit  # noqa: E402
-from control.queue import get_queue, reset_queue  # noqa: E402
-from control.render_routes import router as render_router  # noqa: E402
-from control.schema import TaskEnvelope, TaskKind, TaskStatus  # noqa: E402
+from control.core import jobs as jobs_mod, rate_limit  # noqa: E402
+from control.core.queue import get_queue, reset_queue  # noqa: E402
+from control.routes.render_routes import router as render_router  # noqa: E402
+from control.core.schema import TaskEnvelope, TaskKind, TaskStatus  # noqa: E402
 
 
 def _make_app():
@@ -83,7 +83,7 @@ class CancelJobTest(unittest.IsolatedAsyncioTestCase):
 class HealthEndpointTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         rate_limit.reset_backend()
-        from control.agent_routes import _LAST_SEEN
+        from control.routes.agent_routes import _LAST_SEEN
         _LAST_SEEN.clear()
 
     async def test_health_reports_no_agents_initially(self) -> None:
@@ -100,8 +100,8 @@ class HealthEndpointTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_health_surfaces_agent_after_heartbeat(self) -> None:
         # Inject an agent presence directly (bypass the heartbeat route).
-        from control.agent_routes import _LAST_SEEN
-        from control.schema import AgentResources
+        from control.routes.agent_routes import _LAST_SEEN
+        from control.core.schema import AgentResources
         import time
 
         _LAST_SEEN["mac-1"] = (time.time(), AgentResources(

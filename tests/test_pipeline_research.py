@@ -41,7 +41,7 @@ def _write_text(path: Path, txt: str) -> None:
 def _build_fixture_tree(root: Path) -> None:
     """Mimics the live ytFactory layout circa 2026-05.
 
-    Two channel dirs (sportstoriesanimated = production,
+    Two channel dirs (sportsrecapped = production,
     historyrecapped = secondary, archived); a YouTube cache for each
     written under ``data/research/youtube/`` describing the videos
     currently live on the channels (more than what we have local
@@ -49,16 +49,16 @@ def _build_fixture_tree(root: Path) -> None:
     records, narrations, mp4s, critique scores, and a couple of
     memory feedback files.
     """
-    # ---- channel: sportstoriesanimated ---------------------------------
-    chan = root / "sportstoriesanimated"
+    # ---- channel: sportsrecapped ---------------------------------
+    chan = root / "sportsrecapped"
     (chan / "shorts").mkdir(parents=True)
     (chan / "uploads").mkdir(parents=True)
     (chan / "narrations").mkdir(parents=True)
     (chan / "config.yaml").write_text(
-        "name: SportsStoriesAnimated\n"
+        "name: SportsRecapped\n"
         "source_adapter: sports_moments_manual\n"
         "upload:\n"
-        "  account: sportstoriesanimated\n"
+        "  account: sportsrecapped\n"
     )
     # Fully-joined: mp4 + narration + upload + critique + analytics.
     slug_full = "aguero-9320"
@@ -85,7 +85,7 @@ def _build_fixture_tree(root: Path) -> None:
             "uploaded_at": "2026-05-02T18:00:00+00:00",
             "title": "Aguero 93:20",
             "privacy": "public",
-            "account": "sportstoriesanimated",
+            "account": "sportsrecapped",
             "thumbnail_set": False,
         },
     )
@@ -142,7 +142,7 @@ def _build_fixture_tree(root: Path) -> None:
             "uploaded_at": "2026-05-03T18:00:00+00:00",
             "title": "Iniesta 2010 WC",
             "privacy": "public",
-            "account": "sportstoriesanimated",
+            "account": "sportsrecapped",
         },
     )
 
@@ -183,16 +183,16 @@ def _build_fixture_tree(root: Path) -> None:
     )
 
     # ---- YouTube caches ------------------------------------------------
-    # sportstoriesanimated: 3 videos live on YouTube (one of which has
+    # sportsrecapped: 3 videos live on YouTube (one of which has
     # NO local upload record — to exercise the unjoined path).
     _write_json(
-        root / "data" / "research" / "youtube" / "sportstoriesanimated.json",
+        root / "data" / "research" / "youtube" / "sportsrecapped.json",
         {
-            "account": "sportstoriesanimated",
+            "account": "sportsrecapped",
             "fetched_at": "2026-05-04T12:00:00+00:00",
             "channel": {
                 "id": "UC_sports",
-                "title": "SportsStoriesAnimated",
+                "title": "SportsRecapped",
                 "subscriber_count": 100,
                 "view_count": 12345,
                 "video_count": 3,
@@ -205,7 +205,7 @@ def _build_fixture_tree(root: Path) -> None:
                     "title": "Aguero 93:20",
                     "published_at": "2026-05-02T18:16:41Z",
                     "channel_id": "UC_sports",
-                    "channel_title": "SportsStoriesAnimated",
+                    "channel_title": "SportsRecapped",
                     "thumbnail_url": "https://img/abc.jpg",
                     "duration_s": 58,
                     "privacy": "public",
@@ -301,7 +301,7 @@ def _build_fixture_tree(root: Path) -> None:
         mem / "project_two_channels.md",
         "---\n"
         "name: Two production channels\n"
-        "description: ships to MyStoriesAnimated + SportsStoriesAnimated\n"
+        "description: ships to MyStoriesAnimated + SportsRecapped\n"
         "type: project\n"
         "---\n"
         "Body.\n",
@@ -366,8 +366,8 @@ class BuildVideosTest(unittest.TestCase):
         rows = research.build_videos()
         full = next(r for r in rows if r["video_id"] == "ABC123")
         self.assertEqual(full["slug"], "aguero-9320")
-        self.assertEqual(full["channel"], "sportstoriesanimated")
-        self.assertEqual(full["account"], "sportstoriesanimated")
+        self.assertEqual(full["channel"], "sportsrecapped")
+        self.assertEqual(full["account"], "sportsrecapped")
         # YouTube fields come straight from the cache.
         self.assertEqual(full["title"], "Aguero 93:20")
         self.assertEqual(full["stats"]["view_count"], 1234)
@@ -422,13 +422,13 @@ class BuildChannelsTest(unittest.TestCase):
     def test_one_row_per_config_yaml(self):
         rows = research.build_channels(self.videos)
         names = {r["channel"] for r in rows}
-        self.assertEqual(names, {"sportstoriesanimated", "historyrecapped"})
+        self.assertEqual(names, {"sportsrecapped", "historyrecapped"})
         # All rows have the new uniform kind.
         self.assertEqual({r["kind"] for r in rows}, {"channel"})
 
     def test_youtube_meta_propagated(self):
         rows = research.build_channels(self.videos)
-        sports = next(r for r in rows if r["channel"] == "sportstoriesanimated")
+        sports = next(r for r in rows if r["channel"] == "sportsrecapped")
         self.assertEqual(sports["youtube_channel_id"], "UC_sports")
         self.assertEqual(sports["subscriber_count"], 100)
         self.assertEqual(sports["youtube_video_count"], 3)
@@ -437,11 +437,11 @@ class BuildChannelsTest(unittest.TestCase):
     def test_production_flag_only_for_canonical_recipes(self):
         rows = research.build_channels(self.videos)
         prod = [r for r in rows if r["production"]]
-        self.assertEqual({r["channel"] for r in prod}, {"sportstoriesanimated"})
+        self.assertEqual({r["channel"] for r in prod}, {"sportsrecapped"})
 
     def test_rollup_only_counts_locally_joined_videos(self):
         rows = research.build_channels(self.videos)
-        sports = next(r for r in rows if r["channel"] == "sportstoriesanimated")
+        sports = next(r for r in rows if r["channel"] == "sportsrecapped")
         # 2 of the 3 YouTube videos joined to local upload records;
         # the orphan one didn't.
         self.assertEqual(sports["video_count_local"], 2)
@@ -486,7 +486,7 @@ class BuildLearningsTest(unittest.TestCase):
         classes = {r["title"] for r in crit}
         self.assertEqual(classes, {"kit-text-gibberish", "opposition-cast-missing"})
         for r in crit:
-            self.assertEqual(r["channel"], "sportstoriesanimated")
+            self.assertEqual(r["channel"], "sportsrecapped")
             self.assertEqual(r["related_slugs"], ["aguero-9320"])
 
     def test_memory_rows_sort_before_critique(self):

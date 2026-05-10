@@ -2,12 +2,15 @@
 
 * ``pipeline/probe.py`` — memoized ffprobe duration helper that
   replaces 5+ ad-hoc subprocess call sites
-* ``pipeline.images.reset_image_state()`` — drops _PIPE / _FLUX_PIPE
-  / _ZIMAGE_PIPE singletons, mirrors ``audio.reset_f5_state()``
-* ``pipeline.tts.f5._F5_REF_CACHE`` — bounded LRU (was unbounded
-  dict; now OrderedDict capped at ``_F5_REF_CACHE_MAX = 4``)
+* ``pipeline.images.images.reset_image_state()`` — drops _PIPE / _FLUX_PIPE
+  / _ZIMAGE_PIPE singletons (former mirror of the now-removed
+  ``audio.reset_f5_state()``)
 * libx264 ``-threads 3`` on parallel-fanned encodes — keeps the
   4-worker fanout from oversubscribing on M2 Max (12 perf cores)
+
+Note: the F5RefCacheLruTests class tested the local ``pipeline.tts.f5``
+LRU cache. Local TTS providers were removed 2026-05-09 (laptop nuclear
+cleanup) so that class is gone too.
 """
 from __future__ import annotations
 
@@ -18,14 +21,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
-from pipeline import images
-from pipeline.probe import (
+from pipeline.images import images
+from pipeline.quality.probe import (
     clear_probe_cache,
     probe_duration,
     probe_duration_or_none,
     _probe_cached,
 )
-from pipeline.tts import f5
 
 
 def _write_silence_wav(path: Path, duration_s: float, sample_rate: int = 24_000) -> None:
@@ -70,7 +72,7 @@ class ProbeDurationTests(unittest.TestCase):
         with TemporaryDirectory() as td:
             p = Path(td) / "a.wav"
             _write_silence_wav(p, 1.0)
-            with patch("pipeline.probe.subprocess.check_output",
+            with patch("pipeline.quality.probe.subprocess.check_output",
                        return_value="1.000000\n") as mock_run:
                 probe_duration(p)
                 probe_duration(p)
@@ -85,7 +87,7 @@ class ProbeDurationTests(unittest.TestCase):
         with TemporaryDirectory() as td:
             p = Path(td) / "a.wav"
             _write_silence_wav(p, 1.0)
-            with patch("pipeline.probe.subprocess.check_output",
+            with patch("pipeline.quality.probe.subprocess.check_output",
                        return_value="1.000000\n") as mock_run:
                 probe_duration(p)
                 # Touch the file (rewrite with same content but new mtime).
@@ -100,7 +102,7 @@ class ProbeDurationTests(unittest.TestCase):
         with TemporaryDirectory() as td:
             p = Path(td) / "a.wav"
             _write_silence_wav(p, 1.0)
-            with patch("pipeline.probe.subprocess.check_output",
+            with patch("pipeline.quality.probe.subprocess.check_output",
                        return_value="1.000000\n") as mock_run:
                 probe_duration(p)
                 clear_probe_cache()
@@ -115,7 +117,7 @@ class ResetImageStateTests(unittest.TestCase):
 
     def setUp(self):
         # Defensive getattr: when the full test suite runs earlier tests
-        # that touch pipeline.images (e.g. via shorts.py imports), the
+        # that touch pipeline.images.images (e.g. via shorts.py imports), the
         # module attributes may be present-but-mock or briefly missing
         # due to test-ordering quirks around MLX. We snapshot whatever's
         # there (or a sentinel) and restore it in tearDown.
@@ -158,53 +160,8 @@ class ResetImageStateTests(unittest.TestCase):
         images.reset_image_state()  # no raise
 
 
-class F5RefCacheLruTests(unittest.TestCase):
-    """``_F5_REF_CACHE`` is now an OrderedDict capped at
-    ``_F5_REF_CACHE_MAX`` (default 4). Test eviction on overflow + LRU
-    bookkeeping on hits."""
-
-    def setUp(self):
-        # Stash + clear so each test starts from empty.
-        self._prev = list(f5._F5_REF_CACHE.items())
-        f5._F5_REF_CACHE.clear()
-
-    def tearDown(self):
-        f5._F5_REF_CACHE.clear()
-        for k, v in self._prev:
-            f5._F5_REF_CACHE[k] = v
-
-    def test_cache_evicts_lru_when_over_cap(self):
-        # Manually populate (skip the real _f5_get_ref which loads MLX).
-        for i in range(f5._F5_REF_CACHE_MAX + 2):
-            f5._F5_REF_CACHE[f"voice_{i}.wav"] = (object(), 5.0)
-            while len(f5._F5_REF_CACHE) > f5._F5_REF_CACHE_MAX:
-                f5._F5_REF_CACHE.popitem(last=False)
-        self.assertEqual(len(f5._F5_REF_CACHE), f5._F5_REF_CACHE_MAX)
-        # The first two voices should have been evicted.
-        self.assertNotIn("voice_0.wav", f5._F5_REF_CACHE)
-        self.assertNotIn("voice_1.wav", f5._F5_REF_CACHE)
-        self.assertIn(f"voice_{f5._F5_REF_CACHE_MAX + 1}.wav", f5._F5_REF_CACHE)
-
-    def test_move_to_end_refreshes_recency(self):
-        # Populate to capacity.
-        for i in range(f5._F5_REF_CACHE_MAX):
-            f5._F5_REF_CACHE[f"voice_{i}.wav"] = (object(), 5.0)
-        # Touch voice_0 to refresh its recency.
-        f5._F5_REF_CACHE.move_to_end("voice_0.wav")
-        # Now insert a new voice and evict — voice_1 should be the LRU
-        # (since voice_0 was just refreshed).
-        f5._F5_REF_CACHE["voice_new.wav"] = (object(), 5.0)
-        while len(f5._F5_REF_CACHE) > f5._F5_REF_CACHE_MAX:
-            f5._F5_REF_CACHE.popitem(last=False)
-        self.assertIn("voice_0.wav", f5._F5_REF_CACHE)
-        self.assertNotIn("voice_1.wav", f5._F5_REF_CACHE)
-
-    def test_reset_state_clears_cache(self):
-        f5._F5_REF_CACHE["voice_x.wav"] = (object(), 5.0)
-        # reset_state also drops the model singleton; we only care
-        # about the cache here.
-        f5.reset_state()
-        self.assertEqual(len(f5._F5_REF_CACHE), 0)
+# F5RefCacheLruTests removed 2026-05-09 — pipeline.tts.f5 was deleted in
+# the laptop nuclear cleanup. The bounded LRU lived inside that module.
 
 
 class Libx264ThreadsCapWiringTests(unittest.TestCase):

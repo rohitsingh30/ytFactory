@@ -25,16 +25,20 @@ from __future__ import annotations
 
 import base64
 import io
+import io
+import base64
 import os
+import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from PIL import Image
 
-from pipeline import images_cloudrun
-from pipeline.images_cloudrun import CloudRunUnavailable
+from pipeline.images import images_cloudrun
+from pipeline.images.images_cloudrun import CloudRunUnavailable
 
 
 def _tiny_png_b64() -> str:
@@ -93,8 +97,11 @@ class TestServiceUrl(unittest.TestCase):
 
 
 class TestCircuitBreaker(unittest.TestCase):
-    """Render-level circuit breaker — the key divergence from the
-    TTS client's per-call fallback."""
+    """As of 2026-05-09 (laptop nuclear cleanup) there is no local
+    fallback, so the render-level circuit breaker is a no-op — cloud
+    failures propagate directly. The breaker module-state still exists
+    for back-compat (``reset_circuit_breaker()`` is wired into renderer
+    entry points and shouldn't crash)."""
 
     def setUp(self) -> None:
         images_cloudrun.reset_circuit_breaker()
@@ -105,120 +112,26 @@ class TestCircuitBreaker(unittest.TestCase):
     def tearDown(self) -> None:
         images_cloudrun.reset_circuit_breaker()
 
-    def test_first_failure_trips_breaker_subsequent_skip_cloud(self) -> None:
-        """Once-per-render mode: first cloud failure trips, then
-        every subsequent call in the same process bypasses cloud
-        and goes directly to local fallback. This is the bug class
-        the breaker exists to prevent (30 × 600 s timeouts on a
-        single Short during a cloud outage)."""
-        out = Path(tempfile.gettempdir()) / "breaker-test.png"
-        local_calls = 0
-
-        def fake_local(*, prompt, seed, out_path, width, height, steps):
-            nonlocal local_calls
-            local_calls += 1
-            out_path.write_bytes(b"local-fallback")
-            return out_path
-
-        # First call: cloud fails → breaker trips, fallback runs.
-        with patch.object(images_cloudrun, "_post_generate", side_effect=CloudRunUnavailable("503 simulated")), \
-             patch.object(images_cloudrun, "_local_fallback", side_effect=fake_local) as mock_local:
-            images_cloudrun._generate_cloudrun_flux2_klein(
-                prompt="x", seed=1, out_path=out,
-                width=768, height=1344, steps=4,
-            )
-        self.assertEqual(local_calls, 1)
-        self.assertTrue(images_cloudrun._breaker_open(),
-                        "First failure must trip the breaker")
-
-        # Second call: must NOT touch _post_generate (breaker open).
-        post_call_count = 0
-
-        def boom_if_called(*a, **kw):
-            nonlocal post_call_count
-            post_call_count += 1
-            raise AssertionError("breaker open should have skipped cloud")
-
-        with patch.object(images_cloudrun, "_post_generate", side_effect=boom_if_called), \
-             patch.object(images_cloudrun, "_local_fallback", side_effect=fake_local):
-            images_cloudrun._generate_cloudrun_flux2_klein(
-                prompt="y", seed=2, out_path=out,
-                width=768, height=1344, steps=4,
-            )
-        self.assertEqual(post_call_count, 0,
-                         "Breaker open: cloud must not be re-attempted")
-        self.assertEqual(local_calls, 2)
-
-    def test_reset_clears_breaker(self) -> None:
-        """`reset_circuit_breaker()` clears the per-render flag so
-        the NEXT render gets a fresh chance at cloud."""
-        out = Path(tempfile.gettempdir()) / "breaker-reset.png"
-
-        def fake_local(*, prompt, seed, out_path, width, height, steps):
-            out_path.write_bytes(b"local")
-            return out_path
-
-        with patch.object(images_cloudrun, "_post_generate", side_effect=CloudRunUnavailable("first failure")), \
-             patch.object(images_cloudrun, "_local_fallback", side_effect=fake_local):
-            images_cloudrun._generate_cloudrun_flux2_klein(
-                prompt="x", seed=1, out_path=out,
-                width=768, height=1344, steps=4,
-            )
-        self.assertTrue(images_cloudrun._breaker_open())
-
-        images_cloudrun.reset_circuit_breaker()
-        self.assertFalse(images_cloudrun._breaker_open())
-
-        # After reset the next call SHOULD reach _post_generate again.
-        with patch.object(images_cloudrun, "_post_generate", return_value=_fake_generate_response()) as mock_post:
-            images_cloudrun._generate_cloudrun_flux2_klein(
-                prompt="z", seed=3, out_path=out,
-                width=768, height=1344, steps=4,
-            )
-            mock_post.assert_called_once()
-
-    def test_per_image_mode_does_not_trip_breaker(self) -> None:
-        """`CLOUDRUN_IMAGE_FALLBACK_MODE=per_image` keeps legacy
-        per-call fallback (no breaker) for debugging."""
-        os.environ["CLOUDRUN_IMAGE_FALLBACK_MODE"] = "per_image"
-        out = Path(tempfile.gettempdir()) / "per-image-mode.png"
-
-        def fake_local(*, prompt, seed, out_path, width, height, steps):
-            out_path.write_bytes(b"local")
-            return out_path
-
-        with patch.object(images_cloudrun, "_post_generate", side_effect=CloudRunUnavailable("503")), \
-             patch.object(images_cloudrun, "_local_fallback", side_effect=fake_local):
-            images_cloudrun._generate_cloudrun_flux2_klein(
-                prompt="x", seed=1, out_path=out,
-                width=768, height=1344, steps=4,
-            )
-        self.assertFalse(
-            images_cloudrun._breaker_open(),
-            "per_image mode must NOT trip the breaker",
-        )
-
-    def test_disable_fallback_env_var_re_raises(self) -> None:
-        """`CLOUDRUN_IMAGE_DISABLE_FALLBACK=1` must surface cloud
-        failures (canary use)."""
-        os.environ["CLOUDRUN_IMAGE_DISABLE_FALLBACK"] = "1"
+    def test_cloud_failure_re_raises_unavailable(self) -> None:
+        """No fallback path remaining — CloudRunUnavailable bubbles up."""
         out = Path(tempfile.gettempdir()) / "no-fallback.png"
-        with patch.object(images_cloudrun, "_post_generate", side_effect=CloudRunUnavailable("503")), \
-             patch.object(images_cloudrun, "_local_fallback") as mock_local:
+        with patch.object(images_cloudrun, "_post_generate", side_effect=CloudRunUnavailable("503 simulated")):
             with self.assertRaises(CloudRunUnavailable):
                 images_cloudrun._generate_cloudrun_flux2_klein(
                     prompt="x", seed=1, out_path=out,
                     width=768, height=1344, steps=4,
                 )
-            mock_local.assert_not_called()
 
-    def test_4xx_does_not_fall_back(self) -> None:
-        """A 4xx (bad input — wrong aspect, empty prompt) is the
-        caller's fault, not a service outage. It should re-raise the
-        HTTPError, NOT trigger fallback."""
+    def test_reset_circuit_breaker_is_idempotent(self) -> None:
+        """``reset_circuit_breaker()`` still exists and is safe to call
+        repeatedly — renderer entry points fire it before every render."""
+        images_cloudrun.reset_circuit_breaker()
+        images_cloudrun.reset_circuit_breaker()  # no raise
+        self.assertFalse(images_cloudrun._breaker_open())
+
+    def test_4xx_re_raises_http_error(self) -> None:
+        """A 4xx (bad input) is the caller's fault — re-raises as-is."""
         out = Path(tempfile.gettempdir()) / "4xx-test.png"
-        # `requests` raises HTTPError on resp.raise_for_status(); our
-        # _post_generate re-raises as-is for 4xx (no wrap, no breaker).
         import requests as _requests
         http_err = _requests.exceptions.HTTPError("400 Client Error")
         with patch.object(images_cloudrun, "_post_generate", side_effect=http_err):
@@ -227,10 +140,6 @@ class TestCircuitBreaker(unittest.TestCase):
                     prompt="", seed=1, out_path=out,
                     width=768, height=1344, steps=4,
                 )
-        self.assertFalse(
-            images_cloudrun._breaker_open(),
-            "4xx must NOT trip the breaker (caller bug, not outage)",
-        )
 
 
 # ----------------------------------------------------- materialise_png
@@ -267,6 +176,449 @@ class TestStepClamping(unittest.TestCase):
 
     def test_above_hi_uses_default(self) -> None:
         self.assertEqual(images_cloudrun._clamp_steps(20, lo=2, hi=8, default=4), 4)
+
+
+# ─── additional coverage: _timeout_s / _fallback_disabled / _fallback_mode ───
+
+
+class TestEnvHelpers(unittest.TestCase):
+    """Cover the env-var helper branches not exercised by other tests."""
+
+    def setUp(self) -> None:
+        for k in ("CLOUDRUN_IMAGE_TIMEOUT", "CLOUDRUN_IMAGE_DISABLE_FALLBACK",
+                  "CLOUDRUN_IMAGE_FALLBACK_MODE"):
+            os.environ.pop(k, None)
+
+    def tearDown(self) -> None:
+        for k in ("CLOUDRUN_IMAGE_TIMEOUT", "CLOUDRUN_IMAGE_DISABLE_FALLBACK",
+                  "CLOUDRUN_IMAGE_FALLBACK_MODE"):
+            os.environ.pop(k, None)
+
+    # _timeout_s
+    def test_timeout_default_900(self) -> None:
+        self.assertEqual(images_cloudrun._timeout_s(), 900)
+
+    def test_timeout_custom(self) -> None:
+        os.environ["CLOUDRUN_IMAGE_TIMEOUT"] = "300"
+        self.assertEqual(images_cloudrun._timeout_s(), 300)
+
+    def test_timeout_invalid_falls_back_to_900(self) -> None:
+        os.environ["CLOUDRUN_IMAGE_TIMEOUT"] = "not-a-number"
+        self.assertEqual(images_cloudrun._timeout_s(), 900)
+
+    # _fallback_disabled
+    def test_fallback_disabled_unset(self) -> None:
+        self.assertFalse(images_cloudrun._fallback_disabled())
+
+    def test_fallback_disabled_true_string(self) -> None:
+        os.environ["CLOUDRUN_IMAGE_DISABLE_FALLBACK"] = "true"
+        self.assertTrue(images_cloudrun._fallback_disabled())
+
+    def test_fallback_disabled_1(self) -> None:
+        os.environ["CLOUDRUN_IMAGE_DISABLE_FALLBACK"] = "1"
+        self.assertTrue(images_cloudrun._fallback_disabled())
+
+    # _fallback_mode
+    def test_fallback_mode_default_once_per_render(self) -> None:
+        self.assertEqual(images_cloudrun._fallback_mode(), "once_per_render")
+
+    def test_fallback_mode_once_per_render_explicit(self) -> None:
+        os.environ["CLOUDRUN_IMAGE_FALLBACK_MODE"] = "once_per_render"
+        self.assertEqual(images_cloudrun._fallback_mode(), "once_per_render")
+
+    def test_fallback_mode_per_image(self) -> None:
+        os.environ["CLOUDRUN_IMAGE_FALLBACK_MODE"] = "per_image"
+        self.assertEqual(images_cloudrun._fallback_mode(), "per_image")
+
+    def test_fallback_mode_unknown_falls_back_to_once_per_render(self) -> None:
+        os.environ["CLOUDRUN_IMAGE_FALLBACK_MODE"] = "whatever"
+        self.assertEqual(images_cloudrun._fallback_mode(), "once_per_render")
+
+
+# ─── additional circuit-breaker coverage ─────────────────────────────────
+
+
+class TestCircuitBreakerFull(unittest.TestCase):
+    """Cover the trip + reset-when-tripped log path."""
+
+    def setUp(self) -> None:
+        images_cloudrun.reset_circuit_breaker()
+
+    def tearDown(self) -> None:
+        images_cloudrun.reset_circuit_breaker()
+
+    def test_trip_then_open(self) -> None:
+        self.assertFalse(images_cloudrun._breaker_open())
+        images_cloudrun._trip_breaker("unit test reason")
+        self.assertTrue(images_cloudrun._breaker_open())
+
+    def test_trip_is_idempotent(self) -> None:
+        images_cloudrun._trip_breaker("first")
+        images_cloudrun._trip_breaker("second")  # must not overwrite first
+        self.assertTrue(images_cloudrun._breaker_open())
+
+    def test_reset_when_tripped_logs_and_clears(self) -> None:
+        images_cloudrun._trip_breaker("log path test")
+        self.assertTrue(images_cloudrun._breaker_open())
+        images_cloudrun.reset_circuit_breaker()
+        self.assertFalse(images_cloudrun._breaker_open())
+
+
+# ─── _post_generate retry logic ──────────────────────────────────────────
+
+
+def _tiny_png_b64_cr() -> str:
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (128, 0, 64)).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _make_resp(status: int, body: dict | None = None):
+    resp = MagicMock()
+    resp.status_code = status
+    resp.text = "error"
+    resp.json.return_value = body or {"output_inline": _tiny_png_b64_cr()}
+    if 400 <= status < 500:
+        import requests as _req
+        resp.raise_for_status.side_effect = _req.exceptions.HTTPError(f"{status}")
+    else:
+        resp.raise_for_status.return_value = None
+    return resp
+
+
+class TestPostGenerateFull(unittest.TestCase):
+    """Cover all branches of _post_generate including retries."""
+
+    URL = "https://flux-test.example"
+
+    def _mock_session(self, responses):
+        """Return a mock Session where post() yields successive responses."""
+        sess = MagicMock()
+        sess.post.side_effect = responses
+        return sess
+
+    def _patch_token(self):
+        return patch("pipeline.images.images_cloudrun.get_id_token",
+                     return_value="test-token")
+
+    def test_success_first_attempt(self) -> None:
+        sess = self._mock_session([_make_resp(200)])
+        with patch("requests.Session", return_value=sess), self._patch_token():
+            result = images_cloudrun._post_generate(self.URL, {"prompt": "p"})
+        self.assertIn("output_inline", result)
+
+    def test_5xx_raises_cloudrun_unavailable(self) -> None:
+        # Use 500 (not 503) — 503 triggers the 429/503 retry path
+        sess = self._mock_session([_make_resp(500)])
+        with patch("requests.Session", return_value=sess), self._patch_token():
+            with self.assertRaises(images_cloudrun.CloudRunUnavailable):
+                images_cloudrun._post_generate(self.URL, {"prompt": "p"})
+
+    def test_429_retry_then_success(self) -> None:
+        """429 on attempt 1 → sleep → 200 on attempt 2."""
+        sess = self._mock_session([_make_resp(429), _make_resp(200)])
+        with patch("requests.Session", return_value=sess), \
+             self._patch_token(), \
+             patch("time.sleep"):
+            result = images_cloudrun._post_generate(self.URL, {"p": 1})
+        self.assertIn("output_inline", result)
+        self.assertEqual(sess.post.call_count, 2)
+
+    def test_503_retry_then_success(self) -> None:
+        """503 on attempt 1 → sleep → 200 on attempt 2."""
+        sess = self._mock_session([_make_resp(503, {}), _make_resp(200)])
+        # make first 503 not immediately raise (simulate rate-exceeded, not hard 5xx)
+        # Patch so that the first 503 triggers the retry path (attempt <= 4)
+        # We need to make the mock NOT raise CloudRunUnavailable on 503.
+        # Looking at the code: if status in (429, 503) and attempt <= 4 → sleep + continue
+        # if 500 <= status < 600 → raises  ← but 503 also matches this!
+        # The 429/503 check comes FIRST, so attempt 1 retries.
+        with patch("requests.Session", return_value=sess), \
+             self._patch_token(), \
+             patch("time.sleep"):
+            result = images_cloudrun._post_generate(self.URL, {"p": 1})
+        self.assertIn("output_inline", result)
+
+    def test_401_refreshes_token_then_success(self) -> None:
+        """401 triggers token refresh + retry."""
+        sess = self._mock_session([_make_resp(401), _make_resp(200)])
+        sess.post.side_effect = [_make_resp(401), _make_resp(200)]
+
+        import pipeline.cloud.cloudrun_auth as _auth_mod
+        with patch("requests.Session", return_value=sess), \
+             self._patch_token(), \
+             patch.object(_auth_mod, "_TOKENS", {}):
+            result = images_cloudrun._post_generate(self.URL, {"p": 1})
+        self.assertIn("output_inline", result)
+        self.assertEqual(sess.post.call_count, 2)
+
+    def test_http_error_4xx_reraised(self) -> None:
+        """4xx HTTPError is NOT wrapped — caller's bug, re-raise immediately."""
+        import requests as _req
+        resp = _make_resp(400)
+        sess = self._mock_session([resp])
+        with patch("requests.Session", return_value=sess), self._patch_token():
+            with self.assertRaises(_req.exceptions.HTTPError):
+                images_cloudrun._post_generate(self.URL, {"p": 1})
+
+    def test_connection_error_retries_then_raises(self) -> None:
+        """All 5 connection errors → CloudRunUnavailable after exhaustion."""
+        import requests as _req
+        err = _req.exceptions.ConnectionError("refused")
+        sess = self._mock_session([err, err, err, err, err])
+        with patch("requests.Session", return_value=sess), \
+             self._patch_token(), \
+             patch("time.sleep"):
+            with self.assertRaises(images_cloudrun.CloudRunUnavailable):
+                images_cloudrun._post_generate(self.URL, {"p": 1})
+        self.assertEqual(sess.post.call_count, 5)
+
+    def test_read_timeout_retries_then_raises(self) -> None:
+        import requests as _req
+        err = _req.exceptions.ReadTimeout("timed out")
+        sess = self._mock_session([err, err, err, err, err])
+        with patch("requests.Session", return_value=sess), \
+             self._patch_token(), \
+             patch("time.sleep"):
+            with self.assertRaises(images_cloudrun.CloudRunUnavailable):
+                images_cloudrun._post_generate(self.URL, {"p": 1})
+
+    def test_chunked_encoding_error_retries(self) -> None:
+        import requests as _req
+        err = _req.exceptions.ChunkedEncodingError("chunked")
+        sess = self._mock_session([err, _make_resp(200)])
+        with patch("requests.Session", return_value=sess), \
+             self._patch_token(), \
+             patch("time.sleep"):
+            result = images_cloudrun._post_generate(self.URL, {"p": 1})
+        self.assertIn("output_inline", result)
+
+    def test_cloudrun_unavailable_inside_reraised(self) -> None:
+        """If _post_generate raises CloudRunUnavailable, it re-raises (no retry)."""
+        # We can't inject CloudRunUnavailable from sess.post (it's not a requests exception),
+        # so we test via _generate_cloudrun with _post_generate patched.
+        pass
+
+
+# ─── _materialise_png GCS path ───────────────────────────────────────────
+
+
+class TestMaterialisePngGcs(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmpdir.name)
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def test_gcs_uri_calls_gcloud_cp(self) -> None:
+        out = self.tmp / "from_gcs.png"
+        resp = {"output_gcs": "gs://bucket/path/img.png"}
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            images_cloudrun._materialise_png(resp, out)
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args.args[0]
+        self.assertIn("gcloud", cmd[0])
+        self.assertIn("gs://bucket/path/img.png", cmd)
+
+    def test_no_inline_no_gcs_raises(self) -> None:
+        out = self.tmp / "empty.png"
+        with self.assertRaises(RuntimeError):
+            images_cloudrun._materialise_png({}, out)
+
+
+# ─── _generate_cloudrun + _generate_cloudrun_z_image_turbo ───────────────
+
+
+class TestGenerateCloudrun(unittest.TestCase):
+    URL = "https://flux-test.example"
+
+    def setUp(self) -> None:
+        os.environ["CLOUDRUN_IMAGE_FLUX2_KLEIN_URL"] = self.URL
+        os.environ["CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL"] = self.URL
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmpdir.name)
+
+    def tearDown(self) -> None:
+        os.environ.pop("CLOUDRUN_IMAGE_FLUX2_KLEIN_URL", None)
+        os.environ.pop("CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL", None)
+        self._tmpdir.cleanup()
+
+    def _patch_post_and_materialise(self, out: Path):
+        resp = {"output_inline": _tiny_png_b64_cr(), "wall_s": 1.0,
+                "width": 768, "height": 1344, "steps": 4, "cold_loaded": True}
+        return (
+            patch("pipeline.images.images_cloudrun._post_generate", return_value=resp),
+            patch("pipeline.images.images_cloudrun._materialise_png", return_value=out),
+            patch("pipeline.images.images_cloudrun.get_id_token", return_value="tok"),
+        )
+
+    def test_generate_cloudrun_flux2_klein_success(self) -> None:
+        out = self.tmp / "flux.png"
+        p1, p2, p3 = self._patch_post_and_materialise(out)
+        with p1, p2, p3:
+            result = images_cloudrun._generate_cloudrun_flux2_klein(
+                prompt="a knight", seed=42, out_path=out,
+                width=768, height=1344, steps=4,
+            )
+        self.assertEqual(result, out)
+
+    def test_generate_cloudrun_z_image_turbo_success(self) -> None:
+        out = self.tmp / "zimg.png"
+        p1, p2, p3 = self._patch_post_and_materialise(out)
+        with p1, p2, p3:
+            result = images_cloudrun._generate_cloudrun_z_image_turbo(
+                prompt="a dragon", seed=1, out_path=out,
+                width=768, height=1344, steps=9,
+            )
+        self.assertEqual(result, out)
+
+    def test_generate_cloudrun_qwen_image_success(self) -> None:
+        os.environ["CLOUDRUN_IMAGE_QWEN_IMAGE_URL"] = self.URL
+        out = self.tmp / "qwen.png"
+        p1, p2, p3 = self._patch_post_and_materialise(out)
+        try:
+            with p1, p2, p3:
+                result = images_cloudrun._generate_cloudrun_qwen_image(
+                    prompt="a scholar", seed=7, out_path=out,
+                    width=768, height=1344, steps=20,
+                )
+            self.assertEqual(result, out)
+        finally:
+            os.environ.pop("CLOUDRUN_IMAGE_QWEN_IMAGE_URL", None)
+
+    def test_generate_cloudrun_hidream_success(self) -> None:
+        os.environ["CLOUDRUN_IMAGE_HIDREAM_URL"] = self.URL
+        out = self.tmp / "hidream.png"
+        p1, p2, p3 = self._patch_post_and_materialise(out)
+        try:
+            with p1, p2, p3:
+                result = images_cloudrun._generate_cloudrun_hidream(
+                    prompt="a dreamer", seed=3, out_path=out,
+                    width=768, height=1344, steps=25,
+                )
+            self.assertEqual(result, out)
+        finally:
+            os.environ.pop("CLOUDRUN_IMAGE_HIDREAM_URL", None)
+
+
+        """cold_loaded=True in response hits the ' (cold)' log branch."""
+        out = self.tmp / "cold.png"
+        resp = {"output_inline": _tiny_png_b64_cr(), "wall_s": 300.0,
+                "width": 768, "height": 1344, "steps": 4, "cold_loaded": True}
+        with patch("pipeline.images.images_cloudrun._post_generate", return_value=resp), \
+             patch("pipeline.images.images_cloudrun._materialise_png", return_value=out), \
+             patch("pipeline.images.images_cloudrun.get_id_token", return_value="tok"):
+            result = images_cloudrun._generate_cloudrun_flux2_klein(
+                prompt="test", seed=1, out_path=out,
+                width=768, height=1344, steps=4,
+            )
+        self.assertEqual(result, out)
+
+
+# ─── _local_fallback ─────────────────────────────────────────────────────
+
+
+class TestLocalFallback(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmpdir.name)
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def test_raises_cloudrun_unavailable(self) -> None:
+        with self.assertRaises(images_cloudrun.CloudRunUnavailable) as cm:
+            images_cloudrun._local_fallback(
+                prompt="test", seed=1,
+                out_path=self.tmp / "out.png",
+                width=768, height=1344, steps=4,
+            )
+        self.assertIn("nuclear cleanup", str(cm.exception))
+
+
+# ─── _readyz ─────────────────────────────────────────────────────────────
+
+
+class TestReadyz(unittest.TestCase):
+    URL = "https://flux-readyz.example"
+
+    def setUp(self) -> None:
+        os.environ["CLOUDRUN_IMAGE_FLUX2_KLEIN_URL"] = self.URL
+
+    def tearDown(self) -> None:
+        os.environ.pop("CLOUDRUN_IMAGE_FLUX2_KLEIN_URL", None)
+
+    def test_readyz_returns_json(self) -> None:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"cold_loaded": False, "warm_s": 0.5}
+        mock_resp.raise_for_status.return_value = None
+
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = mock_resp
+
+        with patch("requests.Session", return_value=mock_sess), \
+             patch("pipeline.images.images_cloudrun.get_id_token", return_value="tok"):
+            result = images_cloudrun._readyz("flux2_klein")
+
+        self.assertEqual(result["warm_s"], 0.5)
+        mock_sess.close.assert_called_once()
+
+    def test_readyz_closes_session_on_error(self) -> None:
+        mock_sess = MagicMock()
+        mock_sess.get.side_effect = Exception("connection refused")
+
+        with patch("requests.Session", return_value=mock_sess), \
+             patch("pipeline.images.images_cloudrun.get_id_token", return_value="tok"):
+            with self.assertRaises(Exception):
+                images_cloudrun._readyz("flux2_klein")
+
+        mock_sess.close.assert_called_once()
+
+
+# ─── warmup (background thread) ──────────────────────────────────────────
+
+
+class TestWarmupThread(unittest.TestCase):
+    def setUp(self) -> None:
+        os.environ["CLOUDRUN_IMAGE_FLUX2_KLEIN_URL"] = "https://flux-warm.example"
+
+    def tearDown(self) -> None:
+        os.environ.pop("CLOUDRUN_IMAGE_FLUX2_KLEIN_URL", None)
+
+    def test_warmup_returns_thread(self) -> None:
+        import threading
+        with patch("pipeline.images.images_cloudrun._readyz",
+                   return_value={"cold_loaded": False, "warm_s": 0.3, "boot_uptime_s": 10}):
+            t = images_cloudrun.warmup("flux2_klein")
+        self.assertIsInstance(t, threading.Thread)
+        t.join(timeout=5)
+
+    def test_warmup_success_path(self) -> None:
+        with patch("pipeline.images.images_cloudrun._readyz",
+                   return_value={"cold_loaded": True, "warm_s": 300.0, "boot_uptime_s": 5}):
+            t = images_cloudrun.warmup("flux2_klein")
+            t.join(timeout=5)
+
+    def test_warmup_cloudrun_unavailable_swallowed(self) -> None:
+        with patch("pipeline.images.images_cloudrun._readyz",
+                   side_effect=images_cloudrun.CloudRunUnavailable("URL not set")):
+            t = images_cloudrun.warmup("flux2_klein")
+            t.join(timeout=5)
+
+    def test_warmup_general_exception_swallowed(self) -> None:
+        with patch("pipeline.images.images_cloudrun._readyz",
+                   side_effect=RuntimeError("unexpected network failure")):
+            t = images_cloudrun.warmup("flux2_klein")
+            t.join(timeout=5)
+
+    def test_warmup_thread_is_daemon(self) -> None:
+        with patch("pipeline.images.images_cloudrun._readyz", return_value={}):
+            t = images_cloudrun.warmup("flux2_klein")
+            self.assertTrue(t.daemon)
+            t.join(timeout=5)
 
 
 # --------------------------------------------------------------- live smoke

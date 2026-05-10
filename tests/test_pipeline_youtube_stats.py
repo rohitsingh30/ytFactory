@@ -1,7 +1,7 @@
 """Tests for pipeline.youtube_stats — YouTube-driven enumeration + stats.
 
 We never call the real API. Instead:
-  - patch ``pipeline.upload.authenticate`` to return a sentinel
+  - patch ``pipeline.upload.upload.authenticate`` to return a sentinel
   - inject a fake ``googleapiclient`` whose service stubs return canned
     payloads for ``channels.list``, ``playlistItems.list``, and
     ``videos.list``
@@ -152,12 +152,12 @@ class _PointAtTmp:
 class FetchAccountTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        _write_channel_dir(self.tmp, "sportstoriesanimated", account="sportstoriesanimated")
+        _write_channel_dir(self.tmp, "sportsrecapped", account="sportsrecapped")
 
         # 3 videos, two pages of playlistItems (2 + 1) to verify pagination.
         channel_payload = {
             "id": "UC_sports",
-            "snippet": {"title": "SportsStoriesAnimated", "description": "Sports"},
+            "snippet": {"title": "SportsRecapped", "description": "Sports"},
             "statistics": {
                 "subscriberCount": "100",
                 "viewCount": "12345",
@@ -185,7 +185,7 @@ class FetchAccountTest(unittest.TestCase):
                     "title": "Vid A",
                     "publishedAt": "2026-05-02T18:00:00Z",
                     "channelId": "UC_sports",
-                    "channelTitle": "SportsStoriesAnimated",
+                    "channelTitle": "SportsRecapped",
                     "thumbnails": {"high": {"url": "https://img/a.jpg"}},
                     "categoryId": "17",
                 },
@@ -213,32 +213,32 @@ class FetchAccountTest(unittest.TestCase):
         _install_fake_googleapiclient(_FakeYouTube(
             channels=self.channels, playlist_items=self.playlist, videos=self.videos,
         ))
-        from pipeline import upload as up
+        from pipeline.upload import upload as up
         self._orig_auth = up.authenticate
         up.authenticate = lambda **kw: object()
         self.point = _PointAtTmp(self.tmp).__enter__()
 
     def tearDown(self):
         self.point.__exit__(None, None, None)
-        from pipeline import upload as up
+        from pipeline.upload import upload as up
         up.authenticate = self._orig_auth
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_writes_account_cache(self):
-        result = youtube_stats.fetch_account("sportstoriesanimated", quiet=True)
+        result = youtube_stats.fetch_account("sportsrecapped", quiet=True)
         self.assertIsNotNone(result)
         cache = json.loads(
-            (youtube_stats.YOUTUBE_DIR / "sportstoriesanimated.json").read_text()
+            (youtube_stats.YOUTUBE_DIR / "sportsrecapped.json").read_text()
         )
-        self.assertEqual(cache["account"], "sportstoriesanimated")
+        self.assertEqual(cache["account"], "sportsrecapped")
         self.assertEqual(cache["channel"]["id"], "UC_sports")
         self.assertEqual(cache["channel"]["subscriber_count"], 100)
         self.assertEqual(len(cache["videos"]), 3)
 
     def test_video_rows_have_full_shape(self):
-        youtube_stats.fetch_account("sportstoriesanimated", quiet=True)
+        youtube_stats.fetch_account("sportsrecapped", quiet=True)
         cache = json.loads(
-            (youtube_stats.YOUTUBE_DIR / "sportstoriesanimated.json").read_text()
+            (youtube_stats.YOUTUBE_DIR / "sportsrecapped.json").read_text()
         )
         a = next(v for v in cache["videos"] if v["video_id"] == "VID_A")
         self.assertEqual(a["title"], "Vid A")
@@ -250,9 +250,9 @@ class FetchAccountTest(unittest.TestCase):
         self.assertEqual(a["url"], "https://youtu.be/VID_A")
 
     def test_missing_stats_become_none(self):
-        youtube_stats.fetch_account("sportstoriesanimated", quiet=True)
+        youtube_stats.fetch_account("sportsrecapped", quiet=True)
         cache = json.loads(
-            (youtube_stats.YOUTUBE_DIR / "sportstoriesanimated.json").read_text()
+            (youtube_stats.YOUTUBE_DIR / "sportsrecapped.json").read_text()
         )
         c = next(v for v in cache["videos"] if v["video_id"] == "VID_C")
         self.assertIsNone(c["view_count"])
@@ -260,14 +260,14 @@ class FetchAccountTest(unittest.TestCase):
         self.assertEqual(c["duration_s"], 150)  # 2m30s
 
     def test_paginates_playlist_items(self):
-        youtube_stats.fetch_account("sportstoriesanimated", quiet=True)
+        youtube_stats.fetch_account("sportsrecapped", quiet=True)
         # 2 calls: pageToken=None then pageToken="PAGE2".
         self.assertEqual([c["pageToken"] for c in self.playlist.calls], [None, "PAGE2"])
 
     def test_preserves_playlist_order(self):
-        youtube_stats.fetch_account("sportstoriesanimated", quiet=True)
+        youtube_stats.fetch_account("sportsrecapped", quiet=True)
         cache = json.loads(
-            (youtube_stats.YOUTUBE_DIR / "sportstoriesanimated.json").read_text()
+            (youtube_stats.YOUTUBE_DIR / "sportsrecapped.json").read_text()
         )
         self.assertEqual(
             [v["video_id"] for v in cache["videos"]], ["VID_A", "VID_B", "VID_C"]
@@ -300,14 +300,14 @@ class VideosBatchingTest(unittest.TestCase):
         _install_fake_googleapiclient(_FakeYouTube(
             channels=channels, playlist_items=playlist, videos=self.videos,
         ))
-        from pipeline import upload as up
+        from pipeline.upload import upload as up
         self._orig_auth = up.authenticate
         up.authenticate = lambda **kw: object()
         self.point = _PointAtTmp(self.tmp).__enter__()
 
     def tearDown(self):
         self.point.__exit__(None, None, None)
-        from pipeline import upload as up
+        from pipeline.upload import upload as up
         up.authenticate = self._orig_auth
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -329,7 +329,7 @@ class NoAuthTest(unittest.TestCase):
             playlist_items=_FakePlaylistItems({}),
             videos=_FakeVideos({}),
         ))
-        from pipeline import upload as up
+        from pipeline.upload import upload as up
         self._orig_auth = up.authenticate
         def _raise(**kw):
             raise RuntimeError("no token")
@@ -338,7 +338,7 @@ class NoAuthTest(unittest.TestCase):
 
     def tearDown(self):
         self.point.__exit__(None, None, None)
-        from pipeline import upload as up
+        from pipeline.upload import upload as up
         up.authenticate = self._orig_auth
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -355,7 +355,7 @@ class NoAuthTest(unittest.TestCase):
 class IterChannelConfigsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        _write_channel_dir(self.tmp, "sportstoriesanimated", account="sportstoriesanimated")
+        _write_channel_dir(self.tmp, "sportsrecapped", account="sportsrecapped")
         _write_channel_dir(self.tmp, "historyrecapped", account="historyrecapped")
         # A non-channel dir — must NOT be picked up.
         (self.tmp / "pipeline").mkdir()
@@ -371,7 +371,7 @@ class IterChannelConfigsTest(unittest.TestCase):
     def test_finds_only_top_level_channel_dirs(self):
         accounts = youtube_stats.iter_channel_configs()
         names = sorted(a for a, _ in accounts)
-        self.assertEqual(names, ["historyrecapped", "sportstoriesanimated"])
+        self.assertEqual(names, ["historyrecapped", "sportsrecapped"])
 
 
 class LoadAccountTest(unittest.TestCase):

@@ -1,4 +1,4 @@
-"""Tests for `pipeline.parallel.run_parallel` — bounded ThreadPool fan-out
+"""Tests for `pipeline.utils.parallel.run_parallel` — bounded ThreadPool fan-out
 used by the long-form / Shorts renderers for ffmpeg trim and PIL caption
 PNG render stages.
 
@@ -24,7 +24,7 @@ from unittest.mock import patch
 
 from tests._helpers import PROJECT_ROOT  # noqa: F401
 
-from pipeline import parallel
+from pipeline.utils import parallel
 
 
 class DefaultWorkersTests(unittest.TestCase):

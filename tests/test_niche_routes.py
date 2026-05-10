@@ -5,7 +5,7 @@ import unittest
 
 import httpx
 
-from control.niche_routes import NICHES, router
+from control.routes.niche_routes import NICHES, router
 
 
 def _make_app():
@@ -43,7 +43,7 @@ class NichesEndpointTest(unittest.IsolatedAsyncioTestCase):
     async def test_production_channels_present(self) -> None:
         keys = {n["key"] for n in NICHES}
         self.assertIn("mystoriesanimated", keys)
-        self.assertIn("sportstoriesanimated", keys)
+        self.assertIn("sportsrecapped", keys)
 
 
 class VoicesEndpointTest(unittest.IsolatedAsyncioTestCase):

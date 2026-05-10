@@ -5,7 +5,7 @@ These tests guard against drift from the spec in docs/channel_layout.md:
 * Every production channel has a config.yaml at its root.
 * Every variant YAML in <channel>/variants/ either matches a NICHE_CHANNEL
   entry OR falls back to a flat layout (which is logged but tolerated).
-* Niched channels (mystoriesanimated, sportstoriesanimated) actually have
+* Niched channels (mystoriesanimated, sportsrecapped) actually have
   per-slug subdirs nested under their niche dirs — not at the channel root.
 * Flat channels do NOT have niche dirs alongside their per-slug subdirs.
 * The legacy data/intermediate/, data/critiques/, data/shorts/ subtrees
@@ -19,7 +19,7 @@ from pathlib import Path
 from tests._helpers import PROJECT_ROOT  # noqa: F401
 
 from pipeline import niches
-from pipeline.paths import (
+from pipeline.schemas.paths import (
     PROJECT_ROOT as PATHS_PROJECT_ROOT,
     RenderPaths,
     Subdir,
@@ -28,18 +28,17 @@ from pipeline.paths import (
 
 # Production channels — every channel root in the repo.
 _PRODUCTION_CHANNELS = [
-    "airecap",
     "cosmosdecoded",
     "hindutavaanimated",
     "historyrecapped",
     "mystoriesanimated",
     "rhymetimejunction",
-    "sportstoriesanimated",
+    "sportsrecapped",
+    "scrollpulse",
 ]
 
 # Channels declared as flat (no niches).
 _FLAT_CHANNELS = {
-    "airecap",
     "cosmosdecoded",
     "hindutavaanimated",
     "historyrecapped",
@@ -47,11 +46,11 @@ _FLAT_CHANNELS = {
 }
 
 # Channels declared as niched (everything per-slug nests under <niche>/).
-# sportstoriesanimated is the documented mixed-niche exception (has both
+# sportsrecapped is the documented mixed-niche exception (has both
 # parent-channel content at root and a 'ranked/' niche).
 _NICHED_CHANNELS = {
     "mystoriesanimated",
-    "sportstoriesanimated",
+    "sportsrecapped",
 }
 
 
@@ -90,19 +89,12 @@ class VariantYamlsCoveredTest(unittest.TestCase):
                     self.assertEqual(p.channel, ch)
 
 
-class NICHE_CHANNEL_NicheDirsExistTest(unittest.TestCase):
-    """Every NICHE_CHANNEL entry's channel_dir is a real directory."""
-
-    def test_every_niche_dir_on_disk(self):
-        for niche_key, (chan_dir, _) in niches.NICHE_CHANNEL.items():
-            with self.subTest(niche=niche_key):
-                target = PATHS_PROJECT_ROOT / chan_dir
-                self.assertTrue(
-                    target.exists() and target.is_dir(),
-                    f"NICHE_CHANNEL[{niche_key!r}] points at {chan_dir!r} "
-                    f"but {target} does not exist on disk. Either create the "
-                    f"dir or remove the NICHE_CHANNEL entry.",
-                )
+# NICHE_CHANNEL_NicheDirsExistTest deleted 2026-05-10 — niche state
+# moved to gs://ytfactory-prod-v2-state/<channel>/<niche>/. The chan_dir
+# string in NICHE_CHANNEL is now a GCS-relative key, not a laptop dir.
+# Skills + render code access it via pipeline.utils.state_client, never via
+# direct filesystem reads. Was: every NICHE_CHANNEL entry's channel_dir
+# is a real directory.
 
 
 class FlatChannelsHaveNoNicheDirsTest(unittest.TestCase):
@@ -153,9 +145,9 @@ class NichedChannelsContentIsNestedTest(unittest.TestCase):
     def test_no_legacy_uploads_niche_nesting_under_root(self):
         # Specifically checks for <channel>/uploads/<niche>/<slug>.json
         # (the Gen 2 layout we migrated away from). Skips
-        # sportstoriesanimated which legitimately has parent-channel
+        # sportsrecapped which legitimately has parent-channel
         # uploads at root + ranked/ niche uploads (the mixed exception).
-        for ch in sorted(_NICHED_CHANNELS - {"sportstoriesanimated"}):
+        for ch in sorted(_NICHED_CHANNELS - {"sportsrecapped"}):
             chan_root = PATHS_PROJECT_ROOT / ch
             uploads_at_root = chan_root / "uploads"
             with self.subTest(channel=ch):
@@ -190,7 +182,7 @@ class LegacyDataSubtreeDecommissionedTest(unittest.TestCase):
                 non_empty, [],
                 f"data/intermediate/ has been decommissioned but contains files: "
                 f"{non_empty[:5]}... Migrate to <channel>/cache/<slug>/ via "
-                f"pipeline.paths.RenderPaths.cache_for(slug).",
+                f"pipeline.schemas.paths.RenderPaths.cache_for(slug).",
             )
 
     def test_data_critiques_decommissioned(self):

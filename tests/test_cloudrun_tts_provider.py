@@ -24,7 +24,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pipeline import audio
+from pipeline.audio import audio
 from pipeline.tts.cloudrun import CloudRunUnavailable
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -82,31 +82,28 @@ class TestCloudRunDispatch(unittest.TestCase):
 
 
 class TestCloudRunFallback(unittest.TestCase):
-    """When the cloud is unavailable, the call must fall back to local
-    f5_tts unless explicitly disabled."""
+    """As of 2026-05-09 (laptop nuclear cleanup) there is **no** local
+    fallback. Cloud failures must surface ``CloudRunUnavailable``."""
 
-    def test_5xx_falls_back_to_local_f5(self) -> None:
-        # Simulate cloud failure; assert local f5 is called with same args.
-        with patch("pipeline.tts.cloudrun._post_synth") as mock_post, \
-             patch("pipeline.tts.f5._synth_f5_tts") as mock_local:
+    def test_5xx_re_raises_cloud_unavailable(self) -> None:
+        # Cloud failure → CloudRunUnavailable bubbles up.
+        with patch("pipeline.tts.cloudrun._post_synth") as mock_post:
             mock_post.side_effect = CloudRunUnavailable("503 simulated")
             from pipeline.tts.cloudrun import _synth_cloudrun_f5
 
-            out = Path("/tmp/fallback-test.wav")
-            _synth_cloudrun_f5(
-                text="hello",
-                ref_audio_path=str(REF_WAV),
-                ref_audio_text="ref",
-                out_path=out,
-                speed=1.0,
-            )
-            mock_local.assert_called_once()
-            self.assertEqual(
-                mock_local.call_args.kwargs["ref_audio_path"], str(REF_WAV),
-            )
+            with self.assertRaises(CloudRunUnavailable):
+                _synth_cloudrun_f5(
+                    text="hello",
+                    ref_audio_path=str(REF_WAV),
+                    ref_audio_text="ref",
+                    out_path=Path("/tmp/fallback-test.wav"),
+                    speed=1.0,
+                )
 
-    def test_disable_fallback_env_var_re_raises(self) -> None:
-        """CLOUDRUN_TTS_DISABLE_FALLBACK=1 must surface cloud failures."""
+    def test_disable_fallback_env_var_is_now_a_noop(self) -> None:
+        """``CLOUDRUN_TTS_DISABLE_FALLBACK=1`` used to flip on the
+        re-raise behaviour; with no fallback path left it's a no-op
+        but the env var is still tolerated for back-compat."""
         with patch.dict(os.environ, {"CLOUDRUN_TTS_DISABLE_FALLBACK": "1"}), \
              patch("pipeline.tts.cloudrun._post_synth") as mock_post:
             mock_post.side_effect = CloudRunUnavailable("503 simulated")

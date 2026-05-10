@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import MagicMock, patch
 
 os.environ["YTFACTORY_QUEUE_BACKEND"] = "memory"
 
-from control import jobs as jobs_mod  # noqa: E402
+from control.core import jobs as jobs_mod  # noqa: E402
 
 
 class JobLifecycleTest(unittest.TestCase):
@@ -14,13 +15,13 @@ class JobLifecycleTest(unittest.TestCase):
         jobs_mod.reset_jobs()
 
     def test_create_job_initial_fields(self):
-        jobs_mod.create_job("j1", channel="sportstoriesanimated",
+        jobs_mod.create_job("j1", channel="sportsrecapped",
                             topic="Aguero 93:20", proposal={"length_s": 55})
         doc = jobs_mod.get_job("j1")
         self.assertIsNotNone(doc)
         assert doc is not None
         self.assertEqual(doc["job_id"], "j1")
-        self.assertEqual(doc["channel"], "sportstoriesanimated")
+        self.assertEqual(doc["channel"], "sportsrecapped")
         self.assertEqual(doc["topic"], "Aguero 93:20")
         self.assertEqual(doc["status"], jobs_mod.STATUS_PENDING)
         self.assertEqual(doc["stage"], "queued")
@@ -106,3 +107,153 @@ class BackendFactoryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# FirestoreJobs backend (mocked)
+# ---------------------------------------------------------------------------
+
+class FirestoreJobsTest(unittest.TestCase):
+    def _make_fj(self):
+        from control.core.jobs import _FirestoreJobs
+        with patch("google.cloud.firestore.Client") as MockClient:
+            mock_db = MagicMock()
+            MockClient.return_value = mock_db
+            fj = _FirestoreJobs()
+        return fj
+
+    def test_create_returns_doc(self):
+        fj = self._make_fj()
+        doc_ref = MagicMock()
+        fj._db.collection.return_value.document.return_value = doc_ref
+        result = fj.create("job-1", channel="auto", topic="t")
+        self.assertEqual(result["job_id"], "job-1")
+        doc_ref.set.assert_called_once()
+
+    def test_update_calls_set_with_merge(self):
+        fj = self._make_fj()
+        doc_ref = MagicMock()
+        fj._db.collection.return_value.document.return_value = doc_ref
+        fj.update("job-1", status="done")
+        doc_ref.set.assert_called_once()
+        _, kw = doc_ref.set.call_args
+        self.assertTrue(kw.get("merge"))
+
+    def test_get_existing_returns_dict(self):
+        fj = self._make_fj()
+        snap = MagicMock()
+        snap.exists = True
+        snap.to_dict.return_value = {"job_id": "job-2", "status": "pending"}
+        doc_ref = MagicMock()
+        doc_ref.get.return_value = snap
+        fj._db.collection.return_value.document.return_value = doc_ref
+        result = fj.get("job-2")
+        self.assertEqual(result["job_id"], "job-2")
+
+    def test_get_missing_returns_none(self):
+        fj = self._make_fj()
+        snap = MagicMock()
+        snap.exists = False
+        doc_ref = MagicMock()
+        doc_ref.get.return_value = snap
+        fj._db.collection.return_value.document.return_value = doc_ref
+        result = fj.get("ghost")
+        self.assertIsNone(result)
+
+    def test_ref_returns_document(self):
+        fj = self._make_fj()
+        mock_col = MagicMock()
+        mock_doc = MagicMock()
+        mock_col.document.return_value = mock_doc
+        fj._db.collection.return_value = mock_col
+        ref = fj._ref("job-3")
+        self.assertEqual(ref, mock_doc)
+
+
+class GetJobsFirestoreTest(unittest.TestCase):
+    def setUp(self) -> None:
+        jobs_mod.reset_jobs()
+
+    def tearDown(self) -> None:
+        os.environ["YTFACTORY_QUEUE_BACKEND"] = "memory"
+        jobs_mod.reset_jobs()
+
+    def test_firestore_backend_selected_when_env_says_firestore(self):
+        from control.core.jobs import _FirestoreJobs
+        with patch.dict(os.environ, {"YTFACTORY_QUEUE_BACKEND": "firestore"}):
+            with patch("google.cloud.firestore.Client") as MockClient:
+                mock_db = MagicMock()
+                MockClient.return_value = mock_db
+                backend = jobs_mod.get_jobs()
+                self.assertIsInstance(backend, _FirestoreJobs)
+                jobs_mod.reset_jobs()
+
+
+# ---------------------------------------------------------------------------
+# _enqueue_render_job — both cloudrun and sim/queue paths
+# ---------------------------------------------------------------------------
+
+class EnqueueRenderJobTest(unittest.TestCase):
+    def setUp(self) -> None:
+        os.environ["YTFACTORY_QUEUE_BACKEND"] = "memory"
+        jobs_mod.reset_jobs()
+        from control.core.queue import reset_queue
+        reset_queue()
+
+    def _make_proposal(self):
+        from control.core.schema import ShortProposal
+        return ShortProposal(
+            channel="historyrecapped",
+            format="auto",
+            topic="Battle of Thermopylae",
+            source_kind="manual_backlog",
+            source_ref="historyrecapped/narrations/thermo.json",
+            length_s=55,
+        )
+
+    def test_sim_path_enqueues_task(self):
+        from control.core import cloud_run as cr_mod
+        from control.core.queue import get_queue
+        proposal = self._make_proposal()
+        with patch.object(cr_mod, "render_backend", return_value="sim"):
+            resp = jobs_mod._enqueue_render_job(proposal)
+        self.assertIsNotNone(resp.job_id)
+        # Task should be in the queue.
+        q = get_queue()
+        tasks = list(q._tasks.values())
+        self.assertEqual(len(tasks), 1)
+
+    def test_cloudrun_path_triggers_job(self):
+        from control.core import cloud_run as cr_mod
+        proposal = self._make_proposal()
+        mock_ref = cr_mod.ExecutionRef(
+            job_id="x", execution_name="exec-001", triggered_via="sdk"
+        )
+        with patch.object(cr_mod, "render_backend", return_value="cloudrun"):
+            with patch.object(cr_mod, "trigger_render_job", return_value=mock_ref):
+                resp = jobs_mod._enqueue_render_job(proposal)
+        self.assertIsNotNone(resp.job_id)
+        doc = jobs_mod.get_job(resp.job_id)
+        self.assertEqual(doc["stage"], "dispatching")
+
+    def test_cloudrun_path_marks_failed_on_exception(self):
+        from control.core import cloud_run as cr_mod
+        proposal = self._make_proposal()
+        with patch.object(cr_mod, "render_backend", return_value="cloudrun"):
+            with patch.object(cr_mod, "trigger_render_job", side_effect=RuntimeError("cloud down")):
+                resp = jobs_mod._enqueue_render_job(proposal)
+        doc = jobs_mod.get_job(resp.job_id)
+        self.assertEqual(doc["status"], jobs_mod.STATUS_FAILED)
+        self.assertIn("dispatch", doc["stage"])
+
+    def test_laptop_path_enqueues_task(self):
+        """laptop backend is same as sim — drops on queue."""
+        from control.core import cloud_run as cr_mod
+        from control.core.queue import get_queue
+        proposal = self._make_proposal()
+        with patch.object(cr_mod, "render_backend", return_value="laptop"):
+            resp = jobs_mod._enqueue_render_job(proposal)
+        self.assertIsNotNone(resp.job_id)
+        q = get_queue()
+        tasks = list(q._tasks.values())
+        self.assertEqual(len(tasks), 1)

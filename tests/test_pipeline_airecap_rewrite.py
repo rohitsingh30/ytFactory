@@ -1,19 +1,18 @@
-"""Tests for pipeline.airecap_rewrite — claude CLI is mocked out."""
+"""Tests for pipeline.llm.airecap_rewrite — claude CLI is mocked out."""
 
 from __future__ import annotations
 
 import json
-import tempfile
+import shutil
+import sys
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-from tests._helpers import PROJECT_ROOT  # noqa: F401
+from tests._helpers import PROJECT_ROOT
 
 from pipeline.llm import airecap_rewrite as ar
 
 
-# A canned LLM response that satisfies the schema.
 _GOOD_LLM_OUTPUT = {
     "hook": "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton.",
     "narration": (
@@ -37,7 +36,6 @@ _GOOD_LLM_OUTPUT = {
     ],
 }
 
-
 _GOOD_RAW = {
     "slug": "anthropic-connectors-creative-apps",
     "title": "Anthropic Connectors — Claude wires into Photoshop, Blender, Ableton",
@@ -46,6 +44,8 @@ _GOOD_RAW = {
     "url": "https://www.anthropic.com/news/claude-for-creative-work",
     "metadata": {},
 }
+
+SCRATCH_AIRECAP = PROJECT_ROOT / "tests" / ".scratch_airecap"
 
 
 class RewriteHappyPathTest(unittest.TestCase):
@@ -60,29 +60,29 @@ class RewriteHappyPathTest(unittest.TestCase):
         self.assertEqual(len(script["title_options"]), 3)
 
     def test_caps_title_options_at_three(self):
-        out = dict(_GOOD_LLM_OUTPUT, title_options=[
-            "title 1", "title 2", "title 3", "title 4", "title 5",
-        ])
+        out = dict(_GOOD_LLM_OUTPUT, title_options=["title 1", "title 2", "title 3", "title 4", "title 5"])
         with patch.object(ar.llm, "call_claude_cli", return_value=out):
             script = ar.rewrite(_GOOD_RAW)
         self.assertEqual(len(script["title_options"]), 3)
 
     def test_strips_whitespace_from_fields(self):
-        out = dict(_GOOD_LLM_OUTPUT,
-                   hook="  Anthropic just plugged Claude  \n",
-                   title_options=["  one  ", "  two  ", "  three  "])
+        out = dict(
+            _GOOD_LLM_OUTPUT,
+            hook="  Anthropic just plugged Claude  \n",
+            title_options=["  one  ", "  two  ", "  three  "],
+        )
         with patch.object(ar.llm, "call_claude_cli", return_value=out):
             script = ar.rewrite(_GOOD_RAW)
         self.assertFalse(script["hook"].startswith(" "))
         self.assertFalse(script["hook"].endswith(" "))
-        for t in script["title_options"]:
-            self.assertEqual(t, t.strip())
+        for title in script["title_options"]:
+            self.assertEqual(title, title.strip())
 
 
 class RewriteRejectsBadInputTest(unittest.TestCase):
     def test_empty_raw_story_raises(self):
         with self.assertRaises(ar.AirecapRewriteError):
-            ar.rewrite({"slug": "x"})  # no title or body
+            ar.rewrite({"slug": "x"})
 
     def test_non_dict_llm_output_raises(self):
         with patch.object(ar.llm, "call_claude_cli", return_value="not a dict"):
@@ -97,15 +97,16 @@ class RewriteRejectsBadInputTest(unittest.TestCase):
 
 class RewriteWarningsTest(unittest.TestCase):
     def test_short_narration_warns_but_does_not_raise(self):
-        out = dict(_GOOD_LLM_OUTPUT, narration="Anthropic shipped connectors. FOLLOW for daily AI recaps. LIKE if this saved you a tab.")
+        out = dict(
+            _GOOD_LLM_OUTPUT,
+            narration="Anthropic shipped connectors. FOLLOW for daily AI recaps. LIKE if this saved you a tab.",
+        )
         with patch.object(ar.llm, "call_claude_cli", return_value=out):
-            # Should still return a script; warning goes to stderr.
             script = ar.rewrite(_GOOD_RAW)
         self.assertEqual(script["slug"], _GOOD_RAW["slug"])
 
     def test_missing_cta_warns_but_does_not_raise(self):
-        narr = "x " * 150
-        out = dict(_GOOD_LLM_OUTPUT, narration=narr)
+        out = dict(_GOOD_LLM_OUTPUT, narration="x " * 150)
         with patch.object(ar.llm, "call_claude_cli", return_value=out):
             script = ar.rewrite(_GOOD_RAW)
         self.assertNotIn("FOLLOW for daily AI recaps", script["narration"])
@@ -121,12 +122,59 @@ class SaveTest(unittest.TestCase):
             "source_url": "u",
             "source": "s",
         }
-        with tempfile.TemporaryDirectory() as d:
-            path = ar.save(script, Path(d))
+        out_dir = SCRATCH_AIRECAP / "save"
+        shutil.rmtree(out_dir, ignore_errors=True)
+        try:
+            path = ar.save(script, out_dir)
             self.assertEqual(path.name, "test-slug.json")
             self.assertTrue(path.exists())
             roundtrip = json.loads(path.read_text())
             self.assertEqual(roundtrip["slug"], "test-slug")
+        finally:
+            shutil.rmtree(out_dir, ignore_errors=True)
+
+
+class MainCliTest(unittest.TestCase):
+    def setUp(self):
+        shutil.rmtree(SCRATCH_AIRECAP, ignore_errors=True)
+        SCRATCH_AIRECAP.mkdir(parents=True, exist_ok=True)
+        self.raw = SCRATCH_AIRECAP / "raw.json"
+        self.raw.write_text(json.dumps(_GOOD_RAW))
+
+    def tearDown(self):
+        shutil.rmtree(SCRATCH_AIRECAP, ignore_errors=True)
+
+    def test_missing_raw_returns_2(self):
+        with patch.object(sys, "argv", ["airecap", "--raw", str(SCRATCH_AIRECAP / "missing.json")]):
+            self.assertEqual(ar.main(), 2)
+
+    def test_rewrite_error_returns_1(self):
+        with patch.object(sys, "argv", ["airecap", "--raw", str(self.raw)]), patch.object(
+            ar, "rewrite", side_effect=ar.AirecapRewriteError("bad")
+        ):
+            self.assertEqual(ar.main(), 1)
+        with patch.object(sys, "argv", ["airecap", "--raw", str(self.raw)]), patch.object(
+            ar, "rewrite", side_effect=ar.llm.ClaudeCLIError("bad")
+        ):
+            self.assertEqual(ar.main(), 1)
+
+    def test_print_only_skips_save(self):
+        script = {"slug": "s", "hook": "h", "narration": "n", "title_options": ["t"], "source_url": "", "source": ""}
+        with patch.object(sys, "argv", ["airecap", "--raw", str(self.raw), "--print-only", "--model", "haiku"]), patch.object(
+            ar, "rewrite", return_value=script
+        ) as rewrite_mock, patch.object(ar, "save") as save_mock:
+            self.assertEqual(ar.main(), 0)
+        rewrite_mock.assert_called_once_with(_GOOD_RAW, model="haiku")
+        save_mock.assert_not_called()
+
+    def test_success_saves_to_out_dir(self):
+        script = {"slug": "s", "hook": "h", "narration": "n", "title_options": ["t"], "source_url": "", "source": ""}
+        out_dir = SCRATCH_AIRECAP / "out"
+        with patch.object(sys, "argv", ["airecap", "--raw", str(self.raw), "--out", str(out_dir)]), patch.object(
+            ar, "rewrite", return_value=script
+        ):
+            self.assertEqual(ar.main(), 0)
+        self.assertTrue((out_dir / "s.json").exists())
 
 
 if __name__ == "__main__":

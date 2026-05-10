@@ -113,5 +113,29 @@ class ScoreInRangeTest(unittest.TestCase):
             self.assertLessEqual(s, 1.0)
 
 
+# ---- Additional coverage for mid-range scoring buckets ----
+
+class MidRangeBucketsTest(unittest.TestCase):
+    def test_mid_range_concrete_nouns_bucket(self):
+        words = ["abstract"] * 99 + ["kitchen"]
+        story = " ".join(words) + " 7"
+        score, _ = score_visualizability(story)
+        self.assertGreater(score, 0.0)
+
+    def test_mid_range_action_verbs_bucket(self):
+        words = ["abstract"] * 99 + ["walked"]
+        story = " ".join(words) + " 7"
+        score, _ = score_visualizability(story)
+        self.assertGreater(score, 0.0)
+
+    def test_mid_range_dialogue_bucket(self):
+        quoted = '"' + ("quoted words " * 12) + '" '
+        plain = "plain context with kitchen phone and 7 dollars " * 7
+        story = quoted + plain
+        score, reasons = score_visualizability(story)
+        self.assertGreater(score, 0.0)
+        self.assertFalse(any("dialogue-heavy" in r for r in reasons))
+
+
 if __name__ == "__main__":
     unittest.main()
