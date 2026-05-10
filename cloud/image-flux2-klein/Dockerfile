@@ -1,13 +1,19 @@
 # ytFactory Image — FLUX.2 [klein] 4B Cloud Run GPU service
 #
 # Model: black-forest-labs/FLUX.2-klein-4B (Apache 2.0, Jan 2026)
-# 4 B rectified flow transformer + 8 B Qwen3 text embedder.
-# Distilled to 4 inference steps. ~13 GB VRAM at bf16 → comfortable
-# headroom on L4 24 GB.
+# 4 B rectified flow transformer + 8 B Qwen3 text embedder = 12 B
+# params total. At bf16 the weights alone are ~24 GB — exceeds the
+# L4's 22 GiB usable VRAM.
+#
+# We run with diffusers' enable_model_cpu_offload() (see server.py
+# _pipe()): submodules are kept on CPU and pulled to GPU just-in-time.
+# Peak VRAM ~12-14 GB, comfortable on L4 24 GB. Per-call latency
+# +1-2 s vs full-GPU resident.
+#
 # Repo: 24 GB / 52 files staged to gs://ytfactory-model-weights/flat/.
 # Cold-start expected ~30-60 s (read 24 GB from GCS Fuse mount, load
-# bf16, single .to("cuda") of ~13 GB model). Warm /generate ~0.5-0.8 s
-# at 1024² with 4 steps.
+# bf16 to CPU, hooks installed). Warm /generate ~1.5-2.5 s at 1024²
+# with 4 steps (was 0.5-0.8 s pre-offload, but pre-offload OOM'd).
 #
 # Image size: ~5 GB compressed (no weights baked in, weights live in
 # the GCS Fuse-mounted bucket at /models/hf/flat/black-forest-labs/...).

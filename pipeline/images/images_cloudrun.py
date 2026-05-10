@@ -80,7 +80,11 @@ def _service_url(model: str) -> str:
     per_model = {
         "flux2_klein":   "CLOUDRUN_IMAGE_FLUX2_KLEIN_URL",
         "z_image_turbo": "CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL",
-        "qwen_image":    "CLOUDRUN_IMAGE_QWEN_URL",
+        # qwen_image's canonical env is the longer form which mirrors
+        # the model name verbatim. The shorter ``CLOUDRUN_IMAGE_QWEN_URL``
+        # is accepted as a fallback for compatibility with any old
+        # .env still using it.
+        "qwen_image":    "CLOUDRUN_IMAGE_QWEN_IMAGE_URL",
         "hidream":       "CLOUDRUN_IMAGE_HIDREAM_URL",
     }
     if model not in per_model:
@@ -90,6 +94,9 @@ def _service_url(model: str) -> str:
         )
     env_var = per_model[model]
     url = os.environ.get(env_var, "").strip().rstrip("/")
+    # Back-compat fallbacks: the older shorter env var names still work.
+    if not url and model == "qwen_image":
+        url = os.environ.get("CLOUDRUN_IMAGE_QWEN_URL", "").strip().rstrip("/")
     if not url:
         raise CloudRunUnavailable(
             f"cloudrun_{model} requires {env_var} to be set in .env. "

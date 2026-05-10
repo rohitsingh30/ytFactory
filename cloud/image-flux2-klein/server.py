@@ -14,6 +14,22 @@ API: POST /generate {prompt, ...} → JSON with PNG inline-base64 (if
 <5 MB) or GCS URI. GET /readyz lazy-loads the pipeline so cold-start
 work happens at /readyz time (laptop client warms via a background
 GET before the render starts).
+
+VRAM accounting (post-OOM debug 2026-05-10):
+  - 4B transformer + 8B Qwen3 text encoder = 12B params @ bf16 = 24 GB
+  - L4 has 22 GiB usable VRAM (~2 GB driver-reserved on the 24 GB card)
+  - With naive `.to("cuda")` the FIRST /generate call OOMs allocating
+    activations during prompt encoding (the smoking-gun trace logged
+    21.94 GB / 21.96 GB used before any inference)
+  - Fix: ``enable_model_cpu_offload()`` keeps each submodule on CPU
+    until it's about to run; peak VRAM drops to ~12-14 GB. Per-call
+    latency +1-2 s warm. See _pipe() for the trade-off math.
+
+Allocator hint (PYTORCH_CUDA_ALLOC_CONF) is set at module import
+time so it takes effect before the first `import torch`. Without it
+the post-OOM error suggests
+``expandable_segments:True`` to reduce fragmentation; we set it
+unconditionally.
 """
 from __future__ import annotations
 
@@ -25,6 +41,11 @@ import os
 import time
 import uuid
 from pathlib import Path
+
+# Set BEFORE importing torch — the allocator reads this on init.
+# Reduces fragmentation-induced OOMs that the post-OOM CUDA error
+# message itself recommends in PyTorch 2.5+.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -56,8 +77,26 @@ _BOOT_T0 = time.monotonic()
 
 
 def _pipe():
-    """Lazy-load the Flux2KleinPipeline. ~30-60 s on cold start
-    (read 24 GB from GCS Fuse, materialize bf16, push to CUDA)."""
+    """Lazy-load the Flux2KleinPipeline.
+
+    Memory accounting (from a real OOM trace 2026-05-10):
+      - Transformer (4B params, bf16): ~8 GB
+      - Qwen3 text encoder (8B params, bf16): ~16 GB
+      - VAE + scheduler scratch: ~1 GB
+      - Activations during prompt encoding: ~0.5-2 GB
+      Total: ~25-27 GB peak — does NOT fit in the L4's 22 GiB usable
+      VRAM. The Dockerfile's "~13 GB at bf16" estimate ignored Qwen3.
+
+    Fix: ``enable_model_cpu_offload()`` keeps each submodule on CPU
+    until it's about to run, then moves it to GPU just-in-time and
+    moves it back when done. Diffusers handles the orchestration. Net
+    effect: peak VRAM ~12-14 GB instead of 25 GB; per-call latency
+    +1-2 s on warm calls (the back-and-forth) but actually completes.
+
+    The alternative (sequential CPU offload, more aggressive) would
+    drop us to ~6 GB peak but adds another 2-4 s per call. Model-level
+    is the right balance for our workload.
+    """
     global _PIPE
     if _PIPE is None:
         import torch
@@ -70,13 +109,23 @@ def _pipe():
                 f"gs://ytfactory-model-weights at /models/hf"
             )
         logger.info("loading Flux2KleinPipeline from %s …", WEIGHTS_DIR)
-        _PIPE = Flux2KleinPipeline.from_pretrained(
+        pipe = Flux2KleinPipeline.from_pretrained(
             str(WEIGHTS_DIR),
             torch_dtype=torch.bfloat16,
             local_files_only=True,
-        ).to("cuda")
+        )
+        # Critical for L4 24 GB: total model weights are ~24 GB at
+        # bf16 (4B transformer + 8B Qwen3 text encoder = 12B params).
+        # Without offload we OOM on the very first /generate call. See
+        # docstring above for the trade-off math. NEVER replace this
+        # with `.to("cuda")` — that worked in dev tests because the
+        # tests didn't actually run inference; the OOM only fires when
+        # the pipeline tries to allocate activations during diffusion.
+        pipe.enable_model_cpu_offload()
+        _PIPE = pipe
         logger.info(
-            "Flux2KleinPipeline loaded in %.2fs (boot+%.2fs)",
+            "Flux2KleinPipeline loaded with model_cpu_offload in %.2fs "
+            "(boot+%.2fs)",
             time.monotonic() - t0,
             time.monotonic() - _BOOT_T0,
         )
