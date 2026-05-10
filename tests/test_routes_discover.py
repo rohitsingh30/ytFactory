@@ -339,6 +339,67 @@ class TestBuildFeed(unittest.TestCase):
         self.assertIn("Keep this", topics)
         self.assertNotIn("Skip this", topics)
 
+    def test_native_source_failure_falls_back_to_llm(self) -> None:
+        """Reddit blowing up shouldn't 502 the request — LLM picks up the slack.
+
+        Regression for the prod 502 spam where a transient Reddit hiccup
+        on /api/discover/mystoriesanimated took the auto-generate button
+        out for everyone. _safe_native_items_for now swallows the
+        exception so the LLM brainstorm carries the response.
+        """
+        result = {"items": [{"topic": "Brainstormed angle"}]}
+        with patch("pipeline.sources.reddit_api.fetch",
+                   side_effect=RuntimeError("reddit 429")), \
+             patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm", return_value=result):
+            feed = _build_feed("mystoriesanimated", req=DiscoverRequest())
+        self.assertGreaterEqual(len(feed.items), 1)
+        self.assertEqual(feed.items[0].source_kind, "llm")
+        # Adapter no longer mentions the (failed) reddit source.
+        self.assertNotIn("reddit", feed.adapter)
+
+
+class TestDiscoverRequestCoercion(unittest.TestCase):
+    """Hard 422s for routine FE drift were the second-biggest source of
+    /api/discover spam. The validators below keep the contract loose
+    where the consequences are cosmetic."""
+
+    def test_null_values_dict_becomes_empty(self) -> None:
+        req = DiscoverRequest.model_validate({"values": None})
+        self.assertEqual(req.values, {})
+
+    def test_avoid_drops_non_string_entries(self) -> None:
+        req = DiscoverRequest.model_validate({"avoid": [None, "real-topic", 5, True]})
+        self.assertEqual(req.avoid, ["real-topic", "5"])
+
+    def test_avoid_string_wrapped_into_list(self) -> None:
+        req = DiscoverRequest.model_validate({"avoid": "single-string"})
+        self.assertEqual(req.avoid, ["single-string"])
+
+    def test_optional_str_fields_strip_and_nullify_blanks(self) -> None:
+        req = DiscoverRequest.model_validate({
+            "variant": "  ",
+            "length_kind": "  long  ",
+            "language": "",
+            "niche_key": None,
+        })
+        self.assertIsNone(req.variant)
+        self.assertEqual(req.length_kind, "long")
+        self.assertIsNone(req.language)
+        self.assertIsNone(req.niche_key)
+
+    def test_non_string_optional_field_coerced(self) -> None:
+        # Ints / floats are stringified (helpful when the FE accidentally
+        # forwards a numeric value); bools are silently dropped because
+        # "True" / "False" is never a valid variant / language / etc.
+        req = DiscoverRequest.model_validate({"variant": 1, "length_kind": True})
+        self.assertEqual(req.variant, "1")
+        self.assertIsNone(req.length_kind)
+
+    def test_non_dict_values_dropped_silently(self) -> None:
+        req = DiscoverRequest.model_validate({"values": "broken"})
+        self.assertEqual(req.values, {})
+
 
 class TestFeedEndpoint(unittest.IsolatedAsyncioTestCase):
     async def test_feed_ok(self) -> None:
@@ -379,6 +440,28 @@ class TestFeedEndpoint(unittest.IsolatedAsyncioTestCase):
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 r = await client.get("/api/discover/mystoriesanimated/feed")
         self.assertEqual(r.status_code, 502)
+
+    async def test_feed_native_failure_falls_back_to_llm(self) -> None:
+        """Production regression: Reddit blocks Cloud Run egress IPs with
+        a 403, but the LLM brainstorm should still carry the response.
+        Pre-fix this 502'd the whole route."""
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        result = {"items": [{"topic": "Drafted by LLM when Reddit was 403"}]}
+        with patch("pipeline.sources.reddit_api.fetch",
+                   side_effect=RuntimeError("403 Blocked")), \
+             patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm", return_value=result):
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.get(
+                    "/api/discover/mystoriesanimated/feed?variant=tifu",
+                )
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        # Adapter should signal the native failure but still surface LLM
+        self.assertIn("llm", data["adapter"])
+        self.assertGreaterEqual(len(data["items"]), 1)
+        self.assertEqual(data["items"][0]["source_kind"], "llm")
 
 
 class TestPickOne(unittest.IsolatedAsyncioTestCase):

@@ -34,7 +34,7 @@ import random
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/discover")
@@ -92,7 +92,14 @@ class DiscoverContextValues(BaseModel):
 
 
 class DiscoverRequest(BaseModel):
-    """Optional body / query carrying the create-form context."""
+    """Optional body / query carrying the create-form context.
+
+    Validators are intentionally lenient: the FE form values dict is a
+    moving target (new fields land all the time, and React state flips
+    can briefly serialise undefined/null where a string is expected).
+    Hard 422s here are user-visible noise that the operator can't fix —
+    we'd rather coerce-or-drop than reject the whole request.
+    """
 
     variant: str | None = None
     length_kind: str | None = None  # "short" | "long"
@@ -100,6 +107,59 @@ class DiscoverRequest(BaseModel):
     niche_key: str | None = None
     values: dict[str, Any] = Field(default_factory=dict)
     avoid: list[str] = Field(default_factory=list)  # already-shown topics
+
+    @field_validator("variant", "length_kind", "language", "niche_key", mode="before")
+    @classmethod
+    def _coerce_optional_str(cls, v):
+        # Treat empty / missing / non-stringy as None rather than 422-ing.
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            # bool subclasses int — but a bool here is meaningless;
+            # silently drop rather than persist "True" as a variant key.
+            return None
+        if isinstance(v, str):
+            s = v.strip()
+            return s or None
+        if isinstance(v, (int, float)):
+            return str(v)
+        return None
+
+    @field_validator("values", mode="before")
+    @classmethod
+    def _coerce_values(cls, v):
+        # The FE may send `null` / `undefined` for the form values dict
+        # before any field has been touched. Treat both as empty dict.
+        if v is None:
+            return {}
+        if isinstance(v, dict):
+            return v
+        # Last-ditch: ignore rather than reject.
+        logger.debug("discover: dropping non-dict values payload (%s)", type(v).__name__)
+        return {}
+
+    @field_validator("avoid", mode="before")
+    @classmethod
+    def _coerce_avoid(cls, v):
+        # Drop non-string entries instead of 422-ing on a single bad item.
+        if v is None:
+            return []
+        if isinstance(v, str):
+            # Single string instead of a list — wrap.
+            return [v]
+        if not isinstance(v, list):
+            return []
+        out: list[str] = []
+        for item in v:
+            if isinstance(item, bool):
+                # bool subclasses int — explicitly skip; "True"/"False"
+                # is meaningless as an avoid-topic.
+                continue
+            if isinstance(item, str) and item.strip():
+                out.append(item)
+            elif isinstance(item, (int, float)):
+                out.append(str(item))
+        return out
 
 
 class DiscoverItem(BaseModel):
@@ -432,15 +492,37 @@ def _filter_avoid(items: list[DiscoverItem], avoid: list[str]) -> list[DiscoverI
     return out
 
 
+def _safe_native_items_for(
+    channel: str, req: DiscoverRequest, *, limit: int,
+) -> tuple[str, list[DiscoverItem]]:
+    """Wrapper around :func:`_native_items_for` that swallows source
+    failures (Reddit rate-limit, Wikipedia DNS, …) instead of surfacing
+    them as 502s. The LLM brainstorm fallback in :func:`_build_feed`
+    keeps the discover endpoint usable even when the native source is
+    down — previously a single Reddit hiccup 502'd the whole call.
+    """
+    try:
+        return _native_items_for(channel, req, limit=limit)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "discover: native source failed for %s; falling back to LLM-only: %s",
+            channel, exc, exc_info=True,
+        )
+        return ("", [])
+
+
 def _build_feed(channel: str, *, limit: int = 8, req: DiscoverRequest | None = None) -> DiscoverFeed:
     """Compose the candidate feed for a channel.
 
     Always tries the native adapter (when one exists) AND the LLM
     brainstorm (per the 2026-05-11 product decision to always blend
-    LLM-augmented suggestions). LLM failures are non-fatal.
+    LLM-augmented suggestions). Native + LLM failures are both
+    non-fatal — only "literally zero items" surfaces as 502.
     """
     req = req or DiscoverRequest()
-    native_label, native_items = _native_items_for(channel, req, limit=limit)
+    native_label, native_items = _safe_native_items_for(channel, req, limit=limit)
     native_items = _filter_avoid(native_items, req.avoid)
 
     # LLM augmentation — always attempted unless globally disabled. We
