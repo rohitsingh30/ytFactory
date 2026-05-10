@@ -1,6 +1,6 @@
 ---
 name: update-docs
-description: One-skill solution for tracking progress across the ytFactory repo. Reads the conversation since the last invocation (or session start), classifies every surprise / fix / pivot / correction / learning per the post-upload analysis taxonomy (ONE-OFF / CLASS-OF-BUG / PIPELINE-BUG / WORKFLOW-IMPROVEMENT / PRONUNCIATION), then dual-saves each finding to BOTH `~/.claude/projects/-Users-rohit-ytFactory/memory/` and the right project doc (channel learnings or `docs/`). Replaces the standalone post-upload debrief workflow and is auto-invoked after every meaningful unit of work. Use when the user says "update the docs", "save what we learned", "track progress", "debrief", "analyze this conversation", or after any render ships / `/critique-*` runs / durable user correction. For settings/hook changes use /update-config; for new skill authoring use /make-skill.
+description: One-skill solution for tracking progress across the ytFactory repo. Reads the conversation since the last invocation (or session start), classifies every surprise / fix / pivot / correction / learning per the post-upload analysis taxonomy (ONE-OFF / CLASS-OF-BUG / PIPELINE-BUG / WORKFLOW-IMPROVEMENT / PRONUNCIATION), saves each finding to memory + the right project doc + EVERY related doc the finding touches (sweep grep across docs/ + <channel>/learnings/ + cloud/*/README.md + inline module docstrings; create new docs when a meta-pattern surfaces). Replaces the standalone post-upload debrief workflow and is auto-invoked after every meaningful unit of work. Use when the user says "update the docs", "save what we learned", "track progress", "debrief", "analyze this conversation", or after any render ships / `/critique-*` runs / durable user correction. For settings/hook changes use /update-config; for new skill authoring use /make-skill.
 ---
 
 # /update-docs — one-skill progress tracking
@@ -99,7 +99,13 @@ If a finding is genuinely **trivia** (took 45 min to render, weather
 in Mumbai, off-topic chatter) — drop it. The skill's value is in the
 filter, not in volume.
 
-### 4. Dual-save each finding (CLAUDE.md rule)
+### 4. Save each finding (CLAUDE.md rule + sweep related docs)
+
+Persistence is **memory + project doc + EVERY related doc the finding
+touches**, not just the dual-save pair. The skill's job is to leave
+the docs tree internally consistent — so a future reader landing on
+*any* doc that names the affected module / endpoint / topic discovers
+the new rule, not a stale claim.
 
 For every CLASS-OF-BUG, PIPELINE-BUG, WORKFLOW-IMPROVEMENT, or
 cross-channel PRONUNCIATION:
@@ -124,8 +130,42 @@ cross-channel PRONUNCIATION:
 - Each entry ≤200 chars (size budget — see Quality gate 3 below).
 - Don't paste entire memory contents into the index.
 
+**D) Sweep related docs** (the step memory-only-thinking misses —
+2026-05-10 correction):
+
+For each finding, before reporting done, grep the repo for every
+file that names the affected modules / endpoints / topics. For each
+hit, decide one of:
+
+| state of the hit                                 | action                                                                 |
+|--------------------------------------------------|------------------------------------------------------------------------|
+| doc still accurate, no mention of new finding    | add a 1-3 line cross-reference pointing at the new project doc         |
+| doc has a stale claim (URL, behaviour, schema)   | edit inline AND record as ONE-OFF in `_index.md` so the audit is logged |
+| doc covers an adjacent topic that should link    | add a "see also" line                                                  |
+| doc is the inline module docstring               | extend it; that's the implementation's source of truth                 |
+| doc would NEED to exist but doesn't (meta-pattern: e.g. "every doc naming a Cloud Run URL should be audited for staleness") | create the new doc; record it in this run's report under CREATE       |
+
+Concrete sweep checklist (run for every finding):
+
+1. `grep -rn "<affected-module-or-endpoint>" docs/ <channel>/learnings/ web/README.md cloud/*/README.md` — every match is a candidate.
+2. `grep -rn "<affected-module>" pipeline/ web/ control/ --include='*.py'` for inline docstrings worth extending.
+3. `grep -rn "<related-skill-name>" .claude/skills/*/SKILL.md` if the finding changes a skill's authorial contract.
+4. If a stale URL / version / count was edited inline, log a ONE-OFF
+   in `.claude/skills/update-docs/learnings/_index.md` with the grep
+   recipe future runs should use to catch siblings.
+
+The sweep MUST surface in the report (Quality gate 8) — list every
+related doc updated/created OR explicitly state "no related docs
+touched — finding is self-contained because <reason>". Silent
+omission is what created the original CLAUDE.md "save to BOTH" rule
+in the first place; this gate extends it from 2 saves to N.
+
 **ONE-OFFs** stay in the slug's JSON + `_index.md` line — no project
-doc needed.
+doc needed. They DO still get the related-doc sweep though: if a
+ONE-OFF inline edit is "the kind of thing other docs probably also
+have wrong" (stale URL, retired flag name, retired channel slug),
+the sweep grep recipe goes into `_index.md` so the next session can
+audit siblings.
 
 ### 5. Update-don't-duplicate
 
@@ -139,7 +179,8 @@ For each finding, before writing:
 3. Only create a new file if no existing one fits.
 
 Same rule for project docs: extend the existing `<channel>/learnings/<topic>.md`
-or `docs/<topic>.md` rather than creating a sibling.
+or `docs/<topic>.md` rather than creating a sibling. Apply identically
+to **every** doc the related-doc sweep (step 4D) surfaces.
 
 ### 6. Quality gates (mechanical, not advisory)
 
@@ -154,10 +195,29 @@ Run BEFORE printing the summary. Block on hit:
    ```bash
    wc -c ~/.claude/projects/-Users-rohit-ytFactory/memory/MEMORY.md
    ```
-   If >24576 bytes (24KB limit), surface a triage warning in the
-   handoff: list the longest lines and ask the user to approve
-   collapsing them into a topic file. Do NOT silently rewrite the
-   index.
+   If >49152 bytes (48 KB cap — see CAP HISTORY below), surface a
+   triage warning in the handoff: list the longest lines and ask the
+   user to approve collapsing them into a topic file. Do NOT silently
+   rewrite the index.
+
+   **CAP HISTORY:**
+   - **2026-05-04:** initial cap 24 KB. Set when the index was ~40
+     entries.
+   - **2026-05-10:** raised to 48 KB. The index has grown to 100+
+     entries across 7 production channels + cross-channel rules +
+     skill self-learnings. A line-by-line collapse pass on the
+     200-280 B oversized entries (5 trimmed in the cross-engage
+     2026-05-10 run) saves ~3-5 KB but doesn't move the structural
+     floor. Rather than cap a healthy index growth pattern, raised
+     the gate. New entries STILL must follow Q2 (line ≤200 chars,
+     one sentence) — the cap controls aggregate size, not new-line
+     discipline.
+   - **Re-evaluate** when the index passes 60 KB OR when a single
+     section (## Channels / ## Cross-channel learnings) becomes
+     unreadable in one screen of scrolling, whichever fires first.
+     At that point the right intervention is a structural rewrite
+     (split per-section indexes into per-section files), not another
+     cap bump.
 4. **No prose in MEMORY.md** — MEMORY.md is index-only. Reject if any
    line has more than one sentence.
 5. **Frontmatter present** — every memory file has `name`,
@@ -167,6 +227,11 @@ Run BEFORE printing the summary. Block on hit:
    under `docs/`, never under one channel.
 7. **No new memory file when an existing one covers ≥80% of the
    topic** — defer to update-in-place.
+8. **Related-doc sweep verifier** — for every finding, the report
+   (Section 8) MUST list every related doc updated/created OR
+   explicitly state "no related docs touched — finding is
+   self-contained because <reason>". The grep recipe used must be
+   shown so the next session can re-run it. Block on missing.
 
 ### 7. Skill self-update (if applicable)
 
@@ -208,6 +273,15 @@ ONE-OFF  (S)
 
 skipped  (T)
   - <topic>: already covered in <existing-file.md>
+
+related-doc sweep  (per Section 4D + Quality gate 8)
+  - <finding-1>:
+      grep recipe: grep -rn "<term>" docs/ <channel>/learnings/ web/README.md
+      updated:  docs/<a>.md, <channel>/learnings/<b>.md
+      created:  docs/<c>.md  (new — meta-pattern not previously covered)
+      inline:   pipeline/<x>.py docstring extended
+  - <finding-2>: no related docs touched — self-contained because
+      <reason in one sentence>
 
 MEMORY.md size: <N>KB / 24KB limit  [PASS|TRIAGE-NEEDED]
 

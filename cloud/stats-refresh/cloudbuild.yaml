@@ -1,0 +1,16 @@
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --tag=${_IMAGE}
+      - --file=cloud/stats-refresh/Dockerfile
+      - .
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: [push, '${_IMAGE}']
+images:
+  - ${_IMAGE}
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1200s

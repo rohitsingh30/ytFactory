@@ -488,10 +488,26 @@ def play_view(
 
 
 def _engage_blocking(uploader_account: str, video_id: str) -> dict[str, Any]:
-    """Likes from every sibling + one anonymous Playwright view."""
-    likes = like_from_siblings(uploader_account, video_id)
-    view = play_view(video_id)
-    return {"likes": likes, "view": view}
+    """Likes from every sibling + one anonymous Playwright view.
+
+    All exceptions are swallowed and returned as the dict result —
+    this function is the worker for a daemon thread, so an unhandled
+    exception would surface as a noisy ``PytestUnhandledThreadException``
+    or print a long traceback in production. The cross-engage path is
+    explicitly best-effort (engagement failures must never block the
+    upload), so degrading gracefully here is the correct contract.
+    """
+    out: dict[str, Any] = {"likes": [], "view": None, "error": None}
+    try:
+        out["likes"] = like_from_siblings(uploader_account, video_id)
+    except Exception as e:  # noqa: BLE001
+        out["error"] = f"like_from_siblings: {e}"
+    try:
+        out["view"] = play_view(video_id)
+    except Exception as e:  # noqa: BLE001
+        # Don't overwrite an earlier error — preserve the first one.
+        out["error"] = out["error"] or f"play_view: {e}"
+    return out
 
 
 def engage_after_upload(

@@ -1,10 +1,23 @@
 # Cloud Run Higgs Audio v2 — service runbook + post-mortem
 
-> **Status (2026-05-06):** Service `ytfactory-tts-higgs` is **LIVE** in
-> `asia-southeast1` on NVIDIA L4. Image `tts-higgs:v12`, revision
-> `00008-8b8`. Runtime weight download (~65 s cold-start). Steady-state
-> RTF ≈ 1.07. **Don't switch back to the bosonai/* official checkpoints
-> without re-validating** — see "the PierrunoYT lesson" below.
+> **Status (2026-05-10):** ⚠ Service `ytfactory-tts-higgs` is **NOT
+> deployed under `ytfactory-prod-v2`**. The 2026-05-06 deployment
+> documented below was under the retired `ytfactory-prod` project;
+> the gcloud commands below all reference that retired project.
+> Higgs lost the post-Phase-4 English TTS bake-off to Chatterbox
+> (`ytfactory-tts-chatterbox`) and was not re-deployed when the
+> project consolidated to `ytfactory-prod-v2`. This doc is kept as
+> the runbook for any future re-deploy — substitute
+> `--project=ytfactory-prod-v2` throughout if you re-stand-it-up.
+> See `docs/full_cloud_cutover_2026_05_09.md` for the consolidation
+> rationale.
+
+> **Original status (2026-05-06):** Service `ytfactory-tts-higgs` was
+> **LIVE** in `asia-southeast1` on NVIDIA L4. Image `tts-higgs:v12`,
+> revision `00008-8b8`. Runtime weight download (~65 s cold-start).
+> Steady-state RTF ≈ 1.07. **Don't switch back to the bosonai/*
+> official checkpoints without re-validating** — see "the PierrunoYT
+> lesson" below.
 
 This doc captures the full story of getting Higgs Audio v2 running on
 our self-hosted Cloud Run + L4 stack: what worked, what didn't, why a

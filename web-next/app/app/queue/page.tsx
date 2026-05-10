@@ -6,7 +6,6 @@ import {
   AlertTriangle,
   CheckCircle2,
   Eye,
-  ExternalLink,
   Gavel,
   ListChecks,
   Loader2,
@@ -46,6 +45,7 @@ import type {
   ResolveHoldResponse,
 } from "@/lib/types";
 import { relativeTime } from "@/lib/utils";
+import { useVisiblePoll } from "@/lib/use-visible-poll";
 
 export default function QueuePage() {
   const [queue, setQueue] = useState<QueueState | null>(null);
@@ -66,11 +66,7 @@ export default function QueuePage() {
     }
   }
 
-  useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 2000);
-    return () => clearInterval(id);
-  }, []);
+  useVisiblePoll(refresh, 2000);
 
   return (
     <div className="flex min-h-full flex-col">
@@ -395,16 +391,6 @@ function HeldCritiqueDialog({
               <span className="mr-auto truncate font-mono text-[10.5px] text-muted-foreground">
                 {data.path}
               </span>
-            )}
-            {entry && (
-              <Button asChild variant="ghost" size="sm">
-                <Link
-                  href={`/app/library?channel=${encodeURIComponent(entry.channel)}&q=${encodeURIComponent(entry.slug)}`}
-                >
-                  Open in Library
-                  <ExternalLink className="h-3 w-3" />
-                </Link>
-              </Button>
             )}
             <Button variant="outline" size="sm" onClick={onClose}>
               Close

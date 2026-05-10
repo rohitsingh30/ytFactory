@@ -19,6 +19,16 @@ so the panel can show it muted instead of dropping it.
 
 The rolling baseline lives at ``data/_bench/cloud_health_baseline.json``
 and is updated by :mod:`pipeline.cloud.snapshot` once per day.
+
+Note (2026-05-10 perf pass — see ``docs/web_perf_pass_2026_05_10.md``):
+the request-level handler at ``control/routes/cloud_routes.py::cloud_health``
+wraps :func:`sweep` in a 5 s in-process TTL cache. Health is volatile,
+but multi-tab × 30 s poll cadence multiplies the work. 5 s is shorter
+than any meaningful service-state change (services recover/die on
+Cloud Run scale events, both >> 5 s) and collapses N-tab × M-poll work
+to a single sweep. ``sweep`` itself stays uncached so callers needing
+real-time data (cron snapshot writer, ad-hoc CLI) bypass via direct
+import.
 """
 from __future__ import annotations
 

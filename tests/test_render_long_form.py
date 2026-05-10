@@ -1066,6 +1066,32 @@ class MainFunctionTests(MainBase):
                 tmp, channel_dir, slug, extra_argv=["--tts-only"]
             )
         mocks["synth_long_narration"].assert_called_once()
+        # Provider must be forwarded into synth_long_narration — pre-2026-05-10
+        # the renderer parsed the YAML provider, validated it, then dropped
+        # it on the floor (synth_long_narration kept its f5_tts default).
+        self.assertEqual(
+            mocks["synth_long_narration"].call_args.kwargs.get("provider"),
+            "cloudrun_f5",
+        )
+
+    def test_cloudrun_chatterbox_provider_calls_synth(self):
+        """2026-05-10: cosmosdecoded + historyrecapped long-form flipped
+        from cloudrun_f5 → cloudrun_chatterbox because the f5 cloud
+        service was never deployed to ytfactory-prod-v2. The renderer
+        must accept the new provider AND forward it to
+        synth_long_narration so the cloud path actually fires."""
+        with local_tempdir() as tmp:
+            channel_dir, slug = self._setup_channel(
+                tmp, tts_provider="cloudrun_chatterbox"
+            )
+            _result, mocks = self._run_main(
+                tmp, channel_dir, slug, extra_argv=["--tts-only"]
+            )
+        mocks["synth_long_narration"].assert_called_once()
+        self.assertEqual(
+            mocks["synth_long_narration"].call_args.kwargs.get("provider"),
+            "cloudrun_chatterbox",
+        )
 
     def test_f5_tts_provider_calls_synth(self):
         with local_tempdir() as tmp:
@@ -1074,6 +1100,10 @@ class MainFunctionTests(MainBase):
                 tmp, channel_dir, slug, extra_argv=["--tts-only"]
             )
         mocks["synth_long_narration"].assert_called_once()
+        self.assertEqual(
+            mocks["synth_long_narration"].call_args.kwargs.get("provider"),
+            "f5_tts",
+        )
 
     def test_reset_mlx_called_before_video(self):
         with local_tempdir() as tmp:

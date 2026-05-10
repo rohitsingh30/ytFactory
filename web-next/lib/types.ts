@@ -42,6 +42,13 @@ export interface ChannelSummary {
   default_length_s?: number | null;
   image_provider?: string | null;
   tts_provider?: string | null;
+  /**
+   * Audio backend declared by the channel YAML — drives the Customize
+   * step's Voice/Song flip default. Values: "tts" (default) | "sunoapi"
+   * | "external_song". Pre-selects the Song tab for sunoapi/external_song
+   * channels (rhymetimejunction today).
+   */
+  audio_provider?: string;
   has_overrides?: boolean;
   variants_count?: number;
 

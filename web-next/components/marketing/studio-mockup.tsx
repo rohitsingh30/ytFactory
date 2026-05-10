@@ -41,7 +41,6 @@ export function StudioMockup() {
             {[
               { l: "Dashboard", a: false },
               { l: "Create", a: true },
-              { l: "Library", a: false },
               { l: "Queue", a: false },
               { l: "Channels", a: false },
               { l: "Settings", a: false },

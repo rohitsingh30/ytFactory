@@ -81,13 +81,45 @@ def cloud_services(authorization: str | None = Header(None)) -> dict[str, Any]:
 
 @router.get("/api/cloud/health")
 def cloud_health(authorization: str | None = Header(None)) -> dict[str, Any]:
-    """Probe every service NOW. No cache — health is volatile."""
+    """Probe every service NOW. 5 s in-process cache.
+
+    Health was uncached previously: every dashboard tile poll fired one
+    sweep — N parallel HTTP probes per call, with up to 15 s timeout per
+    dead service. With multiple tabs open the work multiplied.
+
+    The 5 s window is shorter than any meaningful health-state change
+    (a service either recovers/dies on a Cloud Run scale event, both
+    of which take >> 5 s) so the cached payload is effectively
+    real-time-equivalent for UX while collapsing N tabs × M tabs of
+    polling onto one sweep.
+    """
     _require_auth(authorization)
+
+    import time as _t  # noqa: PLC0415
+
+    now = _t.monotonic()
+    with _HEALTH_CACHE_LOCK:
+        cached = _HEALTH_CACHE.get(None)
+        if cached is not None and (now - cached[0]) < _HEALTH_CACHE_TTL_S:
+            return cached[1]
+
     rows = health_mod.sweep()
-    return {
+    payload = {
         "summary": health_mod.summary(rows),
-        "rows": health_mod.sweep_dict() if False else [r.__dict__ for r in rows],
+        "rows": [r.__dict__ for r in rows],
     }
+    with _HEALTH_CACHE_LOCK:
+        _HEALTH_CACHE[None] = (now, payload)
+    return payload
+
+
+# Module-level cache for cloud_health. ``None`` is the only key — the
+# probe targets ``list_services()`` which is bound at import time.
+import threading as _hth_threading  # noqa: PLC0415
+
+_HEALTH_CACHE_TTL_S = 5.0
+_HEALTH_CACHE: dict[None, tuple[float, dict[str, Any]]] = {}
+_HEALTH_CACHE_LOCK = _hth_threading.Lock()
 
 
 # ---------------------------------------------------------------------------

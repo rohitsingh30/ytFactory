@@ -211,26 +211,41 @@ class TestAccountEmailForToken(unittest.TestCase):
 # ── list_burner_channels ─────────────────────────────────────────────────────
 
 class TestListBurnerChannels(unittest.TestCase):
-    def test_filters_production(self):
-        ids = {
-            "prod_chan": {"channel_id": "UC_prod", "title": "Prod"},
-            "burner1": {"channel_id": "UC_burner", "title": "Burner1"},
-        }
-        with patch.object(_mod, "_production_slugs", return_value={"prod_chan"}), \
-             patch.object(_mod, "_channel_ids_registry", return_value=ids), \
-             patch.object(_mod, "_resolve_token_path",
-                          side_effect=lambda s: FakePath(s) if s == "burner1" else None), \
-             patch.object(_mod, "_account_email_for_token", return_value="burner@e.com"):
-            result = list_burner_channels()
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["slug"], "burner1")
-        self.assertTrue(result[0]["profile_known"])
+    def test_loads_from_yaml(self):
+        """Burners come from pipeline.channels.BURNERS (the YAML manifest)."""
+        from pipeline.channels import BurnerAccount
 
-    def test_no_token_excluded(self):
-        ids = {"b1": {"channel_id": "UC_b1", "title": "B1"}}
-        with patch.object(_mod, "_production_slugs", return_value=set()), \
-             patch.object(_mod, "_channel_ids_registry", return_value=ids), \
-             patch.object(_mod, "_resolve_token_path", return_value=None):
+        fake_burners = (
+            BurnerAccount(
+                slug="zeta",
+                youtube_title="Zeta Title",
+                youtube_channel_id="UC_zeta",
+                google_email="zeta@example.com",
+            ),
+            BurnerAccount(
+                slug="alpha",
+                youtube_title="Alpha Title",
+                youtube_channel_id="UC_alpha",
+                google_email="alpha@example.com",
+            ),
+        )
+        with patch("pipeline.channels.BURNERS", fake_burners), \
+             patch.object(_mod, "_resolve_token_path",
+                          side_effect=lambda s: FakePath(s) if s == "alpha" else None):
+            result = list_burner_channels()
+        # Sorted by slug
+        self.assertEqual([r["slug"] for r in result], ["alpha", "zeta"])
+        self.assertEqual(result[0]["title"], "Alpha Title")
+        self.assertEqual(result[0]["channel_id"], "UC_alpha")
+        self.assertEqual(result[0]["email"], "alpha@example.com")
+        self.assertTrue(result[0]["has_token"])
+        self.assertTrue(result[0]["profile_known"])
+        # zeta has no token file but still shows up — YAML is authoritative
+        self.assertFalse(result[1]["has_token"])
+        self.assertTrue(result[1]["profile_known"])
+
+    def test_empty_yaml(self):
+        with patch("pipeline.channels.BURNERS", ()):
             result = list_burner_channels()
         self.assertEqual(result, [])
 
@@ -444,9 +459,147 @@ class TestMaybeStop(unittest.TestCase):
     def test_no_stop_file(self):
         state = EngageState(slug="s", channel_id="UC", started_at="now")
         fake_stop = FakePath("stop", exists=False)
-        with patch.object(_mod, "_stop_path", return_value=fake_stop):
+        with patch.object(_mod, "_stop_path", return_value=fake_stop), \
+             patch.object(_mod, "_read_stop_sentinel_gcs", return_value=False):
             result = _maybe_stop(state)
         self.assertFalse(result)
+
+    def test_gcs_sentinel_triggers_stop(self):
+        """Cloud-initiated stop: no local /tmp file but GCS sentinel
+        present should still stop the worker."""
+        state = EngageState(slug="s", channel_id="UC", started_at="now")
+        fake_stop = FakePath("stop", exists=False)
+        with patch.object(_mod, "_stop_path", return_value=fake_stop), \
+             patch.object(_mod, "_read_stop_sentinel_gcs", return_value=True):
+            result = _maybe_stop(state)
+        self.assertTrue(result)
+        self.assertTrue(state.stop_requested)
+
+
+# ── GCS state helpers (cloud cutover 2026-05-09) ────────────────────────────
+
+
+class TestStateBucketHelpers(unittest.TestCase):
+    def setUp(self):
+        # Always start with a clean cache so tests don't see each other's data.
+        _mod._GCS_STATE_CACHE.clear()
+        _mod._GCS_STOP_CACHE.clear()
+        _mod._GCS_CLIENT = None
+
+    def tearDown(self):
+        _mod._GCS_STATE_CACHE.clear()
+        _mod._GCS_STOP_CACHE.clear()
+        _mod._GCS_CLIENT = None
+
+    def test_bucket_unset_means_noop(self):
+        """Without YTFACTORY_STATE_BUCKET, all GCS helpers no-op."""
+        with patch.dict("os.environ", {k: v for k, v in __import__("os").environ.items()
+                                       if k != "YTFACTORY_STATE_BUCKET"}, clear=True):
+            self.assertIsNone(_mod._state_bucket())
+            _mod._push_state_gcs("s", {"phase": "x"})  # must not raise
+            self.assertIsNone(_mod._read_state_gcs("s"))
+            self.assertFalse(_mod._read_stop_sentinel_gcs("s"))
+            self.assertFalse(_mod._write_stop_sentinel_gcs("s"))
+            _mod.clear_stop_sentinel("s")  # must not raise
+
+    def test_push_state_uploads_to_correct_blob(self):
+        fake_blob = MagicMock()
+        fake_bucket = MagicMock()
+        fake_bucket.blob = MagicMock(return_value=fake_blob)
+        fake_client = MagicMock()
+        fake_client.bucket = MagicMock(return_value=fake_bucket)
+        with patch.dict("os.environ", {"YTFACTORY_STATE_BUCKET": "bk"}), \
+             patch.object(_mod, "_gcs_client", return_value=fake_client):
+            _mod._push_state_gcs("myslug", {"phase": "watching"})
+        fake_bucket.blob.assert_called_once_with("burner_engage/myslug.json")
+        fake_blob.upload_from_string.assert_called_once()
+        # Fresh state should invalidate any prior cache for that slug.
+        self.assertNotIn("myslug", _mod._GCS_STATE_CACHE)
+
+    def test_push_state_swallows_errors(self):
+        with patch.dict("os.environ", {"YTFACTORY_STATE_BUCKET": "bk"}), \
+             patch.object(_mod, "_gcs_client", side_effect=RuntimeError("boom")):
+            _mod._push_state_gcs("s", {"x": 1})  # must not raise
+
+    def test_read_state_gcs_returns_blob_json(self):
+        fake_blob = MagicMock()
+        fake_blob.exists = MagicMock(return_value=True)
+        fake_blob.download_as_text = MagicMock(return_value='{"phase": "engaging"}')
+        fake_bucket = MagicMock()
+        fake_bucket.blob = MagicMock(return_value=fake_blob)
+        fake_client = MagicMock()
+        fake_client.bucket = MagicMock(return_value=fake_bucket)
+        with patch.dict("os.environ", {"YTFACTORY_STATE_BUCKET": "bk"}), \
+             patch.object(_mod, "_gcs_client", return_value=fake_client):
+            result = _mod._read_state_gcs("s")
+        self.assertEqual(result, {"phase": "engaging"})
+
+    def test_read_state_gcs_caches(self):
+        """Two reads in a row should hit the cache (only one client call)."""
+        fake_blob = MagicMock()
+        fake_blob.exists = MagicMock(return_value=True)
+        fake_blob.download_as_text = MagicMock(return_value='{"phase": "x"}')
+        fake_bucket = MagicMock()
+        fake_bucket.blob = MagicMock(return_value=fake_blob)
+        fake_client = MagicMock()
+        fake_client.bucket = MagicMock(return_value=fake_bucket)
+        with patch.dict("os.environ", {"YTFACTORY_STATE_BUCKET": "bk"}), \
+             patch.object(_mod, "_gcs_client", return_value=fake_client) as gcli:
+            r1 = _mod._read_state_gcs("s")
+            r2 = _mod._read_state_gcs("s")
+        self.assertEqual(r1, r2)
+        # Client invoked once on first read; second served from cache.
+        self.assertEqual(gcli.call_count, 1)
+
+    def test_read_state_gcs_blob_missing_returns_none(self):
+        fake_blob = MagicMock()
+        fake_blob.exists = MagicMock(return_value=False)
+        fake_bucket = MagicMock()
+        fake_bucket.blob = MagicMock(return_value=fake_blob)
+        fake_client = MagicMock()
+        fake_client.bucket = MagicMock(return_value=fake_bucket)
+        with patch.dict("os.environ", {"YTFACTORY_STATE_BUCKET": "bk"}), \
+             patch.object(_mod, "_gcs_client", return_value=fake_client):
+            self.assertIsNone(_mod._read_state_gcs("s"))
+
+    def test_request_stop_writes_both_local_and_gcs(self):
+        fake_local = FakePath("/tmp/burner_engage_x.stop", exists=False)
+        with patch.object(_mod, "_stop_path", return_value=fake_local), \
+             patch.object(_mod, "_write_stop_sentinel_gcs") as gcs:
+            request_stop("x")
+        self.assertNotEqual(fake_local._text_data, "")
+        gcs.assert_called_once_with("x")
+
+    def test_clear_stop_sentinel_deletes_blob(self):
+        fake_blob = MagicMock()
+        fake_blob.exists = MagicMock(return_value=True)
+        fake_bucket = MagicMock()
+        fake_bucket.blob = MagicMock(return_value=fake_blob)
+        fake_client = MagicMock()
+        fake_client.bucket = MagicMock(return_value=fake_bucket)
+        with patch.dict("os.environ", {"YTFACTORY_STATE_BUCKET": "bk"}), \
+             patch.object(_mod, "_gcs_client", return_value=fake_client):
+            _mod.clear_stop_sentinel("s")
+        fake_blob.delete.assert_called_once()
+
+    def test_read_state_prefers_gcs_over_local(self):
+        fake_local = FakePath("local.json", exists=True)
+        fake_local._text_data = '{"phase": "from-local"}'
+        with patch.object(_mod, "_state_path", return_value=fake_local), \
+             patch.object(_mod, "_state_bucket", return_value="bk"), \
+             patch.object(_mod, "_read_state_gcs",
+                          return_value={"phase": "from-cloud"}):
+            result = read_state("s")
+        self.assertEqual(result["phase"], "from-cloud")
+
+    def test_read_state_falls_back_to_local_when_gcs_empty(self):
+        fake_local = FakePath("local.json", exists=True)
+        fake_local._text_data = '{"phase": "local-only"}'
+        with patch.object(_mod, "_state_path", return_value=fake_local), \
+             patch.object(_mod, "_state_bucket", return_value="bk"), \
+             patch.object(_mod, "_read_state_gcs", return_value=None):
+            result = read_state("s")
+        self.assertEqual(result["phase"], "local-only")
 
 
 class TestDeprecatedClickers(unittest.TestCase):
@@ -525,6 +678,9 @@ class TestRun(unittest.TestCase):
                    return_value=("liked", MagicMock())), \
              patch("pipeline.cross_engage.cross_engage_via_playwright._probe_subscribe",
                    return_value=("subscribed", MagicMock())), \
+             patch("pipeline.cross_engage.cross_engage_burner_attached.switch_to_burner_brand",
+                   return_value=True), \
+             patch("pipeline.cross_engage.cross_engage_burner_attached.switch_to_burner_brand", return_value=True), \
              patch("playwright.sync_api.sync_playwright", mock_sp), \
              patch("subprocess.run",
                    return_value=MagicMock(stdout=" ".join(chrome_pids) + "\n")), \
@@ -634,6 +790,7 @@ class TestRun(unittest.TestCase):
                    return_value=("liked", MagicMock())), \
              patch("pipeline.cross_engage.cross_engage_via_playwright._probe_subscribe",
                    return_value=("subscribed", MagicMock())), \
+             patch("pipeline.cross_engage.cross_engage_burner_attached.switch_to_burner_brand", return_value=True), \
              patch("playwright.sync_api.sync_playwright", mock_sp), \
              patch("subprocess.run", return_value=MagicMock(stdout="99999\n")), \
              patch.object(_mod, "_save_state"), \
@@ -702,6 +859,7 @@ class TestRun(unittest.TestCase):
                    side_effect=probe_like_impl), \
              patch("pipeline.cross_engage.cross_engage_via_playwright._probe_subscribe",
                    side_effect=probe_sub_impl), \
+             patch("pipeline.cross_engage.cross_engage_burner_attached.switch_to_burner_brand", return_value=True), \
              patch("playwright.sync_api.sync_playwright", mock_sp), \
              patch("subprocess.run", return_value=MagicMock(stdout="")), \
              patch.object(_mod, "_save_state"), \
@@ -741,6 +899,7 @@ class TestRun(unittest.TestCase):
              patch("pipeline.cross_engage.cross_engage_via_playwright._clear_singleton"), \
              patch("pipeline.cross_engage.cross_engage_via_playwright.launch_chrome_for",
                    return_value=(mock_proc, "12345")), \
+             patch("pipeline.cross_engage.cross_engage_burner_attached.switch_to_burner_brand", return_value=True), \
              patch("playwright.sync_api.sync_playwright", mock_sp), \
              patch("subprocess.run", return_value=MagicMock(stdout="")), \
              patch.object(_mod, "_save_state"), \
@@ -777,6 +936,7 @@ class TestRun(unittest.TestCase):
                    return_value=("liked", MagicMock())), \
              patch("pipeline.cross_engage.cross_engage_via_playwright._probe_subscribe",
                    return_value=("subscribed", MagicMock())), \
+             patch("pipeline.cross_engage.cross_engage_burner_attached.switch_to_burner_brand", return_value=True), \
              patch("playwright.sync_api.sync_playwright", mock_sp), \
              patch("subprocess.run", return_value=MagicMock(stdout="")), \
              patch.object(_mod, "_save_state"), \
@@ -787,16 +947,25 @@ class TestRun(unittest.TestCase):
         self.assertEqual(rc, 0)
 
     def test_run_no_pages_after_engage(self):
-        """Cover the 'no playable tabs' branch when all pages have non-http URLs."""
+        """Cover the 'no tabs opened — nothing to cycle' branch.
+
+        Post 2026-05-10 refactor: Phase 0 opens all tabs upfront; if
+        every ctx.new_page() (or page.goto) raises, video_pages stays
+        empty and the worker exits with phase=failed / rc=1 BEFORE
+        entering the cycle loop. Replaces the old test for the
+        Phase-2 "no http pages" branch which no longer exists.
+        """
         from pipeline.cross_engage.burner_engage import run
         burners = [{"slug": "b1", "channel_id": "UC", "email": "e@e.com"}]
         catalog = [_make_catalog_entry("v1")]
         mock_sp, pw, browser, ctx, page = make_fake_playwright(
             "https://www.youtube.com/watch?v=v1"
         )
-        # No http pages in context after engage
-        ctx.pages = []
-        ctx.new_page.return_value = page
+        # Force Phase 0 to fail on every tab open. Either path works
+        # (ctx.new_page raise OR page.goto raise) but new_page is
+        # cleaner because it also exercises the broad except in the
+        # Phase 0 loop.
+        ctx.new_page.side_effect = RuntimeError("page-open denied")
 
         fake_stop = FakePath("stop", exists=False)
         mock_proc = MagicMock()
@@ -813,6 +982,7 @@ class TestRun(unittest.TestCase):
                    return_value=("liked", MagicMock())), \
              patch("pipeline.cross_engage.cross_engage_via_playwright._probe_subscribe",
                    return_value=("subscribed", MagicMock())), \
+             patch("pipeline.cross_engage.cross_engage_burner_attached.switch_to_burner_brand", return_value=True), \
              patch("playwright.sync_api.sync_playwright", mock_sp), \
              patch("subprocess.run", return_value=MagicMock(stdout="")), \
              patch.object(_mod, "_save_state"), \
@@ -850,6 +1020,7 @@ class TestRun(unittest.TestCase):
                    return_value=("liked", MagicMock())), \
              patch("pipeline.cross_engage.cross_engage_via_playwright._probe_subscribe",
                    return_value=("subscribed", MagicMock())), \
+             patch("pipeline.cross_engage.cross_engage_burner_attached.switch_to_burner_brand", return_value=True), \
              patch("playwright.sync_api.sync_playwright", mock_sp), \
              patch("subprocess.run", return_value=MagicMock(stdout="")), \
              patch.object(_mod, "_save_state"), \
@@ -881,6 +1052,7 @@ class TestRun(unittest.TestCase):
              patch("pipeline.cross_engage.cross_engage_via_playwright._clear_singleton"), \
              patch("pipeline.cross_engage.cross_engage_via_playwright.launch_chrome_for",
                    return_value=(mock_proc, "12345")), \
+             patch("pipeline.cross_engage.cross_engage_burner_attached.switch_to_burner_brand", return_value=True), \
              patch("playwright.sync_api.sync_playwright", mock_sp), \
              patch("subprocess.run", return_value=MagicMock(stdout="")), \
              patch.object(_mod, "_save_state"), \
@@ -916,6 +1088,7 @@ class TestRun(unittest.TestCase):
                    return_value=("liked", MagicMock())), \
              patch("pipeline.cross_engage.cross_engage_via_playwright._probe_subscribe",
                    return_value=("subscribed", MagicMock())), \
+             patch("pipeline.cross_engage.cross_engage_burner_attached.switch_to_burner_brand", return_value=True), \
              patch("playwright.sync_api.sync_playwright", mock_sp), \
              patch("subprocess.run", return_value=MagicMock(stdout="")), \
              patch.object(_mod, "_save_state"), \
@@ -954,6 +1127,7 @@ class TestRun(unittest.TestCase):
              patch("pipeline.cross_engage.cross_engage_via_playwright._clear_singleton"), \
              patch("pipeline.cross_engage.cross_engage_via_playwright.launch_chrome_for",
                    return_value=(mock_proc, "12345")), \
+             patch("pipeline.cross_engage.cross_engage_burner_attached.switch_to_burner_brand", return_value=True), \
              patch("playwright.sync_api.sync_playwright", mock_sp), \
              patch("subprocess.run", return_value=MagicMock(stdout="")), \
              patch.object(_mod, "_save_state"), \
@@ -1012,6 +1186,7 @@ class TestRun(unittest.TestCase):
              patch("pipeline.cross_engage.cross_engage_via_playwright.launch_chrome_for",
                    return_value=(mock_proc, "12345")), \
              like_patch, sub_patch, \
+             patch("pipeline.cross_engage.cross_engage_burner_attached.switch_to_burner_brand", return_value=True), \
              patch("playwright.sync_api.sync_playwright", mock_sp), \
              patch("subprocess.run", return_value=MagicMock(stdout="")), \
              patch.object(_mod, "_save_state"), \
@@ -1126,12 +1301,19 @@ class TestCli(unittest.TestCase):
         with patch.object(_mod, "run", return_value=0) as mock_run:
             rc = self._run_cli(["run", "b1"])
         self.assertEqual(rc, 0)
-        mock_run.assert_called_once_with("b1", headless=False)
+        mock_run.assert_called_once_with("b1", headless=False, mode="like_subscribe_view")
 
     def test_run_cmd_headless(self):
         with patch.object(_mod, "run", return_value=0) as mock_run:
             rc = self._run_cli(["run", "b1", "--headless"])
-        mock_run.assert_called_once_with("b1", headless=True)
+        mock_run.assert_called_once_with("b1", headless=True, mode="like_subscribe_view")
+
+    def test_run_cmd_mode(self):
+        """--mode plumbs through to run()."""
+        with patch.object(_mod, "run", return_value=0) as mock_run:
+            rc = self._run_cli(["run", "b1", "--mode", "subscribe_only"])
+        self.assertEqual(rc, 0)
+        mock_run.assert_called_once_with("b1", headless=False, mode="subscribe_only")
 
     def test_unknown_parsed_command_returns_2(self):
         from pipeline.cross_engage.burner_engage import _cli

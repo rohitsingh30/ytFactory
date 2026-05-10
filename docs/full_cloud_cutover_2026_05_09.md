@@ -145,6 +145,17 @@ render entry) didn't exist on the new control plane — it lived in
   fetched from GCS).
 - `GET /api/jobs/from_script/{id}/mp4` 302s to a 15-min signed URL.
 
+> **2026-05-10 follow-up — unified `/api/jobs/{id}` read surface.** The
+> Phase-4 split into `JOBS` (niche) vs `SCRIPT_JOBS` (skill) namespaces
+> caused the new web-next render-detail page to 404 on every
+> skill-submitted render (`/app/render/<id>` polls `/api/jobs/{id}`,
+> which only checked `JOBS`). `web/server.py:job_snapshot()` and
+> `job_short()` now fall through to `SCRIPT_JOBS`; same call site adapts
+> the record into both legacy + new `JobView` shapes. `SCRIPT_JOBS`
+> itself is now Firestore-backed (`web/script_jobs_store.py`,
+> `YTFACTORY_QUEUE_BACKEND=firestore`) so jobs survive Cloud Run
+> revision rollover. Full pattern: `docs/jobs_snapshot_unification.md`.
+
 Wired into `control/server_dev.py`: now 87 routes (was 65 at
 session start).
 
@@ -177,8 +188,21 @@ Wired up `~/Library/LaunchAgents/com.ytfactory.laptop-agent.plist`:
 pointing to `/.claude/skills/upload-via-playwright/SKILL.md` —
 implementing the actual Chrome automation is a follow-on task. The
 heartbeat + lease + ack loop works; the executor is just the missing
-body. Burner_engage IS implemented (delegates to existing
-`pipeline.burner_engage run <slug>`).
+body.
+
+`burner_engage` was claimed implemented here, but the cloud entry
+point (`POST /api/burner_channels/<slug>/engage` in
+`control/routes/burner_routes.py`) was still doing
+`subprocess.Popen(...)` on the cloud container (no Chrome → silent
+crash → UI 404 storm). Plus three more gaps surfaced 2026-05-10:
+the agent middleware needed an IAM bypass for `/agent/*`, the
+laptop catalog reader needed GCS-awareness, and the worker needed
+to actively brand-switch before engaging (one Google account hosts
+multiple burners). The full cloud cross-engage path is now
+documented in
+[`docs/cross_engage_cloud_v2.md`](cross_engage_cloud_v2.md). The
+laptop-only `pipeline.cross_engage.burner_engage run <slug>`
+direct-CLI path still works in dev when `K_SERVICE` is unset.
 
 **Pending:** Firestore composite index on `tasks(kind,status,created_at)`
 was creating at session end (~5 min build). Once live the lease will

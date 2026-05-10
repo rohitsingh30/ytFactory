@@ -91,8 +91,21 @@ class _FakeYouTube:
         return self._videos
 
 
-def _install_fake_googleapiclient(youtube: _FakeYouTube) -> None:
-    """Inject a fake ``googleapiclient`` package into sys.modules."""
+def _install_fake_googleapiclient(youtube: _FakeYouTube) -> dict[str, object | None]:
+    """Inject a fake ``googleapiclient`` package into sys.modules.
+
+    Returns the dict of replaced modules (per-key originals or
+    ``None`` when the key didn't exist before) so the caller's
+    ``tearDown`` can restore the prior state via
+    :func:`_uninstall_fake_googleapiclient`. Without restore, every
+    later test that imports ``googleapiclient`` gets the fake one
+    and downstream calls (`discovery.build(creds=…)`) explode with
+    `AttributeError`.
+    """
+    saved: dict[str, object | None] = {
+        k: sys.modules.get(k)
+        for k in ("googleapiclient", "googleapiclient.discovery", "googleapiclient.errors")
+    }
     discovery = types.ModuleType("googleapiclient.discovery")
     discovery.build = lambda *a, **kw: youtube
     errors = types.ModuleType("googleapiclient.errors")
@@ -107,6 +120,17 @@ def _install_fake_googleapiclient(youtube: _FakeYouTube) -> None:
     sys.modules["googleapiclient"] = pkg
     sys.modules["googleapiclient.discovery"] = discovery
     sys.modules["googleapiclient.errors"] = errors
+    return saved
+
+
+def _uninstall_fake_googleapiclient(saved: dict[str, object | None]) -> None:
+    """Restore sys.modules to its state before
+    :func:`_install_fake_googleapiclient`."""
+    for key, prev in saved.items():
+        if prev is None:
+            sys.modules.pop(key, None)
+        else:
+            sys.modules[key] = prev
 
 
 # ---- shared fixtures ----------------------------------------------------
@@ -210,7 +234,7 @@ class FetchAccountTest(unittest.TestCase):
                 "status": {},
             },
         })
-        _install_fake_googleapiclient(_FakeYouTube(
+        self._gapi_saved = _install_fake_googleapiclient(_FakeYouTube(
             channels=self.channels, playlist_items=self.playlist, videos=self.videos,
         ))
         from pipeline.upload import upload as up
@@ -222,6 +246,7 @@ class FetchAccountTest(unittest.TestCase):
         self.point.__exit__(None, None, None)
         from pipeline.upload import upload as up
         up.authenticate = self._orig_auth
+        _uninstall_fake_googleapiclient(self._gapi_saved)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_writes_account_cache(self):
@@ -297,7 +322,7 @@ class VideosBatchingTest(unittest.TestCase):
             v: {"snippet": {"title": v, "thumbnails": {}}, "statistics": {}, "contentDetails": {}, "status": {}}
             for v in ids
         })
-        _install_fake_googleapiclient(_FakeYouTube(
+        self._gapi_saved = _install_fake_googleapiclient(_FakeYouTube(
             channels=channels, playlist_items=playlist, videos=self.videos,
         ))
         from pipeline.upload import upload as up
@@ -309,6 +334,7 @@ class VideosBatchingTest(unittest.TestCase):
         self.point.__exit__(None, None, None)
         from pipeline.upload import upload as up
         up.authenticate = self._orig_auth
+        _uninstall_fake_googleapiclient(self._gapi_saved)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_chunks_videos_list_at_50(self):
@@ -324,7 +350,7 @@ class NoAuthTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         _write_channel_dir(self.tmp, "ghosted", account="ghosted")
         # Even though no API call should reach these, install harmless fakes.
-        _install_fake_googleapiclient(_FakeYouTube(
+        self._gapi_saved = _install_fake_googleapiclient(_FakeYouTube(
             channels=_FakeChannels(None),
             playlist_items=_FakePlaylistItems({}),
             videos=_FakeVideos({}),
@@ -340,6 +366,7 @@ class NoAuthTest(unittest.TestCase):
         self.point.__exit__(None, None, None)
         from pipeline.upload import upload as up
         up.authenticate = self._orig_auth
+        _uninstall_fake_googleapiclient(self._gapi_saved)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_fetch_account_returns_none(self):

@@ -16,19 +16,43 @@ All burners are **brand accounts** under one Google host account
 (default `rsinghtomar54@gmail.com`, real Chrome `Profile 1`). Switch
 hosts via the `--email` flag if you spread burners across accounts.
 
-| Surface | Path |
-|---|---|
-| OAuth token (per burner) | `~/.config/ytfactory/youtube_token_<slug>.json` |
-| Slug → channel_id index | `~/.config/ytfactory/channel_ids.json` |
-| Slug → host email map | `~/.config/ytfactory/profile_map.json` |
-| Engage-worker state | `data/burner_engage/<slug>.json` |
-| Per-create artifacts | `/tmp/pw-create-burner/<slug>/` (screenshots, html dumps, oauth.log) |
+**Source of truth (2026-05-10):** the committed manifest
+[`pipeline/burners.yaml`](../pipeline/burners.yaml). Every burner row
+declares `slug`, `youtube_title`, `youtube_channel_id`, `google_email`.
+`pipeline.channels._load_burners` parses it on import and exposes
+`BURNERS`; `pipeline.cross_engage.burner_engage.list_burner_channels()`
+(and therefore the `/app/burner-channels` dashboard) iterate that
+tuple. **Adding / removing a burner = edit `burners.yaml` and ship.
+No other file is consulted to decide whether a burner exists.**
+
+Per-laptop runtime files still exist as caches the laptop-side
+Playwright runner uses to avoid re-deriving things (token, host
+profile mapping, engage progress), but they are **not** discovery
+inputs:
+
+| Surface | Path | Role |
+|---|---|---|
+| Burner manifest (SoT) | `pipeline/burners.yaml` | one row per burner, committed |
+| OAuth token (per burner) | `~/.config/ytfactory/youtube_token_<slug>.json` | runtime cache, per laptop |
+| Slug → channel_id index | `~/.config/ytfactory/channel_ids.json` | runtime cache, per laptop |
+| Slug → host email map | `~/.config/ytfactory/profile_map.json` | runtime cache, per laptop |
+| Engage-worker state | `data/burner_engage/<slug>.json` | per-run progress |
+| Per-create artifacts | `/tmp/pw-create-burner/<slug>/` (screenshots, html dumps, oauth.log) | debug |
+
+> **Promotion gap (open follow-up, 2026-05-10):** `register_burner()`
+> in `pipeline/cross_engage/create_burner_channel.py` writes
+> `channel_ids.json` + `profile_map.json` after a successful create
+> but does NOT append the new row to `pipeline/burners.yaml`. Until
+> someone hand-edits the YAML and redeploys, a freshly-minted burner
+> won't appear in the dashboard or `pipeline.burner_engage list`. See
+> `~/.claude/projects/-Users-rohit-ytFactory/memory/feedback_burner_yaml_sot_drift.md`.
 
 The burner is "registered" — and therefore discoverable by
-`pipeline.burner_engage list` — once **all three** of these exist:
-* `channel_ids.json` entry
-* `profile_map.json` entry
-* `youtube_token_<slug>.json`
+`pipeline.burner_engage list` — once it appears in
+`pipeline/burners.yaml`. The runtime caches above are required for
+the engage worker to actually drive it (no token = can't act as the
+burner; no profile mapping = can't pick the right Chrome window) but
+they're filled in lazily on first run.
 
 ## End-to-end create flow
 
@@ -146,6 +170,7 @@ OAuth incomplete) leaves the burner discoverable but flagged as
 | `Failed to create channel. Please try changing your channel name` | Per-account rate-limit OR name was used in a failed attempt today | Wait 24h OR pick a different name. Sometimes the channel gets created anyway — check `https://myaccount.google.com/brandaccounts`. |
 | OAuth subprocess times out | Port 8089 already in use OR you took >10 min on the consent screen | `lsof -nP -iTCP:8089` to find the conflicting process. Re-run authenticate manually. |
 | OAuth completes but no `refresh_token` | Google deduped issuance (you've consented before) | Visit `https://myaccount.google.com/connections`, remove the OAuth app, re-run. |
+| **Chrome windows opening unexpectedly during unrelated work** | The launchd-managed `pipeline.laptop_agent` long-polls the cloud control plane and spawns `burner_engage` workers that launch fresh-profile Chrome on their own | `tail /tmp/ytfactory-laptop-agent.err` — every spawn logs `executing task <id> kind=burner_engage`. To stop: `launchctl unload ~/Library/LaunchAgents/com.ytfactory.laptop-agent.plist`. NOT caused by code that's "currently running" — the agent is autonomous. (Surfaced 2026-05-10.) |
 
 ## Cleaning up unwanted brand accounts
 
@@ -205,15 +230,57 @@ The attached variant:
 6. **Never kills any Chrome.** The engage Chrome stays up so the next
    `--limit N` invocation attaches to it instantly.
 
-### Known gap — Shorts videos
+### Shorts engagement — partial 2026-05-10 (cloud-flow)
 
-When a catalog entry is a YouTube Short (`/shorts/<id>`), the
-`/watch?v=<id>` form 302s to `/shorts/<id>` which has a different
-player DOM. Our `_probe_like` / `_probe_subscribe` selectors are tuned
-for the `/watch` page; on Shorts they return `unknown`. Workaround for
-now: skip Shorts engagement (most production catalog is Shorts so this
-is non-trivial — needs a separate Shorts-DOM probe). Tracking as a
-P3.5 follow-up.
+The cloud-driven flow (see
+[`docs/cross_engage_cloud_v2.md`](cross_engage_cloud_v2.md))
+deliberately uses the `/shorts/<id>` URL form — the Shorts player
+auto-loops indefinitely in the same tab, which compounds the
+Phase-2 tab-cycle watch-time signal vs the regular `/watch` player
+that stops at video end.
+
+What works on Shorts URLs:
+
+- ✅ Brand-switch + verify (via avatar menu + the
+  `/account`-based `_read_active_uc`)
+- ✅ Tab open + auto-loop watch-time accumulation
+- ✅ Phase-2 tab-cycle focus rotation
+
+What's still broken on Shorts URLs:
+
+- ❌ `_probe_like` / `_probe_subscribe` clicks — selectors target
+  the `/watch` player DOM (`button#segmented-like-button` style).
+  Windowed Chrome masks this through animation/timing leniency the
+  headless renderer skips; headless mode exposes the gap
+  immediately. P3.5 follow-up: separate Shorts-DOM probe.
+
+### Brand-account switch — mandatory before engagement (2026-05-10)
+
+`burner_engage.run()` MUST call
+[`switch_to_burner_brand`](../pipeline/cross_engage/cross_engage_burner_attached.py)
+right after Chrome attached and before the engage loop. One Google
+account hosts several burners (rs54 hosts afddfdf, ajfsbqe, axkxlwv,
+cbxqzlyivk; rs3011 hosts ~10), and YouTube tracks the active brand
+via cookies — without an explicit switch the Like/Subscribe lands on
+whichever brand was last selected. Live observation 2026-05-10 22:18:
+the pre-switch run engaged as `UCxClGoGmVMnkC8ytTOMvQKQ` (a sibling
+burner) instead of the requested `UCwKxho5ZLIgoH52eEun8T7g` (afddfdf).
+
+`burner_engage.run` hard-fails (`return 1`, phase=`failed`) if the
+switch can't be verified — engaging from the wrong identity is worse
+than failing visibly.
+
+### Active-brand verifier — `/account` page, not Studio (2026-05-10)
+
+`_read_active_uc` originally probed `studio.youtube.com` for a
+`/channel/UC…` redirect. That works windowed but returns `None` in
+headless Chrome (Studio's SPA loads but never initialises the
+channel context). New fallback: hit
+`https://www.youtube.com/account` and take the most-frequent
+`/channel/(UC…)` from its HTML (every link on the account page points
+at the active brand). Works headless AND windowed, so it also
+robustifies the windowed path against Studio first-run modals or
+transient redirects.
 
 ### Why we abandoned the "new window via CDP" approach
 

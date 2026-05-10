@@ -257,10 +257,40 @@ def switch_to_burner_brand(page, work_dir: pathlib.Path, *, burner: dict) -> boo
                 except Exception:
                     continue
             m = re.search(r"/channel/(UC[A-Za-z0-9_-]{20,})", verify.url)
-            return m.group(1) if m else None
+            if m:
+                return m.group(1)
         finally:
             try: verify.close()
             except Exception: pass
+
+        # Fallback: studio.youtube.com fails to redirect in headless
+        # Chrome (the SPA loads but never initialises the channel
+        # context — validated 2026-05-10). Probe www.youtube.com/account
+        # instead — it renders fully in headless and the ONLY UC that
+        # appears in its HTML is the active brand's channel id (every
+        # /channel/UC… link on that page points at the active brand).
+        # Works in both headless and windowed mode, so it's now the
+        # primary verifier for headless flows.
+        verify2 = ctx.new_page()
+        verify2.set_default_timeout(15000)
+        try:
+            verify2.goto("https://www.youtube.com/account", wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2.0)
+            html = verify2.content()
+            ucs = re.findall(r"/channel/(UC[A-Za-z0-9_-]{20,})", html)
+            if ucs:
+                # Most-frequent UC = active brand (the page is dotted with
+                # links to "your channel"). De-duplicate-and-mode beats
+                # picking the first since some markup chunks reference
+                # other channels in passing (subscription suggestions).
+                from collections import Counter  # noqa: PLC0415
+                return Counter(ucs).most_common(1)[0][0]
+        except Exception:
+            pass
+        finally:
+            try: verify2.close()
+            except Exception: pass
+        return None
 
     active_uc = _read_active_uc()
     if active_uc == target_uc:

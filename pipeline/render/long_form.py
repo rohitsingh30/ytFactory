@@ -121,10 +121,21 @@ def _f5_chunk(
     speed: float = 0.95,
     provider: str = "f5_tts",
 ) -> None:
-    """Single F5 synth → wav. Routes to local f5_tts (MLX) or cloudrun_f5
-    based on ``provider``. Both produce the same voice character because
-    cloud uses the same checkpoint + same flow-matching params (see
-    docs/cloudrun_tts.md and cloud/tts-f5/models/f5.py).
+    """Single TTS chunk → wav. Routes by ``provider`` to the matching
+    backend in ``pipeline.audio.synthesize``:
+
+    * ``f5_tts`` / ``cloudrun_f5`` — F5-TTS (local MLX or Cloud Run L4).
+      Both produce the same voice character because cloud uses the same
+      checkpoint + flow-matching params (see docs/cloudrun_tts.md and
+      cloud/tts-f5/models/f5.py).
+    * ``cloudrun_chatterbox`` — Chatterbox via Cloud Run L4. Picked as
+      the canonical long-form English provider on 2026-05-10 after
+      ``ytfactory-tts-f5`` was retired in favour of
+      ``ytfactory-tts-chatterbox``. Conditions on the ref-WAV embedding
+      only — ``ref_audio_text`` is ignored.
+
+    Name retained for backward compat (sports_doc.py and tests import
+    ``_f5_chunk``); a future refactor can rename to ``_synth_chunk``.
     """
     from pipeline import audio as _aud
     ref_path = ref_audio_path
@@ -226,6 +237,15 @@ def synth_long_narration(
         chunks render concurrently rather than serially. Auto-falls
         back to local f5_tts on cloud failure (handled inside
         pipeline.tts.cloudrun).
+      * ``cloudrun_chatterbox`` — Chatterbox via Cloud Run GPU L4.
+        Same fan-out / prewarm / fallback semantics as cloudrun_f5
+        (single shared cloud-TTS infra in pipeline.tts.cloudrun).
+        Does NOT use ``ref_audio_text`` — Chatterbox conditions on
+        the ref-WAV embedding only. ``voice_id`` is still the path
+        to the 5-15s ref WAV (e.g. ``pipeline/voice_refs/sarah.wav``).
+        Picked as the canonical long-form English provider on
+        2026-05-10 after ``ytfactory-tts-f5`` was retired in favour
+        of ``ytfactory-tts-chatterbox``.
       * ``kokoro`` (sportstoriesanimated long-form doc) — Kokoro 82M
         voice catalogue. ``voice_id`` is a Kokoro voice id (e.g.
         ``am_michael``). ``ref_audio_text`` is unused. Local-only;
@@ -238,10 +258,10 @@ def synth_long_narration(
             "long_form config (the spoken transcript of the ref WAV at "
             "tts_voice)"
         )
-    if provider not in ("f5_tts", "cloudrun_f5", "kokoro"):
+    if provider not in ("f5_tts", "cloudrun_f5", "cloudrun_chatterbox", "kokoro"):
         raise RuntimeError(
             f"synth_long_narration: unsupported provider {provider!r}. "
-            "Supported: f5_tts, cloudrun_f5, kokoro."
+            "Supported: f5_tts, cloudrun_f5, cloudrun_chatterbox, kokoro."
         )
 
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -253,7 +273,7 @@ def synth_long_narration(
     # MUST stay serial (shared M2 Max GPU; concurrent MLX/Metal ops
     # serialise + fragment unified memory — see
     # docs/long_form_model_inventory.md "Parallelism" section).
-    is_cloud = provider == "cloudrun_f5"
+    is_cloud = provider in ("cloudrun_f5", "cloudrun_chatterbox")
     parallel_workers = 0
     if is_cloud:
         parallel_workers = int(os.environ.get(
@@ -270,7 +290,9 @@ def synth_long_narration(
         try:
             from pipeline.tts.cloudrun import _service_url, _get_id_token
             import urllib.request
-            url = _service_url(model="f5")
+            # Map provider → cloudrun.py model alias for the URL lookup.
+            _model_alias = "chatterbox" if provider == "cloudrun_chatterbox" else "f5"
+            url = _service_url(model=_model_alias)
             token = _get_id_token(url)
             req = urllib.request.Request(
                 url=f"{url}/readyz",
@@ -1588,25 +1610,40 @@ def main() -> int:
         )
     voice_id = lf["tts_voice"]
     atempo = float(lf.get("tts_post_atempo", 0.85))
-    # Long-form supports only the F5-family providers today (local
-    # f5_tts MLX and cloudrun_f5 cloud variant). Other tts_provider
-    # values are hard-rejected so the run fails fast instead of
-    # silently picking a stale path. Cloud-first migration 2026-05-06
-    # flipped Shorts to cloudrun_chatterbox, but long-form still
-    # requires F5 because synth_long_narration's chunking + resume +
-    # atempo + parallel-fan-out path is implemented for F5 only. To
-    # add Chatterbox/Higgs/CosyVoice support, extend
-    # synth_long_narration in this module to accept those providers.
+    # Long-form supports the F5 family (local f5_tts MLX + cloudrun_f5)
+    # AND cloudrun_chatterbox. Other tts_provider values are
+    # hard-rejected so the run fails fast instead of silently picking a
+    # stale path. (kokoro is accepted by synth_long_narration for the
+    # separate sports_doc renderer, but the historyrecapped/cosmosdecoded
+    # renderer entered through this main() rejects it.)
+    #
+    # 2026-05-06 cloud-first migration: Shorts flipped to
+    #   cloudrun_chatterbox.
+    # 2026-05-10 long-form cloud parity: cloudrun_chatterbox added here
+    #   so cosmosdecoded + historyrecapped long-form can use the same
+    #   canonical English service (ytfactory-tts-chatterbox); the legacy
+    #   ytfactory-tts-f5 service was never deployed under
+    #   ytfactory-prod-v2 / asia-southeast1.
+    #
+    # To add Higgs / CosyVoice / etc., extend synth_long_narration's
+    # provider whitelist + the is_cloud check + the prewarm
+    # _service_url(model=...) lookup in this module.
     provider = str(lf.get("tts_provider", "f5_tts"))
-    if provider not in ("f5_tts", "cloudrun_f5"):
+    _ALLOWED_LONGFORM_PROVIDERS = (
+        "f5_tts", "cloudrun_f5", "cloudrun_chatterbox",
+    )
+    if provider not in _ALLOWED_LONGFORM_PROVIDERS:
         raise SystemExit(
             f"long-form tts_provider={provider!r} is not supported. "
-            "Long-form supports only f5_tts (laptop) and cloudrun_f5 "
-            "(cloud). Set `long_form.tts_provider: cloudrun_f5` for "
-            "cloud-first or `f5_tts` for laptop fallback. "
-            "(Shorts can use cloudrun_chatterbox / cloudrun_higgs / etc; "
-            "long-form cannot yet — see synth_long_narration in "
-            "pipeline/render/long_form.py to add them.)"
+            f"Allowed: {', '.join(_ALLOWED_LONGFORM_PROVIDERS)}. "
+            "Set `long_form.tts_provider: cloudrun_chatterbox` for "
+            "cloud-first English (the canonical pick post-2026-05-10) "
+            "or `f5_tts` for laptop fallback. "
+            "(Shorts can use any cloudrun_* provider; long-form is "
+            "narrower because synth_long_narration's chunk + resume + "
+            "atempo + fan-out path is wired only for these providers. "
+            "To add Higgs / CosyVoice / etc., extend synth_long_narration "
+            "in pipeline/render/long_form.py.)"
         )
     speed = float(lf.get("tts_speed", 0.80))
     chunk_target_chars = int(lf.get("tts_chunk_target_chars", 380))
@@ -1617,7 +1654,7 @@ def main() -> int:
     if not text:
         raise SystemExit("narration JSON has neither 'narration' nor non-empty 'sections'")
 
-    print(f"[1/5] chunked TTS via f5_tts voice={voice_id} speed={speed} atempo={atempo}…")
+    print(f"[1/5] chunked TTS via {provider} voice={voice_id} speed={speed} atempo={atempo}…")
     narration_wav, chunks = synth_long_narration(
         text=text,
         voice_id=voice_id,
@@ -1627,6 +1664,7 @@ def main() -> int:
         join_silence_s=join_silence_s,
         speed=speed,
         ref_audio_text=ref_audio_text,
+        provider=provider,
     )
     from pipeline.probe import probe_duration  # noqa: PLC0415
     dur = probe_duration(narration_wav)

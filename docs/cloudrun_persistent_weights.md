@@ -1,9 +1,19 @@
 # Cloud Run TTS — persistent weights via GCS Fuse
 
-> **Status (2026-05-06):** ENABLED for all 6 TTS services. Bucket is
-> `gs://ytfactory-model-weights` (asia-southeast1, versioning ON).
-> Mount is **read-write** — see "Why writable" below for the lock-dir
-> reason discovered during F5 canary.
+> **Status (2026-05-10):** ⚠ Bucket name updated to
+> **`gs://ytfactory-model-weights-v2`** under project
+> `ytfactory-prod-v2` (Phase 4 consolidation, see
+> `docs/full_cloud_cutover_2026_05_09.md`). The pre-Phase-4 bucket
+> `gs://ytfactory-model-weights` under retired project
+> `ytfactory-prod` no longer exists — all `gsutil` / `gcloud`
+> commands in this doc must be re-run with the new bucket and
+> project name. The mechanic (read-write Fuse mount, lock-dir
+> requirement, per-service mount path) is unchanged.
+
+> **Original status (2026-05-06):** ENABLED for all 6 TTS services.
+> Bucket was `gs://ytfactory-model-weights` (asia-southeast1,
+> versioning ON). Mount is **read-write** — see "Why writable" below
+> for the lock-dir reason discovered during F5 canary.
 >
 > Captures the user direction "we don't need to download the weight
 > everytime we fire some query."

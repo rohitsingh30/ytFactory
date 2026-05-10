@@ -205,5 +205,138 @@ class TestCli(CatalogBase):
         self.assertIn("empty", buf.getvalue())
 
 
+# ── GCS-backed catalog reads (cloud cutover 2026-05-09) ────────────────────
+
+
+class CatalogGcsBranch(unittest.TestCase):
+    """When YTFACTORY_STATE_BUCKET is set, list_catalog reads from
+    gs://<bucket>/<channel>/uploads/*.json instead of disk."""
+
+    def setUp(self) -> None:
+        self._patches = [
+            patch("pipeline.utils.catalog.CHANNEL_REGISTRY", _FAKE_REGISTRY),
+        ]
+        for p in self._patches:
+            p.start()
+        # Wipe the cache so each test's mocked client is re-consulted.
+        catalog._GCS_ENTRIES_CACHE.clear()
+        catalog._GCS_CLIENT = None
+
+    def tearDown(self) -> None:
+        for p in self._patches:
+            p.stop()
+        catalog._GCS_ENTRIES_CACHE.clear()
+        catalog._GCS_CLIENT = None
+
+    def _make_blob(self, name: str, body: dict) -> object:
+        from unittest.mock import MagicMock
+        b = MagicMock()
+        b.name = name
+        b.download_as_text = MagicMock(return_value=json.dumps(body))
+        return b
+
+    def test_list_catalog_reads_from_gcs(self) -> None:
+        from unittest.mock import MagicMock
+        rec_chan1 = {
+            "video_id": "vid001", "slug": "story-001", "title": "Hello",
+            "url": "https://youtube.com/watch?v=vid001", "uploaded_at": "2026-04-01",
+        }
+        rec_chan2 = {
+            "video_id": "vid002", "slug": "story-002", "title": "World",
+            "uploaded_at": "2026-05-01",  # newer → first in sort
+        }
+        cli = MagicMock()
+        # Per-call: each list_blobs call is scoped to one channel prefix.
+        def _list_blobs(bucket_name, prefix):
+            if prefix == "chan1/":
+                return [self._make_blob("chan1/uploads/story-001.json", rec_chan1)]
+            if prefix == "chan2/":
+                return [self._make_blob("chan2/uploads/story-002.json", rec_chan2)]
+            return []
+        cli.list_blobs = _list_blobs
+        cli.bucket = MagicMock(return_value=MagicMock())
+
+        with patch.dict("os.environ", {"YTFACTORY_STATE_BUCKET": "bk"}), \
+             patch.object(catalog, "_gcs_client", return_value=cli):
+            entries = catalog.list_catalog()
+
+        self.assertEqual(len(entries), 2)
+        # Newer first.
+        self.assertEqual(entries[0].video_id, "vid002")
+        self.assertEqual(entries[1].video_id, "vid001")
+        # URL fallback works when rec lacks one (chan2 record above).
+        self.assertEqual(entries[0].url, "https://youtube.com/watch?v=vid002")
+
+    def test_list_catalog_skips_underscore_and_x_sidecars(self) -> None:
+        from unittest.mock import MagicMock
+        cli = MagicMock()
+        rec_real = {"video_id": "real001", "slug": "real",
+                    "uploaded_at": "2026-04-01"}
+        rec_x = {"video_id": "shouldnotappear", "slug": "real"}
+        rec_under = {"video_id": "alsoshouldnotappear", "slug": "_pending"}
+
+        def _list_blobs(bucket_name, prefix):
+            if prefix == "chan1/":
+                return [
+                    self._make_blob("chan1/uploads/real.json", rec_real),
+                    self._make_blob("chan1/uploads/real.x.json", rec_x),
+                    self._make_blob("chan1/uploads/_pending.json", rec_under),
+                ]
+            return []
+        cli.list_blobs = _list_blobs
+        cli.bucket = MagicMock(return_value=MagicMock())
+
+        with patch.dict("os.environ", {"YTFACTORY_STATE_BUCKET": "bk"}), \
+             patch.object(catalog, "_gcs_client", return_value=cli):
+            entries = catalog.list_catalog()
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].video_id, "real001")
+
+    def test_list_catalog_picks_up_niched_uploads(self) -> None:
+        """mystoriesanimated-style layout: <channel>/<niche>/uploads/<slug>.json."""
+        from unittest.mock import MagicMock
+        cli = MagicMock()
+        rec = {"video_id": "n1", "slug": "n1", "uploaded_at": "2026-05-01"}
+
+        def _list_blobs(bucket_name, prefix):
+            if prefix == "chan1/":
+                return [self._make_blob(
+                    "chan1/reddit_amitheasshole/uploads/n1.json", rec)]
+            return []
+        cli.list_blobs = _list_blobs
+        cli.bucket = MagicMock(return_value=MagicMock())
+
+        with patch.dict("os.environ", {"YTFACTORY_STATE_BUCKET": "bk"}), \
+             patch.object(catalog, "_gcs_client", return_value=cli):
+            entries = catalog.list_catalog()
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].video_id, "n1")
+
+    def test_catalog_count_uses_gcs(self) -> None:
+        from unittest.mock import MagicMock
+        cli = MagicMock()
+
+        def _list_blobs(bucket_name, prefix):
+            if prefix == "chan1/":
+                return [
+                    self._make_blob("chan1/uploads/a.json", {"video_id": "a"}),
+                    self._make_blob("chan1/uploads/b.json", {"video_id": "b"}),
+                    self._make_blob("chan1/uploads/_pending.json", {}),  # skipped
+                    self._make_blob("chan1/uploads/x.x.json", {}),  # skipped
+                ]
+            if prefix == "chan2/":
+                return [self._make_blob("chan2/uploads/c.json", {"video_id": "c"})]
+            return []
+        cli.list_blobs = _list_blobs
+
+        with patch.dict("os.environ", {"YTFACTORY_STATE_BUCKET": "bk"}), \
+             patch.object(catalog, "_gcs_client", return_value=cli):
+            n = catalog.catalog_count()
+
+        self.assertEqual(n, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

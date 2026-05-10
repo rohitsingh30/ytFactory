@@ -268,6 +268,7 @@ def analyze(
         allowed_tools=["Read"] if frames else None,
         timeout_s=240,
         budget_usd=1.0,
+        stage="imitate_analyze",
     )
     if not isinstance(profile, dict):
         raise llm.ClaudeCLIError(f"analyze: expected object, got {type(profile).__name__}")
@@ -327,6 +328,7 @@ def ideate(profile: dict, *, n: int = 3) -> list[RawStory]:
         model=llm.model_for("imitate_apply"),
         timeout_s=240,
         budget_usd=1.0,
+        stage="imitate_apply",
     )
     if not isinstance(seeds_raw, list):
         raise llm.ClaudeCLIError(f"ideate: expected array, got {type(seeds_raw).__name__}")

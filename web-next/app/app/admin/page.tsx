@@ -9,6 +9,7 @@ import { EmptyState } from "@/components/app/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, ApiError } from "@/lib/api";
 import { cn, relativeTime } from "@/lib/utils";
+import { useVisiblePoll } from "@/lib/use-visible-poll";
 
 interface AuthUser {
   email: string;
@@ -70,11 +71,14 @@ export default function AdminPage() {
     };
   }, [refresh]);
 
-  useEffect(() => {
-    if (!me?.is_admin) return;
-    const id = setInterval(refresh, 30_000);
-    return () => clearInterval(id);
-  }, [me?.is_admin, refresh]);
+  useVisiblePoll(
+    () => {
+      if (!me?.is_admin) return;
+      return refresh();
+    },
+    30_000,
+    [me?.is_admin],
+  );
 
   async function decide(email: string, action: "approve" | "deny") {
     setActingOn(email);

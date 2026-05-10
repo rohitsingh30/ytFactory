@@ -21,7 +21,7 @@ functionality consolidated into:
 
 | Section | What it shows | Data source | Refresh cadence |
 |---|---|---|---|
-| **Health** | Per-service red/yellow/green pill, latency, warm_s, cold flag, last error. Filter chips by kind. | Live `/readyz` curl per service (parallel) — see `pipeline/cloud/health.py` | Every 30 s while tab is visible (`useVisiblePoll`) |
+| **Health** | Per-service red/yellow/green pill, latency, warm_s, cold flag, last error. Filter chips by kind. | Live `/readyz` curl per service (parallel) — see `pipeline/cloud/health.py`. **Server-side 5 s in-process cache** so multi-tab × per-tab polling doesn't multiply the work — see `docs/web_perf_pass_2026_05_10.md`. | Every 30 s while tab is visible (`useVisiblePoll`; SWR migration pending — see `useStaleWhileRevalidate`) |
 | **Cost** | Today / MTD / drift-flag StatCards, 30-day stacked-bar `$/day` chart, per-service breakdown table | Daily snapshot from BigQuery billing export — see `pipeline/cloud/cost.py` | Daily 02:00 cron, on-demand via Refresh |
 | **Deploys** | Last build per service (status pill, image digest, link to log), 6-step playbook prep status | `gcloud builds list` + `cloud/<svc>/.deploy_prep/` markers — see `pipeline/cloud/deploys.py` | Daily 02:00 cron, on-demand via Refresh |
 

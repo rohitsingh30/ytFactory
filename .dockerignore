@@ -23,20 +23,20 @@ shared/
 tests/
 docs/
 
-# Re-include the mirrored channel-asset + cached-YouTube + analytics
-# subdirs (~2 MB total) so /api/channels surfaces real avatars, banners,
-# subscriber/view stats. cloud/web-server/Dockerfile COPYs each of these
-# explicitly. data/* (with wildcard) above keeps the parent dir visible
-# so these re-includes work — gitignore semantics forbid re-including
-# children of an excluded dir.
+# Re-include the mirrored channel-asset subdir (avatars/banners) so
+# /api/channels surfaces real channel faces. cloud/web-server/Dockerfile
+# COPYs that explicitly. data/* (with wildcard) above keeps the parent
+# dir visible so this re-include works — gitignore semantics forbid
+# re-including children of an excluded dir.
+#
+# data/research/youtube/ + data/research/analytics/ are NOT re-included
+# any more (B2 of the 2026-05-10 token-issue fix). Live dashboard stats
+# come from YouTube Data API v3 with YOUTUBE_API_KEY (no on-disk
+# cache); per-account research cache lives in gs://...-state.
 !data/research/
 data/research/*
 !data/research/channel_assets/
 !data/research/channel_assets/**
-!data/research/youtube/
-!data/research/youtube/**
-!data/research/analytics/
-!data/research/analytics/**
 
 # Per-channel folders: cloud control plane needs config.yaml + variants/
 # + uploads/ + raw/ + narrations/ (the last two so the round-robin

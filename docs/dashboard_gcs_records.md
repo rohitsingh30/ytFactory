@@ -27,12 +27,28 @@ cloud:   control.dashboard_routes._enumerate_uploads()
   - `upload_record_uri(rel_key)` — builds the gs:// URI
   - `upload_record_rel_key(local_path, project_root)` — strips repo
     root + the literal `/uploads/` middle segment
-  - `list_upload_records()` — yields `(channel, slug, record)`
-- `pipeline/upload.py:_mirror_record_to_gcs` — best-effort GCS push.
-  Disable via `YTFACTORY_DASHBOARD_GCS_SYNC=0`.
+  - `list_upload_records()` — returns `[(channel, slug, record), ...]`.
+    **60 s in-process TTL cache** keyed by bucket name + 16-worker
+    parallel `download_bytes` fan-out (2026-05-10 perf pass — see
+    `docs/web_perf_pass_2026_05_10.md`).
+  - `bust_upload_records_cache()` — public hook for writers. Called
+    from `pipeline/upload/upload.py::_mirror_record_to_gcs` after a
+    successful mirror so the new record appears within one poll cycle.
+- `pipeline/upload/upload.py:_mirror_record_to_gcs` — best-effort GCS push.
+  Disable via `YTFACTORY_DASHBOARD_GCS_SYNC=0`. On success also calls
+  `control.core.storage.bust_upload_records_cache()` (cross-module bust:
+  writer uses `control.storage`, dashboard reads via
+  `control.core.storage` — they're parallel modules with separate
+  caches).
 - `control/dashboard_routes.py:_enumerate_uploads` — GCS-first read
   with disk fallback. Surfaces `record_source` in the API payload
   (e.g. `"gcs:18 disk:1"` or `"gcs:err(...) disk:19"`) for debugging.
+- `web/server.py::_iter_all_uploads` + `_list_uploads_gcs` — separate
+  enumeration over `YTFACTORY_STATE_BUCKET`'s
+  `<channel>/uploads/<slug>.json` layout. Same TTL+parallel pattern:
+  60 s `_DASHBOARD_UPLOADS_CACHE` keyed by bucket; 8-worker channel
+  fan-out + 16-worker per-channel fan-out. Bust via
+  `_bust_dashboard_uploads_cache()`.
 - `scripts/sync_upload_records_to_gcs.py` — one-shot backfill of
   existing records on disk to GCS.
 

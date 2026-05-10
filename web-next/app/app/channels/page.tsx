@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/app/page-header";
 import { ChannelHeroCard } from "@/components/app/channel-hero-card";
 import { channelsApi } from "@/lib/api";
+import { useStaleWhileRevalidate } from "@/lib/use-swr-cache";
 import type { ChannelSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -19,12 +20,17 @@ const LANGUAGE_FILTERS = [
 ];
 
 export default function ChannelsPage() {
-  const [channels, setChannels] = useState<ChannelSummary[] | null>(null);
+  // Stale-while-revalidate: instant repaint with the cached payload
+  // from the previous visit, then revalidate in the background. With
+  // the in-process channel cache + GCS HEAD fast-path on the server
+  // this still revalidates in <500 ms warm.
+  const { data } = useStaleWhileRevalidate<{ channels: ChannelSummary[] }>(
+    "channels:list",
+    () => channelsApi.list(),
+    60_000,
+  );
+  const channels = data?.channels ?? null;
   const [lang, setLang] = useState<string>("all");
-
-  useEffect(() => {
-    channelsApi.list().then((c) => setChannels(c.channels));
-  }, []);
 
   const filtered = useMemo(() => {
     if (!channels) return null;

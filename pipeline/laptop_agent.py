@@ -213,24 +213,85 @@ def _exec_playwright_upload(p: dict) -> tuple[bool, str | None, str | None]:
 
 
 def _exec_burner_engage(p: dict) -> tuple[bool, str | None, str | None]:
-    """Drive Chrome to engage with our catalog from a burner profile.
+    """Spawn the engage worker for a burner profile in the background.
 
     Required payload keys:
       slug:       burner channel slug (matches youtube-token-<slug> secret)
-    Optional:
-      max_actions: cap on like+sub events per run
+
+    The worker is a long-lived loop (engage all videos, then enter the
+    tab-cycling watch phase forever until the user clicks Stop). We
+    intentionally fire-and-forget here:
+
+      * Spawn the subprocess detached (``start_new_session=True``).
+      * Pipe stdout/stderr to a per-slug log file under
+        ``data/burner_engage/logs/<slug>.log`` (same convention the old
+        cloud subprocess.Popen path used).
+      * Ack the task as ``ok`` immediately so the lease doesn't expire
+        and the cloud queue marks the task DONE in seconds rather than
+        keeping it LEASED for hours.
+
+    The UI tracks per-burner progress via the GCS-backed state file
+    (see ``pipeline.cross_engage.burner_engage._save_state`` /
+    ``read_state``), NOT via task-status polling, so a fast ack is the
+    correct UX here.
     """
     import subprocess  # noqa: PLC0415
+
     slug = p.get("slug")
     if not slug:
         return False, None, "missing payload.slug"
+
+    repo_root = Path(__file__).resolve().parent.parent
+    log_dir = repo_root / "data" / "burner_engage" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{slug}.log"
+    log_fp = log_path.open("a", buffering=1)
+    log_fp.write(f"\n\n=== laptop-agent spawn @ {time.strftime('%Y-%m-%dT%H:%M:%S%z')} ===\n")
+    log_fp.flush()
+
+    # Engagement mode (added 2026-05-11). Default keeps the original
+    # like+sub+watch-loop behaviour for any task enqueued before the
+    # cloud route started passing this field.
+    mode = p.get("mode") or "like_subscribe_view"
+
     cmd = [
-        sys.executable, "-m", "pipeline.cross_engage.burner_engage", "run", str(slug),
+        sys.executable, "-m", "pipeline.cross_engage.burner_engage",
+        "run", str(slug), "--mode", mode,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-    if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout)[-1000:]
-        return False, None, f"burner_engage exit={proc.returncode}\n{tail}"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+    # The cloud cutover (2026-05-09) moved per-channel uploads/ records
+    # into GCS. The worker reads the catalog (every shipped video to
+    # engage with) via pipeline.utils.catalog.list_catalog, which now
+    # honours YTFACTORY_STATE_BUCKET for the GCS-backed read path. The
+    # laptop's launchd plist doesn't normally export this env, so we
+    # default it here — that way the worker sees the production catalog
+    # whether or not the user remembered to set it. Override-friendly:
+    # any pre-set value in the plist wins.
+    env.setdefault("YTFACTORY_STATE_BUCKET", "ytfactory-prod-v2-state")
+    env.setdefault("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(repo_root),
+            stdin=subprocess.DEVNULL,
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+            env=env,
+            # Fully detach: the agent's own lifetime is independent of
+            # the worker's. If launchd restarts the agent (or we're
+            # killed for any reason), the burner_engage worker keeps
+            # running until it hits its stop signal.
+            start_new_session=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        return False, None, f"failed to spawn burner_engage worker: {e}"
+
+    logger.info(
+        "laptop_agent: spawned burner_engage worker pid=%s slug=%s mode=%s log=%s",
+        proc.pid, slug, mode, log_path,
+    )
     return True, None, None
 
 

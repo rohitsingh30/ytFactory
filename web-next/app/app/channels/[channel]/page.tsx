@@ -594,11 +594,6 @@ function RecentRenders({ ch, jobs }: { ch: string | undefined; jobs: Job[] | nul
       <SectionHeader
         title="Recent renders"
         subtitle="Local pipeline runs (last 12)"
-        action={
-          <Button asChild variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground">
-            <Link href={`/app/library?channel=${ch}`}>All renders</Link>
-          </Button>
-        }
       />
       <div className="mt-3">
         {jobs === null ? (

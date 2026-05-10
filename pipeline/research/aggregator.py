@@ -54,6 +54,12 @@ from pipeline.paths import (  # noqa: E402
 CRITIQUES_DIR = DATA_DIR / "critiques"  # legacy; new critiques write per-channel
 YOUTUBE_DIR = RESEARCH_DIR / "youtube"
 
+# Lazily imported in functions today (to avoid an import cycle on cold
+# start). Brought to module scope here so build_videos / build_channels
+# can read the cache via the youtube module's GCS-aware loaders rather
+# than walking the local FS directly.
+from pipeline.research import youtube as youtube_stats  # noqa: E402
+
 MEMORY_DIR = Path(
     os.environ.get(
         "YTFACTORY_MEMORY_DIR",
@@ -62,7 +68,11 @@ MEMORY_DIR = Path(
 )
 
 # Locked by `project_two_production_channels.md` — anything else is a variant.
-PRODUCTION_CHANNELS = {"mystoriesanimated", "sportstoriesanimated"}
+# Canonical channel slugs (as used in <channel>/config.yaml dir names):
+# mystoriesanimated + sportsrecapped. Other channels (cosmosdecoded,
+# hindutavaanimated, historyrecapped, rhymetimejunction, scrollpulse)
+# stay non-production.
+PRODUCTION_CHANNELS = {"mystoriesanimated", "sportsrecapped"}
 
 # Top-level dirs that are NOT channel dirs.
 _NON_CHANNEL_DIRS = {
@@ -198,17 +208,31 @@ def build_videos() -> list[dict]:
     ``critique`` and ``local`` set to None).
     """
     rows: list[dict] = []
-    if not YOUTUBE_DIR.exists():
-        return rows
 
     upload_index = _index_local_uploads()
     chan_lookup = {d.name: d for d in _iter_channel_dirs()}
 
-    for cache_path in sorted(YOUTUBE_DIR.glob("*.json")):
-        cache = _read_json(cache_path)
-        if not cache:
-            continue
-        account = cache.get("account") or cache_path.stem
+    # Iterate every cached YouTube account. In cloud (YTFACTORY_STATE_BUCKET
+    # set) the cache lives in GCS; on the laptop it's the local FS at
+    # YOUTUBE_DIR. Read from whichever is active so tests that patch
+    # ``_agg.YOUTUBE_DIR`` keep working AND prod cloud fetches the GCS
+    # bucket without code change.
+    caches: list[dict] = []
+    if youtube_stats._state_bucket():
+        caches.extend(youtube_stats.load_all_cached())
+    elif YOUTUBE_DIR.exists():
+        for cache_path in sorted(YOUTUBE_DIR.glob("*.json")):
+            cache = _read_json(cache_path)
+            if not cache:
+                continue
+            cache.setdefault("account", cache_path.stem)
+            caches.append(cache)
+
+    if not caches:
+        return rows
+
+    for cache in caches:
+        account = cache.get("account") or "default"
         for yt in cache.get("videos") or []:
             vid = yt.get("video_id")
             if not vid:
@@ -354,9 +378,16 @@ def build_channels(videos: list[dict]) -> list[dict]:
         cfg = _read_yaml(chan_dir / "config.yaml") or {}
         account = ((cfg.get("upload") or {}).get("account")) or chan_dir.name
 
-        cache = _read_json(YOUTUBE_DIR / f"{account}.json")
-        yt_channel = (cache or {}).get("channel") or {}
-        yt_videos = (cache or {}).get("videos") or []
+        # Resolve from the active backend (GCS in cloud, FS on laptop).
+        # Falls back to a direct FS read if YOUTUBE_DIR has been patched
+        # to a tmp path (test fixtures) so build_channels keeps working
+        # without forcing every test to also patch youtube_stats.
+        if youtube_stats._state_bucket():
+            cache = youtube_stats.load_account(account) or {}
+        else:
+            cache = _read_json(YOUTUBE_DIR / f"{account}.json") or {}
+        yt_channel = cache.get("channel") or {}
+        yt_videos = cache.get("videos") or []
 
         videos_for = by_channel.get(chan_dir.name, [])
         rollup = _aggregate(videos_for)
@@ -376,7 +407,7 @@ def build_channels(videos: list[dict]) -> list[dict]:
             "youtube_view_count": yt_channel.get("view_count"),
             "youtube_video_count": yt_channel.get("video_count"),
             "hidden_subscribers": yt_channel.get("hidden_subscribers"),
-            "youtube_fetched_at": (cache or {}).get("fetched_at"),
+            "youtube_fetched_at": cache.get("fetched_at"),
             "youtube_uploads_seen": len(yt_videos),
             **rollup,
         })

@@ -155,7 +155,7 @@ def _record_stage_done(
     }
     if extra:
         md.update(extra)
-    tlm.track(
+    tlm.track_stage_done(
         "stage_done",
         category="pipeline",
         success=success,

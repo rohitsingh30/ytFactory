@@ -205,12 +205,27 @@ class FromChannelYamlTest(unittest.TestCase):
 
 class ProductionChannelCoverageTest(unittest.TestCase):
     """Every actual channel in the repo must be reachable via for_channel
-    AND its config.yaml must exist."""
+    AND its config.yaml must exist.
+
+    **Skipped when channel dirs are absent** (post laptop_nuclear_cleanup
+    2026-05-09): channel state lives in GCS now and the local
+    ``<channel>/config.yaml`` files are intentionally absent on a
+    fresh checkout. Same env override as
+    ``test_layout_parity.ChannelConfigYamlPresentTest``.
+    """
 
     def test_every_production_channel_has_config_yaml_on_disk(self):
+        import os
+        force = os.environ.get("YTFACTORY_LAYOUT_PARITY_FORCE", "0") == "1"
         for ch in _PRODUCTION_CHANNELS:
             with self.subTest(channel=ch):
                 p = RenderPaths.for_channel(ch)
+                if not p.config_yaml.exists() and not force:
+                    self.skipTest(
+                        f"{ch}/config.yaml absent — laptop nuclear cleanup "
+                        "leaves channel state in GCS only. Set "
+                        "YTFACTORY_LAYOUT_PARITY_FORCE=1 to assert anyway."
+                    )
                 self.assertTrue(
                     p.config_yaml.exists(),
                     f"channel {ch!r}: expected config.yaml at {p.config_yaml}",

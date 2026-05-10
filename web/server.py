@@ -386,7 +386,18 @@ SUBSCRIBERS: dict[str, list[asyncio.Queue]] = {}
 # renderer in its already-correct env (PYTHONPATH, gcloud account, cwd).
 # /api/jobs/from_script is that entry point. SCRIPT_JOBS tracks them
 # separately from the niche-driven JOBS so their schemas don't collide.
-SCRIPT_JOBS: dict[str, dict[str, Any]] = {}
+#
+# **Persistence (2026-05-10):** SCRIPT_JOBS is a ``ScriptJobsStore`` that
+# behaves like a plain ``dict`` for tests / local dev (default
+# ``YTFACTORY_QUEUE_BACKEND=memory``) and mirror-writes through to a
+# Firestore ``script_jobs`` collection in prod
+# (``YTFACTORY_QUEUE_BACKEND=firestore``). Without it, a Cloud Run
+# revision rotation mid-render leaves the UI 404'ing on a job ID the
+# running renderer is still chugging through. See
+# ``web/script_jobs_store.py`` for the persistence policy.
+from web.script_jobs_store import ScriptJobsStore
+
+SCRIPT_JOBS: ScriptJobsStore = ScriptJobsStore(collection="script_jobs")
 SCRIPT_JOB_LOG_DIR = Path("/tmp/ytfactory-script-jobs")
 
 # Server-side critique state. Mirrors SCRIPT_JOBS shape.
@@ -1480,6 +1491,14 @@ async def lifespan(app: FastAPI):
     SHORTS_DIR.mkdir(parents=True, exist_ok=True)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     _rehydrate_jobs()
+    # Hydrate the persistent SCRIPT_JOBS store from Firestore (no-op when
+    # YTFACTORY_QUEUE_BACKEND=memory). Done before any /api/jobs/*
+    # endpoint can serve traffic so a freshly-rolled container immediately
+    # surfaces in-flight renders submitted to the previous revision.
+    n = await SCRIPT_JOBS.hydrate()
+    if n:
+        print(f"[script_jobs] hydrated {n} records from firestore")
+    SCRIPT_JOBS.start_flush_task()
     if AUTH_TOKEN:
         print(f"[auth] YTFACTORY_TOKEN is set — protected mode (cookie/?token=)")
     else:
@@ -1503,9 +1522,86 @@ async def lifespan(app: FastAPI):
             await watchdog
         except asyncio.CancelledError:
             pass
+        await SCRIPT_JOBS.stop_flush_task()
 
 
 app = FastAPI(title="ytFactory", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Performance middleware (2026-05-10)
+# ---------------------------------------------------------------------------
+#
+# Two responsibilities:
+#
+# 1. Add ``Server-Timing: total;dur=<ms>`` to every API response so we
+#    can read per-endpoint backend cost straight out of the browser
+#    DevTools "Network" → "Timing" tab without needing GCP logging.
+#    Cheap (one timestamp diff) and unblocks ad-hoc perf debugging.
+#
+# 2. Set ``Cache-Control: public, max-age=N, stale-while-revalidate=M``
+#    on the dashboard's polled read endpoints so a browser back/forward
+#    or rapid tab-switch doesn't re-pay the round-trip. The dashboard
+#    already polls for freshness; SWR makes the *paint* instant while
+#    revalidation happens in the background.
+#
+#    POST/PUT/PATCH/DELETE always get ``no-store`` (they're mutations).
+#    Auth endpoints + cookie-bearing redirects also get ``no-store``
+#    so we don't accidentally cache a session-bound response.
+#
+# Order matters: this middleware sits OUTSIDE the route handlers so the
+# Server-Timing total reflects everything, including any inner middleware.
+import time as _perf_time  # noqa: PLC0415
+
+
+# Endpoints that return idempotent dashboard data and are safe to cache
+# briefly in the browser. The dashboard polls these every 10–30 s — SWR
+# means the user sees their cached payload immediately while a fresh
+# fetch runs in the background.
+_CACHEABLE_GET_PREFIXES: tuple[str, ...] = (
+    "/api/dashboard",
+    "/api/channels",  # both /api/channels and /api/channels/{key}
+    "/api/cloud/health",
+    "/api/cloud/cost",
+    "/api/cloud/deploys",
+    "/api/cloud/services",
+    "/api/queue",
+    "/api/voices",
+    "/api/niches",
+)
+
+
+@app.middleware("http")
+async def _perf_headers_middleware(request, call_next):
+    started = _perf_time.perf_counter()
+    response = await call_next(request)
+    dur_ms = (_perf_time.perf_counter() - started) * 1000.0
+    # Append rather than replace so handlers can pre-populate sub-stage
+    # timings (e.g. "gcs;dur=42, render;dur=18") and we tack the total on.
+    existing = response.headers.get("Server-Timing")
+    total = f"total;dur={dur_ms:.1f}"
+    response.headers["Server-Timing"] = f"{existing}, {total}" if existing else total
+
+    # Browser caching for dashboard-class GETs only.
+    if (
+        request.method == "GET"
+        and any(request.url.path.startswith(p) for p in _CACHEABLE_GET_PREFIXES)
+        and "Cache-Control" not in response.headers
+    ):
+        # 10 s fresh + 60 s stale-while-revalidate. Matches the dashboard
+        # poll cadence so the SWR window soaks up tab-flip + back-button.
+        # ``private`` (not ``public``): these endpoints are auth-gated.
+        # Even with ``Vary: Cookie`` we don't want any intermediate
+        # proxy / CDN holding a copy that another user could see by
+        # accident. The browser HTTP cache is ours alone — that's where
+        # SWR pays off without the cross-user risk.
+        response.headers["Cache-Control"] = "private, max-age=10, stale-while-revalidate=60"
+        # Vary on cookie so per-user dashboards never cross-pollinate
+        # the browser cache (defensive — these endpoints don't currently
+        # personalize but auth gating + future per-account scoping might).
+        existing_vary = response.headers.get("Vary")
+        response.headers["Vary"] = f"{existing_vary}, Cookie" if existing_vary else "Cookie"
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -1671,6 +1767,17 @@ async def auth_middleware(request: Request, call_next):
 
     # 2. M2M paths
     if any(path.startswith(p) for p in _M2M_PATH_PREFIXES):
+        # Cloud Run runtime sets K_SERVICE. Google Frontend has already
+        # validated the caller's OIDC token against the run.invoker
+        # binding before the request reached us; the OIDC consumed the
+        # Authorization header so we can't ALSO require an app-level
+        # bearer here. Trust IAM. Mirrors the same K_SERVICE bypass in
+        # control/core/auth.py:require_agent — without this the laptop
+        # agent (which sends `gcloud print-identity-token`, not the
+        # shared YTFACTORY_AGENT_TOKEN) is permanently 401'd against
+        # cloud, and `/app/burner-channels` cross-engage never starts.
+        if os.environ.get("K_SERVICE"):
+            return await call_next(request)
         if AGENT_TOKEN is None:
             # No AGENT_TOKEN configured → fall through to (3)/(4) so laptop
             # dev still works.
@@ -1732,9 +1839,35 @@ async def auth_middleware(request: Request, call_next):
     return JSONResponse({"error": "not authorized"}, status_code=403)
 
 
+class _CachedStaticFiles(StaticFiles):
+    """StaticFiles subclass that adds Cache-Control to every response.
+
+    FastAPI's stock StaticFiles ships no Cache-Control header, so the
+    browser revalidates every asset on every page load — measurable on
+    the dashboard which references ~6 .css/.js + ~10 .png assets per
+    pageview. We send the assets with a short max-age (5 min) so a deploy
+    is reflected within a poll cycle but the FE doesn't pay a full
+    revalidation round-trip on every navigation.
+    """
+
+    def __init__(self, *args, max_age: int = 300, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._max_age = max_age
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        if 200 <= resp.status_code < 400:
+            # Don't override an explicit Cache-Control if one's already set
+            # (some files we serve via FileResponse already set no-cache).
+            resp.headers.setdefault(
+                "Cache-Control", f"public, max-age={self._max_age}"
+            )
+        return resp
+
+
 app.mount(
     "/static",
-    StaticFiles(directory=str(Path(__file__).resolve().parent / "static")),
+    _CachedStaticFiles(directory=str(Path(__file__).resolve().parent / "static")),
     name="static",
 )
 
@@ -1961,6 +2094,193 @@ async def admin_deny(request: Request, email: str) -> dict:
         raise HTTPException(404, str(e))
 
 
+@app.get("/api/admin/token-health")
+async def admin_token_health(request: Request) -> dict:
+    """Per-account OAuth-token state for every YouTube channel (admin UI).
+
+    Browser-facing variant of the same data the cron endpoint returns —
+    gated by the existing admin middleware. See ``_compute_token_health``
+    for the actual computation; ``/api/cron/token-health`` is the M2M
+    sibling used by the daily Cloud Scheduler health probe (plan-D4).
+
+    Born from the 2026-05-10 token-issue permanent fix (plan-D3).
+    """
+    _require_admin(request)
+    return _compute_token_health()
+
+
+@app.get("/api/cron/token-health")
+async def cron_token_health() -> dict:
+    """Same payload as ``/api/admin/token-health``, but auth-bypassed
+    via the existing M2M middleware (``K_SERVICE``-trusted on Cloud Run,
+    ``YTFACTORY_AGENT_TOKEN``-bearer on laptop). Called daily by the
+    ``ytfactory-token-health-cron`` Cloud Scheduler (plan-D4); the cron
+    posts to a Slack webhook / operator email when ``summary.broken > 0``."""
+    return _compute_token_health()
+
+
+def _compute_token_health() -> dict:
+    """Aggregate OAuth-token state for every channel.
+
+    Walks ``pipeline/channels/*.yaml`` for the canonical channel set,
+    then asks ``pipeline.upload.upload.inspect_token_status`` where the
+    active token sits (Cloud Run Secret Manager mount in cloud,
+    ``~/.config/ytfactory/`` on laptop) and what state it's in
+    (``ok`` / ``missing`` / ``no_refresh_token`` / ``missing_scopes`` /
+    ``unreadable``).
+
+    Response shape::
+
+        {
+          "fetched_at": "<iso>",
+          "summary":    { "total": int, "ok": int, "broken": int },
+          "accounts":   [
+            { "account": str,
+              "state":   "ok"|"missing"|"no_refresh_token"|"missing_scopes"|"unreadable",
+              "expiry":  iso or null,
+              "path":    str (token path or secret mount path),
+              "source":  "secret_mount" | "config_dir" | "missing",
+              "missing_scopes": [str, ...] | null,
+              "error":   str | null
+            }, ...
+          ]
+        }
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    from pipeline.research.youtube import iter_channel_configs  # noqa: PLC0415
+    from pipeline.upload.upload import (  # noqa: PLC0415
+        inspect_token_status,
+        _secret_mount_path,
+    )
+
+    accounts = sorted({a for a, _ in iter_channel_configs()})
+    rows: list[dict] = []
+    for acct in accounts:
+        status = inspect_token_status(acct)
+        path_str = status.get("path") or ""
+        if path_str.startswith("/secrets/"):
+            source = "secret_mount"
+        elif status.get("state") == "missing":
+            sp = _secret_mount_path(acct)
+            source = "secret_mount" if str(sp) == path_str else "missing"
+        else:
+            source = "config_dir"
+        rows.append({
+            "account": acct,
+            "state": status.get("state"),
+            "expiry": status.get("expiry"),
+            "path": path_str,
+            "source": source,
+            "missing_scopes": status.get("missing"),
+            "error": status.get("error"),
+        })
+
+    ok_count = sum(1 for r in rows if r["state"] == "ok")
+    return {
+        "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
+        "summary": {
+            "total": len(rows),
+            "ok": ok_count,
+            "broken": len(rows) - ok_count,
+        },
+        "accounts": rows,
+    }
+
+
+# ---------------------------------------------------------------------------
+# A4 — refresh-via-job: trigger the cloud stats-refresh JOB asynchronously
+# ---------------------------------------------------------------------------
+#
+# Pre-A4, the legacy /api/dashboard/videos?refresh=true called
+# pipeline.research.youtube.fetch_all() inside the request thread —
+# 30-60s of synchronous YouTube API calls per channel, easily timed
+# out by the FE. The FastAPI request also pinned an event-loop
+# coroutine for the whole duration, blocking other dashboard polls.
+#
+# Now: this endpoint kicks off the ytfactory-stats-refresh Cloud Run
+# JOB asynchronously and returns immediately with the execution name.
+# The FE polls /api/dashboard/videos until ``latest_fetch`` advances
+# past the refresh-trigger timestamp.
+
+STATS_REFRESH_JOB_NAME = os.environ.get(
+    "YTFACTORY_STATS_REFRESH_JOB", "ytfactory-stats-refresh"
+)
+
+
+@app.post("/api/dashboard/refresh-research-cache")
+async def dashboard_refresh_research_cache(request: Request) -> dict:
+    """Kick off the stats-refresh Cloud Run JOB asynchronously.
+
+    Triggers ``ytfactory-stats-refresh`` (see ``cloud/stats-refresh/``)
+    which writes a fresh per-account YT cache to
+    ``gs://$YTFACTORY_STATE_BUCKET/data/research/youtube/<account>.json``.
+    The dashboard's ``/api/dashboard/videos`` reader picks the new
+    cache up automatically on its next poll.
+
+    Returns immediately (``execution_name`` for log-trail; FE polls
+    ``/api/dashboard/videos`` for ``latest_fetch`` to advance).
+    Admin-only on the laptop / approved-domain on cloud — uses the
+    existing ``_require_admin`` gate.
+    """
+    _require_admin(request)
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    triggered_at = datetime.now(tz=timezone.utc).isoformat()
+
+    # On laptop dev (no gcloud / no project), short-circuit to the
+    # in-process fetch. The cloud cron handles the recurring case;
+    # this manual trigger is mostly for "I just uploaded a video,
+    # show its stats now" workflows.
+    if not os.environ.get("K_SERVICE"):
+        try:
+            from pipeline.research import youtube as _yt  # noqa: PLC0415
+
+            summary = await asyncio.to_thread(_yt.fetch_all, quiet=True)
+            return {
+                "ok": True,
+                "mode": "laptop_inline",
+                "triggered_at": triggered_at,
+                "summary": summary,
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "mode": "laptop_inline",
+                "triggered_at": triggered_at,
+                "error": str(exc),
+            }
+
+    # Cloud path — trigger the JOB via gcloud (same SA already has
+    # run.developer / run.invoker on its own project's JOBs).
+    execute_cmd = [
+        "gcloud", "run", "jobs", "execute", STATS_REFRESH_JOB_NAME,
+        "--project", CLOUDRUN_JOB_PROJECT,
+        "--region", CLOUDRUN_JOB_REGION,
+        "--async",
+        "--format", "value(metadata.name)",
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *execute_cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise HTTPException(
+            500,
+            f"stats-refresh JOB execute failed: "
+            f"{stderr.decode(errors='replace')[:500]}",
+        )
+    return {
+        "ok": True,
+        "mode": "cloud_job",
+        "triggered_at": triggered_at,
+        "execution_name": stdout.decode().strip(),
+        "job_name": STATS_REFRESH_JOB_NAME,
+    }
+
+
 @app.get("/")
 async def home(request: Request):
     """The new product home (creator-studio feel). The old niche-picker
@@ -2016,35 +2336,109 @@ _RENDERS_TRACKED_CHANNELS: tuple[str, ...] = (
 )
 
 
+def _read_job_file(jf: Path) -> dict | None:
+    """Cached parse of one job JSON file. Mtime-keyed, no TTL —
+    historical job records never change once finished, and active jobs
+    move their mtime on every state update so the cache self-busts.
+    """
+    try:
+        st = jf.stat()
+    except OSError:
+        return None
+    key = (st.st_mtime, st.st_size)
+    cached = _JOB_FILE_CACHE.get(jf)
+    if cached is not None and (cached[0], cached[1]) == key:
+        return cached[2]
+    try:
+        blob = json.loads(jf.read_text())
+    except Exception:
+        return None
+    _JOB_FILE_CACHE[jf] = (st.st_mtime, st.st_size, blob)
+    return blob
+
+
+_JOB_FILE_CACHE: dict[Path, tuple[float, int, dict]] = {}
+
+
 def _count_files(p: Path, glob: str = "*.json") -> int:
     if not p.is_dir():
         return 0
     return sum(1 for _ in p.rglob(glob))
 
 
+# ---- channel-scan cache ------------------------------------------------
+#
+# `/api/dashboard` and `/api/overview` both rglob every channel folder
+# for `uploads/*.json` + `_holds.json` on every poll (FE polls every
+# ~10 s × N tabs). On a host with 7 channels × ~50 uploads each that's
+# ~350 small JSON parses per poll, sync, on the asyncio event loop.
+#
+# Cache strategy: 30 s TTL with an mtime fast-path. If the channel
+# folder's mtime hasn't moved AND the cached entry is younger than
+# TTL, return cached. The mtime check lets the cache *self-invalidate*
+# the moment a new upload lands — no manual bust needed.
+_CHAN_SCAN_TTL_S = 30.0
+_CHAN_SCAN_CACHE: dict[Path, tuple[float, float, dict]] = {}
+# (cached_at_ts, watched_mtime, payload)
+_CHAN_SCAN_LOCK = __import__("threading").Lock()
+
+
+def _channel_scan(chan_root: Path) -> dict:
+    """Return {uploads: [(path, parsed)], rendered: [Path], holds: dict}.
+
+    Mtime-checked + 30 s TTL. Safe to call from multiple async routes
+    on every request — collapses to a directory stat + cache hit when
+    nothing has changed.
+    """
+    try:
+        chan_mtime = chan_root.stat().st_mtime
+    except OSError:
+        return {"uploads": [], "rendered": [], "holds": {}}
+    now = time.time()
+    with _CHAN_SCAN_LOCK:
+        cached = _CHAN_SCAN_CACHE.get(chan_root)
+    if cached is not None:
+        cached_at, cached_mtime, payload = cached
+        if cached_mtime == chan_mtime and (now - cached_at) < _CHAN_SCAN_TTL_S:
+            return payload
+    # Cold path: walk the channel.
+    uploads: list[tuple[Path, dict]] = []
+    for u in chan_root.rglob("uploads/*.json"):
+        if u.name.endswith(".x.json"):
+            continue
+        try:
+            uploads.append((u, json.loads(u.read_text())))
+        except Exception:
+            continue
+    rendered: list[Path] = (
+        list(chan_root.rglob("shorts/*.mp4"))
+        + list(chan_root.rglob("long_form/*.mp4"))
+    )
+    holds: dict = {}
+    holds_file = chan_root / "_holds.json"
+    if holds_file.exists():
+        try:
+            holds = json.loads(holds_file.read_text()) or {}
+        except Exception:
+            holds = {}
+    payload = {"uploads": uploads, "rendered": rendered, "holds": holds}
+    with _CHAN_SCAN_LOCK:
+        _CHAN_SCAN_CACHE[chan_root] = (now, chan_mtime, payload)
+    return payload
+
+
 def _channel_summary(channel: str) -> dict:
     chan_root = PROJECT_ROOT / channel
     if not chan_root.is_dir() or not (chan_root / "config.yaml").exists():
         return {"channel": channel, "exists": False}
-    # Uploaded: <chan>/**/uploads/*.json (excluding .x.json sidecars)
-    uploads = [
-        p for p in chan_root.rglob("uploads/*.json")
-        if not p.name.endswith(".x.json")
-    ]
-    # Rendered (mp4 on disk): <chan>/**/shorts/*.mp4 OR <chan>/**/long_form/*.mp4
-    rendered = (
-        list(chan_root.rglob("shorts/*.mp4"))
-        + list(chan_root.rglob("long_form/*.mp4"))
-    )
+    scan = _channel_scan(chan_root)
+    uploads = scan["uploads"]
+    rendered = scan["rendered"]
     last_upload_iso: str | None = None
-    for u in uploads:
-        try:
-            d = json.loads(u.read_text())
-            ts = d.get("uploaded_at") or d.get("publish_at")
-            if ts and (last_upload_iso is None or ts > last_upload_iso):
-                last_upload_iso = ts
-        except Exception:
-            continue
+    for _, d in uploads:
+        ts = d.get("uploaded_at") or d.get("publish_at")
+        if ts and (last_upload_iso is None or ts > last_upload_iso):
+            last_upload_iso = ts
     queue_depth = max(0, len(rendered) - len(uploads))
     return {
         "channel": channel,
@@ -2163,7 +2557,269 @@ async def dashboard_summary() -> dict:
     polled every ~10s by the dashboard page. No `?refresh` mode here —
     the FE refreshes YouTube stats via /api/dashboard/videos?refresh=true
     explicitly.
+
+    The disk-walking work runs in `asyncio.to_thread` so a slow scan
+    doesn't block other in-flight HTTP requests on the event loop. The
+    underlying `_channel_scan` + `_read_job_file` helpers are mtime-
+    cached so re-polls hit memory instead of disk.
     """
+    base = await asyncio.to_thread(_dashboard_summary_sync)
+
+    # --- Top performer ----------------------------------------------------
+    # Compute directly from the cached uploads + cached stats instead of
+    # calling the full `/api/dashboard/videos` handler. The full handler
+    # builds a per-channel grouped payload (titles, totals, subscribers,
+    # latest_fetch, ...) just so we can pull one (title, thumb, views)
+    # tuple. Cuts ~30 lines of per-video work out of the dashboard hot
+    # path; both helpers it now uses are O(1) cached after the first call.
+    top_performer: dict | None = None
+    try:
+        from control.routes.dashboard_routes import (  # noqa: PLC0415
+            _enumerate_uploads as _enum_uploads,
+            _ensure_fresh as _ensure_fresh_stats,
+            _STATS_CACHE as _stats_cache,
+        )
+
+        uploads = _enum_uploads()  # cached list[(account, slug, vid, rec)]
+        if uploads:
+            # Refresh any stats older than the 10-min TTL — cheap when warm.
+            _ensure_fresh_stats([vid for _, _, vid, _ in uploads])
+            best: tuple[int, dict, str, str] | None = None  # (views, rec, account, vid)
+            for account, slug, vid, rec in uploads:
+                views = (_stats_cache.get(vid) or {}).get("viewCount") or 0
+                if not isinstance(views, int):
+                    try:
+                        views = int(views)
+                    except (TypeError, ValueError):
+                        continue
+                if views <= 0:
+                    continue
+                if best is None or views > best[0]:
+                    best = (views, rec, account, vid)
+            if best:
+                views, rec, account, vid = best
+                is_short = bool(str(rec.get("mp4_path") or "").endswith(".mp4"))
+                watch_url = (
+                    f"https://youtube.com/shorts/{vid}" if is_short
+                    else rec.get("url") or f"https://youtu.be/{vid}"
+                )
+                top_performer = {
+                    "youtube_url": watch_url,
+                    "title": rec.get("title") or vid,
+                    "thumb_url": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                    "views": views,
+                    "channel": account,
+                }
+    except Exception as e:
+        logger.warning(f"dashboard: top_performer aggregation failed: {e}")
+
+    base["top_performer"] = top_performer
+    return base
+
+
+def _dashboard_state_bucket() -> str | None:
+    """GCS state bucket holding per-channel uploads/analytics in cloud.
+
+    Mirrors ``control/core/scheduler.py::_state_bucket``. When unset
+    (laptop dev), every dashboard reader walks the local FS.
+    """
+    return os.environ.get("YTFACTORY_STATE_BUCKET") or None
+
+
+def _dashboard_gcs_client():
+    """Lazy google-cloud-storage client for the cloud dashboard reads."""
+    from google.cloud import storage  # noqa: PLC0415
+    return storage.Client(
+        project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+    )
+
+
+def _iter_channel_slugs() -> list[str]:
+    """All channel slugs known to the registry (cloud-safe).
+
+    Reads ``pipeline/channels/*.yaml`` (the canonical post-2026-05-10
+    registry) and merges in any legacy per-channel root dirs that still
+    exist on disk. Used by the dashboard summary endpoints to know which
+    channel namespaces to walk in GCS.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    registry = PROJECT_ROOT / "pipeline" / "channels"
+    if registry.is_dir():
+        for cfg_path in sorted(registry.glob("*.yaml")):
+            slug = cfg_path.stem
+            if slug not in seen:
+                seen.add(slug)
+                out.append(slug)
+    if PROJECT_ROOT.is_dir():
+        for d in sorted(PROJECT_ROOT.iterdir()):
+            if not d.is_dir() or d.name in seen:
+                continue
+            if not (d / "config.yaml").exists():
+                continue
+            out.append(d.name)
+            seen.add(d.name)
+    return out
+
+
+def _list_uploads_gcs(bucket: str, channel: str) -> list[tuple[str, dict]]:
+    """All upload records for ``channel`` in the GCS state bucket.
+
+    Returns list of (slug, record_dict). Skips ``*.x.json`` X-platform
+    sidecars and unparseable bodies.
+
+    Performance: the per-blob ``download_as_bytes`` calls fan out across
+    a thread pool — sequential they took ~50 ms × N records each tick,
+    which is the dominant cost of /api/dashboard on cloud. Wrapped by
+    :func:`_iter_all_uploads`'s 60 s in-process TTL cache so most polls
+    don't even reach this function.
+    """
+    out: list[tuple[str, dict]] = []
+    try:
+        cli = _dashboard_gcs_client()
+        # First pass: collect blob references — cheap (one list_blobs call).
+        targets: list = []
+        for blob in cli.list_blobs(bucket, prefix=f"{channel}/"):
+            parts = blob.name.split("/")
+            if len(parts) < 3 or parts[-2] != "uploads" or not blob.name.endswith(".json"):
+                continue
+            if blob.name.endswith(".x.json"):
+                continue
+            targets.append((Path(parts[-1]).stem, blob))
+
+        if not targets:
+            return out
+
+        def _fetch(target):
+            slug, blob = target
+            try:
+                rec = json.loads(blob.download_as_bytes())
+            except Exception:
+                return None
+            return (slug, rec)
+
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+        with ThreadPoolExecutor(
+            max_workers=min(16, len(targets)),
+            thread_name_prefix="dashboard-uploads-gcs",
+        ) as pool:
+            for result in pool.map(_fetch, targets):
+                if result is not None:
+                    out.append(result)
+    except Exception:
+        logger.warning("dashboard: GCS uploads list failed for %s", channel, exc_info=True)
+    return out
+
+
+# Module-level TTL cache for the cloud GCS upload enumeration. Keyed by
+# bucket name so cross-test bucket monkey-patching doesn't cross-pollinate.
+# Value: (cached_at_epoch, list[(channel, account, slug, vid, rec)]).
+#
+# 60 s TTL — comfortably shorter than any plausible publish cadence and
+# long enough to collapse a 10 s dashboard poll into a single GCS scan
+# every 6 ticks. Writers (the laptop's `pipeline.upload.upload`) don't
+# share this process so we can't bust on write — but the dashboard
+# tile is best-effort eventually-consistent anyway.
+_DASHBOARD_UPLOADS_TTL_S = 60.0
+_DASHBOARD_UPLOADS_CACHE: dict[str, tuple[float, list[tuple[str, str, str, str, dict]]]] = {}
+_DASHBOARD_UPLOADS_LOCK = __import__("threading").Lock()
+
+
+def _bust_dashboard_uploads_cache() -> None:
+    """Drop the cached dashboard uploads enumeration."""
+    with _DASHBOARD_UPLOADS_LOCK:
+        _DASHBOARD_UPLOADS_CACHE.clear()
+
+
+def _iter_all_uploads() -> list[tuple[str, str, str, str, dict]]:
+    """All upload records across every channel.
+
+    Returns ``(channel_slug, account, slug, video_id, record)`` tuples
+    where ``video_id`` may be empty if the record is an X-platform
+    sidecar (already filtered out above) or a malformed entry. In cloud
+    (``YTFACTORY_STATE_BUCKET`` set), reads from GCS; on laptop falls
+    back to walking ``PROJECT_ROOT/<channel>/**/uploads/*.json``.
+
+    Cloud path is cached in-process for ``_DASHBOARD_UPLOADS_TTL_S``
+    so the dashboard's 10 s poll cadence doesn't re-walk GCS on every
+    tick; the per-channel listing inside that walk runs in parallel
+    threads. Together these collapse what was a 3–8 s sequential
+    waterfall (one HTTP round-trip per record per channel) to ~0 ms
+    on warm polls and a few hundred ms on a cold scan.
+    """
+    bucket = _dashboard_state_bucket()
+    out: list[tuple[str, str, str, str, dict]] = []
+
+    if bucket:
+        # Warm-cache fast path.
+        now = time.time()
+        with _DASHBOARD_UPLOADS_LOCK:
+            cached = _DASHBOARD_UPLOADS_CACHE.get(bucket)
+        if cached is not None and (now - cached[0]) < _DASHBOARD_UPLOADS_TTL_S:
+            return cached[1]
+
+        # Cold path: walk every channel in parallel — each call is one
+        # GCS list + N parallel downloads, so doing them sequentially
+        # would still serialize the per-channel list operations.
+        channels = _iter_channel_slugs()
+        if channels:
+            from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+            with ThreadPoolExecutor(
+                max_workers=min(8, len(channels)),
+                thread_name_prefix="dashboard-uploads-channels",
+            ) as pool:
+                results = list(pool.map(
+                    lambda c: (c, _list_uploads_gcs(bucket, c)),
+                    channels,
+                ))
+            for channel, recs in results:
+                for slug, rec in recs:
+                    vid = rec.get("video_id") or ""
+                    acct = rec.get("account") or channel
+                    if vid:
+                        out.append((channel, acct, slug, vid, rec))
+        with _DASHBOARD_UPLOADS_LOCK:
+            _DASHBOARD_UPLOADS_CACHE[bucket] = (now, out)
+        return out
+
+    # Laptop FS fallback.
+    if not PROJECT_ROOT.is_dir():
+        return out
+    for chan_dir in PROJECT_ROOT.iterdir():
+        if not chan_dir.is_dir() or not (chan_dir / "config.yaml").exists():
+            continue
+        for rec_path in chan_dir.rglob("uploads/*.json"):
+            if rec_path.name.endswith(".x.json"):
+                continue
+            try:
+                rec = json.loads(rec_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            vid = rec.get("video_id") or ""
+            acct = rec.get("account") or chan_dir.name
+            if vid:
+                out.append((chan_dir.name, acct, rec_path.stem, vid, rec))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# (Removed in C2 — 2026-05-10 token-issue permanent fix)
+# ---------------------------------------------------------------------------
+#
+# The legacy ``_load_analytics_for_slug`` helper read per-video analytics
+# from ``data/research/analytics/<slug>.json``. That JSON was written by
+# a refresh path tied to per-account OAuth tokens — exactly the fragility
+# we're killing. The canonical dashboard now lives at
+# ``control/routes/dashboard_routes.py::dashboard_videos`` and pulls
+# stats live from YouTube Data API v3 with a single ``YOUTUBE_API_KEY``
+# (in-memory 10-min TTL cache, no per-channel OAuth, no on-disk cache).
+# Avatar/banner mirrors at ``data/research/channel_assets/`` are still
+# served via ``channel_assets.asset_path`` (FS only) — they're baked
+# into the prod image and rarely change, so GCS-ifying them is
+# deferred until rebrands become more frequent.
+
+
+def _dashboard_summary_sync() -> dict:
     import time
     from datetime import datetime, timezone
 
@@ -2177,9 +2833,8 @@ async def dashboard_summary() -> dict:
     queued = 0
     if jobs_dir.exists():
         for jf in jobs_dir.glob("*.json"):
-            try:
-                blob = json.loads(jf.read_text())
-            except Exception:
+            blob = _read_job_file(jf)
+            if blob is None:
                 continue
             state = (blob.get("state") or blob.get("status") or "").lower()
             ts = blob.get("updated_at") or blob.get("created_at") or jf.stat().st_mtime
@@ -2207,64 +2862,53 @@ async def dashboard_summary() -> dict:
     recent_jobs = recent_jobs[:6]
 
     # --- Uploads (last 7 days) -------------------------------------------
+    #
+    # Provider-aware: in cloud (YTFACTORY_STATE_BUCKET set) reads from
+    # GCS via _iter_all_uploads(); on laptop walks the per-channel
+    # filesystem layout via _channel_scan. The ``held`` count remains
+    # FS-only because per-channel _holds.json files aren't mirrored to
+    # GCS yet — that's a separate plan item.
     uploads_7d = 0
-    for chan_dir in PROJECT_ROOT.iterdir():
-        if not chan_dir.is_dir() or not (chan_dir / "config.yaml").exists():
-            continue
-        for upf in chan_dir.rglob("uploads/*.json"):
-            try:
-                rec = json.loads(upf.read_text())
-            except Exception:
-                continue
+    held = 0
+    if _dashboard_state_bucket():
+        for _channel, _account, _slug, _vid, rec in _iter_all_uploads():
             if rec.get("platform") and rec.get("platform") != "youtube":
                 continue
             ts = rec.get("uploaded_at") or rec.get("published_at")
+            epoch: float | None = None
             if isinstance(ts, str):
                 try:
                     epoch = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
                 except Exception:
-                    epoch = upf.stat().st_mtime
-            else:
-                epoch = upf.stat().st_mtime
-            if epoch >= week_ago:
+                    epoch = None
+            if epoch is not None and epoch >= week_ago:
                 uploads_7d += 1
-
-    # --- Held slugs (across all channel _holds.json) ----------------------
-    held = 0
-    for chan_dir in PROJECT_ROOT.iterdir():
-        if not chan_dir.is_dir():
-            continue
-        holds_file = chan_dir / "_holds.json"
-        if not holds_file.exists():
-            continue
-        try:
-            held += len(json.loads(holds_file.read_text()) or {})
-        except Exception:
-            pass
-
-    # --- Top performer ----------------------------------------------------
-    # Reuse dashboard_videos's aggregation by reading it directly. Cheap —
-    # purely cache reads. Tolerate failure (top_performer = None).
-    top_performer: dict | None = None
-    try:
-        videos_summary = await dashboard_videos(refresh=False)
-        best = None
-        for ch in videos_summary.get("channels", []):
-            for v in ch.get("videos", []):
-                views = (v.get("stats") or {}).get("views") or 0
-                if best is None or views > best[0]:
-                    best = (views, v, ch.get("account"))
-        if best:
-            views, v, account = best
-            top_performer = {
-                "youtube_url": v.get("watch_url"),
-                "title": v.get("title"),
-                "thumb_url": v.get("thumbnail"),
-                "views": views,
-                "channel": account,
-            }
-    except Exception as e:
-        logger.warning(f"dashboard: top_performer aggregation failed: {e}")
+    else:
+        for chan_dir in PROJECT_ROOT.iterdir():
+            if not chan_dir.is_dir() or not (chan_dir / "config.yaml").exists():
+                continue
+            scan = _channel_scan(chan_dir)
+            for _upf, rec in scan["uploads"]:
+                if rec.get("platform") and rec.get("platform") != "youtube":
+                    continue
+                ts = rec.get("uploaded_at") or rec.get("published_at")
+                epoch: float
+                if isinstance(ts, str):
+                    try:
+                        epoch = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                    except Exception:
+                        try:
+                            epoch = _upf.stat().st_mtime
+                        except OSError:
+                            continue
+                else:
+                    try:
+                        epoch = _upf.stat().st_mtime
+                    except OSError:
+                        continue
+                if epoch >= week_ago:
+                    uploads_7d += 1
+            held += len(scan["holds"])
 
     return {
         "renders_7d": renders_7d,
@@ -2272,143 +2916,17 @@ async def dashboard_summary() -> dict:
         "queued": queued,
         "held": held,
         "recent_jobs": recent_jobs,
-        "top_performer": top_performer,
     }
 
 
-@app.get("/api/dashboard/videos")
-async def dashboard_videos(refresh: bool = False) -> dict:
-    """Aggregate every uploaded video with cached YouTube analytics.
-
-    Set ``?refresh=true`` to hit the YouTube API and refresh stats before
-    returning. Without it, returns whatever's cached at
-    ``data/research/analytics/<slug>.json``.
-    """
-    from pipeline.research import youtube as _yt
-    refresh_summary: dict | None = None
-    refresh_error: str | None = None
-    if refresh:
-        try:
-            refresh_summary = _yt.fetch_all(quiet=True)
-        except Exception as e:
-            refresh_error = f"refresh failed: {e}"
-        else:
-            # fetch_all swallows per-account auth / HTTP errors and just
-            # records them in `missing_auth`. Surface that to the UI so the
-            # dashboard doesn't silently keep showing stale numbers.
-            if refresh_summary and refresh_summary.get("missing_auth"):
-                refresh_error = (
-                    f"{refresh_summary['missing_auth']} videos skipped — "
-                    "no YouTube auth or API error "
-                    "(re-auth: `python -m pipeline.upload.upload auth --account <channel>`)"
-                )
-
-    by_channel: dict[str, list[dict]] = {}
-    totals = {"videos": 0, "views": 0, "likes": 0, "comments": 0, "subscribers": 0}
-    latest_fetch: str | None = None
-
-    # Inline replacement for the now-removed _yt._enumerate_uploads().
-    # Walks every <channel>/**/uploads/*.json (matches the post-2026-05-05
-    # niched layout AND the flat layout). Skips X-platform sidecars and
-    # malformed records. Yields (account, slug, video_id, rec_path) tuples
-    # to match the old call shape.
-    def _enumerate_uploads_local():
-        from pathlib import Path as _P
-        for chan_dir in PROJECT_ROOT.iterdir():
-            if not chan_dir.is_dir() or not (chan_dir / "config.yaml").exists():
-                continue
-            for rec_path in chan_dir.rglob("uploads/*.json"):
-                if rec_path.name.endswith(".x.json"):
-                    continue
-                try:
-                    rec_local = json.loads(rec_path.read_text())
-                except (OSError, json.JSONDecodeError):
-                    continue
-                vid_local = rec_local.get("video_id")
-                acct_local = rec_local.get("account") or "default"
-                slug_local = rec_path.stem
-                if vid_local:
-                    yield (acct_local, slug_local, vid_local, rec_path)
-
-    # Inline replacement for the now-removed _yt.load_for_slug(slug).
-    # Reads cached YouTube analytics from data/research/analytics/<slug>.json.
-    _ANALYTICS_DIR = PROJECT_ROOT / "data" / "research" / "analytics"
-    def _load_stats_for_slug(slug_local: str) -> dict:
-        p = _ANALYTICS_DIR / f"{slug_local}.json"
-        if not p.exists():
-            return {}
-        try:
-            return json.loads(p.read_text())
-        except (OSError, json.JSONDecodeError):
-            return {}
-
-    for account, slug, vid, rec_path in _enumerate_uploads_local():
-        try:
-            rec = json.loads(rec_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        stats = _load_stats_for_slug(slug) or {}
-        view = stats.get("view_count")
-        like = stats.get("like_count")
-        comment = stats.get("comment_count")
-        fetched_at = stats.get("fetched_at")
-        if fetched_at and (latest_fetch is None or fetched_at > latest_fetch):
-            latest_fetch = fetched_at
-
-        is_short = bool(rec.get("mp4_path", "").endswith(".mp4"))
-        watch_url = (
-            f"https://youtube.com/shorts/{vid}" if is_short else rec.get("url") or f"https://youtu.be/{vid}"
-        )
-
-        by_channel.setdefault(account, []).append({
-            "slug": slug,
-            "video_id": vid,
-            "title": rec.get("title") or slug,
-            "uploaded_at": rec.get("uploaded_at"),
-            "privacy": rec.get("privacy"),
-            "watch_url": watch_url,
-            "studio_url": rec.get("studio_url") or f"https://studio.youtube.com/video/{vid}/edit",
-            "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-            "stats": {
-                "views": view,
-                "likes": like,
-                "comments": comment,
-                "fetched_at": fetched_at,
-            },
-        })
-        totals["videos"] += 1
-        if view is not None: totals["views"] += view
-        if like is not None: totals["likes"] += like
-        if comment is not None: totals["comments"] += comment
-
-    # Sort each channel by upload date desc.
-    channels = []
-    for account, vids in sorted(by_channel.items()):
-        vids.sort(key=lambda v: v.get("uploaded_at") or "", reverse=True)
-        c_views = sum(v["stats"]["views"] or 0 for v in vids)
-        c_likes = sum(v["stats"]["likes"] or 0 for v in vids)
-        c_comments = sum(v["stats"]["comments"] or 0 for v in vids)
-        # _yt.load_channel_for_account was renamed to load_account post-refactor.
-        chan_stats = (_yt.load_account(account) or {}) if hasattr(_yt, "load_account") else {}
-        subs = chan_stats.get("subscriber_count")
-        if subs is not None:
-            totals["subscribers"] += subs
-        channels.append({
-            "account": account,
-            "video_count": len(vids),
-            "subscribers": subs,
-            "subscribers_hidden": chan_stats.get("hidden_subscribers", False),
-            "totals": {"views": c_views, "likes": c_likes, "comments": c_comments},
-            "videos": vids,
-        })
-
-    return {
-        "channels": channels,
-        "totals": totals,
-        "latest_fetch": latest_fetch,
-        "refresh_error": refresh_error,
-        "refresh_summary": refresh_summary,
-    }
+# /api/dashboard/videos is intentionally NOT defined here — see C1 of the
+# permanent-fix-for-token-issue plan (2026-05-10). The handler at
+# control/routes/dashboard_routes.py::dashboard_videos is the canonical
+# implementation: GCS-aware uploads listing via control.core.storage.
+# list_upload_records(), public-API stats via YOUTUBE_API_KEY (no per-
+# channel OAuth tokens needed), in-memory cache + refresh logic. Mounted
+# at the bottom of this file via app.include_router(_control_dashboard_router).
+# Setting YOUTUBE_API_KEY in the prod env lights up the channel cards.
 
 
 @app.get("/api/niches")
@@ -3041,6 +3559,10 @@ async def create_script_job(payload: dict) -> dict:
             rec["state"] = "failed"
             rec["error"] = f"{type(e).__name__}: {e}"
             rec["completed_at"] = time.time()
+        finally:
+            # Terminal state — flush instantly so a Cloud Run revision
+            # rotation in the next millisecond doesn't lose the verdict.
+            SCRIPT_JOBS.flush(job_id)
 
     asyncio.create_task(_run())
     return {"job_id": job_id, "state": "running", "backend": "local"}
@@ -3087,7 +3609,6 @@ async def _run_cloudrun(
                 script_path = repo_root / next(it)
         if not (channel_yaml and script_path):
             raise ValueError("cmd missing --channel or --script")
-
         # Optional raw file (the renderer can use it for upload metadata).
         raw_rel: str | None = None
         raw_b64: str | None = None
@@ -3164,15 +3685,18 @@ async def _run_cloudrun(
                 rec["mp4_path"] = state.get("mp4_uri")
                 rec["completed_at"] = state.get("completed_at") or time.time()
                 rec["log_uri"] = state.get("log_uri")
+                SCRIPT_JOBS.flush(job_id)
                 return
         # Timed out
         rec["state"] = "failed"
         rec["error"] = "polling timed out after 1 hour"
         rec["completed_at"] = time.time()
+        SCRIPT_JOBS.flush(job_id)
     except Exception as e:
         rec["state"] = "failed"
         rec["error"] = f"{type(e).__name__}: {e}"
         rec["completed_at"] = time.time()
+        SCRIPT_JOBS.flush(job_id)
 
 
 def _gcs_upload_text(text: str, uri: str, content_type: str = "application/json") -> None:
@@ -3234,29 +3758,7 @@ async def get_script_job_mp4(job_id: str):
     rec = SCRIPT_JOBS.get(job_id)
     if not rec:
         raise HTTPException(404, "script job not found")
-    mp4 = rec.get("mp4_path")
-    if not mp4:
-        raise HTTPException(404, "mp4 not yet available for this job")
-    if mp4.startswith("gs://"):
-        # 302 to a v4 signed URL (15 min). Avoids streaming the mp4
-        # through the orchestrator and burning its egress quota.
-        try:
-            from urllib.parse import urlparse
-            from google.cloud import storage
-            p = urlparse(mp4)
-            client = storage.Client(project=CLOUDRUN_JOB_PROJECT)
-            blob = client.bucket(p.netloc).blob(p.path.lstrip("/"))
-            url = blob.generate_signed_url(
-                version="v4",
-                expiration=900,  # 15 min
-                method="GET",
-            )
-            return RedirectResponse(url, status_code=302)
-        except Exception as e:
-            raise HTTPException(500, f"failed to sign GCS URL: {e}")
-    if not Path(mp4).exists():
-        raise HTTPException(404, "mp4 not yet available for this job")
-    return FileResponse(mp4, media_type="video/mp4", filename=Path(mp4).name)
+    return _serve_script_job_mp4(rec)
 
 
 @app.get("/api/jobs/from_script")
@@ -3278,6 +3780,166 @@ def _script_job_view(rec: dict) -> dict:
         rec.get("log_path"), state=rec.get("state")
     )
     return out
+
+
+# ---- /api/jobs/{id} fall-through adapter (2026-05-10) -------------------
+#
+# A skill-submitted render lives in SCRIPT_JOBS, but the new web-next
+# render-detail page (`/app/render/<id>`) polls `/api/jobs/{id}`, which
+# resolves to the niche-driven `JOBS` dict. Without an adapter, every
+# skill-rendered job 404s the moment the user opens its page. The
+# adapter maps a SCRIPT_JOBS record into BOTH shapes:
+#
+#   * legacy `JOBS`-snapshot keys (state/niche/mp4_url/events/…) for the
+#     older UIs that still exist on the same /api/jobs/{id} surface;
+#   * new `JobView` keys (status/channel/topic/preview_url/created_at/
+#     updated_at/log_tail/proposal/…) for the web-next UI.
+#
+# Extra keys are harmless to clients that ignore them. See
+# /Users/rohit/.copilot/session-state/.../plan.md for the full mapping.
+
+_SCRIPT_STATE_TO_STATUS = {
+    "running": "rendering",
+    "done": "done",
+    "done_no_mp4_found": "done",
+    "failed": "failed",
+    "cancelled": "cancelled",
+}
+
+
+def _isoformat(epoch: float | None) -> str | None:
+    if not epoch:
+        return None
+    import datetime
+    return (
+        datetime.datetime.fromtimestamp(float(epoch), tz=datetime.timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _channel_topic_from_cmd(cmd: list[str] | None) -> tuple[str | None, str | None]:
+    """Best-effort extraction of channel + topic from the renderer cmd.
+
+    `--channel <yaml>` → channel slug from the first path component
+    (`mystoriesanimated/variants/aita_animated.yaml` → `mystoriesanimated`).
+    `--script <json>` → topic from the file stem (`my_aita_short.json` →
+    `my_aita_short`). Returns (None, None) on parse failure rather than
+    raising so the snapshot still renders.
+    """
+    if not cmd:
+        return (None, None)
+    channel: str | None = None
+    topic: str | None = None
+    it = iter(cmd[1:])  # skip the entry script
+    for tok in it:
+        if tok == "--channel":
+            try:
+                yaml_path = next(it)
+                parts = Path(yaml_path).parts
+                channel = parts[0] if parts else None
+            except StopIteration:
+                break
+        elif tok == "--script":
+            try:
+                script_path = next(it)
+                topic = Path(script_path).stem
+            except StopIteration:
+                break
+    return (channel, topic)
+
+
+def _script_job_to_snapshot(rec: dict) -> dict:
+    """Adapt a SCRIPT_JOBS record to the same JSON shape /api/jobs/{id}
+    returns for niche-driven jobs.
+
+    Includes both legacy keys and new JobView keys so the response is
+    consumable by every UI that hits this endpoint.
+    """
+    job_id = rec.get("job_id", "")
+    state = rec.get("state") or "running"
+    status = _SCRIPT_STATE_TO_STATUS.get(state, state)
+    channel, topic = _channel_topic_from_cmd(rec.get("cmd"))
+    progress = _parse_script_job_progress(
+        rec.get("log_path"), state=state
+    )
+
+    mp4_path = rec.get("mp4_path")
+    short_uri: str | None = None
+    preview_url: str | None = None
+    if mp4_path:
+        if isinstance(mp4_path, str) and mp4_path.startswith("gs://"):
+            short_uri = mp4_path
+        # The mp4 endpoint at /api/jobs/{id}/short already falls through
+        # to SCRIPT_JOBS (see job_short() below), so a single URL covers
+        # both local and gs:// paths.
+        preview_url = f"/api/jobs/{job_id}/short"
+
+    # Read the log tail the same way the from_script endpoint does, so
+    # the new UI's "live trail" surface works without an extra request.
+    log_tail = ""
+    log_path = rec.get("log_path")
+    if log_path:
+        p = Path(log_path)
+        if p.exists():
+            try:
+                with open(p, "rb") as f:
+                    try:
+                        f.seek(-8 * 1024, os.SEEK_END)
+                    except OSError:
+                        f.seek(0)
+                    log_tail = f.read().decode("utf-8", errors="replace")
+            except OSError:
+                pass
+
+    proposal = {
+        "from_script": True,
+        "backend": rec.get("backend"),
+        "cmd": rec.get("cmd"),
+        "label": rec.get("label"),
+        "spec_uri": rec.get("spec_uri"),
+        "log_uri": rec.get("log_uri"),
+        "cloudrun_execution": rec.get("cloudrun_execution"),
+        "exit_code": rec.get("exit_code"),
+        "progress": progress,
+    }
+    # Drop None values from proposal to keep the payload tight.
+    proposal = {k: v for k, v in proposal.items() if v is not None}
+
+    return {
+        # ---- Legacy job_snapshot keys (web/static UIs) ----
+        "job_id": job_id,
+        "niche": channel,
+        "state": state,
+        "slug": topic,
+        "error": rec.get("error"),
+        "stage_started": {},
+        "stage_done": {},
+        "events": [],
+        "beat_prompts": [],
+        "mp4_url": preview_url,
+        "profile": {},
+        "seeds": [],
+        "seed_idx": 0,
+        "seed_total": 1,
+        "mp4s": [],
+        # ---- New JobView keys (web-next UI) ----
+        "status": status,
+        "stage": progress.get("phase"),
+        "channel": channel,
+        "topic": topic,
+        "short_uri": short_uri,
+        "preview_url": preview_url,
+        "created_at": _isoformat(rec.get("started_at")),
+        "updated_at": _isoformat(rec.get("completed_at") or rec.get("started_at")),
+        "log_tail": log_tail,
+        "proposal": proposal,
+        "timeline": [],
+        "critique": None,
+        "youtube_url": None,
+        "thumb_uri": None,
+    }
+
 
 
 # ---- Server-side critique (P2 — 2026-05-09) ------------------------------
@@ -3749,6 +4411,12 @@ async def list_cron_drain(channel: str | None = None, limit: int = 20) -> dict:
 async def job_snapshot(job_id: str) -> dict:
     job = JOBS.get(job_id)
     if not job:
+        # Fall through to skill-submitted render jobs (SCRIPT_JOBS) so
+        # the new web-next render-detail page (`/app/render/<id>`) can
+        # poll a single endpoint regardless of submission origin.
+        rec = SCRIPT_JOBS.get(job_id)
+        if rec:
+            return _script_job_to_snapshot(rec)
         raise HTTPException(404, "job not found")
     return {
         "job_id": job.job_id,
@@ -3827,15 +4495,48 @@ async def job_events(job_id: str, request: Request) -> EventSourceResponse:
 
 
 @app.get("/api/jobs/{job_id}/short")
-async def job_short(job_id: str) -> FileResponse:
+async def job_short(job_id: str):
     job = JOBS.get(job_id)
-    if not job or not job.out_mp4 or not job.out_mp4.exists():
+    if job and job.out_mp4 and job.out_mp4.exists():
+        return FileResponse(
+            str(job.out_mp4),
+            media_type="video/mp4",
+            filename=f"{job.slug}.mp4",
+        )
+    # Fall through to skill-submitted render jobs (SCRIPT_JOBS) so the
+    # new web-next render-detail page can use a single mp4 URL
+    # regardless of submission origin. mp4_path is either a local
+    # filesystem path (local backend) or a `gs://...` URI (cloudrun
+    # backend); we serve the former directly and 302 to a v4-signed
+    # URL for the latter — same shape as /api/jobs/from_script/{id}/mp4.
+    rec = SCRIPT_JOBS.get(job_id)
+    if rec is None:
         raise HTTPException(404, "mp4 not ready")
-    return FileResponse(
-        str(job.out_mp4),
-        media_type="video/mp4",
-        filename=f"{job.slug}.mp4",
-    )
+    return _serve_script_job_mp4(rec)
+
+
+def _serve_script_job_mp4(rec: dict):
+    mp4 = rec.get("mp4_path")
+    if not mp4:
+        raise HTTPException(404, "mp4 not yet available for this job")
+    if mp4.startswith("gs://"):
+        try:
+            from urllib.parse import urlparse  # noqa: PLC0415
+            from google.cloud import storage  # noqa: PLC0415
+            p = urlparse(mp4)
+            client = storage.Client(project=CLOUDRUN_JOB_PROJECT)
+            blob = client.bucket(p.netloc).blob(p.path.lstrip("/"))
+            url = blob.generate_signed_url(
+                version="v4",
+                expiration=900,  # 15 min
+                method="GET",
+            )
+            return RedirectResponse(url, status_code=302)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(500, f"failed to sign GCS URL: {e}")
+    if not Path(mp4).exists():
+        raise HTTPException(404, "mp4 not yet available for this job")
+    return FileResponse(mp4, media_type="video/mp4", filename=Path(mp4).name)
 
 
 @app.get("/api/jobs/{job_id}/short/{seed_idx}")
@@ -3888,7 +4589,7 @@ async def job_thumb(job_id: str, i: int) -> FileResponse:
 async def telemetry_overview(hours: int = 24) -> dict:
     """High-level totals + success rate + per-niche job counts."""
     since = time.time() - max(1, hours) * 3600
-    events = tlm.read_events(since_ts=since)
+    events = await asyncio.to_thread(tlm.read_events, since_ts=since)
     jobs_done = [e for e in events if e["event"] == "job_finished"]
     jobs_started = [e for e in events if e["event"] == "job_started"]
     llm_calls = [e for e in events if e["event"] == "llm_call"]
@@ -3945,7 +4646,8 @@ async def telemetry_stages(hours: int = 24) -> dict:
     """Per-stage counts + avg/p50/p95/max duration. The headline view
     that answers 'how long does each pipeline step actually take'."""
     since = time.time() - max(1, hours) * 3600
-    events = [e for e in tlm.read_events(since_ts=since)
+    raw = await asyncio.to_thread(tlm.read_events, since_ts=since)
+    events = [e for e in raw
               if e["event"] == "stage_done" and e.get("duration_ms") is not None]
     by_stage: dict[str, list[int]] = {}
     for e in events:
@@ -3970,7 +4672,7 @@ async def telemetry_stages(hours: int = 24) -> dict:
 async def telemetry_timeline(hours: int = 24) -> dict:
     """Events bucketed by hour for a sparkline-style view."""
     since = time.time() - max(1, hours) * 3600
-    events = tlm.read_events(since_ts=since)
+    events = await asyncio.to_thread(tlm.read_events, since_ts=since)
     buckets: dict[int, dict[str, int]] = {}
     for e in events:
         # Bucket on the wall-clock hour.
@@ -3997,7 +4699,8 @@ async def telemetry_timeline(hours: int = 24) -> dict:
 async def telemetry_llm(hours: int = 24) -> dict:
     """Per-model LLM token + latency rollup."""
     since = time.time() - max(1, hours) * 3600
-    events = [e for e in tlm.read_events(since_ts=since) if e["event"] == "llm_call"]
+    raw = await asyncio.to_thread(tlm.read_events, since_ts=since)
+    events = [e for e in raw if e["event"] == "llm_call"]
     by_model: dict[str, dict] = {}
     for e in events:
         meta = e.get("metadata") or {}
@@ -4030,7 +4733,7 @@ async def telemetry_llm(hours: int = 24) -> dict:
 async def telemetry_errors(hours: int = 24, limit: int = 50) -> dict:
     """Most recent failures across stages, jobs, and LLM calls."""
     since = time.time() - max(1, hours) * 3600
-    events = tlm.read_events(since_ts=since)
+    events = await asyncio.to_thread(tlm.read_events, since_ts=since)
     failed = [e for e in events
               if e["event"] in ("stage_error",) or e.get("success") is False]
     failed.sort(key=lambda e: e.get("ts", 0), reverse=True)
@@ -4093,14 +4796,43 @@ async def telemetry_latency(hours: int = 168) -> dict:
     a single-host setup and the 24h view is often empty.
     """
     since = time.time() - max(1, hours) * 3600
-    events = tlm.read_events(since_ts=since)
+    events = await asyncio.to_thread(tlm.read_events, since_ts=since)
 
     # ---- hotspots: stages by cumulative wall time ---------------------
+    #
+    # Three event sources fold into this view so the dashboard reflects
+    # the FULL pipeline footprint, not just stages that explicitly emit
+    # `stage_done`:
+    #
+    #   1. `stage_done` events with metadata.stage (when the renderer
+    #      wraps a stage in tlm.timed("stage_done", ...)).
+    #   2. `ffmpeg_compose` events — pre-existing telemetry from
+    #      pipeline.compose, bucketed under the synthetic "compose"
+    #      stage with metadata.pass appended (so libass vs drawtext
+    #      vs compose_clips passes are distinguishable).
+    #   3. `image_attempt` events — bucketed under "image" so the cloud
+    #      cold-load tax (max=2019s, 5.3% >60s; see d-phase telemetry
+    #      analysis) lands in the headline view, not just in the
+    #      separate image_retries panel.
+    #
+    # Pre-fix: hotspots was empty because `stage_done` is never emitted
+    # by today's renderer. Folding in the existing event types is what
+    # actually surfaces the bottleneck without waiting for a2 to ship.
     by_stage: dict[str, list[int]] = {}
     for e in events:
-        if e["event"] != "stage_done" or e.get("duration_ms") is None:
+        if e.get("duration_ms") is None:
             continue
-        stage = (e.get("metadata") or {}).get("stage") or "?"
+        ev = e["event"]
+        meta = e.get("metadata") or {}
+        if ev == "stage_done":
+            stage = meta.get("stage") or "?"
+        elif ev == "ffmpeg_compose":
+            phase = meta.get("phase") or meta.get("pass") or "compose"
+            stage = f"compose:{phase}"
+        elif ev == "image_attempt":
+            stage = "image"
+        else:
+            continue
         by_stage.setdefault(stage, []).append(e["duration_ms"])
     total_stage_ms = sum(sum(v) for v in by_stage.values()) or 1
     hotspots = []

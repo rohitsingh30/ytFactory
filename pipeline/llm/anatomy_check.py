@@ -84,6 +84,7 @@ def check_anatomy(
             model=model,
             timeout_s=timeout_s,
             budget_usd=0.05,
+            stage="anatomy_check",
         )
     except Exception as e:
         # Fail open on infrastructure issues. The dominant gate is

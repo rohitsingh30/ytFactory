@@ -157,8 +157,7 @@ export default function LandingPage() {
             Open the studio.
           </h3>
           <p className="mx-auto mt-4 max-w-md text-[15px] text-muted-foreground">
-            Pick a channel, customize the knobs, hit render. Your library is one
-            click away.
+            Pick a channel, customize the knobs, hit render.
           </p>
           <div className="mt-9 flex justify-center gap-3">
             <Button asChild size="lg">
@@ -184,7 +183,6 @@ export default function LandingPage() {
           </div>
           <div className="flex items-center gap-6 font-mono uppercase tracking-[0.16em]">
             <Link href="/app" className="hover:text-foreground">studio</Link>
-            <Link href="/app/library" className="hover:text-foreground">library</Link>
             <Link href="/app/channels" className="hover:text-foreground">channels</Link>
           </div>
         </div>

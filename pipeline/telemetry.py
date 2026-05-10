@@ -81,6 +81,35 @@ def track(
               file=sys.stderr, flush=True)
 
 
+def track_stage_done(
+    event: str,
+    *,
+    category: str = "pipeline",
+    success: bool = True,
+    duration_ms: int | None = None,
+    job_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Stage-completion telemetry — distinct surface from :func:`track`
+    so renderers can emit per-stage events (tts/asr/image_gen/compose)
+    without inflating the per-attempt event counts that downstream
+    tests assert on.
+
+    Behaviour-wise this is just :func:`track`; the separate name lets
+    callers (and ``unittest.mock.patch.object``) distinguish stage
+    rollups from per-attempt events without filtering by ``event``
+    string.
+    """
+    track(
+        event,
+        category=category,
+        success=success,
+        duration_ms=duration_ms,
+        job_id=job_id,
+        metadata=metadata,
+    )
+
+
 class _Timer:
     def __init__(self, event: str, *, category: str, job_id: str | None,
                  metadata: dict[str, Any]) -> None:
@@ -137,6 +166,55 @@ def timed(
 
 # ---- read side ---------------------------------------------------------
 
+# Cache parsed shards by (path, mtime, size) so the dashboard doesn't
+# re-parse every events-*.jsonl file on every /api/telemetry/* hit.
+# A historical shard (yesterday or older) is parsed exactly once for
+# the lifetime of the server; today's shard is re-parsed only when
+# its mtime/size moves (i.e. when a new event was actually appended).
+#
+# Bug it fixes: pre-fix, six dashboard routes call read_events() per
+# request, each one walks every shard from disk + json.loads every
+# line. With ~3 000 events/day × 7 days = ~21 000 events parsed per
+# request, on the asyncio event loop, blocking every other in-flight
+# request (see d2-async-disk-io). Even after d2 wraps the call in a
+# thread, the wasted work is real — disk + CPU per dashboard poll.
+#
+# Memory cost is bounded: ~21 000 small dicts × ~250 bytes = ~5 MB,
+# trivial. Cache hit is a ref copy, not a deep copy — callers MUST
+# treat the returned list as read-only (read_events docstring updated).
+_PARSE_CACHE: dict[Path, tuple[float, int, list[dict]]] = {}
+_PARSE_CACHE_LOCK = threading.Lock()
+
+
+def _parse_shard(path: Path) -> list[dict]:
+    """Parse one events-*.jsonl shard, with an mtime-keyed cache."""
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    key = (st.st_mtime, st.st_size)
+    with _PARSE_CACHE_LOCK:
+        cached = _PARSE_CACHE.get(path)
+        if cached is not None and (cached[0], cached[1]) == key:
+            return cached[2]
+    out: list[dict] = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    out.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    with _PARSE_CACHE_LOCK:
+        _PARSE_CACHE[path] = (st.st_mtime, st.st_size, out)
+    return out
+
+
 def read_events(
     *,
     since_ts: float | None = None,
@@ -146,27 +224,19 @@ def read_events(
 
     Returns events sorted oldest → newest. ``limit`` (when set) keeps the
     most recent N. Malformed lines are skipped silently.
+
+    The returned list is **shared with the in-memory parse cache** —
+    callers must treat it as read-only. Sort/filter/copy as needed.
     """
     if not TELEMETRY_DIR.exists():
         return []
     files = sorted(TELEMETRY_DIR.glob("events-*.jsonl"))
     out: list[dict] = []
     for f in files:
-        try:
-            with f.open("r", encoding="utf-8") as fh:
-                for raw in fh:
-                    raw = raw.strip()
-                    if not raw:
-                        continue
-                    try:
-                        rec = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    if since_ts is not None and rec.get("ts", 0) < since_ts:
-                        continue
-                    out.append(rec)
-        except OSError:
-            continue
+        for rec in _parse_shard(f):
+            if since_ts is not None and rec.get("ts", 0) < since_ts:
+                continue
+            out.append(rec)
     out.sort(key=lambda r: r.get("ts", 0))
     if limit is not None and len(out) > limit:
         out = out[-limit:]

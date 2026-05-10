@@ -37,6 +37,7 @@ import { ChannelHeroCard } from "@/components/app/channel-hero-card";
 import { AudioSampleButton } from "@/components/app/audio-sample-button";
 import { PreviewableTile } from "@/components/app/previewable-tile";
 import { CloneVoiceDialog } from "@/components/app/clone-voice-dialog";
+import { SongPicker, type SongPickerValues } from "@/components/app/song-picker";
 import { ChannelAvatar } from "@/components/app/channel-avatar";
 import { channelLabel, CHANNEL_TONE } from "@/components/app/channel-meta";
 import {
@@ -203,6 +204,25 @@ export default function CreatePage() {
       const length_s = length_kind === "long" ? Math.max(1, long_minutes) * 60 : 55;
       const source_kind = String(values.source_kind ?? "auto");
       const source_ref = String(values.source_ref ?? "").trim() || null;
+
+      // Pull only the user-facing knobs the renderer cares about into
+      // channel_overrides — everything in here is forwarded to make_short
+      // via --override key=value (see pipeline/render/shorts.py::cli_main).
+      // Skip empty strings / undefined so the YAML default keeps winning
+      // when the user didn't touch a field.
+      const channel_overrides: Record<string, unknown> = {};
+      const passthrough = [
+        "voice", "music_bed", "captions_density", "visibility", "schedule_at",
+        "audio_mode", "song_style", "song_vocal_gender", "song_model",
+        "visual_source",
+      ] as const;
+      for (const k of passthrough) {
+        const v = values[k];
+        if (v === undefined || v === null) continue;
+        if (typeof v === "string" && v.trim() === "") continue;
+        channel_overrides[k] = v;
+      }
+
       const result = await renderApi.enqueue({
         channel: picked,
         topic,
@@ -211,6 +231,7 @@ export default function CreatePage() {
         source_kind,
         source_ref,
         length_s,
+        channel_overrides,
       });
       toast.success("Render queued", { description: `Job ${result.job_id.slice(0, 8)}…` });
       router.push(`/app/render/${result.job_id}`);
@@ -404,6 +425,8 @@ function ModeCardShell({
   href,
   onClick,
   index,
+  disabled = false,
+  disabledReason = "Coming soon",
 }: {
   hero: React.ReactNode;
   title: string;
@@ -416,6 +439,8 @@ function ModeCardShell({
   href?: string;
   onClick?: () => void;
   index: number;
+  disabled?: boolean;
+  disabledReason?: string;
 }) {
   const inner = (
     <motion.div
@@ -424,9 +449,18 @@ function ModeCardShell({
       transition={{ delay: Math.min(index * 0.05, 0.2), duration: 0.28, ease: "easeOut" }}
       className={cn(
         "group relative flex h-full flex-col overflow-hidden rounded-xl border-2 border-border bg-surface text-left transition-all",
-        "hover:border-border-strong hover:bg-surface-2 hover:-translate-y-0.5 hover:shadow-[0_14px_36px_-10px_rgba(0,0,0,0.55)]",
+        disabled
+          ? "cursor-not-allowed opacity-60 grayscale-[0.35]"
+          : "hover:border-border-strong hover:bg-surface-2 hover:-translate-y-0.5 hover:shadow-[0_14px_36px_-10px_rgba(0,0,0,0.55)]",
       )}
     >
+      {disabled && (
+        <div className="pointer-events-none absolute right-3 top-3 z-10 inline-flex items-center gap-1.5 rounded-full bg-amber-300/15 px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.2em] text-amber-200 ring-1 ring-amber-300/40 shadow-sm backdrop-blur-sm">
+          <Sparkles className="h-2.5 w-2.5" />
+          {disabledReason}
+        </div>
+      )}
+
       <div className="relative h-44 overflow-hidden">
         {hero}
         {/* Soft fade from banner into card body so the title region reads. */}
@@ -468,16 +502,39 @@ function ModeCardShell({
 
         <div className="mt-2 flex items-center justify-between gap-3 border-t border-border pt-3.5">
           <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground/80">
-            Step 01 → 02
+            {disabled ? "Not available yet" : "Step 01 → 02"}
           </span>
-          <span className="inline-flex items-center gap-1.5 rounded-md border border-foreground/15 bg-foreground/[0.04] px-3 py-1.5 text-[12px] font-medium text-foreground transition-colors group-hover:border-foreground/30 group-hover:bg-foreground/[0.10]">
+          <span
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition-colors",
+              disabled
+                ? "border-foreground/10 bg-foreground/[0.02] text-muted-foreground/70"
+                : "border-foreground/15 bg-foreground/[0.04] text-foreground group-hover:border-foreground/30 group-hover:bg-foreground/[0.10]",
+            )}
+          >
             {ctaLabel}
-            <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+            {!disabled && (
+              <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+            )}
           </span>
         </div>
       </div>
     </motion.div>
   );
+
+  if (disabled) {
+    return (
+      <div
+        role="button"
+        aria-disabled="true"
+        tabIndex={-1}
+        title={disabledReason}
+        className="block h-full select-none"
+      >
+        {inner}
+      </div>
+    );
+  }
 
   if (href) {
     return (
@@ -559,7 +616,7 @@ function ChannelFocusModeCard({
             </div>
           </div>
           <div className="absolute inset-x-0 top-3 text-center font-mono text-[9.5px] uppercase tracking-[0.22em] text-foreground/75">
-            8 channels · 20+ niches
+            {channels.length} channels · 20+ niches
           </div>
         </div>
       }
@@ -713,8 +770,9 @@ function AIModeCard({ index }: { index: number }) {
         { label: "speed", value: "fast" },
       ]}
       description="Open the chat and describe the Short you want. The assistant figures out channel, niche, source, voice, and length, then queues the render."
-      ctaLabel="Open chat"
-      href="/app/create/chat"
+      ctaLabel="Coming soon"
+      disabled
+      disabledReason="Coming soon"
       reelLabel="A typical exchange"
       hero={
         <div className="absolute inset-0 bg-gradient-to-br from-sky-600/35 via-indigo-700/25 to-violet-950/65">
@@ -1025,11 +1083,18 @@ function CustomizeReviewStep({
   const sourceKindField = byKey("source_kind");
   const sourceRefField = byKey("source_ref");
   const voiceField = byKey("voice");
+  const audioModeField = byKey("audio_mode");
+  const songStyleField = byKey("song_style");
+  const songVocalGenderField = byKey("song_vocal_gender");
+  const songModelField = byKey("song_model");
+  const visualSourceField = byKey("visual_source");
   const musicField = byKey("music_bed");
 
   const handled = new Set([
     "topic", "length_s", "length_kind", "length_minutes",
     "source_kind", "source_ref", "voice", "music_bed",
+    "audio_mode", "song_style", "song_vocal_gender", "song_model",
+    "visual_source",
     "visibility", "schedule_at",
   ]);
   const advancedFields = schema.fields.filter((f) => !handled.has(f.key));
@@ -1160,25 +1225,75 @@ function CustomizeReviewStep({
           />
         )}
 
-        {voiceField && (
-          <VoicePicker
-            voices={compatibleVoices}
-            allLoaded={voices !== null}
-            currentValue={
-              typeof values.voice === "string"
-                ? (values.voice as string)
-                : ((voiceField.default as string | undefined) ?? null)
+        {(voiceField || audioModeField) && (
+          <AudioSection
+            audioMode={
+              typeof values.audio_mode === "string"
+                ? (values.audio_mode as "voice" | "song")
+                : ((audioModeField?.default as "voice" | "song" | undefined) ?? "voice")
             }
-            onChange={(v) => onChange("voice", v)}
-            onCloneAdded={(v) => {
-              setVoices((prev) => {
-                const list = prev ?? [];
-                if (list.some((x) => x.key === v.key)) return list;
-                return [v, ...list];
-              });
-            }}
-            fallbackOptions={voiceField.options ?? []}
-            channelLanguage={channel.language}
+            onAudioModeChange={(m) => onChange("audio_mode", m)}
+            voicePicker={
+              voiceField ? (
+                <VoicePicker
+                  voices={compatibleVoices}
+                  allLoaded={voices !== null}
+                  currentValue={
+                    typeof values.voice === "string"
+                      ? (values.voice as string)
+                      : ((voiceField.default as string | undefined) ?? null)
+                  }
+                  onChange={(v) => onChange("voice", v)}
+                  onCloneAdded={(v) => {
+                    setVoices((prev) => {
+                      const list = prev ?? [];
+                      if (list.some((x) => x.key === v.key)) return list;
+                      return [v, ...list];
+                    });
+                  }}
+                  fallbackOptions={voiceField.options ?? []}
+                  channelLanguage={channel.language}
+                />
+              ) : null
+            }
+            songPicker={
+              songStyleField && songVocalGenderField && songModelField ? (
+                <SongPicker
+                  values={{
+                    style:
+                      typeof values.song_style === "string"
+                        ? (values.song_style as string)
+                        : ((songStyleField.default as string | undefined) ?? ""),
+                    vocal_gender:
+                      ((typeof values.song_vocal_gender === "string"
+                        ? values.song_vocal_gender
+                        : songVocalGenderField.default) as "f" | "m") ?? "f",
+                    model:
+                      ((typeof values.song_model === "string"
+                        ? values.song_model
+                        : songModelField.default) as "V4_5" | "V5") ?? "V4_5",
+                  }}
+                  onChange={(k, v) => {
+                    if (k === "style") onChange("song_style", v);
+                    if (k === "vocal_gender") onChange("song_vocal_gender", v);
+                    if (k === "model") onChange("song_model", v);
+                  }}
+                  channelLanguage={channel.language}
+                />
+              ) : null
+            }
+          />
+        )}
+
+        {visualSourceField && (
+          <VisualSourceCard
+            field={visualSourceField}
+            value={
+              typeof values.visual_source === "string"
+                ? (values.visual_source as string)
+                : ((visualSourceField.default as string | undefined) ?? "ai")
+            }
+            onChange={(v) => onChange("visual_source", v)}
           />
         )}
 
@@ -1921,6 +2036,139 @@ function FamousVoiceCard({
         <Wand2 className="h-3 w-3" />
         Clone
       </button>
+    </div>
+  );
+}
+
+/* ----------------------------- AudioSection (Voice / Song flip) ----------------------------- */
+
+/**
+ * Wraps the Voice picker and Song picker with a 2-way segmented tab so
+ * the user can flip between spoken narration (TTS) and a sung song
+ * (Suno) without leaving the Customize step. Default tab comes from the
+ * channel YAML's audio_provider (read by the schema) — rhymetimejunction
+ * lands on Song; everyone else on Voice. Both tabs are always present.
+ */
+function AudioSection({
+  audioMode,
+  onAudioModeChange,
+  voicePicker,
+  songPicker,
+}: {
+  audioMode: "voice" | "song";
+  onAudioModeChange: (m: "voice" | "song") => void;
+  voicePicker: React.ReactNode;
+  songPicker: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-border bg-surface p-5 min-w-0 max-w-full overflow-hidden">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0">
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+            Audio
+          </div>
+          <div className="mt-0.5 text-[13px] font-medium tracking-tight">
+            {audioMode === "song"
+              ? "Generate a sung track via Suno."
+              : "Audition the narrator. Click ▶ to listen."}
+          </div>
+        </div>
+        <div
+          role="tablist"
+          aria-label="Audio mode"
+          className="inline-flex shrink-0 rounded-md border border-border bg-surface-2 p-0.5"
+        >
+          {(
+            [
+              { v: "voice", label: "🎙 Voice" },
+              { v: "song", label: "🎵 Song" },
+            ] as const
+          ).map((opt) => {
+            const sel = audioMode === opt.v;
+            return (
+              <button
+                key={opt.v}
+                role="tab"
+                aria-selected={sel}
+                type="button"
+                onClick={() => onAudioModeChange(opt.v)}
+                className={cn(
+                  "rounded px-3 py-1 text-[12px] font-medium tracking-tight transition-colors",
+                  sel
+                    ? "bg-foreground text-background"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="mt-4">
+        {audioMode === "song" ? songPicker : voicePicker}
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- VisualSourceCard (AI / Footage / Both) ----------------------------- */
+
+/**
+ * 3-way segmented picker for what plays in the video background.
+ * Defaults are derived per-channel by the backend schema so the picker
+ * pre-selects the channel's house style (animated/rhyme → AI,
+ * footage_only → Real footage, split_screen → Both). Honored by
+ * pipeline/render/shorts.py via cfg["visual_source"].
+ */
+function VisualSourceCard({
+  field,
+  value,
+  onChange,
+}: {
+  field: CustomizationField;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="rounded-xl border border-border bg-surface p-5">
+      <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+        Background visuals
+      </div>
+      <div className="mt-0.5 text-[13px] font-medium tracking-tight">
+        What plays behind the audio.
+      </div>
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        {(field.options ?? []).map((opt) => {
+          const sel = value === opt.value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => onChange(opt.value)}
+              className={cn(
+                "rounded-md border px-3 py-3 text-left transition-colors",
+                sel
+                  ? "border-foreground/45 bg-foreground/10 text-foreground"
+                  : "border-border bg-surface hover:border-border-strong",
+              )}
+            >
+              <div className="text-[12.5px] font-medium tracking-tight">
+                {opt.label}
+              </div>
+              {opt.description && (
+                <div className="mt-1 text-[10.5px] leading-relaxed text-muted-foreground">
+                  {opt.description}
+                </div>
+              )}
+            </button>
+          );
+        })}
+      </div>
+      {field.help && (
+        <p className="mt-2 text-[11px] text-muted-foreground/80">{field.help}</p>
+      )}
     </div>
   );
 }

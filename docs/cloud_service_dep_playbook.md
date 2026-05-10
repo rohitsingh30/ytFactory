@@ -195,6 +195,13 @@ If the build fails despite all the above, it's almost always one of:
 | `OOM during model load on Cloud Run` | Bump `--memory` (4 CPU max 16Gi; 8 CPU max 32Gi) |
 | Service starts but `/readyz` returns 500 | Check `gcloud run services logs read <svc>` — usually a missed runtime import (back to Step 2) |
 
+> **Cross-cutting deploy gotcha (2026-05-10):** `gcloud run services
+> update --set-secrets` REPLACES the entire mount list. When you add
+> a runtime secret out-of-band via `--update-secrets`, you MUST also
+> amend the matching `cloud/<service>/deploy.sh` `--set-secrets` line
+> in the same session, or the next `bash deploy.sh` regresses prod.
+> Audit recipe: [`docs/cloud_run_set_secrets_destructive.md`](./cloud_run_set_secrets_destructive.md).
+
 ---
 
 ## Concrete checklist for ANY new Cloud Run service

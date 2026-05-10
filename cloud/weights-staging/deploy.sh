@@ -5,7 +5,7 @@
 #     --project=ytfactory-prod --region=asia-southeast1 --wait
 set -euo pipefail
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
 SERVICE="ytfactory-weights-staging"

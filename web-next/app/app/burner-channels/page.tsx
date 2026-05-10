@@ -5,6 +5,7 @@ import {
   Activity,
   AlertTriangle,
   Check,
+  ChevronDown,
   ExternalLink,
   Loader2,
   Play,
@@ -17,8 +18,23 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { PageHeader } from "@/components/app/page-header";
-import { burnerApi } from "@/lib/api";
+import {
+  burnerApi,
+  ENGAGE_MODES,
+  ENGAGE_MODE_LABELS,
+  ENGAGE_MODE_DESCRIPTIONS,
+  type EngageMode,
+} from "@/lib/api";
+import { useVisiblePoll } from "@/lib/use-visible-poll";
 import type {
   BurnerChannel,
   BurnerEngagePhase,
@@ -44,11 +60,7 @@ export default function BurnerChannelsPage() {
     }
   }
 
-  useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
-  }, []);
+  useVisiblePoll(refresh, 5000);
 
   return (
     <div className="flex min-h-full flex-col">
@@ -125,14 +137,21 @@ function BurnerRow({
   const [busy, setBusy] = useState(false);
   const running = Boolean(burner.running);
 
-  async function start() {
+  async function start(mode: EngageMode) {
     setBusy(true);
     try {
-      const r = await burnerApi.start(burner.slug);
+      const r = await burnerApi.start(burner.slug, mode);
       if (r.started) {
-        toast.success(`Engage worker started for ${burner.slug}`, {
-          description: `pid ${r.pid}. A Chrome window will open shortly.`,
-        });
+        toast.success(
+          `Engage worker started for ${burner.slug}`,
+          {
+            description:
+              `Mode: ${ENGAGE_MODE_LABELS[mode]}. ` +
+              (r.pid
+                ? `pid ${r.pid}. A Chrome window will open shortly.`
+                : `Queued for laptop agent (task ${(r as any).task_id?.slice(0, 8) ?? "—"}).`),
+          },
+        );
       } else {
         toast.message(`${burner.slug} is already running`, {
           description: r.reason ?? "",
@@ -220,23 +239,63 @@ function BurnerRow({
                 Last run
               </Button>
             )}
-            <Button
-              size="sm"
-              onClick={start}
-              disabled={busy || !burner.profile_known}
-              title={
-                burner.profile_known
-                  ? undefined
-                  : `Add ${burner.slug} → email mapping in ~/.config/ytfactory/profile_map.json first`
-              }
-            >
-              {busy ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Play className="h-3.5 w-3.5" />
-              )}
-              Cross-engage
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  disabled={busy || !burner.profile_known}
+                  title={
+                    burner.profile_known
+                      ? "Pick the engagement intensity"
+                      : `Add ${burner.slug} → email mapping in ~/.config/ytfactory/profile_map.json first`
+                  }
+                >
+                  {busy ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Play className="h-3.5 w-3.5" />
+                  )}
+                  Cross-engage
+                  <ChevronDown className="h-3.5 w-3.5 -mr-1" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-[320px]">
+                <DropdownMenuLabel className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
+                  Engagement mode
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {ENGAGE_MODES.map((m) => (
+                  <DropdownMenuItem
+                    key={m}
+                    onSelect={() => start(m)}
+                    className="flex flex-col items-start gap-0.5 py-2"
+                  >
+                    <div className="flex items-center gap-1.5 text-[13px] font-medium tracking-tight">
+                      {ENGAGE_MODE_LABELS[m]}
+                      {m === "like_subscribe_view" && (
+                        <Badge
+                          variant="outline"
+                          className="ml-1 px-1.5 py-0 font-mono text-[9px] uppercase tracking-tight border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                        >
+                          default
+                        </Badge>
+                      )}
+                      {m === "complete" && (
+                        <Badge
+                          variant="outline"
+                          className="ml-1 px-1.5 py-0 font-mono text-[9px] uppercase tracking-tight border-amber-500/40 bg-amber-500/10 text-amber-200"
+                        >
+                          shadow-ban risk
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="text-[11.5px] leading-snug text-muted-foreground">
+                      {ENGAGE_MODE_DESCRIPTIONS[m]}
+                    </p>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </>
         )}
       </div>
@@ -267,15 +326,16 @@ function EmptyState() {
       <Sparkles className="mx-auto h-6 w-6 text-muted-foreground" />
       <div className="mt-3 text-[14px] font-medium tracking-tight">No burner channels yet</div>
       <p className="mx-auto mt-2 max-w-md text-[12.5px] leading-relaxed text-muted-foreground">
-        A burner channel has an OAuth token at
+        Burners are loaded from
         <code className="mx-1 rounded bg-surface-2 px-1 py-0.5 font-mono text-[11px]">
-          ~/.config/ytfactory/youtube_token_&lt;slug&gt;.json
+          pipeline/burners.yaml
         </code>
-        AND a row in
+        — the committed source of truth (slug, title, channel_id, google_email).
+        Add an entry there and redeploy, or mint a new one with
         <code className="mx-1 rounded bg-surface-2 px-1 py-0.5 font-mono text-[11px]">
-          ~/.config/ytfactory/channel_ids.json
+          python -m pipeline.cross_engage.create_burner_channel
         </code>
-        but is NOT in the production registry. Run a fresh OAuth flow under any non-production slug to add one.
+        and promote it into the YAML.
       </p>
     </div>
   );
@@ -292,23 +352,14 @@ function EngageDrawer({
 }) {
   const [state, setState] = useState<BurnerEngageState | null | "loading" | "missing">("loading");
 
-  useEffect(() => {
-    let cancelled = false;
-    async function tick() {
-      try {
-        const r = await burnerApi.poll(slug);
-        if (!cancelled) setState(r);
-      } catch {
-        if (!cancelled) setState("missing");
-      }
+  useVisiblePoll(async () => {
+    try {
+      const r = await burnerApi.poll(slug);
+      setState(r);
+    } catch {
+      setState("missing");
     }
-    tick();
-    const id = setInterval(tick, 2500);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [slug]);
+  }, 2500, [slug]);
 
   async function stop() {
     try {

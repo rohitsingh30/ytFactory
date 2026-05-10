@@ -37,11 +37,39 @@ SUBSCRIBE_SELECTORS = (
     "button[aria-label*='Subscribe to' i]",
     "ytd-watch-metadata #subscribe-button-shape button",
 )
+# IMPORTANT — Dislike misclassification, fixed 2026-05-10 (re-applied
+# 2026-05-11 after the original edit was reverted by an overlapping
+# patch).
+#
+# The pre-fix selectors used `aria-label*='like this video' i` (case-
+# insensitive substring), which ALSO matches `aria-label='Dislike this
+# video'` because "like this video" is a substring of "Dislike this
+# video". On /watch the DOM order made `.first` return the Like button;
+# on /shorts the order is reversed and `.first` returned the Dislike
+# button. `_probe_like` then reported `("unliked", dislike_btn)` and
+# the engage loop CLICKED DISLIKE on every Short — both the original
+# 2026-05-10 evening run AND the re-occurrence after the second
+# regression on 2026-05-11.
+#
+# Fix: lead with a single universal selector that works on /watch AND
+# /shorts AND can never match Dislike (the `:not(dislike-button-view-
+# model button)` clause excludes the adjacent dislike-button-view-
+# model's child button). Each fallback also carries a `:not([aria-
+# label*='dislike' i])` guard for defence-in-depth.
 LIKE_SELECTORS = (
-    "button[aria-label*='like this video' i][aria-pressed]",
-    "button[aria-label*='Like this' i]",
-    "ytd-toggle-button-renderer #like-button button",
-    "like-button-view-model button",
+    # Universal — works on /watch AND /shorts. The Like button on
+    # Shorts has aria-label="No likes" / "<N> likes" (a count display
+    # that doubles as the toggle); on /watch it's "like this video
+    # along with N other people". aria-pressed reflects user state on
+    # both. The :not() excludes the sibling dislike-button-view-model.
+    "like-button-view-model button:not(dislike-button-view-model button)",
+    # Legacy /watch fallbacks — keep for back-compat with older YouTube
+    # revisions where the view-model markup hasn't rolled out. Both
+    # carry explicit Dislike guards so the misclassification cannot
+    # recur even if a future YouTube refresh narrows the universal
+    # selector.
+    "button[aria-label*='like this video' i][aria-pressed]:not([aria-label*='dislike' i])",
+    "ytd-toggle-button-renderer #like-button button:not([aria-label*='dislike' i])",
 )
 COOKIE_FILES = (
     "Cookies", "Cookies-journal", "Login Data", "Login Data-journal",
@@ -116,7 +144,13 @@ def _clear_singleton(dst_dir: pathlib.Path | None = None) -> None:
         (base / f).unlink(missing_ok=True)
 
 
-def launch_chrome_for(profile: str, *, work_dir: pathlib.Path, user_data_dir: pathlib.Path | None = None) -> tuple[subprocess.Popen, str]:
+def launch_chrome_for(
+    profile: str,
+    *,
+    work_dir: pathlib.Path,
+    user_data_dir: pathlib.Path | None = None,
+    headless: bool = False,
+) -> tuple[subprocess.Popen, str]:
     """Launch Chrome-Debug with the given profile + remote-debugging-port=0.
     Returns (proc, cdp_port). Caller must terminate the proc.
 
@@ -126,6 +160,15 @@ def launch_chrome_for(profile: str, *, work_dir: pathlib.Path, user_data_dir: pa
     canonical one — needed when the user is actively using their
     Chrome-Debug window and we don't want to disrupt them by stealing
     focus / opening tabs there.
+
+    ``headless=True`` adds ``--headless=new`` (modern headless, Chrome
+    109+) plus a fixed ``--window-size=1366,900`` so YouTube's
+    responsive layout matches the desktop SPA selectors the avatar /
+    channel-switcher flow relies on. Headless still respects
+    ``--profile-directory`` and reads cookies from the live user-data-dir
+    natively (no extra bridging needed). Useful when the user is
+    actively using their windowed Chrome and a second visible Chrome
+    would steal focus / be disruptive.
 
     ``start_new_session=True`` puts Chrome in its own POSIX session so it
     survives the Python parent's exit — required for ``--keep-open``
@@ -138,20 +181,39 @@ def launch_chrome_for(profile: str, *, work_dir: pathlib.Path, user_data_dir: pa
     work_dir.mkdir(parents=True, exist_ok=True)
     stderr_path = work_dir / "chrome.stderr"
     stderr_path.write_text("")
+    args = [
+        CHROME_BIN,
+        "--remote-debugging-port=0",
+        "--remote-debugging-address=127.0.0.1",
+        f"--user-data-dir={udd}",
+        f"--profile-directory={profile}",
+        "--no-first-run", "--no-default-browser-check",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-features=AutomationControlled",
+        "--noerrdialogs", "--hide-crash-restore-bubble",
+        "--disable-session-crashed-bubble",
+        # Mute every tab globally. The cross-engage Shorts loop opens
+        # 50+ tabs concurrently; un-muted, the audio decoders saturate
+        # the user's CPU and slow page.goto() to 10+ s per tab. YouTube
+        # still counts views from muted plays, so watch-time signal is
+        # unaffected. Validated 2026-05-10.
+        "--mute-audio",
+    ]
+    if headless:
+        args += [
+            # Chrome 109+ "new" headless renders the same DOM as
+            # windowed mode (the legacy headless lite-rendering would
+            # have broken the avatar / channel-switcher selectors).
+            "--headless=new",
+            # YouTube's SPA renders different chrome layouts at
+            # different viewport sizes; pin a desktop width so the
+            # avatar #avatar-btn selector + Switch-account submenu
+            # render the same way they do in our regular dev runs.
+            "--window-size=1366,900",
+        ]
+    args.append("about:blank")
     proc = subprocess.Popen(
-        [
-            CHROME_BIN,
-            "--remote-debugging-port=0",
-            "--remote-debugging-address=127.0.0.1",
-            f"--user-data-dir={udd}",
-            f"--profile-directory={profile}",
-            "--no-first-run", "--no-default-browser-check",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=AutomationControlled",
-            "--noerrdialogs", "--hide-crash-restore-bubble",
-            "--disable-session-crashed-bubble",
-            "about:blank",
-        ],
+        args,
         stdout=subprocess.DEVNULL,
         stderr=open(stderr_path, "w"),
         start_new_session=True,
@@ -205,14 +267,23 @@ def engage_from_profile(
     work_dir: pathlib.Path,
     do_like: bool = True,
     do_subscribe: bool = True,
+    user_data_dir: pathlib.Path | None = None,
 ) -> dict:
     """Visit `video_url` from `profile` and click Like + Subscribe if applicable.
-    Returns a result dict with per-action status."""
+    Returns a result dict with per-action status.
+
+    ``user_data_dir`` lets the caller pass a per-profile sibling UDD so
+    multiple profiles can engage concurrently in their own Chrome
+    processes (each Chrome locks its own UDD; without per-profile dirs
+    they'd fight over the canonical Chrome-Debug SingletonLock and
+    serialise). Defaults to the canonical ``Chrome-Debug`` for back-compat.
+    """
     from playwright.sync_api import sync_playwright
 
     print(f"\n[{profile}] launching Chrome", flush=True)
-    _clear_singleton()
-    proc, port = launch_chrome_for(profile, work_dir=work_dir)
+    udd = user_data_dir or CHROME_DEBUG
+    _clear_singleton(udd)
+    proc, port = launch_chrome_for(profile, work_dir=work_dir, user_data_dir=udd)
     result = {"profile": profile, "video": video_url, "like": None, "subscribe": None, "errors": []}
     try:
         with sync_playwright() as pw:
@@ -312,36 +383,82 @@ def fanout(
     work_dir: pathlib.Path | None = None,
     profiles: Iterable[str] | None = None,
     bridge_cookies_first: bool = True,
+    max_workers: int | None = None,
 ) -> list[dict]:
     """Cycle every sibling profile (real-Chrome - source) through engage_from_profile.
-    Sequential — Chrome-Debug locks the user-data-dir per-process."""
+
+    **2026-05-10: parallelised.** Each profile gets its own per-profile
+    sibling Chrome user-data-dir (``Chrome-Debug-engage-<profile>``), so
+    Chromes can run concurrently without fighting over the canonical
+    Chrome-Debug SingletonLock. The pattern is the same one
+    ``cross_engage_burner_attached.py:557`` already uses for burner
+    engagement. Cap at 4 workers by default (M2 Max RAM ceiling for
+    concurrent Chromiums); override via ``max_workers`` or env
+    ``YTFACTORY_CROSS_ENGAGE_WORKERS``.
+
+    Pre-fix this was sequential — the largest line item in the per-render
+    wall-clock budget (3-5 min for 5 channels). Parallelising at 4 cuts
+    that to ~1-1.5 min on a typical 5-channel fanout.
+    """
+    import os
+    import concurrent.futures as _cf
+
     work_dir = work_dir or pathlib.Path("/tmp/pw-cross-engage")
     work_dir.mkdir(parents=True, exist_ok=True)
-    assert_chrome_closed()
+    # No more global Chrome-closed assertion: per-profile sibling UDDs
+    # mean each Chrome is independent, and concurrency-by-design needs
+    # the user's main Chrome to stay open.
 
     if profiles is None:
         all_real = discover_profiles(real_only=True)
         profiles = [p for p in all_real if p != source_profile]
+    profiles = list(profiles)
 
     email_map = profile_email_map()
     print(f"[fanout] source: {source_profile} ({email_map.get(source_profile, '?')})")
-    print(f"[fanout] siblings ({len(list(profiles))}):")
-    profiles = list(profiles)  # materialize for re-iteration
+    print(f"[fanout] siblings ({len(profiles)}):")
     for p in profiles:
         print(f"  {p:12} → {email_map.get(p, '?')}")
 
-    results = []
-    for profile in profiles:
+    if max_workers is None:
+        try:
+            max_workers = int(os.environ.get("YTFACTORY_CROSS_ENGAGE_WORKERS", "4"))
+        except ValueError:
+            max_workers = 4
+    max_workers = max(1, min(max_workers, len(profiles) or 1))
+    print(f"[fanout] max_workers={max_workers}")
+
+    def _engage_one(profile: str) -> dict:
+        # Per-profile sibling UDD so this Chrome doesn't lock the
+        # canonical Chrome-Debug user-data-dir. Mirrors
+        # cross_engage_burner_attached.py:557.
+        engage_udd = pathlib.Path.home() / "Library/Application Support/Google" / (
+            f"Chrome-Debug-engage-{profile.replace(' ', '_').lower()}"
+        )
         if bridge_cookies_first:
             try:
-                bridge_cookies(profile)
+                bridge_cookies(profile, dst_dir=engage_udd)
             except Exception as e:
-                results.append({"profile": profile, "errors": [f"bridge {type(e).__name__}: {e}"]})
-                continue
+                return {"profile": profile, "errors": [f"bridge {type(e).__name__}: {e}"]}
         try:
-            results.append(engage_from_profile(profile, video_url, work_dir=work_dir))
+            return engage_from_profile(
+                profile, video_url, work_dir=work_dir, user_data_dir=engage_udd,
+            )
         except Exception as e:
-            results.append({"profile": profile, "errors": [f"engage {type(e).__name__}: {e}"]})
+            return {"profile": profile, "errors": [f"engage {type(e).__name__}: {e}"]}
+
+    results: list[dict] = []
+    if max_workers == 1 or len(profiles) <= 1:
+        for profile in profiles:
+            results.append(_engage_one(profile))
+    else:
+        with _cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            future_for = {ex.submit(_engage_one, p): p for p in profiles}
+            for fut in _cf.as_completed(future_for):
+                try:
+                    results.append(fut.result())
+                except Exception as e:
+                    results.append({"profile": future_for[fut], "errors": [f"future {type(e).__name__}: {e}"]})
 
     summary_path = work_dir / "fanout-summary.json"
     summary_path.write_text(json.dumps(results, indent=2))

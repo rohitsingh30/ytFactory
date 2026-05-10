@@ -177,7 +177,7 @@ def author_cast(
     )
 
     print(f"[cast] authoring narrator via claude CLI for {raw_story.get('slug')!r}…")
-    raw = llm.call_claude_cli(prompt, output_json=True, model=llm.model_for("cast"))
+    raw = llm.call_claude_cli(prompt, output_json=True, model=llm.model_for("cast"), stage="cast")
 
     if not isinstance(raw, dict) or "narrator" not in raw:
         raise ValueError(f"cast author returned unexpected shape: {raw!r}")

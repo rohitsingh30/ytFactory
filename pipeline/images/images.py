@@ -30,6 +30,7 @@ import os as _os
 import re
 import time as _time
 from pathlib import Path
+from threading import Thread as _Thread
 
 # Module-state stubs — kept as None forever post-cleanup so any leftover
 # `_FLUX_PIPE is not None` truthiness check evaluates correctly. Their
@@ -466,7 +467,9 @@ def reset_image_state() -> None:
     _ZIMAGE_PIPE = None
 
 
-def warmup(provider: str, *, want_ip_adapter: bool = False) -> None:
+def warmup(
+    provider: str, *, want_ip_adapter: bool = False
+) -> _Thread | None:
     """Pre-warm the cloud image service via /readyz before generate().
 
     Cloud-only as of 2026-05-09 (laptop nuclear cleanup). Fires
@@ -478,6 +481,12 @@ def warmup(provider: str, *, want_ip_adapter: bool = False) -> None:
     signature) but ignored — IP-Adapter only applied on the deleted
     SDXL laptop path.
 
+    Returns the background ``threading.Thread`` so callers can
+    ``.join(timeout=...)`` it right before the first /generate, to
+    guarantee the cold-load actually completed instead of racing
+    against the real request. Returns ``None`` when the provider is
+    unknown or doesn't support warmup (so callers can ``if t: t.join``).
+
     Catches and logs any error: a warmup failure should not crash the
     job; the first /generate will pay the cold-load instead.
     """
@@ -486,18 +495,20 @@ def warmup(provider: str, *, want_ip_adapter: bool = False) -> None:
         if provider in ("cloudrun_flux2_klein", "cloudrun_z_image_turbo"):
             from pipeline.images.images_cloudrun import warmup as _cloud_warmup
             model = provider.removeprefix("cloudrun_")
-            _cloud_warmup(model)
+            t = _cloud_warmup(model)
             print(f"[warmup] {provider} /readyz fired on background thread")
-            return
+            return t
         if provider in ("azure_flux2_klein", "azure_z_image_turbo"):
             from pipeline.images.images_azure import warmup as _azure_warmup
             model = provider.removeprefix("azure_")
-            _azure_warmup(model)
+            t = _azure_warmup(model)
             print(f"[warmup] {provider} /readyz fired on background thread")
-            return
+            return t
         print(f"[warmup] unknown provider {provider!r}; skipping (only cloudrun_*/azure_* are supported post 2026-05-09)")
+        return None
     except Exception as e:  # pragma: no cover — defensive
         print(f"[warmup] {provider} preload failed (will lazy-load on first generate): {e}")
+        return None
 
 
 # --- Generation --------------------------------------------------------

@@ -422,11 +422,20 @@ class TestSwitchToBurnerBrand(unittest.TestCase):
         page.context = ctx
         burner = self._make_burner("UCdifferent00000000000")
 
-        verify_p1 = MagicMock()
-        verify_p1.url = "https://studio.youtube.com/channel/UC_OTHER0000000000000"
-        verify_p2 = MagicMock()
-        verify_p2.url = "https://studio.youtube.com/channel/UC_OTHER0000000000000"
-        ctx.new_page.side_effect = [verify_p1, verify_p2]
+        # Each _read_active_uc call may open 2 pages (studio probe +
+        # /account fallback when studio.url has no UC). Two probe calls
+        # × 2 pages = 4 mock pages.
+        def _mock_page(url):
+            p = MagicMock()
+            p.url = url
+            p.content.return_value = "<html><body>no UC here</body></html>"
+            return p
+        ctx.new_page.side_effect = [
+            _mock_page("https://studio.youtube.com/channel/UC_OTHER0000000000000"),
+            _mock_page("https://www.youtube.com/account"),
+            _mock_page("https://studio.youtube.com/channel/UC_OTHER0000000000000"),
+            _mock_page("https://www.youtube.com/account"),
+        ]
 
         switch = MagicMock()
         switch.is_visible.return_value = False
@@ -444,11 +453,18 @@ class TestSwitchToBurnerBrand(unittest.TestCase):
         page.context = ctx
         burner = self._make_burner("UCdifferent00000000000", "MyBurner")
 
-        verify_p = MagicMock()
-        verify_p.url = "https://studio.youtube.com/channel/UC_OTHER0000000000000"
-        verify_p2 = MagicMock()
-        verify_p2.url = "https://studio.youtube.com/channel/UC_OTHER0000000000000"
-        ctx.new_page.side_effect = [verify_p, verify_p2]
+        # Same pattern — 2 probe calls × up to 2 pages.
+        def _mock_page(url):
+            p = MagicMock()
+            p.url = url
+            p.content.return_value = "<html><body>no UC here</body></html>"
+            return p
+        ctx.new_page.side_effect = [
+            _mock_page("https://studio.youtube.com/channel/UC_OTHER0000000000000"),
+            _mock_page("https://www.youtube.com/account"),
+            _mock_page("https://studio.youtube.com/channel/UC_OTHER0000000000000"),
+            _mock_page("https://www.youtube.com/account"),
+        ]
 
         switch = MagicMock()
         switch.is_visible.return_value = True

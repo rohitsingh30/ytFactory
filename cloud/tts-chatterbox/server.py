@@ -232,7 +232,19 @@ _REF_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _ref_audio_to_path(ref_b64: str) -> Path:
+    if not ref_b64:
+        raise ValueError(
+            "empty ref_audio_b64 — Chatterbox is a voice-cloning model and "
+            "requires a base64-encoded reference WAV. Pass ref_audio_path on "
+            "the client side or hand-craft the payload with a real reference."
+        )
     raw = base64.b64decode(ref_b64)
+    if len(raw) < 44:  # WAV header is 44 bytes minimum
+        raise ValueError(
+            f"ref_audio_b64 decoded to {len(raw)} bytes — too small to be a "
+            "valid WAV (header is 44 bytes). Likely the client sent empty or "
+            "corrupted base64."
+        )
     sha = hashlib.sha256(raw).hexdigest()[:16]
     path = _REF_DIR / f"{sha}.wav"
     if not path.exists():

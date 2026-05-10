@@ -9,7 +9,7 @@ set -euo pipefail
 TAG="${1:-$(date +%Y%m%d-%H%M%S)}"
 SERVICE="ytfactory-tts-indicf5"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/tts-indicf5:${TAG}"

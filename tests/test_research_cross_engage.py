@@ -205,6 +205,7 @@ class ResolveChannelIdTest(unittest.TestCase):
         fake_yt = MagicMock()
         fake_yt.channels.return_value.list.return_value.execute.return_value = {"items": []}
 
+        _install_fake_google_for_ce()
         with patch.object(ce_mod, "_load_registry", return_value={}):
             with patch("pipeline.research.cross_engage.authenticate", return_value=MagicMock()):
                 sys.modules["googleapiclient.discovery"].build = MagicMock(return_value=fake_yt)
@@ -219,6 +220,7 @@ class ResolveChannelIdTest(unittest.TestCase):
             "items": [{"id": "UCfresh", "snippet": {"title": "Fresh"}}]
         }
 
+        _install_fake_google_for_ce()
         with patch.object(ce_mod, "_load_registry", return_value=reg):
             with patch.object(ce_mod, "_save_registry"):
                 with patch("pipeline.research.cross_engage.authenticate", return_value=MagicMock()):

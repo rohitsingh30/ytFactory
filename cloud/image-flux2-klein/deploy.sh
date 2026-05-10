@@ -12,7 +12,7 @@ set -euo pipefail
 SERVICE="${1:-ytfactory-image-flux2-klein}"
 TAG="${2:-$(date +%Y%m%d-%H%M%S)}"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE}:${TAG}"

@@ -339,6 +339,7 @@ def critique_short(
         add_dirs=[frames_dir.resolve(), beats_path.parent.resolve()],
         timeout_s=600,
         budget_usd=1.5,
+        stage="critic",
     )
 
     if not isinstance(raw, dict):

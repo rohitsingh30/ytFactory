@@ -367,6 +367,48 @@ class TestGetCustomizationSchema(unittest.TestCase):
             result = get_customization_schema(entry["key"])
         self.assertIsNone(result.default_variant)  # type: ignore[union-attr]
 
+    def test_audio_mode_and_song_and_visual_source_fields_present(self):
+        """Every channel exposes the audio_mode flip, the three Suno song
+        fields, and the visual_source picker — these drive the Customize
+        step's Voice/Song toggle and the Background-visuals card."""
+        entry = CHANNEL_REGISTRY[0]
+        fake_personality = {
+            "avatar_url": None, "banner_url": None, "youtube_url": None,
+            "custom_url": None, "subscribers": None, "youtube_video_count": None,
+            "total_views": None, "recent_videos": [],
+            "avatar_mirrored": False, "banner_mirrored": False,
+        }
+        with patch.object(custom_mod, "_personality_for", return_value=fake_personality):
+            result = get_customization_schema(entry["key"])
+        keys = {f.key for f in result.fields}  # type: ignore[union-attr]
+        self.assertIn("audio_mode", keys)
+        self.assertIn("song_style", keys)
+        self.assertIn("song_vocal_gender", keys)
+        self.assertIn("song_model", keys)
+        self.assertIn("visual_source", keys)
+
+    def test_audio_mode_default_song_for_song_channel(self):
+        """rhymetimejunction's audio_provider is sunoapi/external_song,
+        so the Customize form pre-selects the Song tab (default = 'song').
+        Other channels default to 'voice'."""
+        fake_personality = {
+            "avatar_url": None, "banner_url": None, "youtube_url": None,
+            "custom_url": None, "subscribers": None, "youtube_video_count": None,
+            "total_views": None, "recent_videos": [],
+            "avatar_mirrored": False, "banner_mirrored": False,
+        }
+        with patch.object(custom_mod, "_personality_for", return_value=fake_personality):
+            rhyme = get_customization_schema("rhymetimejunction")
+            mystories = get_customization_schema("mystoriesanimated")
+        rhyme_audio_mode = next(
+            (f for f in rhyme.fields if f.key == "audio_mode"), None  # type: ignore[union-attr]
+        )
+        my_audio_mode = next(
+            (f for f in mystories.fields if f.key == "audio_mode"), None  # type: ignore[union-attr]
+        )
+        self.assertEqual(rhyme_audio_mode.default, "song")
+        self.assertEqual(my_audio_mode.default, "voice")
+
 
 # ── get_channel ───────────────────────────────────────────────────────────
 

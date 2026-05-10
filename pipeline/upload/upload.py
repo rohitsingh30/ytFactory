@@ -63,9 +63,35 @@ THUMBNAIL_MIME_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "im
 CONFIG_DIR = Path.home() / ".config" / "ytfactory"
 CLIENT_SECRET_PATH = CONFIG_DIR / "client_secret.json"
 
+# Cloud Run mounts every Secret Manager secret as a tiny read-only
+# directory. Per the 2026-05-09 cutover (docs/full_cloud_cutover_2026_05_09.md
+# §1a) every per-channel OAuth refresh token lives at
+# ``/secrets/youtube-token-<account>/value`` on the cloud web service +
+# render-worker JOB. ``_secret_mount_path`` returns that path; ``_token_path``
+# prefers it when present so the same code paths (authenticate,
+# inspect_token_status, fetch_account, etc.) work transparently on both
+# laptop and cloud without env switching.
+SECRETS_ROOT = Path("/secrets")
+
+
+def _secret_mount_path(account: str) -> Path:
+    """Cloud Run secret mount: ``/secrets/youtube-token-<account>/value``."""
+    safe = "".join(c for c in account if c.isalnum() or c in "-_") or "default"
+    return SECRETS_ROOT / f"youtube-token-{safe}" / "value"
+
 
 def _token_path(account: str) -> Path:
+    """Resolve the active token file for ``account``.
+
+    Prefers the Cloud Run Secret Manager mount when present, falls back
+    to the laptop dev path under ``~/.config/ytfactory/``. The mount is
+    read-only (a writeback path through ``secretmanager.add_secret_version``
+    is a separate plan item — D1 in the token-issue fix).
+    """
     safe = "".join(c for c in account if c.isalnum() or c in "-_") or "default"
+    sp = _secret_mount_path(account)
+    if sp.exists():
+        return sp
     return CONFIG_DIR / f"youtube_token_{safe}.json"
 
 
@@ -175,6 +201,94 @@ class UploadError(RuntimeError):
     pass
 
 
+class RefreshTokenLost(UploadError):
+    """The cached OAuth credentials for ``account`` have no usable refresh token.
+
+    Raised by :func:`authenticate` (with ``interactive=False``) when the
+    on-disk token blob exists but lacks a ``refresh_token`` AND there is
+    no prior cached refresh token to splice forward. Distinct from a
+    generic ``UploadError`` so cloud-side callers (the stats-refresh
+    Job, the token-health endpoint, the dashboard refresh path) can
+    surface it as an actionable "re-OAuth this channel" alert instead
+    of the silent all-nulls degrade we used to ship.
+
+    The fix is always the same: visit
+    ``https://myaccount.google.com/connections``, REMOVE the OAuth app's
+    access for the affected Google account, then re-run
+    ``python -m pipeline.upload.upload auth --account <account>`` from a
+    machine with a browser to issue a fresh refresh token.
+    """
+
+    def __init__(self, account: str):
+        self.account = account
+        super().__init__(
+            f"OAuth credentials for {account!r} have no usable refresh_token. "
+            f"Re-OAuth required: revoke at https://myaccount.google.com/connections "
+            f"then run: python -m pipeline.upload.upload auth --account {account}"
+        )
+
+
+def _persist_token(account: str, blob_json: str, tp: Path) -> None:
+    """Write the (possibly rotated) token blob to the active backend.
+
+    On laptop dev the active path is a writable JSON file under
+    ``~/.config/ytfactory/`` — just write it.
+
+    On Cloud Run the active path is a read-only Secret Manager mount.
+    Use ``secretmanager.add_secret_version`` to write a new version of
+    the underlying secret instead. The mount picks up the new value on
+    the next container restart; in the meantime the in-memory creds
+    object stays valid for the full access-token lifetime.
+
+    Requires ``roles/secretmanager.secretVersionAdder`` on the
+    ``youtube-token-<account>`` secret for the runtime SA — see plan-E3
+    + ``cloud/iam/grant_token_writeback.sh``. Falls back to a loud warn
+    if the IAM grant is missing so we never silently fail to rotate.
+    """
+    from pathlib import Path as _P  # noqa: PLC0415
+
+    is_secret_mount = str(tp).startswith(str(SECRETS_ROOT))
+    if not is_secret_mount:
+        # Laptop dev path — straight file write.
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        tp.write_text(blob_json)
+        return
+
+    # Cloud — mount is read-only. Add a new Secret Manager version.
+    safe = "".join(c for c in account if c.isalnum() or c in "-_") or "default"
+    secret_id = f"youtube-token-{safe}"
+    try:
+        from google.cloud import secretmanager  # noqa: PLC0415
+    except ImportError as exc:
+        raise RuntimeError(
+            "google-cloud-secret-manager not installed; cannot rotate "
+            f"the secret for {account!r}. Install it in the cloud image."
+        ) from exc
+
+    project = (
+        os.environ.get("GOOGLE_CLOUD_PROJECT")
+        or os.environ.get("GCP_PROJECT")
+        or "ytfactory-prod-v2"
+    )
+    client = secretmanager.SecretManagerServiceClient()
+    parent = f"projects/{project}/secrets/{secret_id}"
+    try:
+        client.add_secret_version(
+            request={"parent": parent, "payload": {"data": blob_json.encode("utf-8")}}
+        )
+    except Exception as exc:
+        # Most likely cause: the runtime SA lacks
+        # roles/secretmanager.secretVersionAdder on this secret. Surface
+        # the cause so the operator knows to run cloud/iam/
+        # grant_token_writeback.sh; do NOT swallow because next cold
+        # start will then re-discover the same expired token.
+        raise RuntimeError(
+            f"Failed to add a new version of {parent}: {exc}. "
+            f"Likely missing roles/secretmanager.secretVersionAdder — see "
+            f"cloud/iam/grant_token_writeback.sh."
+        ) from exc
+
+
 # ---- auth ---------------------------------------------------------------
 
 
@@ -210,6 +324,97 @@ def inspect_token_status(account: str) -> dict:
         return out
     out["state"] = "ok"
     return out
+
+
+def _run_local_server_with_chrome_profile(
+    *, flow, port: int, chrome_profile_dir: str,
+):
+    """Same OAuth flow as ``flow.run_local_server`` but opens the URL in
+    a Chrome subprocess pinned to ``chrome_profile_dir`` instead of the
+    system default browser. Used when ``YTFACTORY_CHROME_PROFILE_DIR``
+    is set and you have multiple Google accounts and want OAuth to land
+    on a specific profile.
+
+    On macOS Chrome lives at
+    ``/Applications/Google Chrome.app/Contents/MacOS/Google Chrome``;
+    on Linux at ``/usr/bin/google-chrome`` or ``/usr/bin/chromium``;
+    we try each in order.
+    """
+    import subprocess  # noqa: PLC0415
+    import threading  # noqa: PLC0415
+    import sys as _sys  # noqa: PLC0415
+
+    candidates = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+    ]
+    chrome_bin = next((p for p in candidates if Path(p).exists()), None)
+    if chrome_bin is None:
+        print(
+            "[upload] WARN: no Chrome binary found; falling back to "
+            "default-browser opener."
+        )
+        return flow.run_local_server(
+            port=port,
+            prompt="consent select_account",
+            open_browser=True,
+            success_message="Authorization complete — you can close this tab.",
+        )
+
+    def _open(url: str) -> None:
+        # Detached Chrome process pinned to the specified profile dir.
+        # No --headless: the user MUST see the consent screen.
+        try:
+            subprocess.Popen(
+                [
+                    chrome_bin,
+                    f"--user-data-dir={Path(chrome_profile_dir).expanduser()}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    url,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            print(
+                f"[upload] WARN: could not open Chrome with profile "
+                f"{chrome_profile_dir!r}: {exc}. Paste the URL above into "
+                f"any browser signed into the target Google account."
+            )
+
+    # google-auth-oauthlib doesn't expose an "opener" hook directly, so
+    # we reach in: build the URL ourselves, fire the opener on a thread,
+    # then run the local-server bind. _redirect_uri is set by
+    # run_local_server(); we replicate the minimal handshake here.
+    auth_url, _state = flow.authorization_url(
+        prompt="consent select_account",
+        access_type="offline",
+        include_granted_scopes="true",
+    )
+    print(
+        "\n================================================================\n"
+        f"  Opening OAuth URL in Chrome (profile={chrome_profile_dir!r}).\n"
+        "  If the tab doesn't appear, paste manually:\n"
+        "----------------------------------------------------------------\n"
+        f"  {auth_url}\n"
+        "================================================================\n"
+    )
+    _t = threading.Thread(target=_open, args=(auth_url,), daemon=True)
+    _t.start()
+
+    # Now hand control back to the standard local-server callback path,
+    # but with open_browser=False since we already opened it ourselves.
+    return flow.run_local_server(
+        port=port,
+        prompt="consent select_account",
+        open_browser=False,
+        success_message="Authorization complete — you can close this tab.",
+    )
 
 
 def authenticate(account: str = "default", *, interactive: bool = True) -> Any:
@@ -256,10 +461,13 @@ def authenticate(account: str = "default", *, interactive: bool = True) -> Any:
                 creds = Credentials.from_authorized_user_file(str(tp), SCOPES)
             except Exception as e:
                 # `from_authorized_user_file` rejects tokens missing
-                # `refresh_token`. If the access_token is still valid we
-                # can keep operating for ~1h — construct Credentials
-                # manually so the caller gets a usable creds object,
-                # warn loudly so they re-OAuth before expiry.
+                # `refresh_token`. We try to construct a Credentials
+                # manually so a still-valid access_token can be used for
+                # ~1 hour; if even THAT yields no refresh_token AND
+                # there's no prior cached one to splice forward in the
+                # interactive path below, raise RefreshTokenLost so
+                # cloud callers (no browser) surface an actionable alert
+                # instead of degrading to a 1h-expiring access token.
                 try:
                     blob = json.loads(tp.read_text())
                     creds = Credentials(
@@ -271,6 +479,12 @@ def authenticate(account: str = "default", *, interactive: bool = True) -> Any:
                         scopes=blob.get("scopes") or SCOPES,
                     )
                     if not creds.refresh_token:
+                        if not interactive:
+                            # Cloud path — no browser, no fallback.
+                            # Surface the bad-state explicitly so the
+                            # caller can route it to the token-health
+                            # endpoint / alert.
+                            raise RefreshTokenLost(account)
                         print(
                             f"[upload] WARN: token for {account!r} has no "
                             f"refresh_token — using access_token only "
@@ -278,6 +492,8 @@ def authenticate(account: str = "default", *, interactive: bool = True) -> Any:
                             f"https://myaccount.google.com/connections , "
                             f"then re-run OAuth."
                         )
+                except RefreshTokenLost:
+                    raise
                 except Exception as e2:
                     print(f"[upload] cached token unreadable ({e}; fallback also failed: {e2}); re-auth required")
                     creds = None
@@ -288,11 +504,24 @@ def authenticate(account: str = "default", *, interactive: bool = True) -> Any:
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(GoogleAuthRequest())
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            tp.write_text(creds.to_json())
-            return creds
         except Exception as e:
             print(f"[upload] token refresh failed ({e}); re-auth required")
+        else:
+            # Persist the rotated blob. On the laptop that's a writable
+            # JSON file; on Cloud Run the active path is a read-only
+            # secret mount, so we add a NEW Secret Manager version
+            # instead. ``_persist_token`` handles both cases.
+            try:
+                _persist_token(account, creds.to_json(), tp)
+            except Exception as persist_exc:
+                # Persistence failure is non-fatal — the in-memory creds
+                # are still valid for ~1h. Log and let the caller proceed.
+                print(
+                    f"[upload] WARN: refreshed token for {account!r} "
+                    f"could not be persisted ({persist_exc}); next cold "
+                    f"start will need to refresh again."
+                )
+            return creds
 
     if not interactive:
         raise UploadError(
@@ -317,6 +546,44 @@ def authenticate(account: str = "default", *, interactive: bool = True) -> Any:
     # list once. Desktop-type clients accept any loopback URI regardless,
     # so this is harmless for them. Env-overridable if 8089 is in use.
     callback_port = int(os.environ.get("YTFACTORY_OAUTH_PORT") or 8089)
+
+    # Open in your signed-in Chrome by default — saves a copy/paste step
+    # and uses whichever Google session is already active in your default
+    # browser. Two escape hatches:
+    #
+    #   YTFACTORY_OAUTH_OPEN_BROWSER=0
+    #     Don't open anything; just print the URL (the old behaviour;
+    #     useful when running headless / over SSH / in a CI shell).
+    #
+    #   YTFACTORY_CHROME_PROFILE_DIR=<path-to-Chrome-User-Data>
+    #     Launch a separate Chrome instance against the specified
+    #     ``--user-data-dir`` (e.g. ``~/Library/Application Support/Google/Chrome``).
+    #     Useful when your default browser isn't Chrome OR you have
+    #     multiple Google accounts and want to control which profile
+    #     hosts the OAuth tab.
+    open_browser = (os.environ.get("YTFACTORY_OAUTH_OPEN_BROWSER", "1").strip()
+                    not in ("", "0", "false", "no"))
+    chrome_profile_dir = os.environ.get("YTFACTORY_CHROME_PROFILE_DIR", "").strip()
+
+    # google-auth-oauthlib's run_local_server() opens via
+    # ``webbrowser.open()`` which on macOS uses LaunchServices to honor
+    # the user's default-browser pref — the same Chrome window that's
+    # already signed into Google. To force a SPECIFIC Chrome profile we
+    # have to pre-launch a Chrome subprocess with --user-data-dir AND
+    # tell run_local_server NOT to also open another tab. Hooked via
+    # _open_oauth_url_in_chrome below.
+    if open_browser and chrome_profile_dir:
+        # Pre-flight: warn loudly if the profile dir doesn't exist so
+        # the user catches the typo before the OAuth URL prints to a
+        # browser they didn't expect.
+        if not Path(chrome_profile_dir).expanduser().exists():
+            print(
+                f"[upload] WARN: YTFACTORY_CHROME_PROFILE_DIR=" 
+                f"{chrome_profile_dir!r} does not exist; falling back to "
+                f"the system default browser."
+            )
+            chrome_profile_dir = ""
+
     creds = flow.run_local_server(
         port=callback_port,
         # `consent select_account` forces BOTH the account picker AND the
@@ -324,17 +591,27 @@ def authenticate(account: str = "default", *, interactive: bool = True) -> Any:
         # refresh_token. `access_type=offline` is sent automatically by
         # google-auth-oauthlib's authorization_url().
         prompt="consent select_account",
-        open_browser=False,
+        # Use a custom opener when the user has pinned a Chrome profile;
+        # otherwise let run_local_server open in the system default
+        # browser (which on macOS = your signed-in Chrome).
+        open_browser=open_browser and not chrome_profile_dir,
         authorization_prompt_message=(
             "\n"
             "================================================================\n"
-            "  Open this URL in any browser signed into the target Google\n"
-            "  account, grant access, then return here:\n"
+            "  Opening this URL in your browser. If the tab doesn't open\n"
+            "  automatically (or you want a different Google account),\n"
+            "  paste it manually:\n"
             "----------------------------------------------------------------\n"
             "{url}\n"
             "================================================================\n"
         ),
         success_message="Authorization complete — you can close this tab.",
+        # `redirect_uri_trailing_slash` defaults to True; explicit for
+        # clarity that the registered redirect must include the slash.
+    ) if not chrome_profile_dir else _run_local_server_with_chrome_profile(
+        flow=flow,
+        port=callback_port,
+        chrome_profile_dir=chrome_profile_dir,
     )
 
     # Refresh-token preservation: Google may omit refresh_token in the
@@ -890,11 +1167,25 @@ def _mirror_record_to_gcs(local_path: Path, project_root: Path, record: dict) ->
     logs a warning. The local-disk write above is the source of truth —
     a backfill script can re-sync later. Disable with
     ``YTFACTORY_DASHBOARD_GCS_SYNC=0`` (e.g. for offline laptop work).
+
+    On success, also busts the dashboard's in-memory enumeration cache
+    in ``control.core.storage`` so the freshly-mirrored record shows
+    up on the next dashboard poll instead of waiting for the cache TTL
+    (~60 s) to expire. Best-effort — older deploys without the cache
+    hook silently skip.
     """
     if os.environ.get("YTFACTORY_DASHBOARD_GCS_SYNC", "1") == "0":
         return
     try:
-        from control import storage as _gcs
+        # Resolve via ``sys.modules`` so test mocks of
+        # ``control.storage`` (via ``patch.dict("sys.modules", ...)``)
+        # are honoured. The ``from control import storage`` idiom would
+        # otherwise read the package attr and skip sys.modules.
+        import importlib  # noqa: PLC0415
+        import sys  # noqa: PLC0415
+        _gcs = sys.modules.get("control.storage") or importlib.import_module(
+            "control.storage"
+        )
         rel_key = _gcs.upload_record_rel_key(local_path, project_root)
         uri = _gcs.upload_record_uri(rel_key)
         _gcs.upload_bytes(
@@ -902,6 +1193,14 @@ def _mirror_record_to_gcs(local_path: Path, project_root: Path, record: dict) ->
             uri,
             content_type="application/json",
         )
+        # Reader lives in `control.core.storage` (cached); writer is
+        # `control.storage` (no cache). Bust the reader-side cache
+        # explicitly so the new record appears within one poll cycle.
+        try:
+            from control.core import storage as _gcs_canon  # noqa: PLC0415
+            _gcs_canon.bust_upload_records_cache()
+        except (ImportError, AttributeError):
+            pass
         print(f"[upload] mirrored record → {uri}")
     except Exception as e:
         # Don't fail the upload over a mirror miss; the record is on disk.

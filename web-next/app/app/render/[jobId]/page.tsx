@@ -102,9 +102,9 @@ export default function RenderDetailPage() {
         actions={
           <>
             <Button asChild variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground">
-              <Link href="/app/library">
+              <Link href="/app">
                 <ArrowLeft className="h-3.5 w-3.5" />
-                Library
+                Dashboard
               </Link>
             </Button>
             {job && job.status === "done" && (
@@ -136,7 +136,7 @@ export default function RenderDetailPage() {
           <div className="text-[13px] font-medium tracking-tight text-foreground">Couldn&apos;t load this render.</div>
           <p className="mt-1 text-[12px] text-muted-foreground">{error}</p>
           <Button asChild size="sm" className="mt-4">
-            <Link href="/app/library">Back to library</Link>
+            <Link href="/app">Back to dashboard</Link>
           </Button>
         </div>
       )}

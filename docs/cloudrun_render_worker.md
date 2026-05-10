@@ -148,6 +148,13 @@ gcloud run jobs update ytfactory-render-worker-v2 \
 Without these, the JOB will fail at the rewrite stage. Flip to stub
 mode if you want to demo wiring without an LLM key.
 
+> **Same triplet rule applies to every Azure-using Cloud Run service —
+> not just this JOB.** The `ytfactory-web` service hit the inverse
+> failure on 2026-05-10 (mounted only `AZURE_OPENAI_API_KEY`, missing
+> `ENDPOINT` / `VERSION` / `MODEL` → chat assistant + niche-form
+> auto-generate silently dropped to "AI not configured" stubs).
+> Full post-mortem + audit recipe: [`docs/azure_openai_deploy_env.md`](./azure_openai_deploy_env.md).
+
 ### Optional: Anthropic SDK as the LLM backend
 
 ```bash

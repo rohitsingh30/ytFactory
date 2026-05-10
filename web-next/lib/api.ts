@@ -135,15 +135,41 @@ export const channelsApi = {
     ),
 };
 
+export const ENGAGE_MODES = [
+  "subscribe_only",
+  "like_subscribe",
+  "like_subscribe_view",
+  "complete",
+] as const;
+export type EngageMode = (typeof ENGAGE_MODES)[number];
+
+export const ENGAGE_MODE_LABELS: Record<EngageMode, string> = {
+  subscribe_only: "Subscribe only",
+  like_subscribe: "Like + Subscribe",
+  like_subscribe_view: "Like + Subscribe + Watch loop",
+  complete: "Complete (with comments)",
+};
+
+export const ENGAGE_MODE_DESCRIPTIONS: Record<EngageMode, string> = {
+  subscribe_only:
+    "Subscribe to every channel once. No likes, no watch loop. Exits when done.",
+  like_subscribe:
+    "Like every video + subscribe to every channel. No watch loop. Exits when done.",
+  like_subscribe_view:
+    "Like + subscribe + permanent watch-time loop (default). Runs until you click Stop.",
+  complete:
+    "Like + subscribe + watch loop + LLM-generated comments on a random subset. Highest engagement, highest shadow-ban risk.",
+};
+
 export const burnerApi = {
   list: () =>
     api.get<{ burners: BurnerChannel[]; catalog_size: number }>("/api/burner_channels"),
   catalog: () =>
     api.get<{ videos: BurnerCatalogEntry[]; total: number }>("/api/burner_channels/catalog"),
-  start: (slug: string) =>
-    api.post<{ started: boolean; pid?: number; reason?: string; log_path?: string; state?: BurnerEngageState }>(
+  start: (slug: string, mode: EngageMode = "like_subscribe_view") =>
+    api.post<{ started: boolean; pid?: number; reason?: string; log_path?: string; state?: BurnerEngageState; mode?: EngageMode }>(
       `/api/burner_channels/${slug}/engage`,
-      {},
+      { mode },
     ),
   poll: (slug: string) =>
     api.get<BurnerEngageState>(`/api/burner_channels/${slug}/engage`),
@@ -195,38 +221,6 @@ export const renderApi = {
       "/api/render",
       req,
     ),
-};
-
-export interface ShortProposal {
-  channel: string;
-  format: string;
-  topic: string;
-  source_kind: string;
-  source_ref: string | null;
-  length_s: number;
-  notes: string;
-}
-
-export interface ChatExchangeResponse {
-  response: string;
-  session_id: string;
-  proposal: ShortProposal | null;
-  configured: boolean;
-}
-
-export interface ChatConfirmResponse {
-  job_id: string;
-  task_id: string;
-  proposal: ShortProposal;
-}
-
-export const chatApi = {
-  /** Send one user message; reuses session_id across the conversation. */
-  send: (message: string, sessionId: string) =>
-    api.post<ChatExchangeResponse>("/api/chat", { message, session_id: sessionId }),
-  /** Promote the latest proposal in the session into a queued render job. */
-  confirm: (sessionId: string) =>
-    api.post<ChatConfirmResponse>("/api/chat/confirm", { session_id: sessionId }),
 };
 
 export interface DiscoverItem {

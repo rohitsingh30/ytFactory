@@ -525,6 +525,12 @@ def _split_long_group(group: list[Word], max_s: float) -> list[list[Word]]:
     duration = group[-1].end - group[0].start
     if duration <= max_s:
         return [group]
+    # Single word longer than max_s — no way to split further. Return
+    # as-is rather than recurse infinitely. The caller's max_s contract
+    # is broken in this pathological case (one TTS-emitted token >max_s),
+    # but that's preferable to a stack overflow.
+    if len(group) <= 1:
+        return [group]
 
     # Tier 1 — clause breaks (,;:).
     clause_indices = [

@@ -25,6 +25,89 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
 
 ## ONE-OFFs noted (no project-doc needed)
 
+- 2026-05-10 — **Two-code-path-for-same-symptom heuristic.** When
+  the user says "still no stats" after a fix lands, the response
+  pattern is: don't assume the fix is wrong, look for a SECOND code
+  path that produces the same surface signal. The 2026-05-10
+  YouTube-stats permanent-fix shipped a `YOUTUBE_API_KEY` wire that
+  lit up `/api/dashboard/videos` (cards) but `/api/channels` (gallery)
+  was a separate stack with its own cache. Two surfaces both
+  rendering "subscriber count" looked like one feature; under the
+  hood they were independent endpoints. Sweep recipe:
+  `grep -rn "subscriber_count\|youtube_video_count\|total_views" web/ control/ pipeline/schemas/`.
+  If repeats, escalate to CLASS-OF-BUG: heuristic for the
+  classifier — "find every code path that produces the same UI
+  metric BEFORE declaring done". Memory:
+  `feedback_stats_two_code_paths.md`. Doc:
+  `docs/youtube_stats_refresh.md` § Anti-patterns observed.
+
+- 2026-05-10 — **MEMORY.md size cap raised 24 KB → 48 KB.** The
+  initial 24 KB was set when the index was ~40 entries. After
+  trimming 5 oversized entries down to ≤200 chars (saved 1.3 KB,
+  bringing total to ~45.5 KB), the file was still ~21 KB over the
+  old cap. Root cause: 100+ legitimate index entries across 7
+  channels + cross-channel + skill self-learnings; structural floor
+  is ~40-45 KB. Raised cap rather than fight a healthy growth
+  pattern. New-line Q2 discipline (≤200 chars / 1 sentence)
+  unchanged. Re-evaluate if index >60 KB OR a single section becomes
+  un-screenful — then the right move is structural (split per-section
+  indexes into per-section files), not another cap bump. SKILL.md
+  Quality gate 3 + CAP HISTORY block updated. Future audit recipe:
+  `wc -c ~/.claude/projects/-Users-rohit-ytFactory/memory/MEMORY.md` —
+  if approaching 60 KB, draft the structural-split proposal.
+
+- 2026-05-10 — **`image-flux2-klein` warm-pool holds 8 vCPU even with
+  `min-instances=0`.** During the cross-engage cloud deploy the
+  `ytfactory-web` rollout failed with `Quota exceeded for total
+  allowable CPU per project per region` because the always-warm GPU
+  services (flux2-klein 8 vCPU + tts-chatterbox 8 vCPU + tts-indicf5
+  8 vCPU = 24) plus rolling-deploy double-image overhead pushed past
+  the default 20 vCPU quota. Reducing `min-instances` to 0 doesn't
+  immediately drop quota usage — Cloud Run holds the warm pool for
+  some window. Solved by self-service quota bump (60 vCPU) — see
+  `docs/cloud_run_quota_self_service.md`. Not worth a project doc on
+  its own; relevant only as backstory for the quota recipe. Future
+  audit: if other regions/projects hit the same wall, run
+  `gcloud beta quotas preferences create` rather than reducing min
+  instances.
+
+- 2026-05-10 — **`control/server_dev.py` was missing the
+  `niche_specs_routes` mount.** Only `web/server.py` (the prod
+  monolith) wired it. Local dev hitting `POST
+  /api/channels/<ch>/niches/draft` returned 404 even when uvicorn was
+  up. **Fixed inline** in this session by appending the import +
+  `app.include_router(niche_specs_router_v2)` block. Future audit
+  recipe to catch sibling missing routers:
+  `diff <(grep "include_router" control/server_dev.py | sed 's/.*router as //;s/).*//;s/_router_v2//') <(grep "include_router" web/server.py | sed 's/.*router as //;s/).*//;s/_router_v2//')`
+  — any router in web/server.py but not server_dev.py is a candidate.
+  Pre-existing — not unique to this session.
+- 2026-05-10 — **doc-sweep continuation: stale `ytfactory-control`
+  / `ytfactory-prod` (no `-v2`) refs across 4 docs.** After fixing
+  `docs/architecture.md` lines 256-269 (replaced stale gcloud
+  block with pointer to `cloud/web-server/deploy.sh` — which IS
+  the source of truth for env vars + concurrency + secrets), ran
+  `grep -rnE "ytfactory-control|ytfactory-prod[^-]" docs/`. Found
+  3 sibling runbooks describing pre-Phase-4 state with stale
+  project name throughout: `docs/cloudrun_higgs.md`,
+  `docs/cloudrun_persistent_weights.md`, `docs/deploy.md`. **Fixed
+  by adding status banners** (kept body intact for historical
+  accuracy — original deploy commands were correct at the time;
+  banner says "substitute --project=ytfactory-prod-v2 throughout
+  if re-deploying"). Did NOT touch
+  `docs/laptop_nuclear_cleanup_2026_05_09.md` — historical
+  post-mortem, dates stamp the period it describes. Audit recipe
+  for the next sweep:
+  `grep -rnE "ytfactory-control|ytfactory-prod[^-]" docs/ --include='*.md' | grep -v "retired\|legacy\|pre-Phase-4\|substitute\|original\|historical"`
+  — anything left over without a "this is historical" qualifier
+  is a candidate.
+- 2026-05-10 — **operator decision-fatigue UX cue.** When the user
+  responds "idk" / "not sure" to a multi-option ask, don't restate
+  the open items or re-ask open-ended. Surface a compact decision
+  matrix (table: item / what-it-is / my-recommendation) + ONE focused
+  question. Worked well in this session (user picked "commit
+  everything in one tidy commit" within one turn). Single
+  observation; escalates to CLASS-OF-BUG if the pattern repeats and
+  needs a project doc.
 - 2026-05-10 — `pipeline/cloud/health.py::_probe_one` uses a 15 s
   HTTP timeout, but image services (FLUX2-klein, Z-Image-Turbo) have
   5-7 min cold-load. Cold image services currently classify as
@@ -81,3 +164,38 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
   edit, low risk. Future audit: every doc that names a Cloud Run URL
   should grep for `ytfactory-control` and `ytfactory-prod[^-]` to
   catch the same drift.
+- 2026-05-10 — **Web perf pass (dashboard latency).** User report
+  "every page on the live site takes 5-10 seconds" — bottleneck was
+  sequential GCS waterfalls per dashboard tick (3 separate scans:
+  `control.core.storage.list_upload_records`,
+  `web/server.py::_iter_all_uploads`, `pipeline/research/youtube._load_cache`'s
+  HEAD-on-every-call). Fix shipped 4 cross-channel rules:
+  (1) TTL cache + ThreadPoolExecutor for every GCS-walking polled
+  handler — `feedback_dashboard_gcs_waterfall.md`;
+  (2) `useStaleWhileRevalidate` (sessionStorage) instead of raw
+  `useState+useVisiblePoll` for polled pages —
+  `feedback_browser_swr_for_polled_pages.md`;
+  (3) `Server-Timing` + `Cache-Control` middleware as default —
+  `feedback_server_timing_default.md`;
+  (4) `control/storage.py` shim reverts mid-session, cross-module
+  bust by explicit import instead — `feedback_control_storage_shim_reverts.md`.
+  Project doc: `docs/web_perf_pass_2026_05_10.md`. Sweep recipe to
+  catch siblings before they regress (run after any new GCS handler):
+  `grep -rnE "for [a-z_]+ in (cli|client)\.list_blobs|blob\.reload\(\)|download_as_bytes" pipeline/ control/ web/ --include='*.py'`.
+- 2026-05-10 — **`test_mirror_to_gcs_success` order-brittle (pre-existing).**
+  `from control import storage` resolves via parent-package attr (set
+  by an earlier test that loaded the real module) BEFORE `sys.modules`
+  patch lookup, so `patch.dict("sys.modules", ...)` is a no-op when
+  the test runs after `test_routes_dashboard.py`. Confirmed
+  pre-existing via `git stash` round-trip on the perf-pass changes.
+  Workaround: run `tests/test_upload_youtube.py` in isolation. Real
+  fix when prioritized: `patch("control.storage", mock, create=True)`.
+  Memory: `feedback_test_isolation_control_storage_attr.md`.
+- 2026-05-10 — **`web-next/public/` directory was missing.** Cloud
+  Build for ytfactory-web-next failed at `COPY web-next/public ./public`
+  step because the dir doesn't exist (was never created or got deleted
+  in prior cleanup). **Fixed inline** by `mkdir -p web-next/public &&
+  touch web-next/public/.gitkeep`. Future audit: if web-next deploy
+  fails on the same COPY, check `ls web-next/public` before assuming
+  Dockerfile is broken. Recipe: `git ls-files web-next/public/ | head`
+  should always have ≥1 entry.

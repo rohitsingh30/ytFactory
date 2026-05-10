@@ -1,0 +1,20 @@
+# Stats-refresh JOB deps — TINY image (no torch / diffusers / whisper).
+# Just the bits pipeline.research.youtube.fetch_account actually
+# imports at runtime.
+
+# Core
+pyyaml>=6.0
+requests>=2.31
+
+# Google API client for youtube.googleapis.com
+google-api-python-client>=2.130
+google-auth>=2.30
+google-auth-oauthlib>=1.2
+google-auth-httplib2>=0.2
+
+# GCS client for cache writes (gs://$YTFACTORY_STATE_BUCKET/...).
+google-cloud-storage>=2.18
+
+# Secret Manager for OAuth-token mounts (read-only) + token-rotation
+# write-back via add_secret_version (D1 of the token-issue plan).
+google-cloud-secret-manager>=2.20

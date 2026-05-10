@@ -1,8 +1,12 @@
 # ytFactory Architecture
 
-**Production URL:** https://ytfactory-control-767262167641.us-central1.run.app
-(Cloud Run, project `ytfactory-prod`, region us-central1, revision auto-deployed
-from this repo via `gcloud run deploy --source .`).
+**Production URL:** https://ytfactory-web-7hwnzw7lya-as.a.run.app
+(Cloud Run service `ytfactory-web`, project `ytfactory-prod-v2`,
+region `asia-southeast1`, deployed via
+`./cloud/web-server/deploy.sh`. The earlier `ytfactory-control` /
+us-central1 / `ytfactory-prod` URL is **retired** — Phase 4 of
+`docs/full_cloud_cutover_2026_05_09.md` consolidated the control
+plane into `ytfactory-web`.)
 
 For complementary perspectives see:
 - `docs/user_flows.md` — what each user type does
@@ -241,37 +245,61 @@ Hard rules to keep it there:
 
 ## Deployment
 
-The control plane image is built from `Dockerfile` (slim Python 3.13, only
-`requirements-control.txt` deps — no torch/diffusers/kokoro). Cloud Build
-buildpack handles the build + push to `cloud-run-source-deploy` Artifact
-Registry repo.
+The control plane (FastAPI app at `web/server.py`, post-Phase-4
+consolidation) is built from `cloud/web-server/Dockerfile` and
+deployed via Cloud Build → Artifact Registry → Cloud Run service
+**`ytfactory-web`** in **`ytfactory-prod-v2` / `asia-southeast1`**.
 
-Deploy command (idempotent, re-run for updates):
+The single canonical deploy command is:
 
 ```bash
-gcloud run deploy ytfactory-control \
-  --source . \
-  --region us-central1 \
-  --project ytfactory-prod \
-  --allow-unauthenticated \
-  --port 8080 \
-  --max-instances 3 \
-  --min-instances 0 \
-  --memory 512Mi \
-  --cpu 1 \
-  --concurrency 40 \
-  --timeout 60 \
-  --set-env-vars "YTFACTORY_QUEUE_BACKEND=firestore,YTFACTORY_BUCKET=ytfactory-prod-artifacts,GOOGLE_CLOUD_PROJECT=ytfactory-prod,AZURE_OPENAI_ENDPOINT=...,AZURE_OPENAI_API_VERSION=...,AZURE_OPENAI_MODEL=..." \
-  --set-secrets "AZURE_OPENAI_API_KEY=azure-openai-api-key:latest,YTFACTORY_AGENT_TOKEN=ytfactory-agent-token:latest"
+./cloud/web-server/deploy.sh
 ```
 
-Secrets (`azure-openai-api-key`, `ytfactory-agent-token`) live in Secret
-Manager. The default compute SA (`<project_number>-compute@developer.gserviceaccount.com`)
-has the IAM roles needed:
+That script is the source of truth for env vars, secrets, IAM,
+concurrency, and resource limits — kept current as the deployment
+evolves. **Don't paste a `gcloud run deploy` block here; it would
+drift from the script the moment any flag changes** (which is exactly
+what happened to the pre-2026-05-10 version of this section, which
+still pointed at the retired `ytfactory-control` service in
+`us-central1` under the retired `ytfactory-prod` project).
 
-- `roles/datastore.user` — Firestore queue
-- `roles/storage.objectAdmin` — GCS bucket
-- `roles/secretmanager.secretAccessor` — both secrets
+What lives where:
+
+- **`cloud/web-server/deploy.sh`** — the deploy command + every env
+  var (Firestore, GCS, Azure OpenAI triplet, Cloud Run service URLs,
+  YouTube + OAuth secret mounts).
+- **`cloud/web-server/cloudbuild.yaml`** — Cloud Build config used by
+  the deploy script.
+- **`cloud/web-server/Dockerfile`** — slim Python 3.13 + only
+  `requirements-control.txt` deps (no torch / diffusers / kokoro —
+  those live in their own per-service containers).
+- **`docs/full_cloud_cutover_2026_05_09.md`** — the Phase 4
+  consolidation runbook (web absorbs control, ytfactory-control
+  retired). Read this for the rationale + IAM grants.
+- **`docs/azure_openai_deploy_env.md`** — the four-env-var rule for
+  every Azure-using Cloud Run service (chat + niche-draft silently
+  break with only `AZURE_OPENAI_API_KEY` mounted). Required reading
+  before adding any new Azure-backed feature.
+- **`docs/cloudrun_render_worker.md`** — the Cloud Run JOB runbook
+  for `ytfactory-render-worker-v2` (the per-render execution unit
+  triggered by `ytfactory-web`).
+
+Secrets in Secret Manager (managed via `gcloud secrets versions add`
+— no redeploy needed for value rotation):
+
+- `azure-openai-key` — Azure OpenAI key (mounted as
+  `AZURE_OPENAI_API_KEY`)
+- `ytfactory-oauth-client` — Google OAuth (per-channel YouTube flow)
+- `ytfactory-web-oauth-client` — Google OAuth (web sign-in)
+- `ytfactory-session-secret` — HMAC key for session cookies
+- `ytfactory-agent-token` — shared bearer for M2M callers
+- `youtube-token-<account>` — per-channel YouTube refresh tokens
+
+Service account `tts-runner@ytfactory-prod-v2.iam.gserviceaccount.com`
+holds the IAM roles needed (Firestore user, GCS object admin, Secret
+Manager accessor, Cloud Run invoker on the GPU services + the render
+JOB).
 
 ## Operating principle: cloud is canonical
 

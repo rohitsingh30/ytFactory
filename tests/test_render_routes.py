@@ -78,7 +78,7 @@ class PostRenderTest(unittest.IsolatedAsyncioTestCase):
             })
         self.assertEqual(r.status_code, 422)
 
-    async def test_post_render_clamps_length_to_20_120(self) -> None:
+    async def test_post_render_clamps_short_to_20_120_and_long_to_7200(self) -> None:
         # Two posts → reset the daily quota between them so we measure
         # clamping, not rate-limit behaviour.
         app = _make_app()
@@ -86,6 +86,7 @@ class PostRenderTest(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             r1 = await client.post("/api/render", json={"channel": "auto", "topic": "x", "length_s": 5})
             rate_limit.reset_backend()
+            # > 120 is treated as long-form and clamped to ≤ 7200s (2hr)
             r2 = await client.post("/api/render", json={"channel": "auto", "topic": "x", "length_s": 9999})
         self.assertEqual(r1.status_code, 200)
         self.assertEqual(r2.status_code, 200)
@@ -93,7 +94,26 @@ class PostRenderTest(unittest.IsolatedAsyncioTestCase):
         from control.queue import InMemoryQueue
         assert isinstance(q, InMemoryQueue)
         lengths = sorted(t.payload["length_s"] for t in q._tasks.values())  # type: ignore[attr-defined]
-        self.assertEqual(lengths, [20, 120])
+        self.assertEqual(lengths, [20, 7200])
+
+    async def test_post_render_long_form_value_passes_through(self) -> None:
+        # 30 / 60 / 120-min selections from the create UI must propagate
+        # to the queue payload unchanged (within the 121–7200s band).
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            for secs in (1800, 3600, 7200):
+                rate_limit.reset_backend()
+                r = await client.post(
+                    "/api/render",
+                    json={"channel": "auto", "topic": "x", "length_s": secs},
+                )
+                self.assertEqual(r.status_code, 200)
+        q = get_queue()
+        from control.queue import InMemoryQueue
+        assert isinstance(q, InMemoryQueue)
+        lengths = sorted(t.payload["length_s"] for t in q._tasks.values())  # type: ignore[attr-defined]
+        self.assertEqual(lengths, [1800, 3600, 7200])
 
     async def test_post_render_429_after_quota(self) -> None:
         # Force the confirm quota to 1 for this test — production default

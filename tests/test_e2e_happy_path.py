@@ -126,6 +126,13 @@ class HappyPathE2ETest(unittest.TestCase):
         os.environ.setdefault("YTFACTORY_QUEUE_BACKEND", "memory")
         os.environ.setdefault("YTFACTORY_SIM_WORKER", "1")
         os.environ.setdefault("YTFACTORY_SIM_SPEED", "0.4")
+        # Force the sim render backend even if a sibling test left
+        # ``YTFACTORY_RENDER_BACKEND=cloudrun`` in the environ — the
+        # e2e test boots its own in-process server with no Cloud Run
+        # connectivity, so a real cloudrun dispatch would hang the
+        # job in `dispatching` forever.
+        cls._prev_render_backend = os.environ.get("YTFACTORY_RENDER_BACKEND")
+        os.environ["YTFACTORY_RENDER_BACKEND"] = "sim"
 
         import uvicorn  # noqa: PLC0415
 
@@ -153,6 +160,14 @@ class HappyPathE2ETest(unittest.TestCase):
     def tearDownClass(cls):
         if getattr(cls, "_spawned", False):
             cls._server.should_exit = True
+        # Restore prior YTFACTORY_RENDER_BACKEND so the test doesn't
+        # itself become a polluter for later tests that probe the
+        # cloudrun dispatch path.
+        prev = getattr(cls, "_prev_render_backend", None)
+        if prev is None:
+            os.environ.pop("YTFACTORY_RENDER_BACKEND", None)
+        else:
+            os.environ["YTFACTORY_RENDER_BACKEND"] = prev
 
     def test_health_ok(self):
         h = _get_json("/api/health")

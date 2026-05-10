@@ -79,7 +79,8 @@ Two collections in Firestore are worth knowing:
 | Collection | Doc id | What it holds |
 |---|---|---|
 | `tasks/<task_id>` | uuid | A single unit of work in the queue. Status: queued / leased / done / failed. |
-| `jobs/<job_id>` | uuid | User-facing job state. Tracks all stages from chat-confirm to YT publish. |
+| `jobs/<job_id>` | uuid | User-facing job state for **niche-driven** renders (chat-confirm → YT publish). |
+| `script_jobs/<job_id>` | hex(10) | User-facing job state for **skill-driven** renders (`POST /api/jobs/from_script`). Mirror-written from the in-process `SCRIPT_JOBS` dict via `web/script_jobs_store.py` so jobs survive Cloud Run revision rollover. Same `/api/jobs/{id}` surface reads both via fall-through — see `docs/jobs_snapshot_unification.md`. |
 | `chat_sessions/<session_id>` *(future)* | uuid | Multi-turn chat state. In-memory today; Firestore-backed when sessions need to outlive a Cloud Run cold start. |
 | `ratelimits/<date>/...` | YYYY-MM-DD | Per-IP daily counters + global daily Azure spend. Resets at UTC midnight. |
 | `youtube_videos/<video_id>` | YT video id | Post-publish handoff target — research pipeline reads from here. |
@@ -214,6 +215,19 @@ sequenceDiagram
 | Worker raises exception | `runner.run` returns `(False, None, "<exception>")`; ack with `status=error`; task re-queued up to `max_attempts=3` times before FAILED. |
 | Cloud Run cold start | Heartbeat gets exponential backoff up to 30s; lease loop continues. |
 | Firestore composite index missing | Lease endpoint 500s; agent backoff retries. (Created at deploy time — see `gcloud firestore indexes composite list`.) |
+| Long-lived Chrome task (`burner_engage`) | Fire-and-forget pattern — agent spawns the worker via `subprocess.Popen(start_new_session=True)` and acks immediately. Worker outlives the agent. UI tracks per-burner progress via the GCS-mirrored state file (see `docs/cross_engage_cloud_v2.md`), not via task status. |
+
+### App-level auth gotcha — `K_SERVICE` bypass
+
+Cloud Run's Google Frontend validates the agent's gcloud OIDC
+against the `run.invoker` IAM binding before the request reaches the
+app, but it consumes the `Authorization` header doing so. Both
+`web/server.py:auth_middleware` and `control/core/auth.py:require_agent`
+must therefore check `os.environ.get("K_SERVICE")` and short-circuit
+to `call_next(request)` for `/agent/*` paths — re-requiring the
+shared `YTFACTORY_AGENT_TOKEN` bearer at the app layer would 401
+every legitimate IAM-authenticated agent call. See
+`docs/cross_engage_cloud_v2.md` § 1 for the symptom + fix history.
 
 ---
 

@@ -122,6 +122,12 @@ class _UploadTestBase(unittest.TestCase):
 
         # Disable GCS sync by default — individual tests opt-in
         os.environ["YTFACTORY_DASHBOARD_GCS_SYNC"] = "0"
+        # Disable cross-engagement — these tests mock the upload path
+        # but cross_engage spins a daemon thread that tries to
+        # authenticate against real OAuth credentials and surfaces the
+        # failure as PytestUnhandledThreadException. Engagement is
+        # tested in its own dedicated test file.
+        os.environ["YTFACTORY_CROSS_ENGAGE"] = "0"
 
     def tearDown(self):
         for p in self._patches:
@@ -129,6 +135,7 @@ class _UploadTestBase(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         os.environ.pop("YTFACTORY_DASHBOARD_GCS_SYNC", None)
         os.environ.pop("YTFACTORY_OAUTH_PORT", None)
+        os.environ.pop("YTFACTORY_CROSS_ENGAGE", None)
 
     # -- convenience helpers ------------------------------------------------
 
@@ -178,6 +185,97 @@ class TestTokenAndSecretPaths(_UploadTestBase):
         self._mk_channel("chan1")
         p = _record_path(self.project_root, "chan1", "slug1")
         self.assertTrue(str(p).endswith("uploads/slug1.json"))
+
+    def test_secret_mount_preferred_when_present(self):
+        """Cloud Run mounts each secret at /secrets/<name>/value. When
+        that file exists, _token_path picks it over CONFIG_DIR. (D3 prep
+        for the token-issue permanent fix.)"""
+        from pipeline.upload.upload import _secret_mount_path
+
+        sp = _secret_mount_path("default")
+        # Write into the secret mount path inside our tmp dir to simulate
+        # the Cloud Run mount being present.
+        fake_mount = self.tmpdir / "fake_secrets" / "youtube-token-default" / "value"
+        fake_mount.parent.mkdir(parents=True)
+        fake_mount.write_text('{"token": "x"}')
+        with patch("pipeline.upload.upload.SECRETS_ROOT", self.tmpdir / "fake_secrets"):
+            from pipeline.upload.upload import _token_path as _tp
+            result = _tp("default")
+            self.assertEqual(result, fake_mount)
+
+
+# ===========================================================================
+# _persist_token — laptop FS write vs Cloud Run Secret Manager add_version (D1)
+# ===========================================================================
+
+
+class TestPersistToken(_UploadTestBase):
+    """Coverage for the FS-vs-SecretManager dispatch in _persist_token."""
+
+    def test_laptop_path_writes_file(self):
+        from pipeline.upload.upload import _persist_token, _token_path
+
+        tp = _token_path("acct1")
+        _persist_token("acct1", '{"token": "xyz"}', tp)
+        self.assertTrue(tp.exists())
+        self.assertEqual(tp.read_text(), '{"token": "xyz"}')
+
+    def test_secret_mount_path_calls_add_secret_version(self):
+        """When the active path is a Secret Manager mount, write a new
+        version of the underlying secret instead of touching the read-
+        only mount file."""
+        from pipeline.upload.upload import _persist_token
+
+        # Simulate a secret mount path.
+        fake_root = self.tmpdir / "secrets"
+        secret_dir = fake_root / "youtube-token-acct1"
+        secret_dir.mkdir(parents=True)
+        mount_path = secret_dir / "value"
+        mount_path.write_text("{}")
+
+        # Patch the secret manager client surface.
+        fake_client = MagicMock()
+        fake_secretmanager = types.ModuleType("google.cloud.secretmanager")
+        fake_secretmanager.SecretManagerServiceClient = lambda: fake_client
+
+        with patch.dict(sys.modules, {
+                "google.cloud.secretmanager": fake_secretmanager,
+        }):
+            with patch("pipeline.upload.upload.SECRETS_ROOT", fake_root):
+                with patch.dict(os.environ, {"GOOGLE_CLOUD_PROJECT": "ytfactory-test"}):
+                    _persist_token("acct1", '{"token": "rotated"}', mount_path)
+
+        fake_client.add_secret_version.assert_called_once()
+        kwargs = fake_client.add_secret_version.call_args.kwargs or {}
+        req = (kwargs.get("request")
+               or fake_client.add_secret_version.call_args.args[0])
+        self.assertEqual(req["parent"],
+                         "projects/ytfactory-test/secrets/youtube-token-acct1")
+        self.assertEqual(req["payload"]["data"], b'{"token": "rotated"}')
+
+    def test_secret_manager_failure_raises(self):
+        """add_secret_version errors propagate so the caller can route
+        them to the token-health endpoint / alert. NEVER swallow — a
+        silent failure means the next cold-start re-discovers the same
+        bad token."""
+        from pipeline.upload.upload import _persist_token
+
+        fake_root = self.tmpdir / "secrets"
+        secret_dir = fake_root / "youtube-token-acct1"
+        secret_dir.mkdir(parents=True)
+        mount_path = secret_dir / "value"
+        mount_path.write_text("{}")
+
+        fake_client = MagicMock()
+        fake_client.add_secret_version.side_effect = Exception("PERMISSION_DENIED")
+        fake_sm = types.ModuleType("google.cloud.secretmanager")
+        fake_sm.SecretManagerServiceClient = lambda: fake_client
+
+        with patch.dict(sys.modules, {"google.cloud.secretmanager": fake_sm}):
+            with patch("pipeline.upload.upload.SECRETS_ROOT", fake_root):
+                with self.assertRaises(RuntimeError) as cm:
+                    _persist_token("acct1", "{}", mount_path)
+                self.assertIn("grant_token_writeback.sh", str(cm.exception))
 
 
 # ===========================================================================
@@ -444,8 +542,14 @@ class TestAuthenticate(_UploadTestBase):
         self.assertIs(result, mock_creds)
         mock_creds.refresh.assert_called_once()
 
-    def test_expired_creds_token_write_fails_non_interactive(self):
-        """Refresh OK but write-back raises → warns and raises UploadError (non-interactive)."""
+    def test_expired_creds_token_write_fails_returns_creds_anyway(self):
+        """Refresh OK but write-back raises → log warning, RETURN creds.
+
+        Behaviour change from D1 (2026-05-10 token-issue plan): the
+        in-memory creds are valid for ~1 hour regardless of whether we
+        could persist them, so let the upload proceed instead of breaking
+        on a transient disk / Secret Manager failure.
+        """
         self.client_secret_file.touch()
         self._mk_token()
 
@@ -463,8 +567,8 @@ class TestAuthenticate(_UploadTestBase):
         with patch("google.oauth2.credentials.Credentials", mock_creds_cls):
             with patch("google.auth.transport.requests.Request", MagicMock()):
                 with patch.object(Path, "write_text", side_effect=_raise):
-                    with self.assertRaises(UploadError):
-                        authenticate("default", interactive=False)
+                    result = authenticate("default", interactive=False)
+        self.assertIs(result, mock_creds)
 
     def test_refresh_fails_falls_through_to_error(self):
         """Token refresh exception → non-interactive raises UploadError."""
@@ -498,6 +602,15 @@ class TestAuthenticate(_UploadTestBase):
         mock_creds_cls.return_value = manual
 
         with patch("google.oauth2.credentials.Credentials", mock_creds_cls):
+            # Cloud-side (interactive=False) MUST raise RefreshTokenLost
+            # so the token-health endpoint / alert fires instead of the
+            # silent all-nulls degrade. See plan-D2.
+            from pipeline.upload.upload import RefreshTokenLost
+            with self.assertRaises(RefreshTokenLost) as cm:
+                authenticate("default", interactive=False)
+            self.assertEqual(cm.exception.account, "default")
+            self.assertIn("default", str(cm.exception))
+            self.assertIn("Re-OAuth", str(cm.exception))
             with self.assertRaises(UploadError):
                 authenticate("default", interactive=False)
 
@@ -580,6 +693,83 @@ class TestAuthenticate(_UploadTestBase):
             with patch("google_auth_oauthlib.flow.InstalledAppFlow", mock_flow_cls):
                 with self.assertRaises(UploadError):
                     authenticate("default", interactive=True)
+
+    def test_interactive_oauth_default_opens_browser(self):
+        """Default behaviour (YTFACTORY_OAUTH_OPEN_BROWSER unset) calls
+        run_local_server with open_browser=True so the OAuth URL lands
+        in the user's signed-in default Chrome (the fix for "auth
+        flow doesn't use my Chrome profile")."""
+        self.client_secret_file.write_text(json.dumps({"installed": {}}))
+        mock_creds = MagicMock()
+        mock_creds.refresh_token = "rt"
+        mock_creds.to_json.return_value = json.dumps({"token": "t", "refresh_token": "rt"})
+        mock_flow = MagicMock()
+        mock_flow.run_local_server.return_value = mock_creds
+        mock_flow_cls = MagicMock()
+        mock_flow_cls.from_client_secrets_file.return_value = mock_flow
+
+        # Make sure the env-var override is NOT set (autouse fixtures
+        # might leak from elsewhere).
+        with patch.dict(os.environ, {}, clear=False):
+            for k in ("YTFACTORY_OAUTH_OPEN_BROWSER",
+                      "YTFACTORY_CHROME_PROFILE_DIR"):
+                os.environ.pop(k, None)
+            with patch("google.oauth2.credentials.Credentials", MagicMock()):
+                with patch("google_auth_oauthlib.flow.InstalledAppFlow", mock_flow_cls):
+                    authenticate("default", interactive=True)
+        kwargs = mock_flow.run_local_server.call_args.kwargs
+        self.assertTrue(kwargs.get("open_browser"),
+                        "OAuth flow MUST open a browser by default — "
+                        "this is the regression fix for 'doesn't use "
+                        "my signed-in Chrome profile'.")
+
+    def test_interactive_oauth_explicit_disable_does_not_open(self):
+        """YTFACTORY_OAUTH_OPEN_BROWSER=0 keeps the headless behaviour."""
+        self.client_secret_file.write_text(json.dumps({"installed": {}}))
+        mock_creds = MagicMock()
+        mock_creds.refresh_token = "rt"
+        mock_creds.to_json.return_value = json.dumps({"token": "t", "refresh_token": "rt"})
+        mock_flow = MagicMock()
+        mock_flow.run_local_server.return_value = mock_creds
+        mock_flow_cls = MagicMock()
+        mock_flow_cls.from_client_secrets_file.return_value = mock_flow
+
+        with patch.dict(os.environ, {"YTFACTORY_OAUTH_OPEN_BROWSER": "0"}):
+            with patch("google.oauth2.credentials.Credentials", MagicMock()):
+                with patch("google_auth_oauthlib.flow.InstalledAppFlow", mock_flow_cls):
+                    authenticate("default", interactive=True)
+        kwargs = mock_flow.run_local_server.call_args.kwargs
+        self.assertFalse(kwargs.get("open_browser"),
+                         "OAuth flow MUST NOT open a browser when env=0.")
+
+    def test_interactive_oauth_chrome_profile_uses_chrome_helper(self):
+        """YTFACTORY_CHROME_PROFILE_DIR=<path> routes through the
+        Chrome-subprocess helper instead of the system default
+        browser, so multi-account users can pin a specific profile."""
+        self.client_secret_file.write_text(json.dumps({"installed": {}}))
+        mock_creds = MagicMock()
+        mock_creds.refresh_token = "rt"
+        mock_creds.to_json.return_value = json.dumps({"token": "t", "refresh_token": "rt"})
+
+        # Profile dir must EXIST otherwise upload.authenticate falls back
+        # to the default-browser path.
+        profile_dir = self.tmpdir / "fake-chrome-profile"
+        profile_dir.mkdir()
+
+        mock_flow = MagicMock()
+        mock_flow_cls = MagicMock()
+        mock_flow_cls.from_client_secrets_file.return_value = mock_flow
+
+        with patch.dict(os.environ,
+                        {"YTFACTORY_CHROME_PROFILE_DIR": str(profile_dir)}):
+            with patch("google.oauth2.credentials.Credentials", MagicMock()):
+                with patch("google_auth_oauthlib.flow.InstalledAppFlow", mock_flow_cls):
+                    with patch("pipeline.upload.upload._run_local_server_with_chrome_profile",
+                               return_value=mock_creds) as helper:
+                        authenticate("default", interactive=True)
+        helper.assert_called_once()
+        self.assertEqual(helper.call_args.kwargs["chrome_profile_dir"],
+                         str(profile_dir))
 
     def test_interactive_oauth_stdout_reconfigure_exception_ignored(self):
         """sys.stdout.reconfigure raising is silently caught (lines 344-345)."""

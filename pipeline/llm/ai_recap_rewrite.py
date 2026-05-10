@@ -138,6 +138,7 @@ def rewrite(raw_story: dict, *, model: str | None = None) -> dict:
         output_json=True,
         json_schema=_SCRIPT_SCHEMA,
         model=model or llm.model_for("rewrite"),
+        stage="ai_recap_rewrite",
     )
     if not isinstance(out, dict):
         raise RecapRewriteError(f"expected dict, got {type(out).__name__}")

@@ -11,7 +11,7 @@ set -euo pipefail
 SERVICE="${1:?usage: ./deploy.sh <service-name> [tag]}"
 TAG="${2:-$(date +%Y%m%d-%H%M%S)}"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE}:${TAG}"

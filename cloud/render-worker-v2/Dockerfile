@@ -49,19 +49,17 @@ RUN pip install --no-cache-dir \
 
 # Copy code. Channel configs change less often than the pipeline, but
 # both are baked in. Per-render state lives in Firestore + GCS.
+#
+# As of the 2026-05-05 channel-layout reorg, every channel YAML lives
+# under pipeline/channels/<slug>.yaml (and per-channel variants live
+# under pipeline/variants/<slug>/), so the wholesale `COPY pipeline/`
+# below already brings every config into the image — no per-channel
+# COPY lines needed. (Pre-reorg the configs lived at
+# <slug>/config.yaml and we had a stack of fragile per-channel COPYs
+# here that broke when those files moved.)
 COPY pipeline/      /workspace/pipeline/
 COPY control/       /workspace/control/
 COPY scripts/       /workspace/scripts/
-
-# Channel configs (small).
-COPY mystoriesanimated/config.yaml mystoriesanimated/variants/ /workspace/mystoriesanimated/
-COPY cosmosdecoded/config.yaml      /workspace/cosmosdecoded/
-COPY historyrecapped/config.yaml    /workspace/historyrecapped/
-COPY hindutavaanimated/config.yaml  /workspace/hindutavaanimated/
-COPY sportsrecapped/config.yaml     /workspace/sportsrecapped/
-COPY scrollpulse/config.yaml        /workspace/scrollpulse/
-COPY scrollpulse/variants/          /workspace/scrollpulse/variants/
-COPY rhymetimejunction/config.yaml  /workspace/rhymetimejunction/
 
 COPY cloud/render-worker-v2/entrypoint.py /workspace/cloud/render-worker-v2/entrypoint.py
 

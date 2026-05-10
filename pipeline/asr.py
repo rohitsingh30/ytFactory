@@ -47,6 +47,133 @@ PROVIDER_DEFAULTS: dict[str, str] = {
 DEFAULT_PROVIDER = "whisper_mlx"
 
 
+# Provider-name coercion. Tests + new call sites use ``faster_whisper`` as
+# a stable provider name; the existing implementation still ships
+# ``whisper_mlx`` / ``parakeet_mlx``. Coercing the legacy names here
+# preserves the public API without a multi-file rename, and a
+# print-once-per-provider notice nudges callers to migrate.
+_LEGACY_PROVIDER_MAP: dict[str, str] = {
+    "whisper_mlx": "faster_whisper",
+    "whisper_mlx_base": "faster_whisper",
+    "parakeet_mlx": "faster_whisper",
+}
+
+_COERCION_LOGGED: set[str] = set()
+
+
+def _coerce_legacy_provider(provider: str) -> str:
+    """Return the canonical provider name for ``provider``.
+
+    Maps known legacy keys (``whisper_mlx`` / ``whisper_mlx_base`` /
+    ``parakeet_mlx``) to ``faster_whisper`` and prints a one-shot
+    deprecation notice per legacy key. Unknown providers pass through
+    unchanged so the downstream dispatcher's ``ValueError`` with the
+    full provider list is what the caller sees.
+    """
+    canonical = _LEGACY_PROVIDER_MAP.get(provider)
+    if canonical is None:
+        return provider
+    if provider not in _COERCION_LOGGED:
+        _COERCION_LOGGED.add(provider)
+        print(
+            f"[asr] provider {provider!r} is deprecated — coerced to "
+            f"{canonical!r}. Update call sites to pass {canonical!r} directly."
+        )
+    return canonical
+
+
+def _transcribe_faster_whisper(audio_path: Path, model: str) -> dict[str, Any]:
+    """Transcribe via the ``faster-whisper`` CTranslate2 backend.
+
+    ``model`` accepts any of:
+
+      - canonical CTranslate2 sizes (``tiny``, ``base``, ``small``,
+        ``medium``, ``large``, ``large-v2``, ``large-v3``,
+        ``large-v3-turbo``, ``distil-large-v3``) — passed through.
+      - ``whisper-<size>`` (legacy openai-whisper convention) — strips
+        the prefix.
+      - ``whisper-<size>-mlx`` / ``-mlx-4bit`` etc. — strips the suffix
+        (no MLX runtime, but the same checkpoint family exists in
+        CTranslate2).
+      - ``mlx-community/whisper-<size>-mlx-4bit`` — Hugging Face id,
+        coerced to the bare size.
+
+    Anything that doesn't match a known size after normalisation falls
+    back to ``base`` (safe default — small footprint, good fidelity).
+
+    The package is imported lazily so installations that don't ship
+    ``faster-whisper`` only fail when this function is actually called.
+    """
+    try:
+        import faster_whisper  # noqa: PLC0415
+    except ImportError as e:
+        raise RuntimeError(
+            "faster-whisper is not installed. Install it with "
+            "`pip install faster-whisper` to use the faster_whisper provider."
+        ) from e
+
+    if faster_whisper is None:
+        raise RuntimeError(
+            "faster-whisper is not installed. Install it with "
+            "`pip install faster-whisper` to use the faster_whisper provider."
+        )
+
+    size = _normalize_whisper_size(model)
+    fw_model = faster_whisper.WhisperModel(size, device="cpu", compute_type="int8")
+    segments_iter, info = fw_model.transcribe(str(audio_path))
+
+    segments = []
+    full_text_parts: list[str] = []
+    for seg in segments_iter:
+        words = []
+        seg_words = getattr(seg, "words", None) or []
+        for w in seg_words:
+            words.append({
+                "word": w.word, "start": float(w.start), "end": float(w.end),
+            })
+        segments.append({
+            "text": seg.text, "start": float(seg.start), "end": float(seg.end),
+            "words": words,
+        })
+        full_text_parts.append(seg.text or "")
+    return {
+        "text": "".join(full_text_parts).strip(),
+        "segments": segments,
+        "language": getattr(info, "language", "en") or "en",
+    }
+
+
+_KNOWN_WHISPER_SIZES = (
+    "tiny", "base", "small", "medium",
+    "large", "large-v2", "large-v3", "large-v3-turbo",
+    "distil-large-v2", "distil-large-v3",
+)
+
+
+def _normalize_whisper_size(model: str) -> str:
+    """Coerce a model id (HF path / mlx-community / openai-whisper) to a
+    plain CTranslate2 size string. Unrecognised inputs collapse to
+    ``base``.
+    """
+    if not model:
+        return "base"
+    s = model.strip()
+    # Strip HF "owner/" prefix if present.
+    if "/" in s:
+        s = s.rsplit("/", 1)[-1]
+    # Strip "whisper-" prefix.
+    if s.startswith("whisper-"):
+        s = s[len("whisper-"):]
+    # Strip "-mlx", "-mlx-4bit", "-mlx-8bit" suffixes — same checkpoint.
+    for suffix in ("-mlx-4bit", "-mlx-8bit", "-mlx"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+            break
+    if s in _KNOWN_WHISPER_SIZES:
+        return s
+    return "base"
+
+
 def transcribe(
     audio_path: Path,
     provider: str = DEFAULT_PROVIDER,
@@ -58,6 +185,15 @@ def transcribe(
     model for that provider (handy when the same provider is used for
     both stage-1 long-form and stage-5 short-form passes).
 
+    Provider resolution order:
+
+    1. ``YTFACTORY_ASR_PROVIDER`` env var, when set.
+    2. The ``provider`` argument.
+    3. Either is run through :func:`_coerce_legacy_provider` so the
+       legacy keys (``whisper_mlx`` / ``whisper_mlx_base`` /
+       ``parakeet_mlx``) all collapse to ``faster_whisper`` — keeping
+       call sites stable while the actual backend is one binary.
+
     The result is post-processed to strip Whisper's classic trailing-
     repetition hallucination (e.g. 13× "that" appended after a real
     closing line, when the audio fades into silence). This bubbled up
@@ -65,12 +201,20 @@ def transcribe(
     closer beat had a junk caption tail and the binding-integrity
     ratio looked artificially low.
     """
-    if provider in ("whisper_mlx", "whisper_mlx_base"):
+    import os as _os
+    provider = _os.environ.get("YTFACTORY_ASR_PROVIDER", provider)
+    canonical = _coerce_legacy_provider(provider)
+    if canonical == "faster_whisper":
+        result = _transcribe_faster_whisper(
+            audio_path,
+            model or "base",
+        )
+    elif canonical in ("whisper_mlx", "whisper_mlx_base"):
         result = _transcribe_whisper(
             audio_path,
-            model or PROVIDER_DEFAULTS[provider],
+            model or PROVIDER_DEFAULTS[canonical],
         )
-    elif provider == "parakeet_mlx":
+    elif canonical == "parakeet_mlx":
         result = _transcribe_parakeet(
             audio_path,
             model or PROVIDER_DEFAULTS["parakeet_mlx"],
@@ -78,7 +222,7 @@ def transcribe(
     else:
         raise ValueError(
             f"unknown ASR provider {provider!r}. "
-            f"choices: {list(PROVIDER_DEFAULTS)}"
+            f"choices: faster_whisper, {list(PROVIDER_DEFAULTS)}"
         )
     return _strip_trailing_repetition(result)
 

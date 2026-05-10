@@ -57,7 +57,7 @@ export function FeatureBento() {
         </h3>
         <p className="mt-2 text-xs text-muted-foreground">
           Rewrite → cast → images → TTS → ASR → compose → upload. Stage timeline
-          streams to your library.
+          streams to the queue.
         </p>
       </Tile>
 

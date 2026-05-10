@@ -1,7 +1,20 @@
 # Production deploy & cutover
 
-> **Status:** scaffolded 2026-05-09. Ready to deploy. Two Cloud Run
-> services + one Cloud Run Job, all in `ytfactory-prod-v2` /
+> **Status (2026-05-10):** ⚠ This doc was the **scaffolded plan** for
+> what became Phase 4 of the cloud cutover. **The cutover is
+> complete** — `ytfactory-control` has been retired and consolidated
+> into `ytfactory-web`. The current 7-service / 2-job production
+> reality is documented in
+> [`docs/full_cloud_cutover_2026_05_09.md`](./full_cloud_cutover_2026_05_09.md)
+> (which IS current). Read this doc only as historical context for
+> the original 3-service plan; the architecture diagram + service
+> table below describe the **pre-Phase-4 design** and no longer
+> reflect production. The single canonical deploy command today is
+> `./cloud/web-server/deploy.sh` (see `docs/architecture.md`
+> Deployment section).
+
+> **Original status (scaffolded 2026-05-09):** Ready to deploy. Two
+> Cloud Run services + one Cloud Run Job, all in `ytfactory-prod-v2` /
 > `asia-southeast1`.
 
 ## Architecture

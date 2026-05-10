@@ -9,24 +9,30 @@ publish the result directly to a connected YouTube channel.
 
 ## Live
 
-**Production URL:** https://ytfactory-control-767262167641.us-central1.run.app
+**Production URLs (project `ytfactory-prod-v2`, region `asia-southeast1`):**
 
-That URL is the canonical entry point for everything. The chat UI, the
-agent lease protocol, and the eventual job-status endpoints all live
-behind it. Local dev still works, but **the deployed Cloud Run service is
-the source of truth** — never run a parallel local server in production
-mode.
+| Surface | URL | Role |
+|---|---|---|
+| User-facing UI | https://ytfactory-web-next-7hwnzw7lya-as.a.run.app | Next.js studio (chat, queue, channels) |
+| Backend API | https://ytfactory-web-7hwnzw7lya-as.a.run.app | FastAPI control plane (chat, jobs, agent lease) |
+
+The backend redirects browser-style GETs on `/`, `/docs`, and similar
+routes to the Next.js UI; programmatic API access goes directly to the
+FastAPI endpoints below. Local dev still works, but **the deployed
+Cloud Run services are the source of truth** — never run a parallel
+local server in production mode.
 
 | Endpoint | What |
 |---|---|
-| `GET  /` | Public chat UI (web/static/chat.html) |
-| `POST /api/chat` | Chat with the assistant — extracts a `short_proposal` JSON when it has enough info |
-| `POST /api/chat/confirm` | Turn the latest proposal into a Job + first Task in the Firestore queue |
-| `GET  /docs` | FastAPI auto-generated API docs |
-| `POST /agent/heartbeat` `lease` `ack/{id}` | Laptop agent lease protocol (bearer-token auth) |
+| `GET  /` (web-next) | Marketing landing page |
+| `GET  /app/*` (web-next) | Studio: chat, queue, channels, admin |
+| `POST /api/chat` (web) | Chat with the assistant — extracts a `short_proposal` JSON when it has enough info |
+| `POST /api/chat/confirm` (web) | Turn the latest proposal into a Job + first Task in the Firestore queue |
+| `GET  /docs` (web) | FastAPI auto-generated API docs (auth-gated) |
+| `POST /agent/heartbeat` `lease` `ack/{id}` (web) | Laptop agent lease protocol (bearer-token auth) |
 
-Hitting the live URL directly (curl / browser / Playwright MCP) is now
-the supported workflow. No local server needed.
+Hitting the live URLs directly (curl / browser / Playwright MCP) is the
+supported workflow. No local server needed.
 
 ## Architecture
 
@@ -119,7 +125,7 @@ gitignore conventions) see [`docs/channel_layout.md`](./docs/channel_layout.md).
 
 ```bash
 # That's it. Open:
-open https://ytfactory-control-767262167641.us-central1.run.app
+open https://ytfactory-web-next-7hwnzw7lya-as.a.run.app
 ```
 
 ### Laptop agent (so renders actually run)

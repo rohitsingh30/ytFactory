@@ -301,6 +301,30 @@ _RE_INTEGER = _re.compile(
     r"(?<![-:\d])\b(\d{1,3}(?:,\d{3})+|\d{1,9})\b(?![-:.\d])"
 )
 
+# AD / BC year markers. TTS otherwise reads "AD" as the word "ad"
+# (advertisement) and "BC" as "bee-cee", both broken. We spell them as
+# letter pairs so neural TTS produces "A D" / "B C". Both pre-year
+# ("AD 44") and post-year ("79 AD") forms are supported. Case-insensitive.
+_RE_AD_BC_YEAR = _re.compile(r"\b([Aa][Dd]|[Bb][Cc])\s+(\d{1,4})\b")
+_RE_AD_BC_POST_YEAR = _re.compile(r"\b(\d{1,4})\s+([Aa][Dd]|[Bb][Cc])\b")
+
+
+def _spell_ad_bc(m: "_re.Match[str]") -> str:
+    """Spell ``AD``/``BC`` as letter pairs; year is preserved by the caller
+    via group(2). Returns just the letter-pair so callers (or tests)
+    can compose with the year as needed.
+    """
+    token = m.group(1).upper()
+    return " ".join(token)
+
+
+def _spell_ad_bc_post(m: "_re.Match[str]") -> str:
+    """Same idea, post-year form ("79 AD" → "79 A D")."""
+    year = m.group(1)
+    token = m.group(2).upper()
+    return f"{year} {' '.join(token)}"
+
+
 # Day-month natural-speech rewrite. Without this, "15 September" comes out
 # of TTS as "fifteen September" — robotic. Real human narrators say
 # "the fifteenth of September" or "September fifteenth". We rewrite to
@@ -585,7 +609,7 @@ def _apply_hindi_respellings(text: str) -> str:
     return out
 
 
-def normalize_for_tts(text: str) -> str:
+def normalize_for_tts(text: str, *, skip_hindi_respellings: bool = False) -> str:
     """Make ``text`` pronounceable by neural TTS.
 
     Seven normalisations, applied in order:
@@ -596,18 +620,22 @@ def normalize_for_tts(text: str) -> str:
        visual closer panel still renders the engagement ask from
        cfg["closer_format"] independently. See _strip_verdict_acronym_sentences.
     2. Currency → English words ($2000 → "two thousand dollars")
-    3. Bare integers → English words (60 → "sixty")
-    4. Case-insensitive Reddit-class acronyms (MIL/FIL/SIL/BIL/DIL/OOP/
+    3. AD/BC year markers → letter-spelled tokens ("AD 44" → "A D 44")
+       so neural TTS doesn't read "AD" as "ad" or "BC" as "bee-cee".
+    4. Bare integers → English words (60 → "sixty")
+    5. Case-insensitive Reddit-class acronyms (MIL/FIL/SIL/BIL/DIL/OOP/
        VLC/TIFU/TIL) → their natural phrases. AITA-class verdict
        acronyms are NOT in this list anymore — they were stripped by
        step 1 above.
-    5. Standalone "asshole" / "assholes" → "a hole" / "a holes"
+    6. Standalone "asshole" / "assholes" → "a hole" / "a holes"
        (YouTube monetisation sanitisation; see _RE_PROFANITY_ASSHOLE).
-    6. Remaining all-caps tokens → lowercase (so emphasis-CAPS don't
+    7. Remaining all-caps tokens → lowercase (so emphasis-CAPS don't
        read as letter-spelled acronyms).
-    7. Hindi tatsama + numeral respellings — only applied when text
-       contains Devanagari. Fixes Kokoro's collapse of conjuncts +
-       numeral homophones (सात↔साथ, सोलह→soleh).
+    8. Hindi tatsama + numeral respellings — only applied when text
+       contains Devanagari **and** ``skip_hindi_respellings`` is False
+       (default). Caller passes ``skip_hindi_respellings=True`` when
+       the downstream TTS already handles native Devanagari (e.g.
+       IndicF5 which was trained on raw Hindi text).
 
     Idempotent: re-running produces the same output. Numbers in time
     strings (10:30) and phone numbers (555-1234) are left intact via
@@ -617,6 +645,11 @@ def normalize_for_tts(text: str) -> str:
         return text
     out = _strip_verdict_acronym_sentences(text)
     out = _RE_CURRENCY.sub(_expand_currency, out)
+    # AD/BC year markers run BEFORE date forms + bare integers so the
+    # year digit is preserved as a year (not a cardinal) and the
+    # AD/BC token is spelled as a letter pair.
+    out = _RE_AD_BC_YEAR.sub(lambda m: f"{_spell_ad_bc(m)} {m.group(2)}", out)
+    out = _RE_AD_BC_POST_YEAR.sub(_spell_ad_bc_post, out)
     # Date forms run BEFORE bare integers so the day numbers don't get
     # converted to cardinals first ("15 September" → "fifteen September").
     out = _RE_DAY_MONTH.sub(_expand_day_month, out)
@@ -625,5 +658,6 @@ def normalize_for_tts(text: str) -> str:
     out = _RE_ANY_CASE_ACRONYM.sub(_expand_any_case_acronym, out)
     out = _RE_PROFANITY_ASSHOLE.sub(_sub_profanity_asshole, out)
     out = _RE_ALLCAPS_WORD.sub(_lowercase_emphatic_caps, out)
-    out = _apply_hindi_respellings(out)
+    if not skip_hindi_respellings:
+        out = _apply_hindi_respellings(out)
     return out

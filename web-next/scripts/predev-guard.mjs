@@ -7,7 +7,7 @@
  * URL it references (main-app.js, app/app/<route>/page.js, …) 404s
  * because only the production hashed chunks exist on disk. The page
  * loads, the React app never hydrates, and useEffect-driven data
- * fetchers never fire — so Library / Queue / Channels (any client
+ * fetchers never fire — so Queue / Channels (any client
  * component that loads its data on mount) is stuck on the skeleton
  * forever. Backend is fine; the symptom is purely frontend.
  *

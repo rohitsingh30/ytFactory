@@ -155,3 +155,16 @@ python -m pipeline.cross_engage engage VIDEO_ID --uploader X    # full sync fan-
 - Per-process: `YTFACTORY_CROSS_ENGAGE=0 python -m ...`
 - Globally: comment out the `cross_engage.engage_after_upload(...)` call
   at the bottom of `upload_short()` in `pipeline/upload.py`.
+
+## Related — burner brand-account engagement (different concern)
+
+This doc covers production-channel-to-channel engagement (each owned
+channel likes/subs the others' uploads). The complementary surface
+— **burner** brand-accounts engaging with the production catalog —
+runs through a separate flow on Cloud Run + the laptop agent:
+
+- Spin-up: [`docs/burner_channels.md`](burner_channels.md)
+- Cloud-driven engagement (the `/app/burner-channels` button):
+  [`docs/cross_engage_cloud_v2.md`](cross_engage_cloud_v2.md) —
+  enqueues a `BURNER_ENGAGE` task that the laptop agent leases and
+  executes against a real signed-in Chrome window.

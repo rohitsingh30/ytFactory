@@ -50,7 +50,7 @@ export default function CreateChatPage() {
             AI chat is on its way.
           </h2>
           <p className="mx-auto mt-2 max-w-md text-[13px] leading-relaxed text-muted-foreground">
-            We're polishing the conversation → render hand-off so the assistant always picks
+            We&apos;re polishing the conversation → render hand-off so the assistant always picks
             sane defaults (channel, voice, source, length) and never blocks on a missing field.
           </p>
 

@@ -138,6 +138,15 @@ sequenceDiagram
 After the confirm, this path joins the same render → upload → research
 chain as the form flow.
 
+> **Third path: skill-driven renders.** A `/make-*` skill in Claude
+> Code authors a script JSON locally, then `POST /api/jobs/from_script`
+> to the same Cloud Run service. The job lives in `SCRIPT_JOBS` (its
+> own Firestore-backed namespace, separate from the `jobs/<id>`
+> niche-driven flow shown above). The render-detail UI
+> (`/app/render/<id>`) polls the same `GET /api/jobs/{id}` endpoint —
+> a fall-through (since 2026-05-10) makes both namespaces visible
+> through one URL. See `docs/jobs_snapshot_unification.md`.
+
 ### Why two paths?
 
 Different user mindsets:

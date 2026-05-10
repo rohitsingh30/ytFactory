@@ -271,9 +271,12 @@ class TestExecute(unittest.TestCase):
         self.assertIn("missing payload.slug", err)  # type: ignore[operator]
 
     def test_burner_engage_success(self):
+        """Spawns the worker as a detached subprocess and acks immediately."""
         mock_proc = MagicMock()
-        mock_proc.returncode = 0
-        with patch("subprocess.run", return_value=mock_proc):
+        mock_proc.pid = 4242
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "open", return_value=MagicMock()):
             ok, out_uri, err = agent._execute({
                 "task_id": "t1",
                 "kind": "burner_engage",
@@ -282,20 +285,24 @@ class TestExecute(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIsNone(out_uri)
         self.assertIsNone(err)
+        # Ensure detached spawn (start_new_session=True) so the worker
+        # outlives the agent process — otherwise launchd-restarting the
+        # agent would kill an in-flight engage loop.
+        self.assertTrue(mock_popen.call_args.kwargs.get("start_new_session"))
 
-    def test_burner_engage_failure(self):
-        mock_proc = MagicMock()
-        mock_proc.returncode = 1
-        mock_proc.stderr = "some error"
-        mock_proc.stdout = ""
-        with patch("subprocess.run", return_value=mock_proc):
+    def test_burner_engage_spawn_failure(self):
+        """If Popen itself raises, the task is acked failed with the cause."""
+        with patch("subprocess.Popen", side_effect=OSError("no exec for you")), \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "open", return_value=MagicMock()):
             ok, out_uri, err = agent._execute({
                 "task_id": "t1",
                 "kind": "burner_engage",
                 "payload": {"slug": "burner1"},
             })
         self.assertFalse(ok)
-        self.assertIn("exit=1", err)  # type: ignore[operator]
+        self.assertIn("failed to spawn", err)  # type: ignore[operator]
+        self.assertIn("no exec for you", err)  # type: ignore[operator]
 
     def test_exception_in_execute_caught(self):
         with patch.object(agent, "_exec_burner_engage", side_effect=RuntimeError("boom")):

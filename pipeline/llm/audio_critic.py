@@ -525,6 +525,7 @@ def critique_audio(
         json_schema=_CRITIC_SCHEMA,
         timeout_s=600,
         budget_usd=2.0,
+        stage="audio_critic",
     )
     if not isinstance(raw, dict):
         raise ValueError(f"audio-critic returned {type(raw).__name__}, not object")

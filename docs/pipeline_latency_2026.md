@@ -289,20 +289,119 @@ Or set up Cloud Scheduler crons (free tier covers 3 jobs/mo) — see
 - **Render-level concurrency = 2** — dispatch 2 image-gen calls in
   parallel within a single render to use both `max-instances=2`
   containers. Halves stage-6 wall-clock at no extra cost.
+  *Status 2026-05-10: deferred. Per-beat loop in
+  `pipeline.render.shorts:1597` is 200+ lines of tightly-coupled
+  state (cast routing, IP-Adapter bootstrap with `i==0` dependency,
+  per-beat hash caching, QC retry budget). Revisit after the loop
+  body has been extracted into a pure `_render_one_beat()` function.*
 - **Z-Image cloud cold-load fix (P3.5)** — FastAPI lifespan load so
   the request path never blocks on cold-load. Then we can A/B
   Z-Image vs FLUX.2 klein per channel.
-- **Cross-engagement parallelism** — drive multiple Chrome profiles
-  concurrently. Biggest single win, ~2-3 min off every Short.
 - **Quantized FP8/NVFP4 FLUX.2 klein** — 1.6×–2.7× faster per
   BFL/NVIDIA collab. Defer until bf16 baseline is stable.
-- **Beat-prompt authoring parallelism** — 8 Claude CLI calls in
-  parallel instead of sequential. ~30-60 s off every Short.
-- **TTS-via-cloud for the Higgs / indicparler / cosyvoice paths
-  using requests instead of urllib** — `pipeline/tts/cloudrun.py`
-  still uses urllib; same TCP-RST class of bug as the image client
-  surfaced 2026-05-07 (see `memory/feedback_urllib_cloudrun_stale_tcp.md`).
-  P3.5+ follow-up.
+
+## 9.1 What shipped 2026-05-10
+
+A latency-cleanup pass landed across 16 todos in 4 phases. Receipts:
+
+**Phase A — instrumentation (so post-fix wins are provable):**
+
+- `a1` — every `pipeline.llm.cli.call_claude_cli` site now passes
+  `stage="..."` (rewrite / cast / prompts / critic / audio_critic /
+  imitate_analyze / imitate_apply / anatomy_check / airecap_rewrite /
+  ai_recap_rewrite / rewrite_part2). Dashboard's `/api/telemetry/llm`
+  buckets attribute every call; pre-fix every `llm_call` event landed
+  with `metadata.stage = "?"`.
+- `a2` — `pipeline.render.shorts.make_short` now emits
+  `stage_done` events at TTS, ASR+beats, image_gen, motion_gen,
+  compose phases. Dashboard hotspots view is no longer empty.
+- `a3` — `ffmpeg_compose` events now tag both `metadata.phase` (canonical)
+  and legacy `metadata.pass`; `/api/telemetry/latency` hotspots also folds
+  in `ffmpeg_compose` and `image_attempt` events under synthetic
+  `compose:<phase>` and `image` stage buckets so the headline view
+  reflects the FULL pipeline footprint, not just stages that explicitly
+  emit `stage_done`.
+- `a4` — every render prints a `[render-summary]` line with
+  total wall-clock + slowest stage on completion. Pre-fix: needed to
+  open the dashboard to see which stage burned the budget.
+
+**Phase B — elephant fixes:**
+
+- `b1` — fixed `pipeline.images` package vs flat-module split-brain.
+  Pre-fix: `pipeline/images/__init__.py` was empty → `from pipeline import images`
+  resolved to that empty module → every `images.generate(...)` call
+  in the renderer would have raised `AttributeError` on the laptop
+  path. `pipeline.images_cloudrun` (flat) and `pipeline.images.images_cloudrun`
+  (package) were two diverged module copies — `reset_circuit_breaker()`
+  toggled flag in flat module while in-render `_breaker_open()`
+  checks read the package module's flag (no-op breaker reset). Post-fix:
+  package `__init__.py` re-exports the canonical implementation; flat
+  files are now thin redirect shims that import from the package.
+  Verified: `pipeline.images_cloudrun.reset_circuit_breaker is
+  pipeline.images.images_cloudrun.reset_circuit_breaker` → True.
+- `b2` — TTS prewarm exists on the Shorts path (only `long_form`
+  had it pre-fix). Image warmup now returns the spawned thread so
+  the renderer can join with 30 s timeout right before stage 6,
+  guaranteeing cold-load completed before the first /generate.
+- `b3` — `pipeline/tts/cloudrun.py` ported from `urllib.request.urlopen`
+  to `requests.Session()` per call, matching `pipeline/images/images_cloudrun.py`.
+  Same TCP-RST class of bug as the image client surfaced 2026-05-07
+  (see `memory/feedback_urllib_cloudrun_stale_tcp.md`).
+- `b4` — first `image_attempt` event of every render now carries a
+  `cold_load_s` field (delta from render start to first image return).
+  Lets the dashboard surface cold-load tax per render, not just per-attempt.
+
+**Phase C — documented opportunities:**
+
+- `c1` — image-gen concurrency=2: **deferred**, see §9 above.
+- `c2` — cross-engagement parallel: shipped. `pipeline.cross_engage.cross_engage_via_playwright.fanout`
+  refactored to spawn one Chrome per profile under a per-profile sibling
+  user-data-dir (`Chrome-Debug-engage-<profile>`), driven by a
+  `ThreadPoolExecutor(max_workers=4)`. Pattern proven by
+  `cross_engage_burner_attached.py:557`. Pre-fix: 3-5 min sequential.
+  Post-fix: ~1-1.5 min for a typical 5-profile fanout.
+- `c3` — Z-Image cloud cold-load fix: **deferred**, requires Cloud
+  Build redeploy + L4 cold-load testing and FLUX.2 klein remains the
+  production cloud image service.
+
+**Phase D — website / control-plane latency** (the user-visible "loads
+slowly" complaint):
+
+- `d1` — `pipeline.telemetry.read_events()` now caches parsed shards
+  by (path, mtime, size). **40× speedup on warm reads** (65.7 ms →
+  1.5 ms across 9 211 events), shared across all six
+  `/api/telemetry/*` routes.
+- `d2` — every blocking `tlm.read_events()` call in async routes is
+  now wrapped in `asyncio.to_thread`. One slow client can no longer
+  freeze every other dashboard tab.
+- `d3` — `_channel_scan()` helper added: 30 s TTL + mtime-checked
+  cache around the per-channel `rglob("uploads/*.json")` walk.
+  `/api/dashboard` and `/api/overview` both use it; cache self-busts
+  the moment a new upload lands.
+- `d4` — `_read_job_file()` helper added: mtime-keyed cache for
+  every `JOBS_PERSIST_DIR/*.json` parse. Historical jobs re-parsed
+  exactly once.
+- `d5` — `_CachedStaticFiles` subclass adds
+  `Cache-Control: public, max-age=300` to every `/static/*` response.
+  Pre-fix: FastAPI's stock `StaticFiles` shipped no cache header,
+  forcing a revalidation round-trip for every CSS/JS/PNG on every
+  page navigation.
+- `d6` — `web-next/lib/use-visible-poll.ts` hook created. All five
+  polling pages (dashboard, queue, library, burner-channels, admin)
+  now pause polling when the tab is hidden and resume on focus. Pre-fix:
+  every open tab kept hammering 2-10 s polls forever even when in the
+  background.
+
+### Dashboard endpoint benchmarks (after d1-d4)
+
+| Endpoint | Cold | Warm | Speedup |
+|---|---|---|---|
+| `/api/dashboard` | 1.9 ms | 0.5 ms | 3.6× |
+| `/api/telemetry/overview?hours=168` | 30.1 ms | 2.8 ms | 10.9× |
+| `/api/telemetry/latency?hours=168` (cache shared with overview) | 3.2 ms | 3.1 ms | 1.1× |
+
+All Phase D test surfaces (`tests/test_utils_telemetry.py`,
+`tests/test_routes_dashboard.py`): 39/39 passing.
 
 ---
 
@@ -331,7 +430,19 @@ export CLOUDRUN_TTS_DISABLE_FALLBACK=1
 
 ### Where to look first when a render is slow
 
-1. Check pre-warm: `gcloud run services list --filter='metadata.name~ytfactory' --format='value(metadata.name,status.latestReadyRevisionName)'`
-2. Check Cloud Run logs: `gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="ytfactory-image-flux2-klein"' --freshness=10m`
-3. Check `[image-time]` lines in stdout — the renderer emits per-image timing
-4. Check `pipeline.images_cloudrun` circuit-breaker state — if tripped, all images went to local mflux this render
+1. Check the `[render-summary]` line on the previous render's stdout
+   — it names the slowest stage with per-stage breakdown.
+2. Check pre-warm: `gcloud run services list --filter='metadata.name~ytfactory' --format='value(metadata.name,status.latestReadyRevisionName)'`
+3. Check Cloud Run logs: `gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="ytfactory-image-flux2-klein"' --freshness=10m`
+4. Check `[image-time]` lines in stdout — the renderer emits per-image timing
+5. Check `pipeline.images_cloudrun` circuit-breaker state — if tripped, all images went to local mflux this render. (Post-2026-05-10 split-brain fix the breaker actually clears across renders.)
+6. Check `cold_load_s` field on the first `image_attempt` event in
+   `data/telemetry/events-YYYY-MM-DD.jsonl` — if > 60 s, the warmup
+   didn't beat the first /generate.
+
+### Override cross-engagement concurrency
+
+```bash
+# Default 4. Lower to 1 if RAM is tight; raise on machines with more RAM.
+export YTFACTORY_CROSS_ENGAGE_WORKERS=2
+```

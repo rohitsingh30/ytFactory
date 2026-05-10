@@ -2,13 +2,21 @@
 
 GET  /api/burner_channels                  list of burners + counts
 GET  /api/burner_channels/catalog          live catalog the burner will engage with
-POST /api/burner_channels/{slug}/engage    kick off worker (subprocess)
+POST /api/burner_channels/{slug}/engage    kick off worker
 GET  /api/burner_channels/{slug}/engage    poll status JSON
 POST /api/burner_channels/{slug}/engage/stop  request graceful stop
 
-The actual worker lives in `pipeline.burner_engage` and runs as a
-spawned subprocess so the API stays snappy and a worker crash never
-kills the FastAPI process.
+Worker model (post 2026-05-09 cloud cutover):
+- On Cloud Run (``K_SERVICE`` env set), POST enqueues a ``BURNER_ENGAGE``
+  task in the Firestore-backed queue. The laptop agent
+  (``pipeline.laptop_agent``) leases it and runs the worker locally
+  (Chrome can't run on Cloud Run). State flows back through GCS so
+  this endpoint's GET poll sees live progress — see
+  ``pipeline.cross_engage.burner_engage._save_state`` /
+  ``read_state`` for the GCS path.
+- On laptop dev (no ``K_SERVICE``), POST keeps the legacy
+  ``subprocess.Popen`` path so a single-machine workflow still works
+  end-to-end without a queue.
 """
 from __future__ import annotations
 
@@ -16,9 +24,10 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 
 from pipeline.cross_engage import burner_engage
 from pipeline.utils import catalog
@@ -57,12 +66,41 @@ async def get_catalog() -> dict:
 
 
 @router.post("/{slug}/engage")
-async def start_engage(slug: str) -> dict:
-    """Spawn the engage worker as a subprocess.
+async def start_engage(slug: str, body: dict = Body(default_factory=dict)) -> dict:
+    """Spawn the engage worker.
 
-    Idempotent: if a worker is already alive for this slug, return its
-    state without spawning a duplicate.
+    Body (optional):
+
+      ``mode`` — engagement intensity, one of
+      ``subscribe_only`` / ``like_subscribe`` / ``like_subscribe_view``
+      (default) / ``complete``. See
+      ``pipeline.cross_engage.burner_engage`` for what each mode does.
+      Unknown values 400.
+
+    On Cloud Run (``K_SERVICE`` set): enqueue a ``BURNER_ENGAGE`` task
+    in the queue. The laptop agent leases it within seconds and runs
+    the worker on the laptop (Chrome + macOS Keychain are unavailable
+    on Cloud Run, so this MUST happen on a real desktop). Returns
+    immediately with the task_id.
+
+    On laptop dev (no ``K_SERVICE``): keep the legacy ``subprocess.Popen``
+    path so a single-machine workflow still works end-to-end without a
+    queue / agent.
+
+    Idempotent: if a worker is already alive for this slug (per the
+    GCS-backed state file's recent ``last_action_at``), return its
+    state without spawning / enqueueing a duplicate.
     """
+    mode = (body or {}).get("mode") or burner_engage.DEFAULT_MODE
+    if mode not in burner_engage.ALL_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unknown mode {mode!r}; valid: "
+                f"{list(burner_engage.ALL_MODES)}"
+            ),
+        )
+
     burners = {b["slug"]: b for b in burner_engage.list_burner_channels()}
     if slug not in burners:
         raise HTTPException(status_code=404, detail=f"unknown burner '{slug}'")
@@ -79,17 +117,53 @@ async def start_engage(slug: str) -> dict:
         return {"started": False, "reason": "already_running",
                 "state": burner_engage.read_state(slug)}
 
+    # Cloud path: enqueue for the laptop agent.
+    if os.environ.get("K_SERVICE"):
+        # Imported lazily so laptop dev (which doesn't necessarily have
+        # the Firestore queue backend wired) keeps booting fine.
+        from control.core.queue import get_queue, new_task_id  # noqa: PLC0415
+        from control.core.schema import TaskEnvelope, TaskKind  # noqa: PLC0415
+
+        # Clear any stale GCS stop sentinel from a previous run so the
+        # newly-spawned worker doesn't immediately self-terminate.
+        try:
+            burner_engage.clear_stop_sentinel(slug)
+        except Exception:  # noqa: BLE001
+            logger.warning("burner_engage: couldn't clear stop sentinel for %s", slug,
+                           exc_info=True)
+
+        task_id = new_task_id()
+        task = TaskEnvelope(
+            task_id=task_id,
+            job_id=f"burner-{slug}-{int(time.time())}",
+            kind=TaskKind.BURNER_ENGAGE,
+            payload={"slug": slug, "mode": mode},
+            # Long timeout — the worker is fire-and-forget on the laptop,
+            # but we set a generous lease in case the agent code-path
+            # ever switches to "block until exit".
+            max_attempts=1,
+        )
+        get_queue().enqueue(task)
+        return {
+            "started": True,
+            "task_id": task_id,
+            "mode": mode,
+            "agent_required": True,
+            "hint": "queued for laptop agent — drawer will populate when worker writes its first state file",
+        }
+
+    # Laptop dev path: legacy subprocess spawn.
     WORKER_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = WORKER_LOG_DIR / f"{slug}.log"
     log_fp = log_path.open("a", buffering=1)
-    log_fp.write(f"\n\n=== engage worker spawn @ {os.getpid()} ===\n")
+    log_fp.write(f"\n\n=== engage worker spawn @ {os.getpid()} (mode={mode}) ===\n")
     env = os.environ.copy()
     # Ensure the worker can import pipeline.* (this server runs with
     # PYTHONPATH=. but env may not propagate identically to subprocess
     # under uvicorn's reloader; force it).
     env["PYTHONPATH"] = str(PROJECT_ROOT) + ":" + env.get("PYTHONPATH", "")
     proc = subprocess.Popen(
-        [sys.executable, "-m", "pipeline.cross_engage.burner_engage", "run", slug],
+        [sys.executable, "-m", "pipeline.cross_engage.burner_engage", "run", slug, "--mode", mode],
         cwd=str(PROJECT_ROOT),
         stdin=subprocess.DEVNULL,
         stdout=log_fp,

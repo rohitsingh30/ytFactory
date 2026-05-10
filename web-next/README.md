@@ -53,7 +53,7 @@ service.
 > **Stale-build guard.** `next dev` and `next build` share the same
 > `.next/` directory. If `next build` runs into the same tree the dev
 > server uses, every dev-mode chunk URL 404s and the React app never
-> hydrates — every Studio page (Library, Queue, Channels, …) stays on
+> hydrates — every Studio page (Queue, Channels, …) stays on
 > its skeleton "loading" state forever. The `predev` npm hook
 > (`scripts/predev-guard.mjs`) detects this (`.next/BUILD_ID`
 > present) and wipes `.next/` automatically before `npm run dev`.

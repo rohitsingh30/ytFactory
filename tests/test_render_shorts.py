@@ -254,6 +254,65 @@ class TestPureHelpers(TempWorkspaceMixin, unittest.TestCase):
         f5 = shorts._voice_fingerprint({"tts_provider": "f5_tts", "tts_voice": str(ref)})
         self.assertIn("ref_mtime", f5)
 
+    def test_apply_form_overrides_audio_mode_song(self):
+        """audio_mode=song forces sunoapi even on a TTS channel."""
+        cfg: dict = {"audio_provider": "tts", "tts_provider": "kokoro"}
+        shorts._apply_form_overrides(cfg, {"audio_mode": "song"})
+        self.assertEqual(cfg["audio_provider"], "sunoapi")
+        # tts_provider untouched — TTS settings can stay around for fallback.
+        self.assertEqual(cfg["tts_provider"], "kokoro")
+
+    def test_apply_form_overrides_audio_mode_voice(self):
+        """audio_mode=voice forces tts even on a song channel (rhymetime)."""
+        cfg: dict = {"audio_provider": "sunoapi", "tts_provider": "cloudrun_chatterbox"}
+        shorts._apply_form_overrides(cfg, {"audio_mode": "voice"})
+        self.assertEqual(cfg["audio_provider"], "tts")
+
+    def test_apply_form_overrides_song_fields_round_trip(self):
+        """song_style/song_vocal_gender/song_model land where the synth
+        path + cache fingerprint look for them."""
+        cfg: dict = {}
+        shorts._apply_form_overrides(cfg, {
+            "song_style": "  cheerful upbeat children's nursery rhyme  ",
+            "song_vocal_gender": "m",
+            "song_model": "V5",
+        })
+        self.assertEqual(
+            cfg["_suno_prompt_override"]["style"],
+            "cheerful upbeat children's nursery rhyme",
+        )
+        self.assertEqual(cfg["sunoapi_vocal_gender"], "m")
+        self.assertEqual(cfg["sunoapi_model"], "V5")
+
+    def test_apply_form_overrides_song_style_preserves_existing_block(self):
+        """Existing _suno_prompt_override.lyrics survives a style-only override."""
+        cfg: dict = {"_suno_prompt_override": {"lyrics": "twinkle twinkle"}}
+        shorts._apply_form_overrides(cfg, {"song_style": "lullaby, female lead"})
+        self.assertEqual(cfg["_suno_prompt_override"]["lyrics"], "twinkle twinkle")
+        self.assertEqual(cfg["_suno_prompt_override"]["style"], "lullaby, female lead")
+
+    def test_apply_form_overrides_visual_source(self):
+        cfg: dict = {}
+        shorts._apply_form_overrides(cfg, {"visual_source": "footage"})
+        self.assertEqual(cfg["visual_source"], "footage")
+        # Unknown values are dropped — the form schema is the source of truth.
+        cfg2: dict = {}
+        shorts._apply_form_overrides(cfg2, {"visual_source": "garbage"})
+        self.assertNotIn("visual_source", cfg2)
+
+    def test_apply_form_overrides_empty_and_unknown_keys_ignored(self):
+        cfg: dict = {"audio_provider": "tts"}
+        shorts._apply_form_overrides(cfg, {
+            "audio_mode": "",                  # blank → ignored
+            "song_style": "   ",                # whitespace-only → ignored
+            "song_vocal_gender": "x",           # bad value → ignored
+            "music_bed": "ambient_low",         # not in the override map → ignored
+        })
+        self.assertEqual(cfg["audio_provider"], "tts")
+        self.assertNotIn("_suno_prompt_override", cfg)
+        self.assertNotIn("sunoapi_vocal_gender", cfg)
+        self.assertNotIn("music_bed", cfg)
+
 
 class TestFileHelpers(TempWorkspaceMixin, unittest.TestCase):
     def test_channel_scan_helpers(self):

@@ -238,6 +238,51 @@ gcloud run jobs update ytfactory-render-worker-v2 \
 
 ---
 
+## YouTube stats + OAuth refresh chain (2026-05-10 — permanent fix)
+
+Stats on the dashboard come from **YouTube Data API v3** with a single
+``YOUTUBE_API_KEY`` (no per-channel OAuth). The per-account research
+cache (subscriber counts, full uploads list) is refreshed by a Cloud
+Run JOB on a Cloud Scheduler cron and written to GCS.
+
+**Where to find what:** see [`docs/youtube_stats_refresh.md`](./docs/youtube_stats_refresh.md).
+That doc is the single source of truth for the whole chain (token
+storage → cloud refresh → GCS cache → dashboard read path → daily
+health probe → IAM grants needed).
+
+**Hard rules:**
+
+- **Never `git add data/research/youtube/*.json` or
+  `data/research/analytics/*.json`** — both dirs are gitignored as of
+  2026-05-10. Pre-fix, a test-fixture leak ("Biggie / UC_b / V_000")
+  rode along into prod for several deploys via committed cache files.
+- **Tests that touch `pipeline.research.youtube.YOUTUBE_DIR` MUST use
+  the `tests/conftest.py::isolate_research_dirs` autouse fixture.**
+  ``fetch_account()`` raises ``RuntimeError`` if a test forgets and
+  tries to write into the real cache dir during a pytest run. Opt out
+  with ``@pytest.mark.no_research_isolation`` only when you genuinely
+  need the laptop's real cache (rare).
+- **Cache layout dispatch is the single env var
+  ``YTFACTORY_STATE_BUCKET``.** Set → cache lives in
+  ``gs://$YTFACTORY_STATE_BUCKET/data/research/youtube/<account>.json``.
+  Unset → laptop FS at ``data/research/youtube/<account>.json``.
+- **OAuth tokens have a typed failure mode.** When ``authenticate(...,
+  interactive=False)`` finds the cached blob has lost its
+  ``refresh_token``, it raises ``pipeline.upload.upload.RefreshTokenLost(account)``
+  instead of degrading silently to a 1h access token. Catch this in
+  cloud-side callers and route to ``/api/admin/token-health`` so the
+  daily cron alert fires.
+- **Token rotation writes back to Secret Manager.** When
+  ``creds.refresh()`` succeeds in cloud, ``_persist_token()`` calls
+  ``secretmanager.add_secret_version`` to keep the secret current.
+  Requires ``roles/secretmanager.secretVersionAdder`` on every
+  ``youtube-token-<account>`` secret — wire via
+  ``cloud/iam/grant_token_writeback.sh``.
+- **Cards on prod are blank?** Set ``YOUTUBE_API_KEY`` on the
+  ytfactory-web service. That's the entire fix.
+
+---
+
 ## Layout reference
 
 Per-channel layout is the canonical 2026-05-05 spec. **Use

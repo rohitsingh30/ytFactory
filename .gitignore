@@ -36,6 +36,16 @@ data/scratch/
 data/intermediate/
 data/_bench/
 
+# YouTube stats cache — runtime-only, populated by
+# pipeline.research.youtube.fetch_account on the laptop and by the
+# cloud stats-refresh Job in prod (writes to gs://...-state). Was
+# committed pre-2026-05-10 which let a test-fixture leak ("Biggie /
+# UC_b / V_000") corrupt every prod deploy. Now ignored everywhere;
+# laptop dev runs `python -m pipeline.research.youtube` to populate
+# locally, prod reads from GCS (see docs/youtube_stats_refresh.md).
+data/research/youtube/
+data/research/analytics/
+
 # Per-channel runtime artifacts (apply across every <channel>/ folder)
 # Cache — per-slug intermediate render artifacts (regenerable via re-render)
 **/cache/

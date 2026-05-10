@@ -78,10 +78,10 @@ data/intermediate/
 data/research/*
 !data/research/channel_assets/
 !data/research/channel_assets/**
-!data/research/youtube/
-!data/research/youtube/**
-!data/research/analytics/
-!data/research/analytics/**
+
+# data/research/youtube/ + data/research/analytics/ deliberately NOT
+# re-included (B2 of the 2026-05-10 token-issue fix). Stats come live
+# from YouTube Data API v3; per-account cache lives in gs://...-state.
 
 # === Logs / temp ===
 *.log

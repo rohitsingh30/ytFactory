@@ -184,6 +184,98 @@ class IterChannelConfigsTest(unittest.TestCase):
                 result = yt_mod.iter_channel_configs()
         self.assertEqual(result, [])
 
+    def test_centralised_registry_takes_precedence(self):
+        """Post-2026-05-10 hygiene pass: pipeline/channels/<slug>.yaml is
+        the canonical channel registry. Cloud images have no per-channel
+        root dirs, so iter_channel_configs() MUST find accounts via the
+        registry. Both sources merge; registry wins on dup slugs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "pipeline" / "channels"
+            registry.mkdir(parents=True)
+            (registry / "centralchan.yaml").write_text(
+                "name: CentralChan\nupload:\n  account: centralacct\n"
+            )
+            # Also drop a per-channel root dir to verify both are found.
+            legacy = root / "legacychan"
+            legacy.mkdir()
+            (legacy / "config.yaml").write_text(
+                "upload:\n  account: legacyacct\n"
+            )
+            with patch("pipeline.research.youtube.PROJECT_ROOT", root):
+                result = yt_mod.iter_channel_configs()
+        # Index by channel_dir (the second element).
+        by_dir = {d: a for a, d in result}
+        self.assertEqual(by_dir.get("centralchan"), "centralacct")
+        self.assertEqual(by_dir.get("legacychan"), "legacyacct")
+
+    def test_registry_dedupes_against_legacy(self):
+        """When the same slug exists in both the registry AND as a legacy
+        per-channel dir, the registry entry wins (cloud is the source of
+        truth post-hygiene-pass)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "pipeline" / "channels"
+            registry.mkdir(parents=True)
+            (registry / "dupchan.yaml").write_text(
+                "upload:\n  account: registry_account\n"
+            )
+            legacy = root / "dupchan"
+            legacy.mkdir()
+            (legacy / "config.yaml").write_text(
+                "upload:\n  account: legacy_account\n"
+            )
+            with patch("pipeline.research.youtube.PROJECT_ROOT", root):
+                result = yt_mod.iter_channel_configs()
+        # Only one entry for dupchan, and it's the registry one.
+        dupchan_entries = [a for a, d in result if d == "dupchan"]
+        self.assertEqual(dupchan_entries, ["registry_account"])
+
+
+# ---------------------------------------------------------------------------
+# D5 — fixture lockdown: writing into the real YOUTUBE_DIR during tests
+# raises a loud RuntimeError instead of silently corrupting the cache
+# ---------------------------------------------------------------------------
+
+
+class FixtureLockdownTest(unittest.TestCase):
+
+    def test_fetch_account_refuses_real_dir_during_pytest(self):
+        """The autouse isolate_research_dirs fixture has already pointed
+        ``YOUTUBE_DIR`` at a tmp dir, so we have to UNDO that to simulate
+        a buggy test that forgot to monkey-patch."""
+        from pipeline.paths import RESEARCH_DIR as _real_research
+
+        real_youtube_dir = _real_research / "youtube"
+        with patch.object(yt_mod, "YOUTUBE_DIR", real_youtube_dir):
+            with self.assertRaises(RuntimeError) as cm:
+                yt_mod.fetch_account("anyaccount", quiet=True)
+            self.assertIn("Refusing to write", str(cm.exception))
+            self.assertIn("YOUTUBE_DIR", str(cm.exception))
+
+    def test_guard_no_op_outside_pytest(self):
+        """If PYTEST_CURRENT_TEST is unset, the guard does nothing — the
+        production path (cloud Job, laptop CLI) must not raise."""
+        import os as _os
+        saved = _os.environ.pop("PYTEST_CURRENT_TEST", None)
+        try:
+            # Should not raise even with YOUTUBE_DIR pointed at the real dir.
+            from pipeline.paths import RESEARCH_DIR as _real_research
+            with patch.object(yt_mod, "YOUTUBE_DIR", _real_research / "youtube"):
+                yt_mod._assert_safe_to_write("anyaccount")
+        finally:
+            if saved is not None:
+                _os.environ["PYTEST_CURRENT_TEST"] = saved
+
+    def test_guard_no_op_in_gcs_mode(self):
+        """When YTFACTORY_STATE_BUCKET is set, writes go to GCS not the
+        local FS so the guard is irrelevant — must not raise."""
+        with patch.dict("os.environ", {"YTFACTORY_STATE_BUCKET": "fake"}):
+            from pipeline.paths import RESEARCH_DIR as _real_research
+            with patch.object(yt_mod, "YOUTUBE_DIR", _real_research / "youtube"):
+                # Should not raise.
+                yt_mod._assert_safe_to_write("anyaccount")
+
 
 # ---------------------------------------------------------------------------
 # _build_youtube: auth failure → None
@@ -203,6 +295,152 @@ class BuildYoutubeTest(unittest.TestCase):
         with patch("pipeline.upload.authenticate", return_value=MagicMock()):
             result = yt_mod._build_youtube("myaccount")
         self.assertIsNotNone(result)
+
+
+# ---------------------------------------------------------------------------
+# _save_cache / _load_cache / _list_cached_accounts — provider-aware (B1)
+# ---------------------------------------------------------------------------
+
+
+class CacheStoreFSBackendTest(unittest.TestCase):
+    """When YTFACTORY_STATE_BUCKET is unset, cache I/O hits the local FS."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self._patch_yt_dir = patch.object(yt_mod, "YOUTUBE_DIR", self.tmp)
+        self._patch_yt_dir.start()
+        self._patch_env = patch.dict("os.environ", {}, clear=False)
+        self._patch_env.start()
+        # Make sure the env var is not set during this test.
+        import os as _os
+        _os.environ.pop("YTFACTORY_STATE_BUCKET", None)
+        # Clear in-process read cache between tests (writes already do).
+        yt_mod._READ_CACHE.clear()
+
+    def tearDown(self):
+        self._patch_env.stop()
+        self._patch_yt_dir.stop()
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_save_then_load_roundtrip(self):
+        payload = {"account": "x", "channel": {"title": "X"}, "videos": []}
+        yt_mod._save_cache("x", payload)
+        loaded = yt_mod._load_cache("x")
+        self.assertEqual(loaded, payload)
+
+    def test_load_missing_returns_none(self):
+        self.assertIsNone(yt_mod._load_cache("nope"))
+
+    def test_list_cached_accounts(self):
+        yt_mod._save_cache("a", {"account": "a"})
+        yt_mod._save_cache("b", {"account": "b"})
+        self.assertEqual(yt_mod._list_cached_accounts(), ["a", "b"])
+
+    def test_save_invalidates_read_cache(self):
+        yt_mod._save_cache("a", {"account": "a", "v": 1})
+        first = yt_mod._load_cache("a")
+        self.assertEqual(first.get("v"), 1)
+        # Sleep is necessary to bump mtime on filesystems with 1s
+        # resolution; instead just bump the file directly.
+        import os as _os, time as _time
+        _time.sleep(0.01)
+        yt_mod._save_cache("a", {"account": "a", "v": 2})
+        second = yt_mod._load_cache("a")
+        self.assertEqual(second.get("v"), 2)
+
+
+class CacheStoreGCSBackendTest(unittest.TestCase):
+    """When YTFACTORY_STATE_BUCKET is set, cache I/O hits GCS."""
+
+    def setUp(self):
+        # Patch _gcs_blob to a fake that records uploads + serves them
+        # back on download. Mirrors the real google.cloud.storage.Blob
+        # surface (upload_from_string, reload, download_as_bytes,
+        # generation).
+        self._store: dict[str, tuple[bytes, int]] = {}
+        self._gen = [0]
+
+        outer = self
+
+        class FakeBlob:
+            def __init__(self, key):
+                self.key = key
+                self.generation = None
+
+            def upload_from_string(self, body, content_type=None):
+                if isinstance(body, str):
+                    body = body.encode("utf-8")
+                outer._gen[0] += 1
+                outer._store[self.key] = (body, outer._gen[0])
+
+            def reload(self):
+                if self.key not in outer._store:
+                    from google.api_core import exceptions as gax
+                    raise gax.NotFound(f"missing: {self.key}")
+                self.generation = outer._store[self.key][1]
+
+            def download_as_bytes(self):
+                return outer._store[self.key][0]
+
+        class FakeClient:
+            def list_blobs(self, bucket, prefix):
+                for key in sorted(outer._store):
+                    if not key.startswith(prefix):
+                        continue
+                    b = FakeBlob(key)
+                    b.name = key
+                    yield b
+
+        self._fake_client = FakeClient()
+        self._patches = [
+            patch.dict("os.environ", {"YTFACTORY_STATE_BUCKET": "fake-bucket"}),
+            patch.object(yt_mod, "_gcs_blob", lambda bucket, key: FakeBlob(key)),
+        ]
+        for p in self._patches:
+            p.start()
+        # Patch the storage client used by _list_cached_accounts.
+        import google.cloud.storage  # noqa: F401 — make sure module importable
+        self._patch_client = patch(
+            "google.cloud.storage.Client", lambda project=None: self._fake_client
+        )
+        self._patch_client.start()
+        yt_mod._READ_CACHE.clear()
+
+    def tearDown(self):
+        self._patch_client.stop()
+        for p in reversed(self._patches):
+            p.stop()
+        yt_mod._READ_CACHE.clear()
+
+    def test_save_writes_to_gcs(self):
+        yt_mod._save_cache("acct", {"account": "acct", "n": 7})
+        self.assertIn("data/research/youtube/acct.json", self._store)
+        body, gen = self._store["data/research/youtube/acct.json"]
+        import json as _j
+        self.assertEqual(_j.loads(body)["n"], 7)
+        self.assertGreater(gen, 0)
+
+    def test_load_reads_from_gcs(self):
+        yt_mod._save_cache("acct", {"account": "acct", "n": 7})
+        loaded = yt_mod._load_cache("acct")
+        self.assertEqual(loaded.get("n"), 7)
+
+    def test_load_missing_returns_none(self):
+        self.assertIsNone(yt_mod._load_cache("nope"))
+
+    def test_list_cached_accounts_walks_gcs(self):
+        yt_mod._save_cache("a", {"account": "a"})
+        yt_mod._save_cache("b", {"account": "b"})
+        self.assertEqual(yt_mod._list_cached_accounts(), ["a", "b"])
+
+    def test_read_cache_keyed_on_generation(self):
+        yt_mod._save_cache("acct", {"account": "acct", "v": 1})
+        first = yt_mod._load_cache("acct")
+        self.assertEqual(first.get("v"), 1)
+        yt_mod._save_cache("acct", {"account": "acct", "v": 2})
+        second = yt_mod._load_cache("acct")
+        self.assertEqual(second.get("v"), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -714,6 +952,74 @@ class YouTubeCLITest(unittest.TestCase):
         fake_fetch = MagicMock(return_value={"account": "a", "videos": [{"x": 1}]})
         with patch("sys.stdout", io.StringIO()):
             self._run(["--account", "a", "--quiet"], fake_fetch=fake_fetch)
+
+
+# ---------------------------------------------------------------------------
+# E2 — `--token-status` CLI subcommand
+# ---------------------------------------------------------------------------
+
+
+class TokenStatusCLITest(unittest.TestCase):
+
+    def test_returns_zero_when_all_ok(self):
+        from io import StringIO
+
+        with patch.object(yt_mod, "iter_channel_configs",
+                          return_value=[("acct1", "chan1"), ("acct2", "chan2")]):
+            with patch("pipeline.upload.upload.inspect_token_status",
+                       side_effect=lambda a: {"account": a, "state": "ok",
+                                              "expiry": "2099-01-01"}):
+                out = StringIO()
+                with patch("sys.stdout", out):
+                    rc = yt_mod._cmd_token_status(quiet=False)
+        self.assertEqual(rc, 0)
+        self.assertIn("All 2 account(s) ok", out.getvalue())
+
+    def test_returns_nonzero_when_any_bad(self):
+        from io import StringIO
+
+        with patch.object(yt_mod, "iter_channel_configs",
+                          return_value=[("acct1", "c1"), ("acct2", "c2")]):
+            statuses = {"acct1": {"account": "acct1", "state": "ok",
+                                  "expiry": "2099-01-01"},
+                        "acct2": {"account": "acct2", "state": "no_refresh_token",
+                                  "expiry": "1970-01-01"}}
+            with patch("pipeline.upload.upload.inspect_token_status",
+                       side_effect=lambda a: statuses[a]):
+                out = StringIO()
+                with patch("sys.stdout", out):
+                    rc = yt_mod._cmd_token_status(quiet=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("1/2 account(s) need attention", out.getvalue())
+        self.assertIn("re-auth required", out.getvalue())
+
+    def test_quiet_mode_emits_ndjson(self):
+        from io import StringIO
+
+        with patch.object(yt_mod, "iter_channel_configs",
+                          return_value=[("acct1", "c1")]):
+            with patch("pipeline.upload.upload.inspect_token_status",
+                       return_value={"account": "acct1", "state": "ok",
+                                     "expiry": "2099-01-01"}):
+                out = StringIO()
+                with patch("sys.stdout", out):
+                    rc = yt_mod._cmd_token_status(quiet=True)
+        self.assertEqual(rc, 0)
+        # NDJSON: one JSON object per line.
+        line = out.getvalue().strip()
+        import json as _json
+        parsed = _json.loads(line)
+        self.assertEqual(parsed["account"], "acct1")
+        self.assertEqual(parsed["state"], "ok")
+
+    def test_returns_one_when_no_channels(self):
+        with patch.object(yt_mod, "iter_channel_configs", return_value=[]):
+            from io import StringIO
+            out = StringIO()
+            with patch("sys.stdout", out):
+                rc = yt_mod._cmd_token_status(quiet=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("No channels discovered", out.getvalue())
 
 
 if __name__ == "__main__":

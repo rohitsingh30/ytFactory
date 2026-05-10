@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
 SERVICE="ytfactory-tts"

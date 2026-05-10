@@ -500,6 +500,10 @@ def _compose_with_word_captions(
         category="pipeline",
         job_id=os.environ.get("YTFACTORY_JOB_ID") or None,
         metadata={
+            # `phase` is the canonical key as of 2026-05-10 (latency
+            # dashboard reads it). `pass` retained for back-compat with
+            # historical events parsed by old code paths.
+            "phase": pass_label,
             "pass": pass_label,
             "caption_mode": "word",
             "n_inputs": len(image_paths),
@@ -778,6 +782,7 @@ def compose(
         category="pipeline",
         job_id=os.environ.get("YTFACTORY_JOB_ID") or None,
         metadata={
+            "phase": pass_label,
             "pass": pass_label,
             "n_inputs": len(image_paths),
             "duration_s": round(max_duration, 2),
@@ -1410,6 +1415,7 @@ def compose_clips(
         category="pipeline",
         job_id=os.environ.get("YTFACTORY_JOB_ID") or None,
         metadata={
+            "phase": pass_label,
             "pass": pass_label,
             "n_inputs": len(clip_paths),
             "duration_s": round(max_duration, 2),

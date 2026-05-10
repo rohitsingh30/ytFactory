@@ -746,6 +746,7 @@ def author_beat_prompts(
         full_prompt,
         output_json=True,
         model=llm.model_for("prompts"),
+        stage="prompts",
     )
 
     cleaned = _validate_and_clean(

@@ -25,9 +25,20 @@ A user opens `http://<host>:8765/`, picks a niche, picks a voice (38 voices acro
 
 - **FastAPI** (matches your `~/trading` project) + **uvicorn**
 - **sse-starlette** for the live event stream
-- No DB. Job state is in-memory (`JOBS: dict[str, Job]`); cached artifacts on disk under `data/cache/<slug>/` (the same paths the pipeline already uses)
+- No DB for niche-driven jobs. Job state is in-memory
+  (`JOBS: dict[str, Job]`); cached artifacts on disk under
+  `data/cache/<slug>/` (the same paths the pipeline already uses).
+  Skill-submitted jobs (`/api/jobs/from_script`) live in
+  `SCRIPT_JOBS`, which **is** Firestore-backed in prod
+  (`web/script_jobs_store.py`, `YTFACTORY_QUEUE_BACKEND=firestore`)
+  so they survive Cloud Run revision rollover. See
+  `docs/jobs_snapshot_unification.md`.
 - No background queue. One asyncio task per job. Multiple jobs can run in parallel, but on this Mac the Flux model serializes anyway because it holds MPS — keep job concurrency = 1 for now
-- **No DB migrations to worry about.** Restart the server → in-memory job dict resets. Past mp4s persist on disk so you can still serve `<slug>.mp4` directly.
+- **No DB migrations to worry about** for the niche-driven `JOBS`
+  store. Restart the server → in-memory job dict resets. Past mp4s
+  persist on disk so you can still serve `<slug>.mp4` directly. The
+  skill-driven `SCRIPT_JOBS` store is Firestore-backed (`script_jobs`
+  collection) so its records survive restart.
 
 ### Frontend stack (deliberately minimal)
 
@@ -88,10 +99,10 @@ A user opens `http://<host>:8765/`, picks a niche, picks a voice (38 voices acro
 | GET | `/api/voices` | `{languages: [{code, label, flag}], voices: [{id, label, lang, accent, tone, sample_url}], default}` |
 | GET | `/api/voices/{voice_id}/sample.wav` | Lazy-synth + cache. First call ~3s; subsequent calls hit the cache file. Sample text is per-language (an AITA hook in the voice's native language). |
 | POST | `/api/jobs` | Body: `{niche: str, options: {voice: str}}` → `{job_id: str}`. Spawns `pull_stories.py` + `make_shorts.py --tts-voice <id>` and starts emitting SSE events. |
-| GET | `/api/jobs/{job_id}` | Snapshot — `{job_id, niche, state, slug, error, stage_started, stage_done, events, beat_prompts, mp4_url}`. Useful for catch-up after a reconnect. |
+| GET | `/api/jobs/{job_id}` | Snapshot — `{job_id, niche, state, slug, error, stage_started, stage_done, events, beat_prompts, mp4_url}`. Useful for catch-up after a reconnect. **Falls through to `SCRIPT_JOBS` on JOBS-miss** (since 2026-05-10) so the same endpoint serves both niche-driven and skill-submitted renders — see `docs/jobs_snapshot_unification.md`. |
 | GET | `/api/jobs/{job_id}/events` | SSE stream of stage events. See "SSE event schema" below. |
 | GET | `/api/jobs/{job_id}/audio` | `narration.wav` (404 until `tts.done`). |
-| GET | `/api/jobs/{job_id}/short` | Final mp4 (404 until `done`). |
+| GET | `/api/jobs/{job_id}/short` | Final mp4 (404 until `done`). **Falls through to `SCRIPT_JOBS` on JOBS-miss** — local `mp4_path` served directly, `gs://...` 302s to a 15-min v4-signed URL. |
 | GET | `/api/jobs/{job_id}/thumb/{i}` | Per-beat illustrated scene `img_NN.png`. |
 | GET | `/api/jobs/{job_id}/closer` | The rendered `closer_panel.png`. |
 | GET | `/api/telemetry/overview?hours=N` | KPI tiles: jobs started/finished/success/failed, success rate, avg/p50/p95/max job ms, llm calls/tokens/cost, plus per-niche breakdown. |
