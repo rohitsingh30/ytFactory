@@ -87,15 +87,16 @@ STAGES: list[tuple[str, str]] = [
 
 
 # Map proposal.channel → channel YAML path on disk (baked into the image).
-CHANNEL_YAML: dict[str, str] = {
-    "mystoriesanimated": "mystoriesanimated/config.yaml",
-    "sportsrecapped":    "sportsrecapped/config.yaml",
-    "hindutavaanimated": "hindutavaanimated/config.yaml",
-    "historyrecapped":   "historyrecapped/config.yaml",
-    "rhymetimejunction": "rhymetimejunction/config.yaml",
-    "scrollpulse":       "scrollpulse/config.yaml",
-    "cosmosdecoded":     "cosmosdecoded/config.yaml",
-}
+#
+# Single source of truth for channel YAML locations is
+# pipeline.channels._channel_yaml_path — defining it here too would
+# drift the moment a channel reorg lands (which already happened once
+# pre-2026-05-10, breaking the cloud build until this map was rewired).
+# We resolve at request time instead.
+def _channel_yaml_for(channel_key: str) -> Path:
+    from pipeline.channels import _channel_yaml_path  # noqa: PLC0415
+    rel = _channel_yaml_path(channel_key)
+    return REPO_ROOT / rel
 
 
 # ---------------------------------------------------------------------------
@@ -182,11 +183,6 @@ def _slug_from_topic(topic: str, job_id: str) -> str:
     base = re.sub(r"[^a-z0-9]+", "-", (topic or "render").lower()).strip("-")[:50]
     suffix = job_id[:8]
     return f"{base}-{suffix}" if base else suffix
-
-
-def _channel_yaml_for(channel_key: str) -> Path:
-    rel = CHANNEL_YAML.get(channel_key, CHANNEL_YAML["mystoriesanimated"])
-    return REPO_ROOT / rel
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +291,30 @@ def _run_renderer_subprocess(job: dict, work_dir: Path) -> Path:
         "--no-upload",     # YouTube upload happens via /api/jobs/{id}/publish
         "--no-critic",     # critic runs on the cloud worker as a separate stage later
     ]
+
+    # Forward the user's Customize-step picks from the proposal's
+    # `channel_overrides` dict into pipeline.render.shorts via repeated
+    # --override KEY=VALUE flags. This is the cloud-side counterpart of
+    # the create page's submit() forwarder; without it, song_style /
+    # audio_mode / visual_source / voice etc. would silently land in
+    # Firestore but never reach make_short.
+    #
+    # Stringify defensively — the renderer's --override parser splits on
+    # the first `=` and stores the raw RHS, so non-string values would
+    # arrive as their repr. Skip empty values so a YAML default keeps
+    # winning when the form left a knob untouched.
+    proposal = job.get("proposal") or {}
+    overrides = proposal.get("channel_overrides") or {}
+    if isinstance(overrides, dict):
+        for k, v in overrides.items():
+            if v is None:
+                continue
+            sv = str(v)
+            if not sv.strip():
+                continue
+            cmd += ["--override", f"{k}={sv}"]
+        if overrides:
+            logger.info("renderer overrides: %s", sorted(overrides.keys()))
     env = os.environ.copy()
     env.setdefault("PYTHONPATH", str(REPO_ROOT))
     env.setdefault("YTFACTORY_ASR_PROVIDER", "faster_whisper")
@@ -317,20 +337,58 @@ def _run_renderer_subprocess(job: dict, work_dir: Path) -> Path:
         tail = log_path.read_text(errors="replace")[-4000:]
         raise RuntimeError(f"renderer subprocess exit={proc.returncode}\n{tail}")
 
-    # Locate the produced mp4 — search common output dirs.
+    # Locate the produced mp4. The renderer writes via
+    # RenderPaths.from_channel_yaml — use the SAME resolver so worker
+    # and renderer can never disagree on the output location. Pre-fix
+    # the worker hard-coded chan_dir = Path(channel_yaml).parent which
+    # resolved to ``pipeline/channels/`` (the central-config dir) when
+    # the channel YAML lived there, and then looked for
+    # ``pipeline/channels/shorts/<slug>.mp4`` — the renderer had
+    # written to the channel root. v7 cake-orch surfaced this:
+    # renderer exited 0 in 941s, all 22 images + mp4 on disk, the
+    # worker raised "renderer ran but no mp4 found".
     slug = job.get("_slug") or ""
+    candidates: list[Path] = []
+    try:
+        from pipeline.paths import RenderPaths  # noqa: PLC0415
+        rp = RenderPaths.from_channel_yaml(
+            Path(channel_yaml), project_root=REPO_ROOT,
+        )
+        # Per-niche layout writes to <channel>/<niche>/shorts/<slug>.mp4;
+        # flat layout to <channel>/shorts/<slug>.mp4. ``rp.root`` is
+        # the right answer for both.
+        candidates += [
+            rp.root / "shorts" / f"{slug}.mp4",
+            rp.root / "shorts" / slug / f"{slug}.mp4",
+            rp.channel_root / "shorts" / f"{slug}.mp4",
+        ]
+    except Exception as e:  # noqa: BLE001 — fall back to legacy lookup
+        logger.warning(
+            "[worker] RenderPaths lookup failed (%s); using legacy "
+            "chan_dir glob", e,
+        )
+
     chan_dir = Path(channel_yaml).parent
-    candidates = [
+    candidates += [
         chan_dir / "shorts" / f"{slug}.mp4",
         chan_dir / "shorts" / slug / f"{slug}.mp4",
+        # Renderer's data/ legacy fallback when path resolution can't
+        # find a channel root (e.g. for mystoriesanimated when the
+        # channel-named dir was removed in the 2026-05-10 cleanup).
+        REPO_ROOT / "data" / "shorts" / f"{slug}.mp4",
     ]
     for cand in candidates:
         if cand.exists():
+            logger.info("[worker] mp4 found at %s", cand)
             return cand
-    # Fall back to a glob across the channel root.
-    for mp4 in chan_dir.rglob(f"{slug}.mp4"):
+    # Last-ditch: glob the entire repo root for the slug.
+    for mp4 in REPO_ROOT.rglob(f"{slug}.mp4"):
+        logger.info("[worker] mp4 found via repo-wide glob at %s", mp4)
         return mp4
-    raise RuntimeError(f"renderer ran but no mp4 found for slug={slug}")
+    raise RuntimeError(
+        f"renderer ran but no mp4 found for slug={slug}; "
+        f"searched: {candidates!r}"
+    )
 
 
 def _stage_render_real(job: dict, work_dir: Path) -> None:
