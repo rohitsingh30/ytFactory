@@ -1625,6 +1625,7 @@ from control.routes.agent_routes import router as _control_agent_router
 from control.routes.auth_pin import router as _control_auth_pin_router
 from control.routes.burner_routes import router as _control_burner_router
 from control.routes.channels_routes import router as _control_channels_router
+from control.routes.cloud_routes import router as _control_cloud_router
 from control.routes.clone_video_routes import router as _control_clone_video_router
 from control.routes.dashboard_routes import router as _control_dashboard_router
 from control.routes.discover_routes import router as _control_discover_router
@@ -5700,6 +5701,7 @@ app.include_router(_control_agent_router)
 app.include_router(_control_auth_pin_router)
 app.include_router(_control_burner_router)
 app.include_router(_control_channels_router)
+app.include_router(_control_cloud_router)
 app.include_router(_control_clone_video_router)
 app.include_router(_control_dashboard_router)
 app.include_router(_control_discover_router)

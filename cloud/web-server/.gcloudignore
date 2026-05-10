@@ -1,0 +1,65 @@
+# Build context exclusions for cloud/web-server/deploy.sh.
+#
+# Why a separate file: the web-server image does NOT need anything in
+# web-next/. Excluding it shrinks the upload by ~150 MiB AND avoids the
+# 2026-05-11 race where a parallel web-next deploy was rewriting
+# web-next/.next/ while web-server's tarball walk hit
+# `web-next/.next/images-manifest.json` mid-rebuild → FileNotFoundError
+# from gcloud's archive step.
+#
+# Strategy: include the root .gcloudignore patterns (mirror of .gitignore
+# + cloud-specific) AND add web-next/ on top. The .gcloudignore syntax
+# (gsutil-style) doesn't support !include, so we duplicate the contents
+# rather than diverge. Keep the duplicated section in sync if the root
+# file changes.
+
+# === From .gcloudignore (keep in sync) ===
+
+# Python / venvs
+.venv/
+.venv-*/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Env / secrets
+.env
+.agent-token
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+.git/
+
+# Build artifacts
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+dist/
+build/
+
+# Model weights
+*.onnx
+*.bin
+*.safetensors
+*.pt
+*.ckpt
+
+# Heavy regenerable per-channel dirs
+**/footage/
+**/cache/
+**/scratch/
+**/emoji/
+**/tts_tests/
+**/cooking_loops/
+**/critiques/
+
+# === Cloud-web-server-only additions ===
+
+# The FastAPI image's Dockerfile only COPYs web/, pipeline/, control/,
+# requirements-control.txt and a tiny channel-assets subdir. web-next/
+# (the Next.js build output) is unrelated and ~150 MiB. Exclude wholesale.
+web-next/

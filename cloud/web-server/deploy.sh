@@ -34,6 +34,7 @@ cd "$REPO_ROOT"
 echo "==> Building + pushing ${IMAGE}"
 gcloud builds submit . \
   --config=cloud/web-server/cloudbuild.yaml \
+  --ignore-file=cloud/web-server/.gcloudignore \
   --substitutions="_IMAGE=${IMAGE}" \
   --project="${PROJECT}" \
   --timeout=1800s

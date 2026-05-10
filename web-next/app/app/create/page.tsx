@@ -144,15 +144,24 @@ export default function CreatePage() {
   // When the variant changes, fetch its NicheDoc and seed length_kind
   // from it. Best-effort — fails silently if the niche JSON doesn't
   // exist (channel hasn't been backfilled).
+  //
+  // Implementation: list-then-find rather than get-by-key. This avoids
+  // the 404 console noise the dashboard was throwing every time the
+  // user landed on /create with a variant whose niche JSON hadn't been
+  // authored yet (which is most variants for non-mystoriesanimated
+  // channels). list() always returns 200 with whatever's there, so the
+  // network tab stays clean.
   useEffect(() => {
     if (!picked || !variant) return;
     nichesApi
-      .get(picked, variant)
-      .then((n: NicheDoc) => {
+      .list(picked)
+      .then((r: { niches: NicheDoc[] }) => {
+        const n = r.niches.find((d) => d.key === variant);
+        if (!n) return;
         setValues((prev) => ({ ...prev, length_kind: n.length_kind }));
       })
       .catch(() => {
-        // No niche doc — leave the user's current length_kind alone.
+        // No niches at all — leave the user's current length_kind alone.
       });
   }, [picked, variant]);
 
