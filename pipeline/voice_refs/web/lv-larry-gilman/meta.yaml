@@ -1,0 +1,10 @@
+label: Larry Gilman
+language: en
+gender: male
+style: "LibriVox \xB7 MacDonald"
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "LibriVox \xB7 Larry Gilman reads Ranald Bannerman's Boyhood"

@@ -42,17 +42,35 @@ import time as _time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import torch
-from diffusers import (
-    AutoPipelineForText2Image,
-    EulerDiscreteScheduler,
-)
-from huggingface_hub import hf_hub_download
-from PIL import Image
-from safetensors.torch import load_file
+try:
+    from PIL import Image
+except ImportError:
+    Image = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     pass
+
+
+def _torch():
+    """Lazy import — torch is cloud-only since 2026-05-09."""
+    import torch  # noqa: PLC0415
+    return torch
+
+
+def _diffusers():
+    """Lazy import — diffusers is cloud-only since 2026-05-09."""
+    from diffusers import AutoPipelineForText2Image, EulerDiscreteScheduler  # noqa: PLC0415
+    return AutoPipelineForText2Image, EulerDiscreteScheduler
+
+
+def _hf_hub_download(*args, **kwargs):
+    from huggingface_hub import hf_hub_download as _real  # noqa: PLC0415
+    return _real(*args, **kwargs)
+
+
+def _load_file(*args, **kwargs):
+    from safetensors.torch import load_file as _real  # noqa: PLC0415
+    return _real(*args, **kwargs)
 
 
 _BASE_REPO = "stabilityai/stable-diffusion-xl-base-1.0"
@@ -63,7 +81,7 @@ _IP_ADAPTER_REPO = "h94/IP-Adapter"
 _IP_ADAPTER_SUBFOLDER = "sdxl_models"
 _IP_ADAPTER_WEIGHT = "ip-adapter_sdxl.bin"  # ~700 MB
 
-_PIPE: AutoPipelineForText2Image | None = None
+_PIPE = None
 _IP_ADAPTER_LOADED = False
 _FLUX_PIPE = None  # mflux Flux1 instance, lazy-loaded on first mflux call
 _ZIMAGE_PIPE = None  # mflux ZImage (Turbo) instance, lazy-loaded on first z_image_turbo call

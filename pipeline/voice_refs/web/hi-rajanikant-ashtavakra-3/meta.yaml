@@ -1,0 +1,10 @@
+label: "Rajanikant \xB7 Ashtavakra ch3"
+language: hi
+gender: male
+style: devotional, calm
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "archive.org \xB7 AshtavakraGitaHindiAudiobook (Adhyaay 03.mp3) \u2014 PD/CC"

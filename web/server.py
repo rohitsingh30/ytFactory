@@ -1,10 +1,21 @@
-"""FastAPI wrapper for the ytFactory pipeline.
+"""FastAPI wrapper for the ytFactory pipeline (also the source for ytfactory-web).
 
-Runs locally on the M-series Mac because the pipeline depends on
-local Flux/Whisper/Kokoro models. Exposed publicly via cloudflared
-tunnel (matches the shofferai laptop-relay deployment pattern).
+**2026-05-09 — laptop nuclear cleanup.** The canonical instance of
+this app runs as the ``ytfactory-web`` Cloud Run SERVICE in
+asia-southeast1 (project ``ytfactory-prod-v2``). Running locally on
+:8765 is for **dev iteration only**. Skills now POST to the cloud
+service by default (see ``pipeline.cloud.skill_dispatch.WEBSITE_URL``); set
+``YTFACTORY_WEBSITE_URL=http://localhost:8765`` to redirect to a
+local dev instance.
 
-Endpoints:
+Most heavy ML deps (torch, diffusers, mflux, mlx-whisper, kokoro)
+were removed from the laptop venv 2026-05-09. The local web server
+can still load + serve the UI but actual rendering must go through
+the cloud render-worker JOB (``YTFACTORY_RENDER_BACKEND=cloudrun``).
+Local mode (subprocess of make_shorts.py) will fail at the first GPU
+import.
+
+Endpoints (mirrored cloud-side):
     GET  /                          → niche picker HTML
     GET  /static/*                  → assets
     POST /api/jobs                  → start a job, returns {job_id}
@@ -13,10 +24,10 @@ Endpoints:
     GET  /api/jobs/{id}/short       → final mp4 (when done)
     GET  /api/jobs/{id}/thumb/{i}   → image thumbnail (img_NN.png)
 
-Pipeline integration: every job spawns
-``pull_stories.py`` and then ``make_shorts.py`` as subprocesses
-(re-using the existing CLI rather than refactoring). We tail stdout,
-parse the structured prefixes already emitted (``[1/4]``, ``[prompts]``,
+Pipeline integration: every job spawns ``pull_stories.py`` and then
+``make_shorts.py`` as subprocesses (re-using the existing CLI rather
+than refactoring). We tail stdout, parse the structured prefixes
+already emitted (``[1/4]``, ``[prompts]``,
 ``[3/4] mflux: generating N images``, ``[critic] score=...``), and
 fan them out as SSE events to the browser.
 """
@@ -25,11 +36,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import secrets
 import signal
 import time
+
+# Load .env on startup so CLOUDRUN_*_URL, GOOGLE_CLOUD_PROJECT, OAuth
+# config etc. are available without remembering to `set -a; source .env`
+# every uvicorn invocation. Best-effort — silent if python-dotenv isn't
+# installed (the website still runs, just without the env vars).
+try:
+    from dotenv import load_dotenv as _load_dotenv  # type: ignore
+    from pathlib import Path as _PathBootstrap
+    _ENV_FILE = _PathBootstrap(__file__).resolve().parent.parent / ".env"
+    if _ENV_FILE.exists():
+        _load_dotenv(_ENV_FILE, override=False)
+except ImportError:
+    pass
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
@@ -49,17 +74,65 @@ from pipeline.sources.base import RawStory, save_raw
 from pipeline import niches as _niches
 from pipeline import telemetry as tlm
 
+logger = logging.getLogger(__name__)
+
 
 # ---- Auth ---------------------------------------------------------------
 #
-# Match shofferai's RELAY_AUTH_TOKEN pattern. When YTFACTORY_TOKEN is set,
-# every API and the home page require it (cookie OR ?token= query). Without
-# it, the server is open (localhost-only safe; public tunnel NOT safe).
+# Two-tier auth (2026-05-10):
 #
-# Set it before exposing publicly:
-#     export YTFACTORY_TOKEN=$(uuidgen)
+# 1. **Browser users** — Sign in with Google via ``pipeline.auth``.
+#    Email-keyed Firestore allowlist (auth_users/<email>) gates access:
+#    approved → through, pending → /access-pending, denied → /login.
+#    Implicit admin = email domain in YTFACTORY_ADMIN_DOMAINS (default
+#    docx.co.in). Admins can approve/deny pending requests.
+#
+# 2. **M2M callers** (Cloud Scheduler, laptop agent, skills) —
+#    ``Authorization: Bearer <YTFACTORY_AGENT_TOKEN>`` shared secret on
+#    M2M-only path prefixes (/agent/*, /api/scheduler/*, /api/cron/*).
+#
+# Legacy single-token mode survives behind ``YTFACTORY_TOKEN``: when
+# set with no AGENT_TOKEN/OAuth client configured, the old cookie/query
+# token flow gates everything (used by laptop dev). Production sets
+# YTFACTORY_AGENT_TOKEN + YTFACTORY_WEB_OAUTH_CLIENT and AUTH_TOKEN
+# stays unset.
 #
 AUTH_TOKEN = os.environ.get("YTFACTORY_TOKEN", "").strip() or None
+AGENT_TOKEN = os.environ.get("YTFACTORY_AGENT_TOKEN", "").strip() or None
+
+# When set (Cloud Run env), `/` and `/dashboard` redirect here so the
+# polished Next.js studio (web-next) is the canonical face. Locally
+# unset → keep serving the legacy single-page web/static/index.html so
+# dev / direct-API operators still have a landing page.
+_PUBLIC_FRONTEND_URL = os.environ.get("YTFACTORY_PUBLIC_FRONTEND_URL", "").rstrip("/")
+
+# Path prefixes that carry their own M2M auth — only checked against
+# AGENT_TOKEN, never against the browser session cookie.
+_M2M_PATH_PREFIXES: tuple[str, ...] = (
+    "/agent/",
+    "/api/scheduler/",
+    "/api/cron/",
+)
+
+# Path prefixes that bypass auth entirely (sign-in flow + static assets
+# the login page references).
+_PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
+    "/api/auth/",
+    "/static/",
+    "/_static_unauth/",
+)
+
+_PUBLIC_EXACT_PATHS: frozenset[str] = frozenset({
+    # `/` + `/dashboard` redirect to web-next on Cloud Run via
+    # YTFACTORY_PUBLIC_FRONTEND_URL — bypass auth so anonymous browsers
+    # land on the polished login page (handled by web-next middleware)
+    # instead of being 401'd by FastAPI.
+    "/",
+    "/dashboard",
+    "/login",
+    "/access-pending",
+    "/healthz",
+})
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -303,6 +376,34 @@ class Job:
 
 JOBS: dict[str, Job] = {}
 SUBSCRIBERS: dict[str, list[asyncio.Queue]] = {}
+
+# ---- Website-native render-from-script jobs (2026-05-09) -----------------
+#
+# The original /api/jobs flow is niche-driven: pick a niche, the website
+# runs pull_stories.py + make_shorts.py end-to-end. Skills (the AI
+# authoring layer) need a different entry point: they hand-author the
+# script JSON themselves and just want the website to drive the
+# renderer in its already-correct env (PYTHONPATH, gcloud account, cwd).
+# /api/jobs/from_script is that entry point. SCRIPT_JOBS tracks them
+# separately from the niche-driven JOBS so their schemas don't collide.
+SCRIPT_JOBS: dict[str, dict[str, Any]] = {}
+SCRIPT_JOB_LOG_DIR = Path("/tmp/ytfactory-script-jobs")
+
+# Server-side critique state. Mirrors SCRIPT_JOBS shape.
+# `mode` ∈ {"video", "audio"}; `verdict` is the parsed critique JSON.
+CRITIQUE_JOBS: dict[str, dict[str, Any]] = {}
+CRITIQUE_JOB_LOG_DIR = Path("/tmp/ytfactory-critique-jobs")
+
+# Per-render Publish jobs. Mirrors SCRIPT_JOBS shape; one entry per
+# upload attempt. Auto-falls-back-marker on YouTube API quotaExceeded.
+UPLOAD_JOBS: dict[str, dict[str, Any]] = {}
+
+# Channel cron-drain jobs. Wraps the existing per-channel upload-rotation
+# scripts (scripts/upload_next.py for mystoriesanimated etc.) as
+# website-driven endpoints so the schedule + status are visible alongside
+# everything else.
+CRON_JOBS: dict[str, dict[str, Any]] = {}
+CRON_JOB_LOG_DIR = Path("/tmp/ytfactory-cron-jobs")
 
 
 # ---- Runtime handles for cancellation -----------------------------------
@@ -1361,10 +1462,10 @@ async def _warm_image_pipe() -> None:
     print(f"[image-worker] warming pipe (provider={_IMAGE_WORKER_PROVIDER})…")
     t0 = time.time()
     try:
-        # Lazy-import — pipeline.images pulls in torch+diffusers, which
+        # Lazy-import — pipeline.images.images pulls in torch+diffusers, which
         # is heavy. We don't want to pay that cost when the worker is
         # disabled (the default).
-        from pipeline import images as _images
+        from pipeline.images import images as _images
         await asyncio.to_thread(_images.warmup, _IMAGE_WORKER_PROVIDER)
         print(f"[image-worker] warm in {time.time()-t0:.1f}s")
     except Exception as e:
@@ -1407,6 +1508,51 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="ytFactory", lifespan=lifespan)
 
 
+# ---------------------------------------------------------------------------
+# ytfactory-control absorption (Phase 4 — 2026-05-10)
+# ---------------------------------------------------------------------------
+#
+# The legacy split between web/server.py (orchestrator/UI) and
+# control/server_dev.py (scheduler/agent/state-API) is gone. Every
+# control router is now mounted onto this app — ytfactory-web is the
+# canonical Cloud Run service. The control/* package stays as a Python
+# library; only its routers are imported here. control/server_dev.py
+# remains usable for local-dev iteration of the control plane in
+# isolation.
+#
+# Auth note: control routers carry their own auth (K_SERVICE trust on
+# Cloud Run + Bearer YTFACTORY_AGENT_TOKEN off-cloud). web/server.py's
+# AUTH_TOKEN middleware below is exempted on these route prefixes so
+# the two auth models don't double up.
+#
+from control.routes.agent_routes import router as _control_agent_router
+from control.routes.auth_pin import router as _control_auth_pin_router
+from control.routes.burner_routes import router as _control_burner_router
+from control.routes.channels_routes import router as _control_channels_router
+from control.routes.clone_video_routes import router as _control_clone_video_router
+from control.routes.dashboard_routes import router as _control_dashboard_router
+from control.routes.discover_routes import router as _control_discover_router
+from control.routes.music_routes import router as _control_music_router
+from control.routes.niche_routes import router as _control_niche_router
+from control.routes.niche_specs_routes import router as _control_niche_specs_router
+from control.routes.oauth_web_routes import router as _control_oauth_web_router
+from control.routes.render_routes import router as _control_render_router
+from control.routes.scheduler_routes import router as _control_scheduler_router
+from control.routes.script_jobs_routes import router as _control_script_jobs_router
+from control.routes.state_routes import router as _control_state_router
+from control.routes.voices_routes import router as _control_voices_router
+
+# NOTE: app.include_router() calls for control routers happen at the
+# BOTTOM of this file (search for "control router include block").
+# That ordering means web's own @app.* decorators register FIRST, so
+# any route paths that overlap (e.g. /api/jobs/from_script,
+# /api/research/*, /api/dashboard/*, /api/voices/*) resolve to web's
+# established handler — control's duplicate registrations become no-ops.
+# Endpoints that are unique to control (/agent/*, /api/scheduler/*,
+# /api/state/*, /api/channels, /api/niches/*, /api/burner*, etc.)
+# attach cleanly with no collision.
+
+
 @app.post("/api/_internal/render")
 async def _internal_render(req: Request) -> dict:
     """Render one image inside the long-lived server process.
@@ -1430,50 +1576,160 @@ async def _internal_render(req: Request) -> dict:
 
     assert _IMAGE_GPU_LOCK is not None
     async with _IMAGE_GPU_LOCK:
-        from pipeline import images as _images
+        from pipeline.images import images as _images
         t0 = time.time()
         result = await asyncio.to_thread(_images.generate, **kwargs)
         dt = time.time() - t0
     return {"path": str(result), "duration_s": round(dt, 3)}
 
 
-def _check_auth(request: Request) -> None:
-    """Reject if YTFACTORY_TOKEN is set and the request doesn't carry it.
+SESSION_COOKIE = "yt_session"
+OAUTH_STATE_COOKIE = "yt_oauth_state"
 
-    Accepts either:
-      - cookie ``yt_tok=<token>`` (set by /auth?token=...)
-      - query string ``?token=<token>``
-      - header ``Authorization: Bearer <token>``
-    """
+
+def _bearer_matches(request: Request, expected: str | None) -> bool:
+    if not expected:
+        return False
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        return False
+    return secrets.compare_digest(auth.split(" ", 1)[1].strip(), expected)
+
+
+def _legacy_token_ok(request: Request) -> bool:
+    """Backwards-compat token mode (laptop dev). Active only when
+    ``YTFACTORY_TOKEN`` is set."""
     if AUTH_TOKEN is None:
-        return
+        return False
     cookie = request.cookies.get("yt_tok")
     if cookie and secrets.compare_digest(cookie, AUTH_TOKEN):
-        return
+        return True
     qtok = request.query_params.get("token")
     if qtok and secrets.compare_digest(qtok, AUTH_TOKEN):
-        return
-    auth = request.headers.get("authorization", "")
-    if auth.startswith("Bearer "):
-        if secrets.compare_digest(auth.split(" ", 1)[1], AUTH_TOKEN):
-            return
-    raise HTTPException(401, "auth required")
+        return True
+    return _bearer_matches(request, AUTH_TOKEN)
+
+
+def _is_browser_request(request: Request) -> bool:
+    """Heuristic: HTML accept header or no Accept = browser; JSON/* = API."""
+    accept = (request.headers.get("accept") or "").lower()
+    if "text/html" in accept:
+        return True
+    if not accept or accept == "*/*":
+        # Treat unspecified as browser only for GET — POST without Accept is API.
+        return request.method == "GET"
+    return False
+
+
+def _server_is_open() -> bool:
+    """Fully-unconfigured = open mode (laptop dev + unit tests).
+
+    Matches the original ``AUTH_TOKEN is None`` semantics: open when
+    neither the legacy single-token nor the OAuth flow is configured.
+    AGENT_TOKEN being set (test fixtures, M2M-only deploys) does NOT
+    lock the door — that's M2M-flavor auth, distinct from user auth.
+
+    Always locked on Cloud Run (``K_SERVICE`` is set by the runtime),
+    so a production env without explicit auth config still blocks
+    public traffic.
+    """
+    if os.environ.get("K_SERVICE"):
+        return False
+    return (
+        not os.environ.get("YTFACTORY_TOKEN")
+        and not os.environ.get("YTFACTORY_WEB_OAUTH_CLIENT")
+        and not os.environ.get("YTFACTORY_WEB_OAUTH_CLIENT_PATH")
+    )
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Gate all routes except /auth and /healthz."""
+    """Two-tier auth gate.
+
+    Order:
+      1. Public paths (sign-in flow, static, /healthz) — always pass.
+      2. M2M paths (/agent/*, /api/scheduler/*, /api/cron/*) — require
+         ``Authorization: Bearer <AGENT_TOKEN>`` if AGENT_TOKEN is set.
+         When unset, fall through to legacy/session check (laptop dev).
+      3. Legacy ``YTFACTORY_TOKEN`` mode — single shared token via
+         cookie / query / Bearer. Skips OAuth entirely. Used by laptop dev.
+      4. Default — Sign in with Google session cookie. Approved → through.
+         Pending → /access-pending (HTML) or 403 (API). Anonymous → /login
+         (HTML) or 401 (API).
+    """
     path = request.url.path
-    if path in ("/auth", "/healthz") or path.startswith("/_static_unauth"):
+
+    # 0. Open mode (dev / tests / fully-unconfigured)
+    if _server_is_open():
         return await call_next(request)
-    try:
-        _check_auth(request)
-    except HTTPException as e:
-        # Friendly redirect for the home page.
-        if path == "/":
+
+    # 1. Public paths
+    if path in _PUBLIC_EXACT_PATHS:
+        return await call_next(request)
+    if any(path.startswith(p) for p in _PUBLIC_PATH_PREFIXES):
+        return await call_next(request)
+
+    # 2. M2M paths
+    if any(path.startswith(p) for p in _M2M_PATH_PREFIXES):
+        if AGENT_TOKEN is None:
+            # No AGENT_TOKEN configured → fall through to (3)/(4) so laptop
+            # dev still works.
+            pass
+        else:
+            if _bearer_matches(request, AGENT_TOKEN):
+                return await call_next(request)
+            return JSONResponse({"error": "missing or invalid bearer"}, status_code=401)
+
+    # 3. Legacy single-token mode (laptop dev convenience).
+    if AUTH_TOKEN is not None:
+        if _legacy_token_ok(request):
+            return await call_next(request)
+        if _is_browser_request(request) and path == "/":
             return RedirectResponse(url="/auth", status_code=302)
-        return JSONResponse({"error": e.detail}, status_code=e.status_code)
-    return await call_next(request)
+        return JSONResponse({"error": "auth required"}, status_code=401)
+
+    # 4. Session-cookie path — Sign in with Google.
+    from pipeline.auth import (  # noqa: PLC0415
+        USER_STATUS_APPROVED,
+        USER_STATUS_PENDING,
+        get_user,
+        verify_session,
+    )
+
+    # M2M Bearer is also accepted on browser endpoints (skills hitting
+    # /api/jobs/* etc. with a token).
+    if _bearer_matches(request, AGENT_TOKEN):
+        return await call_next(request)
+
+    email = verify_session(request.cookies.get(SESSION_COOKIE))
+    if not email:
+        if _is_browser_request(request):
+            return RedirectResponse(url="/login", status_code=302)
+        return JSONResponse({"error": "auth required"}, status_code=401)
+
+    try:
+        user = get_user(email)
+    except Exception as e:  # Firestore offline / network blip
+        logger.warning(f"auth: Firestore lookup failed for {email!r}: {e}")
+        return JSONResponse({"error": "auth backend unavailable"}, status_code=503)
+
+    status = (user or {}).get("status")
+    if status == USER_STATUS_APPROVED:
+        request.state.user_email = email
+        request.state.user_is_admin = bool((user or {}).get("is_admin"))
+        return await call_next(request)
+    if status == USER_STATUS_PENDING:
+        if _is_browser_request(request):
+            return RedirectResponse(url="/access-pending", status_code=302)
+        return JSONResponse(
+            {"error": "access pending", "email": email}, status_code=403
+        )
+    # No record OR denied — bounce to /login (clears any stale cookie path).
+    if _is_browser_request(request):
+        resp = RedirectResponse(url="/login", status_code=302)
+        resp.delete_cookie(SESSION_COOKIE)
+        return resp
+    return JSONResponse({"error": "not authorized"}, status_code=403)
 
 
 app.mount(
@@ -1485,53 +1741,401 @@ app.mount(
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    return {"ok": True, "auth_required": AUTH_TOKEN is not None}
+    return {
+        "ok": True,
+        "session_auth": AGENT_TOKEN is not None or AUTH_TOKEN is None,
+        "legacy_token": AUTH_TOKEN is not None,
+    }
 
 
-@app.get("/auth")
-async def auth_page(token: str | None = None) -> Response:
-    """Token entry. ``GET /auth?token=...`` sets the cookie and redirects /."""
-    if AUTH_TOKEN is None:
-        return RedirectResponse("/", status_code=302)
-    if token and secrets.compare_digest(token, AUTH_TOKEN):
-        resp = RedirectResponse("/", status_code=302)
-        # 7 days; cookie scoped to root.
-        resp.set_cookie(
-            "yt_tok",
-            AUTH_TOKEN,
-            max_age=7 * 24 * 3600,
-            httponly=True,
-            samesite="lax",
-            secure=False,  # tunnel terminates TLS at cloudflared edge
-        )
-        return resp
-    html = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>ytFactory · auth</title>
-<script src="https://cdn.tailwindcss.com"></script></head>
-<body class="bg-slate-950 text-slate-100 min-h-screen grid place-items-center font-sans">
-<div class="max-w-md w-full p-6 bg-slate-900/60 border border-slate-800 rounded-xl">
-<h1 class="text-xl font-bold mb-2">ytFactory</h1>
-<p class="text-slate-400 text-sm mb-4">Paste your access token to enter.</p>
-<form method="get" action="/auth" class="flex gap-2">
-<input type="password" name="token" placeholder="Token" autofocus
-  class="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm" />
-<button class="px-4 py-2 bg-violet-600 hover:bg-violet-500 rounded text-sm font-medium">Enter</button>
-</form></div></body></html>"""
-    return Response(html, media_type="text/html")
+# ---------------------------------------------------------------------------
+# Sign-in with Google + per-email allowlist (2026-05-10).
+# ---------------------------------------------------------------------------
+
+
+def _set_session_cookie(resp: Response, email: str) -> None:
+    from pipeline.auth import sign_session  # noqa: PLC0415
+
+    resp.set_cookie(
+        SESSION_COOKIE,
+        sign_session(email),
+        max_age=int(os.environ.get("YTFACTORY_SESSION_TTL_S", str(7 * 24 * 3600))),
+        httponly=True,
+        samesite="lax",
+        secure=os.environ.get("YTFACTORY_COOKIE_SECURE", "1") == "1",
+        path="/",
+    )
+
+
+@app.get("/login")
+async def login_page(request: Request) -> Response:
+    """Sign-in page. Anonymous → renders the page. Already-authed approved
+    user → 302 to /. Pending → 302 to /access-pending."""
+    from pipeline.auth import (  # noqa: PLC0415
+        USER_STATUS_APPROVED,
+        USER_STATUS_PENDING,
+        get_user,
+        verify_session,
+    )
+
+    email = verify_session(request.cookies.get(SESSION_COOKIE))
+    if email:
+        try:
+            user = get_user(email)
+        except Exception:
+            user = None
+        status = (user or {}).get("status")
+        if status == USER_STATUS_APPROVED:
+            return RedirectResponse("/", status_code=302)
+        if status == USER_STATUS_PENDING:
+            return RedirectResponse("/access-pending", status_code=302)
+    return FileResponse(
+        Path(__file__).resolve().parent / "static" / "auth_login.html",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/access-pending")
+async def access_pending_page() -> Response:
+    return FileResponse(
+        Path(__file__).resolve().parent / "static" / "auth_pending.html",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/admin")
+async def admin_page(request: Request) -> Response:
+    """Admin UI — list pending requests + approve/deny. Admin-only.
+
+    Anonymous browser hits middleware first → redirected to /login.
+    Approved-non-admin → 403 here (we don't expose the page).
+    """
+    if not getattr(request.state, "user_is_admin", False):
+        return JSONResponse({"error": "admin only"}, status_code=403)
+    return FileResponse(
+        Path(__file__).resolve().parent / "static" / "auth_admin.html",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/api/auth/google/login")
+async def google_login() -> Response:
+    """Start the Google OAuth web flow."""
+    from pipeline.auth import oauth_url  # noqa: PLC0415
+
+    state = secrets.token_urlsafe(24)
+    resp = RedirectResponse(url=oauth_url(state), status_code=302)
+    resp.set_cookie(
+        OAUTH_STATE_COOKIE, state,
+        max_age=600, httponly=True, samesite="lax",
+        secure=os.environ.get("YTFACTORY_COOKIE_SECURE", "1") == "1",
+        path="/api/auth/",
+    )
+    return resp
+
+
+@app.get("/api/auth/google/callback")
+async def google_callback(
+    request: Request, code: str | None = None, state: str | None = None
+) -> Response:
+    """Receive Google's callback. Verify state, exchange code, upsert user,
+    set session cookie, route based on status."""
+    from pipeline.auth import (  # noqa: PLC0415
+        USER_STATUS_APPROVED,
+        USER_STATUS_PENDING,
+        exchange_code,
+        upsert_user,
+    )
+
+    if not code:
+        return JSONResponse({"error": "missing code"}, status_code=400)
+    expected_state = request.cookies.get(OAUTH_STATE_COOKIE)
+    if not expected_state or not state or not secrets.compare_digest(state, expected_state):
+        return JSONResponse({"error": "state mismatch"}, status_code=400)
+
+    try:
+        info = exchange_code(code)
+    except Exception as e:
+        logger.exception("OAuth callback failed")
+        return JSONResponse({"error": f"OAuth failed: {e}"}, status_code=400)
+
+    user = upsert_user(
+        email=info["email"],
+        name=info.get("name", ""),
+        picture=info.get("picture", ""),
+    )
+
+    status = user.get("status")
+    if status == USER_STATUS_APPROVED:
+        target = "/"
+    elif status == USER_STATUS_PENDING:
+        target = "/access-pending"
+    else:
+        target = "/login?error=denied"
+
+    resp = RedirectResponse(target, status_code=302)
+    if status in (USER_STATUS_APPROVED, USER_STATUS_PENDING):
+        _set_session_cookie(resp, info["email"])
+    resp.delete_cookie(OAUTH_STATE_COOKIE, path="/api/auth/")
+    return resp
+
+
+@app.get("/api/auth/whoami")
+async def whoami(request: Request) -> dict:
+    """Cheap session probe — used by the admin UI + frontend to render
+    the right state."""
+    from pipeline.auth import get_user, verify_session  # noqa: PLC0415
+
+    email = verify_session(request.cookies.get(SESSION_COOKIE))
+    if not email:
+        return {"signed_in": False}
+    try:
+        user = get_user(email) or {}
+    except Exception:
+        user = {}
+    return {
+        "signed_in": True,
+        "email": email,
+        "status": user.get("status"),
+        "is_admin": bool(user.get("is_admin")),
+        "name": user.get("name") or "",
+        "picture": user.get("picture") or "",
+    }
+
+
+@app.post("/api/auth/logout")
+async def logout() -> Response:
+    resp = RedirectResponse("/login", status_code=302)
+    resp.delete_cookie(SESSION_COOKIE, path="/")
+    return resp
+
+
+# Admin endpoints — gated by middleware (must be approved + is_admin via
+# request.state). We re-check is_admin here in case middleware ever changes.
+
+
+def _require_admin(request: Request) -> None:
+    if not getattr(request.state, "user_is_admin", False):
+        raise HTTPException(status_code=403, detail="admin only")
+
+
+@app.get("/api/admin/requests")
+async def admin_list_requests(request: Request) -> dict:
+    """List pending access requests (admin-only)."""
+    _require_admin(request)
+    from pipeline.auth import list_pending  # noqa: PLC0415
+
+    return {"pending": list_pending()}
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(request: Request) -> dict:
+    """List ALL users (admin-only) — for the audit log on /admin."""
+    _require_admin(request)
+    from pipeline.auth import list_users  # noqa: PLC0415
+
+    return {"users": list_users()}
+
+
+@app.post("/api/admin/requests/{email}/approve")
+async def admin_approve(request: Request, email: str) -> dict:
+    _require_admin(request)
+    from pipeline.auth import approve  # noqa: PLC0415
+
+    actor = getattr(request.state, "user_email", "system")
+    try:
+        return {"ok": True, "user": approve(email, by=actor)}
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/admin/requests/{email}/deny")
+async def admin_deny(request: Request, email: str) -> dict:
+    _require_admin(request)
+    from pipeline.auth import deny  # noqa: PLC0415
+
+    actor = getattr(request.state, "user_email", "system")
+    try:
+        return {"ok": True, "user": deny(email, by=actor)}
+    except LookupError as e:
+        raise HTTPException(404, str(e))
 
 
 @app.get("/")
-async def home() -> FileResponse:
-    # no-cache: ETag/304 revalidation only — fresh deploys take effect
-    # on a normal reload, no hard-refresh required.
+async def home(request: Request):
+    """The new product home (creator-studio feel). The old niche-picker
+    POST-/api/jobs flow lives at /legacy for power users.
+
+    On Cloud Run the web-next service (Next.js) is the canonical public
+    face. If `YTFACTORY_PUBLIC_FRONTEND_URL` is set, redirect there so
+    operators who bookmarked the FastAPI URL still land on the polished
+    UI. Locally (env unset), keep serving the legacy `web/static/index.html`
+    so dev / tests / direct-API operators still have a landing page.
+    """
+    if _PUBLIC_FRONTEND_URL:
+        return RedirectResponse(url=_PUBLIC_FRONTEND_URL + "/", status_code=302)
     return FileResponse(
         Path(__file__).resolve().parent / "static" / "index.html",
         headers={"Cache-Control": "no-cache"},
     )
 
 
+@app.get("/legacy")
+async def legacy_home() -> FileResponse:
+    """The original niche-picker UI — POSTs to /api/jobs (the niche-driven
+    flow). Kept for power users who want direct access to the niche
+    pipeline without going through the new product UI."""
+    return FileResponse(
+        Path(__file__).resolve().parent / "static" / "legacy.html",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/admin")
+async def admin_page() -> FileResponse:
+    """Engineer mode: the operations console. Same content as /renders
+    today (KPIs, service health, log tails, exit codes). Hidden from the
+    consumer surface; reachable from the header link."""
+    return FileResponse(
+        Path(__file__).resolve().parent / "static" / "renders.html",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+# ---- /renders dashboard data (P1.1 — 2026-05-09) -------------------------
+#
+# Single endpoint that powers the redesigned /renders page. Aggregates
+# channel rosters, cron-drain channel set, in-flight + recent jobs across
+# render/critique/publish/cron, and a best-effort service-health probe.
+# One JSON round-trip → fast first paint.
+
+
+_RENDERS_TRACKED_CHANNELS: tuple[str, ...] = (
+    "mystoriesanimated", "cosmosdecoded", "historyrecapped", "hindutavaanimated",
+    "sportsrecapped", "scrollpulse", "rhymetimejunction",
+)
+
+
+def _count_files(p: Path, glob: str = "*.json") -> int:
+    if not p.is_dir():
+        return 0
+    return sum(1 for _ in p.rglob(glob))
+
+
+def _channel_summary(channel: str) -> dict:
+    chan_root = PROJECT_ROOT / channel
+    if not chan_root.is_dir() or not (chan_root / "config.yaml").exists():
+        return {"channel": channel, "exists": False}
+    # Uploaded: <chan>/**/uploads/*.json (excluding .x.json sidecars)
+    uploads = [
+        p for p in chan_root.rglob("uploads/*.json")
+        if not p.name.endswith(".x.json")
+    ]
+    # Rendered (mp4 on disk): <chan>/**/shorts/*.mp4 OR <chan>/**/long_form/*.mp4
+    rendered = (
+        list(chan_root.rglob("shorts/*.mp4"))
+        + list(chan_root.rglob("long_form/*.mp4"))
+    )
+    last_upload_iso: str | None = None
+    for u in uploads:
+        try:
+            d = json.loads(u.read_text())
+            ts = d.get("uploaded_at") or d.get("publish_at")
+            if ts and (last_upload_iso is None or ts > last_upload_iso):
+                last_upload_iso = ts
+        except Exception:
+            continue
+    queue_depth = max(0, len(rendered) - len(uploads))
+    return {
+        "channel": channel,
+        "exists": True,
+        "uploaded_count": len(uploads),
+        "rendered_count": len(rendered),
+        "queue_depth": queue_depth,
+        "last_upload_iso": last_upload_iso,
+        "cron_drain_supported": channel in _CRON_DRAIN_SCRIPTS,
+    }
+
+
+@app.get("/api/overview")
+async def overview() -> dict:
+    """Aggregate dashboard payload for /renders. Single round-trip."""
+    channels = [_channel_summary(c) for c in _RENDERS_TRACKED_CHANNELS]
+    totals = {
+        "uploaded": sum(c.get("uploaded_count", 0) for c in channels),
+        "rendered": sum(c.get("rendered_count", 0) for c in channels),
+        "queue_depth": sum(c.get("queue_depth", 0) for c in channels),
+        "channels_count": sum(1 for c in channels if c.get("exists")),
+    }
+    # Recent in-flight + completed render jobs
+    script_jobs = sorted(
+        SCRIPT_JOBS.values(), key=lambda r: r.get("started_at", 0), reverse=True
+    )[:8]
+    in_flight = sum(1 for r in SCRIPT_JOBS.values() if r.get("state") == "running")
+    upload_jobs = sorted(
+        UPLOAD_JOBS.values(), key=lambda r: r.get("started_at", 0), reverse=True
+    )[:5]
+    critique_jobs = sorted(
+        CRITIQUE_JOBS.values(), key=lambda r: r.get("started_at", 0), reverse=True
+    )[:5]
+    cron_jobs = sorted(
+        CRON_JOBS.values(), key=lambda r: r.get("started_at", 0), reverse=True
+    )[:5]
+    # Cloud Run service health — best-effort (no Cloud Run access from website
+    # process required if env vars set; otherwise skip).
+    services = []
+    for env_key, label in (
+        ("CLOUDRUN_TTS_CHATTERBOX_URL", "chatterbox"),
+        ("CLOUDRUN_TTS_INDICF5_URL", "indicf5"),
+        ("CLOUDRUN_IMAGE_FLUX2_KLEIN_URL", "flux2-klein"),
+    ):
+        url = os.environ.get(env_key)
+        services.append({
+            "label": label,
+            "configured": bool(url),
+            "url": url or "",
+        })
+    return {
+        "channels": channels,
+        "totals": totals,
+        "in_flight": in_flight,
+        "recent_renders": [
+            _script_job_view(r) for r in script_jobs
+        ],
+        "recent_uploads": upload_jobs,
+        "recent_critiques": [
+            {k: v for k, v in r.items() if k not in ("log_path",)}
+            for r in critique_jobs
+        ],
+        "recent_crons": [
+            {k: v for k, v in r.items() if k not in ("log_path",)}
+            for r in cron_jobs
+        ],
+        "services": services,
+    }
+
+
+@app.get("/renders")
+async def renders_page() -> FileResponse:
+    """Render-list + preview UI. Lists JOBS (niche-driven) and SCRIPT_JOBS
+    (skill-driven, the website-native dispatch path). Auto-refreshes every 5s."""
+    return FileResponse(
+        Path(__file__).resolve().parent / "static" / "renders.html",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @app.get("/dashboard")
-async def dashboard() -> FileResponse:
-    """Live YouTube analytics dashboard for every uploaded Short."""
+async def dashboard():
+    """Live YouTube analytics dashboard for every uploaded Short.
+
+    Cloud: redirect to the polished `/app` route on the Next.js service
+    when YTFACTORY_PUBLIC_FRONTEND_URL is set. Local dev: serve the
+    legacy single-file dashboard.html so operators without web-next can
+    still see numbers.
+    """
+    if _PUBLIC_FRONTEND_URL:
+        return RedirectResponse(url=_PUBLIC_FRONTEND_URL + "/app", status_code=302)
     # no-cache forces the browser to revalidate via ETag/304 every load,
     # so dashboard.html updates take effect on a normal reload instead of
     # requiring ⌘⇧R after every deploy. The 304 path stays bandwidth-cheap.
@@ -1539,6 +2143,137 @@ async def dashboard() -> FileResponse:
         Path(__file__).resolve().parent / "static" / "dashboard.html",
         headers={"Cache-Control": "no-cache"},
     )
+
+
+@app.get("/api/dashboard")
+async def dashboard_summary() -> dict:
+    """Aggregate read for the studio dashboard tile/card layer.
+
+    Schema mirrors `web-next/lib/types.ts::DashboardData`:
+
+    - ``renders_7d`` / ``uploads_7d`` — counts of jobs / uploads completed
+      in the trailing 7 days (from the persisted job + upload registries).
+    - ``queued`` — currently active jobs (state in {pending, running}).
+    - ``held`` — total slugs across all per-channel `_holds.json` files.
+    - ``recent_jobs`` — last 6 jobs (any state), newest first.
+    - ``top_performer`` — highest-views uploaded video across all channels
+      (read from the cached YouTube analytics, no live API hit).
+
+    Cheap to compute (file reads + a single in-memory scan); meant to be
+    polled every ~10s by the dashboard page. No `?refresh` mode here —
+    the FE refreshes YouTube stats via /api/dashboard/videos?refresh=true
+    explicitly.
+    """
+    import time
+    from datetime import datetime, timezone
+
+    now = time.time()
+    week_ago = now - 7 * 24 * 3600
+
+    # --- Jobs (renders) ---------------------------------------------------
+    jobs_dir = JOBS_PERSIST_DIR
+    recent_jobs: list[dict] = []
+    renders_7d = 0
+    queued = 0
+    if jobs_dir.exists():
+        for jf in jobs_dir.glob("*.json"):
+            try:
+                blob = json.loads(jf.read_text())
+            except Exception:
+                continue
+            state = (blob.get("state") or blob.get("status") or "").lower()
+            ts = blob.get("updated_at") or blob.get("created_at") or jf.stat().st_mtime
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    ts = jf.stat().st_mtime
+            if state in {"pending", "running", "queued"}:
+                queued += 1
+            if state in {"done", "completed", "succeeded", "ok"} and ts >= week_ago:
+                renders_7d += 1
+            recent_jobs.append({
+                "id": blob.get("id") or jf.stem,
+                "channel": blob.get("channel") or blob.get("channel_yaml") or "—",
+                "slug": blob.get("slug") or blob.get("script") or "—",
+                "state": state or "unknown",
+                "updated_at": (
+                    datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+                    if isinstance(ts, (int, float))
+                    else None
+                ),
+            })
+    recent_jobs.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
+    recent_jobs = recent_jobs[:6]
+
+    # --- Uploads (last 7 days) -------------------------------------------
+    uploads_7d = 0
+    for chan_dir in PROJECT_ROOT.iterdir():
+        if not chan_dir.is_dir() or not (chan_dir / "config.yaml").exists():
+            continue
+        for upf in chan_dir.rglob("uploads/*.json"):
+            try:
+                rec = json.loads(upf.read_text())
+            except Exception:
+                continue
+            if rec.get("platform") and rec.get("platform") != "youtube":
+                continue
+            ts = rec.get("uploaded_at") or rec.get("published_at")
+            if isinstance(ts, str):
+                try:
+                    epoch = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    epoch = upf.stat().st_mtime
+            else:
+                epoch = upf.stat().st_mtime
+            if epoch >= week_ago:
+                uploads_7d += 1
+
+    # --- Held slugs (across all channel _holds.json) ----------------------
+    held = 0
+    for chan_dir in PROJECT_ROOT.iterdir():
+        if not chan_dir.is_dir():
+            continue
+        holds_file = chan_dir / "_holds.json"
+        if not holds_file.exists():
+            continue
+        try:
+            held += len(json.loads(holds_file.read_text()) or {})
+        except Exception:
+            pass
+
+    # --- Top performer ----------------------------------------------------
+    # Reuse dashboard_videos's aggregation by reading it directly. Cheap —
+    # purely cache reads. Tolerate failure (top_performer = None).
+    top_performer: dict | None = None
+    try:
+        videos_summary = await dashboard_videos(refresh=False)
+        best = None
+        for ch in videos_summary.get("channels", []):
+            for v in ch.get("videos", []):
+                views = (v.get("stats") or {}).get("views") or 0
+                if best is None or views > best[0]:
+                    best = (views, v, ch.get("account"))
+        if best:
+            views, v, account = best
+            top_performer = {
+                "youtube_url": v.get("watch_url"),
+                "title": v.get("title"),
+                "thumb_url": v.get("thumbnail"),
+                "views": views,
+                "channel": account,
+            }
+    except Exception as e:
+        logger.warning(f"dashboard: top_performer aggregation failed: {e}")
+
+    return {
+        "renders_7d": renders_7d,
+        "uploads_7d": uploads_7d,
+        "queued": queued,
+        "held": held,
+        "recent_jobs": recent_jobs,
+        "top_performer": top_performer,
+    }
 
 
 @app.get("/api/dashboard/videos")
@@ -1565,19 +2300,54 @@ async def dashboard_videos(refresh: bool = False) -> dict:
                 refresh_error = (
                     f"{refresh_summary['missing_auth']} videos skipped — "
                     "no YouTube auth or API error "
-                    "(re-auth: `python -m pipeline.upload auth --account <channel>`)"
+                    "(re-auth: `python -m pipeline.upload.upload auth --account <channel>`)"
                 )
 
     by_channel: dict[str, list[dict]] = {}
     totals = {"videos": 0, "views": 0, "likes": 0, "comments": 0, "subscribers": 0}
     latest_fetch: str | None = None
 
-    for account, slug, vid, rec_path in _yt._enumerate_uploads():
+    # Inline replacement for the now-removed _yt._enumerate_uploads().
+    # Walks every <channel>/**/uploads/*.json (matches the post-2026-05-05
+    # niched layout AND the flat layout). Skips X-platform sidecars and
+    # malformed records. Yields (account, slug, video_id, rec_path) tuples
+    # to match the old call shape.
+    def _enumerate_uploads_local():
+        from pathlib import Path as _P
+        for chan_dir in PROJECT_ROOT.iterdir():
+            if not chan_dir.is_dir() or not (chan_dir / "config.yaml").exists():
+                continue
+            for rec_path in chan_dir.rglob("uploads/*.json"):
+                if rec_path.name.endswith(".x.json"):
+                    continue
+                try:
+                    rec_local = json.loads(rec_path.read_text())
+                except (OSError, json.JSONDecodeError):
+                    continue
+                vid_local = rec_local.get("video_id")
+                acct_local = rec_local.get("account") or "default"
+                slug_local = rec_path.stem
+                if vid_local:
+                    yield (acct_local, slug_local, vid_local, rec_path)
+
+    # Inline replacement for the now-removed _yt.load_for_slug(slug).
+    # Reads cached YouTube analytics from data/research/analytics/<slug>.json.
+    _ANALYTICS_DIR = PROJECT_ROOT / "data" / "research" / "analytics"
+    def _load_stats_for_slug(slug_local: str) -> dict:
+        p = _ANALYTICS_DIR / f"{slug_local}.json"
+        if not p.exists():
+            return {}
+        try:
+            return json.loads(p.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    for account, slug, vid, rec_path in _enumerate_uploads_local():
         try:
             rec = json.loads(rec_path.read_text())
         except (OSError, json.JSONDecodeError):
             continue
-        stats = _yt.load_for_slug(slug) or {}
+        stats = _load_stats_for_slug(slug) or {}
         view = stats.get("view_count")
         like = stats.get("like_count")
         comment = stats.get("comment_count")
@@ -1618,7 +2388,8 @@ async def dashboard_videos(refresh: bool = False) -> dict:
         c_views = sum(v["stats"]["views"] or 0 for v in vids)
         c_likes = sum(v["stats"]["likes"] or 0 for v in vids)
         c_comments = sum(v["stats"]["comments"] or 0 for v in vids)
-        chan_stats = _yt.load_channel_for_account(account) or {}
+        # _yt.load_channel_for_account was renamed to load_account post-refactor.
+        chan_stats = (_yt.load_account(account) or {}) if hasattr(_yt, "load_account") else {}
         subs = chan_stats.get("subscriber_count")
         if subs is not None:
             totals["subscribers"] += subs
@@ -1680,7 +2451,7 @@ async def voice_sample(voice_id: str) -> FileResponse:
     VOICE_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
     sample_path = VOICE_SAMPLES_DIR / f"{voice_id}.wav"
     if not sample_path.exists():
-        from pipeline import audio as audio_mod
+        from pipeline.audio import audio as audio_mod
         text = SAMPLE_TEXT_BY_LANG.get(voice["lang"], SAMPLE_TEXT_BY_LANG["en-us"])
         try:
             await asyncio.to_thread(
@@ -1766,7 +2537,7 @@ async def create_voice_clone(payload: dict) -> dict:
     ref_wav = clone_dir / "ref.wav"
     ref_json = clone_dir / "ref.json"
 
-    from pipeline import voice_clone as vc_mod
+    from pipeline.voice import voice_clone as vc_mod
     try:
         cloned = await asyncio.to_thread(
             vc_mod.clone_from_youtube,
@@ -1886,6 +2657,1092 @@ async def create_job(payload: dict) -> dict:
     task = asyncio.create_task(_run_job_with_telemetry(job))
     _runtime(job.job_id)["task"] = task
     return {"job_id": job.job_id}
+
+
+# ---- Website-native render-from-script (2026-05-09) ---------------------
+#
+# Skills (the AI authoring layer) hand-author script JSON locally, then
+# POST it here. The website spawns the right renderer in its own
+# already-correct env, captures stdout/stderr to a per-job log file,
+# and exposes status + log_tail + final mp4 path via the GET sibling.
+# This replaces the older "skills bash-exec scripts/make_shorts.py
+# directly" pattern (`feedback_skills_kick_render_directly.md`),
+# which was env-fragile (PYTHONPATH, cwd, gcloud account).
+# Allowed entry-points the skill is permitted to invoke. Whitelist
+# rather than free-form to prevent the endpoint from becoming a
+# remote-shell. Add a new path here to expose a new renderer.
+_ALLOWED_RENDER_CMDS: set[str] = {
+    "scripts/make_shorts.py",
+    "historyrecapped/scripts/render_long_form.py",
+    "historyrecapped/scripts/render_footage_only.py",
+    "sportsrecapped/scripts/render_long_form_doc.py",
+    "sportsrecapped/scripts/render_tweet_reaction.py",
+    "sportsrecapped/scripts/render_rivalry_compilation.py",
+    "scrollpulse/scripts/render_split_screen.py",
+}
+
+
+def _resolve_mp4_for_script_job(
+    hint_paths: list[str],
+    *,
+    min_mtime: float | None = None,
+    mtime_tolerance_s: float = 30.0,
+) -> str | None:
+    """Best-effort mp4-locator. Walk the channel-rooted hints (e.g. a
+    --channel YAML and a --script JSON or --slug-derived path) and look
+    for an mp4 with the same stem under {shorts,long_form}/.
+
+    Two layouts seen in the wild as of 2026-05-09:
+      <chan>/<niche>/shorts/<slug>.mp4           ← mystoriesanimated
+      <chan>/<niche>/shorts/<slug>/<slug>.mp4    ← some others
+    Try both.
+
+    ``min_mtime`` (2026-05-09 fix): when set, an mp4 only matches if its
+    mtime is ≥ ``min_mtime - mtime_tolerance_s``. Without this, a brand-new
+    job whose subprocess exited 0 quickly (silent failure, or an
+    everything-cached fast path) would resolve a STALE mp4 from the
+    previous render of the same slug and be marked "done" instantly,
+    pointing the UI at the OLD video. Pass `started_at` here.
+    """
+    candidates: list[Path] = []
+    slugs: set[str] = set()
+    for hint in hint_paths:
+        if not hint:
+            continue
+        p = Path(hint)
+        if p.suffix in (".json", ".yaml") or p.is_file():
+            slugs.add(p.stem)
+        # Walk upward looking for a likely channel root
+        for parent in [p, p.parent, p.parent.parent, p.parent.parent.parent]:
+            if not parent or not parent.is_dir():
+                continue
+            for kind in ("shorts", "long_form"):
+                candidates.append(parent / kind)
+    threshold = (min_mtime - mtime_tolerance_s) if min_mtime is not None else None
+    for kind_dir in candidates:
+        if not kind_dir.is_dir():
+            continue
+        for slug in slugs:
+            for mp4 in (kind_dir / f"{slug}.mp4", kind_dir / slug / f"{slug}.mp4"):
+                if not mp4.exists():
+                    continue
+                if threshold is not None and mp4.stat().st_mtime < threshold:
+                    # Stale — pre-dates this job's start. Skip.
+                    continue
+                return str(mp4)
+    return None
+
+
+# ---- Render-progress parser (2026-05-09) --------------------------------
+#
+# Skill-driven /api/jobs/from_script flows used to expose only state ∈
+# {running, done, done_no_mp4_found, failed} — the user saw "running"
+# flip to "done" with nothing in between, and on cache-hit fast paths
+# the first poll often caught it already at "done". The renderer
+# already prints high-fidelity stage markers to stdout (mirrored to
+# the per-job log file); we just weren't parsing them. Now we do.
+#
+# Contract — each renderer prints, in order:
+#   [1/4] TTS …              ← TTS phase
+#   [2/4] … beat split …     ← ASR/beats phase
+#   [3/4] <provider>: generating N images …
+#   [image-done] beat I of N ← per-image completion
+#   [4/4] ffmpeg compose …   ← final compose
+# Plus optional: [warmup] …, [opening_image] WARNING: …, traceback lines.
+
+_PHASE_TOTAL = 4
+_PHASE_LABELS = {
+    0: "starting",
+    1: "tts",
+    2: "beats",
+    3: "images",
+    4: "compose",
+}
+_PHASE_HUMAN = {
+    "starting": "Starting render",
+    "tts": "Synthesising narration",
+    "beats": "Aligning beats",
+    "images": "Generating images",
+    "compose": "Composing video",
+}
+
+_RE_PHASE_HEADER = re.compile(r"^\[(\d)/4\]\s*(.*)$")
+_RE_IMAGES_TOTAL = re.compile(r"generating\s+(\d+)\s+(?:images|clips)\b")
+_RE_IMAGE_DONE = re.compile(r"^\[image-done\]\s+beat\s+(\d+)\s+of\s+(\d+)\s*$")
+
+
+def _parse_script_job_progress(
+    log_path: str | None,
+    *,
+    state: str | None = None,
+    max_bytes: int = 64 * 1024,
+) -> dict:
+    """Parse the latest stage + per-image progress out of the renderer
+    log tail. Returns a JSON-safe dict the UI can render directly.
+
+    Only reads the tail (≤64KB) so it's cheap to call on every poll —
+    the markers we care about are line-anchored and the latest one wins.
+
+    Output schema:
+        {
+            "phase":         str   (one of _PHASE_LABELS values),
+            "phase_index":   int   (0-4),
+            "phase_total":   int   (4),
+            "phase_label":   str   (human-readable),
+            "images_done":   int | None,
+            "images_total":  int | None,
+            "percent":       int   (0-100, rough overall completion),
+            "text":          str   (single-line status for the UI),
+        }
+    """
+    phase_index = 0
+    images_done: int | None = None
+    images_total: int | None = None
+
+    if log_path:
+        p = Path(log_path)
+        if p.exists():
+            try:
+                with open(p, "rb") as f:
+                    try:
+                        f.seek(-max_bytes, os.SEEK_END)
+                    except OSError:
+                        f.seek(0)
+                    data = f.read().decode("utf-8", errors="replace")
+                for raw in data.splitlines():
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    m = _RE_PHASE_HEADER.match(line)
+                    if m:
+                        idx = int(m.group(1))
+                        if idx > phase_index:
+                            phase_index = idx
+                        if idx == 3:
+                            mt = _RE_IMAGES_TOTAL.search(m.group(2))
+                            if mt:
+                                images_total = int(mt.group(1))
+                                # New image phase started — reset counter
+                                # (the critic patch path can re-emit [3/4]).
+                                images_done = 0
+                        continue
+                    m = _RE_IMAGE_DONE.match(line)
+                    if m:
+                        # `beat I of N` is 0-indexed at I; treat I as
+                        # "completed-through-this-beat" (so I=0 means
+                        # 1 image done).
+                        i = int(m.group(1))
+                        n = int(m.group(2))
+                        images_total = n
+                        images_done = max(images_done or 0, i + 1)
+            except OSError:
+                pass
+
+    # Terminal-state overrides — once the worker reports done/failed,
+    # the parser's last-marker view is already stale.
+    if state in ("done", "done_no_mp4_found"):
+        phase_index = _PHASE_TOTAL
+        if images_total is not None:
+            images_done = images_total
+    elif state == "failed":
+        # Keep whichever phase was last seen so the UI can show
+        # "Failed at: Generating images". Do nothing.
+        pass
+
+    phase = _PHASE_LABELS.get(phase_index, "starting")
+    label = _PHASE_HUMAN.get(phase, phase)
+
+    if state in ("done", "done_no_mp4_found"):
+        text = "Done"
+        percent = 100
+    elif state == "failed":
+        text = f"Failed at: {label}"
+        # Estimate percent as fraction of phases completed at failure.
+        percent = int(round(100 * phase_index / _PHASE_TOTAL))
+    else:
+        if phase == "images" and images_total:
+            done = images_done or 0
+            text = f"{label} ({done}/{images_total})"
+            # Smoother percent for the longest phase: blend phase
+            # midpoint with image fraction.
+            phase_floor = (phase_index - 1) / _PHASE_TOTAL
+            phase_ceil = phase_index / _PHASE_TOTAL
+            sub = done / max(images_total, 1)
+            percent = int(round(100 * (phase_floor + sub * (phase_ceil - phase_floor))))
+        else:
+            text = label
+            # Conservative: report having entered this phase, not finished it.
+            percent = int(round(100 * max(phase_index - 1, 0) / _PHASE_TOTAL))
+
+    return {
+        "phase": phase,
+        "phase_index": phase_index,
+        "phase_total": _PHASE_TOTAL,
+        "phase_label": label,
+        "images_done": images_done,
+        "images_total": images_total,
+        "percent": max(0, min(100, percent)),
+        "text": text,
+    }
+
+
+@app.post("/api/jobs/from_script")
+async def create_script_job(payload: dict) -> dict:
+    """Run a pre-built renderer command via the website (the AI-layer
+    entry). The skill assembles the exact CLI it wants; the website
+    just executes it in its own already-correct process env
+    (PYTHONPATH, gcloud account, cwd) and tracks status.
+
+    Payload (preferred — generic):
+        cmd:    list[str], e.g.
+                ["scripts/make_shorts.py",
+                 "--channel", "mystoriesanimated/variants/aita_animated.yaml",
+                 "--script", "mystoriesanimated/.../scripts/<slug>.json"]
+                The first element MUST be in the allowed-entry-point
+                whitelist (`_ALLOWED_RENDER_CMDS`).
+
+    Payload (legacy convenience for shorts):
+        channel_yaml + script_path  →  rewrites to cmd=
+            [scripts/make_shorts.py, --channel, ..., --script, ...]
+    """
+    cmd_in: list[str] = list(payload.get("cmd") or [])
+
+    # Convenience-form rewrite (keeps the shorts-only callers simple).
+    if not cmd_in and (payload.get("channel_yaml") and payload.get("script_path")):
+        cmd_in = [
+            "scripts/make_shorts.py",
+            "--channel", str(payload["channel_yaml"]),
+            "--script", str(payload["script_path"]),
+        ]
+        cmd_in.extend(list(payload.get("extra_args") or []))
+
+    if not cmd_in:
+        raise HTTPException(
+            400,
+            "either `cmd: [...]` or `{channel_yaml, script_path}` is required",
+        )
+    entry = cmd_in[0]
+    if entry not in _ALLOWED_RENDER_CMDS:
+        raise HTTPException(
+            400,
+            f"entry-point {entry!r} not in allowed whitelist: "
+            f"{sorted(_ALLOWED_RENDER_CMDS)}",
+        )
+
+    repo_root = Path(__file__).resolve().parent.parent
+    if not (repo_root / entry).exists():
+        raise HTTPException(400, f"renderer script not found at: {entry}")
+
+    # Validate any --channel / --script / --slug paths that exist on
+    # disk. Best-effort — unknown flags pass through.
+    flag_paths: list[str] = []
+    it = iter(cmd_in[1:])
+    for tok in it:
+        if tok in ("--channel", "--script"):
+            try:
+                v = next(it)
+            except StopIteration:
+                break
+            flag_paths.append(v)
+            if not (repo_root / v).exists() and not Path(v).exists():
+                raise HTTPException(400, f"{tok} path not found: {v}")
+
+    SCRIPT_JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    job_id = uuid.uuid4().hex[:10]
+    log_path = SCRIPT_JOB_LOG_DIR / f"{job_id}.log"
+    label = payload.get("label") or " ".join(cmd_in[:6])
+
+    SCRIPT_JOBS[job_id] = {
+        "job_id": job_id,
+        "label": label,
+        "cmd": list(cmd_in),
+        "state": "running",
+        "started_at": time.time(),
+        "completed_at": None,
+        "exit_code": None,
+        "mp4_path": None,
+        "error": None,
+        "log_path": str(log_path),
+        "backend": os.environ.get("YTFACTORY_RENDER_BACKEND", "local"),
+    }
+
+    backend = SCRIPT_JOBS[job_id]["backend"]
+    if backend == "cloudrun":
+        # Cloud Run JOB path: upload spec to GCS, trigger the worker, poll
+        # state.json. See docs/full_cloud_cutover_2026_05_09.md.
+        asyncio.create_task(_run_cloudrun(job_id, cmd_in, flag_paths))
+        return {"job_id": job_id, "state": "running", "backend": "cloudrun"}
+
+    # Local subprocess path (default).
+    cmd = [
+        os.fspath(repo_root / ".venv" / "bin" / "python"),
+        *cmd_in,
+    ]
+
+    async def _run() -> None:
+        rec = SCRIPT_JOBS[job_id]
+        try:
+            with open(log_path, "wb") as logfh:
+                env = os.environ.copy()
+                # Make sure pipeline.* imports resolve regardless of how
+                # the website itself was started.
+                env["PYTHONPATH"] = str(repo_root) + (
+                    os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+                )
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(repo_root),
+                    env=env,
+                    stdout=logfh,
+                    stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                rec["pid"] = proc.pid
+                await proc.wait()
+            rec["exit_code"] = proc.returncode
+            rec["completed_at"] = time.time()
+            if proc.returncode == 0:
+                # Fresh-mp4 gate: only accept an mp4 produced by THIS
+                # job (mtime ≥ started_at). Without the gate, a
+                # subprocess that exited 0 silently — or an
+                # everything-cached fast path that didn't actually
+                # rewrite the mp4 — would resolve a stale prior render
+                # and the UI would flip straight to "done" pointing
+                # at the OLD video. (2026-05-09 instant-done bug.)
+                mp4 = _resolve_mp4_for_script_job(
+                    flag_paths, min_mtime=rec["started_at"]
+                )
+                rec["mp4_path"] = mp4
+                if mp4:
+                    rec["state"] = "done"
+                else:
+                    # Distinguish a true no-mp4-on-disk case from a
+                    # fast silent failure: if the subprocess exited
+                    # near-instantly AND wrote no log, surface as
+                    # failed so the UI doesn't claim success.
+                    elapsed = rec["completed_at"] - rec["started_at"]
+                    log_size = (
+                        Path(log_path).stat().st_size
+                        if Path(log_path).exists() else 0
+                    )
+                    if elapsed < 2.0 and log_size < 64:
+                        rec["state"] = "failed"
+                        rec["error"] = (
+                            f"renderer exited 0 in {elapsed:.2f}s with "
+                            f"{log_size}B of log output and no fresh mp4 "
+                            "(silent failure — check entry-point and env)"
+                        )
+                    else:
+                        rec["state"] = "done_no_mp4_found"
+            else:
+                rec["state"] = "failed"
+                rec["error"] = f"renderer exit_code={proc.returncode}"
+        except Exception as e:
+            rec["state"] = "failed"
+            rec["error"] = f"{type(e).__name__}: {e}"
+            rec["completed_at"] = time.time()
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id, "state": "running", "backend": "local"}
+
+
+# ---- Cloud Run JOB backend (P-cloud — 2026-05-09) ------------------------
+#
+# When YTFACTORY_RENDER_BACKEND=cloudrun, /api/jobs/from_script writes a
+# spec.json to GCS, triggers the ytfactory-render-worker Cloud Run JOB
+# with JOB_SPEC_GCS_URI, and polls state.json until the worker completes.
+# The same SCRIPT_JOBS dict surfaces both backends transparently to the
+# /renders UI. Design: docs/full_cloud_cutover_2026_05_09.md.
+
+CLOUDRUN_JOB_NAME = os.environ.get("YTFACTORY_CLOUDRUN_JOB", "ytfactory-render-worker-v2")
+CLOUDRUN_JOB_REGION = os.environ.get("YTFACTORY_CLOUDRUN_REGION", "asia-southeast1")
+CLOUDRUN_JOB_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+CLOUDRUN_ARTIFACTS_BUCKET = os.environ.get(
+    "YTFACTORY_BUCKET", "ytfactory-prod-v2-artifacts"
+)
+
+
+def _b64_file(p: Path) -> str:
+    import base64
+    return base64.b64encode(p.read_bytes()).decode("ascii")
+
+
+async def _run_cloudrun(
+    job_id: str, cmd_in: list[str], flag_paths: list[str]
+) -> None:
+    """Cloud Run backend for /api/jobs/from_script."""
+    rec = SCRIPT_JOBS[job_id]
+    repo_root = Path(__file__).resolve().parent.parent
+
+    try:
+        # 1. Resolve --channel / --script / optional --raw paths.
+        channel_yaml: Path | None = None
+        script_path: Path | None = None
+        it = iter(cmd_in)
+        next(it)  # skip the entry script
+        for tok in it:
+            if tok == "--channel":
+                channel_yaml = repo_root / next(it)
+            elif tok == "--script":
+                script_path = repo_root / next(it)
+        if not (channel_yaml and script_path):
+            raise ValueError("cmd missing --channel or --script")
+
+        # Optional raw file (the renderer can use it for upload metadata).
+        raw_rel: str | None = None
+        raw_b64: str | None = None
+        if script_path.parent.name == "scripts":
+            raw_candidate = (
+                script_path.parent.parent / "raw" / f"{script_path.stem}.json"
+            )
+            if raw_candidate.exists():
+                raw_rel = str(raw_candidate.relative_to(repo_root))
+                raw_b64 = _b64_file(raw_candidate)
+
+        # 2. Build spec.
+        cy_rel = str(channel_yaml.relative_to(repo_root))
+        sp_rel = str(script_path.relative_to(repo_root))
+        spec = {
+            "job_id": job_id,
+            "cmd": list(cmd_in),
+            "channel_yaml_path": cy_rel,
+            "channel_yaml_b64": _b64_file(channel_yaml),
+            "script_path": sp_rel,
+            "script_json_b64": _b64_file(script_path),
+        }
+        if raw_rel and raw_b64:
+            spec["raw_path"] = raw_rel
+            spec["raw_b64"] = raw_b64
+
+        # 3. Upload spec.json to GCS.
+        spec_uri = (
+            f"gs://{CLOUDRUN_ARTIFACTS_BUCKET}/jobs/{job_id}/spec.json"
+        )
+        await asyncio.to_thread(_gcs_upload_text, json.dumps(spec), spec_uri)
+        rec["spec_uri"] = spec_uri
+
+        # 4. Trigger Cloud Run JOB execution. We use `gcloud run jobs
+        #    execute` rather than the REST API because the gcloud CLI
+        #    handles auth automatically; orchestrator runs as
+        #    tts-runner SA which has the run.invoker / run.developer roles.
+        execute_cmd = [
+            "gcloud", "run", "jobs", "execute", CLOUDRUN_JOB_NAME,
+            "--project", CLOUDRUN_JOB_PROJECT,
+            "--region", CLOUDRUN_JOB_REGION,
+            "--update-env-vars", f"^|^JOB_SPEC_GCS_URI={spec_uri}",
+            "--async",
+            "--format", "value(metadata.name)",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *execute_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"gcloud run jobs execute failed: {stderr.decode(errors='replace')}"
+            )
+        execution_name = stdout.decode().strip()
+        rec["cloudrun_execution"] = execution_name
+
+        # 5. Poll state.json from GCS until terminal.
+        state_uri = (
+            f"gs://{CLOUDRUN_ARTIFACTS_BUCKET}/jobs/{job_id}/state.json"
+        )
+        terminal = ("done", "done_no_mp4_found", "failed")
+        for _ in range(720):  # ~1 hr at 5s poll
+            await asyncio.sleep(5)
+            try:
+                state = await asyncio.to_thread(_gcs_read_json, state_uri)
+            except Exception:
+                continue
+            if state.get("state") in terminal:
+                rec["state"] = state["state"]
+                rec["exit_code"] = state.get("exit_code")
+                rec["error"] = state.get("error")
+                rec["mp4_path"] = state.get("mp4_uri")
+                rec["completed_at"] = state.get("completed_at") or time.time()
+                rec["log_uri"] = state.get("log_uri")
+                return
+        # Timed out
+        rec["state"] = "failed"
+        rec["error"] = "polling timed out after 1 hour"
+        rec["completed_at"] = time.time()
+    except Exception as e:
+        rec["state"] = "failed"
+        rec["error"] = f"{type(e).__name__}: {e}"
+        rec["completed_at"] = time.time()
+
+
+def _gcs_upload_text(text: str, uri: str, content_type: str = "application/json") -> None:
+    """Sync GCS text upload (called via asyncio.to_thread)."""
+    from google.cloud import storage
+    from urllib.parse import urlparse
+    p = urlparse(uri)
+    client = storage.Client(project=CLOUDRUN_JOB_PROJECT)
+    blob = client.bucket(p.netloc).blob(p.path.lstrip("/"))
+    # Pass content_type to upload_from_string directly — setting
+    # blob.content_type beforehand triggers a metadata-vs-upload
+    # content-type mismatch (HTTP 400) on the multipart upload.
+    blob.upload_from_string(text, content_type=content_type)
+
+
+def _gcs_read_json(uri: str) -> dict:
+    """Sync GCS JSON read (called via asyncio.to_thread)."""
+    from google.cloud import storage
+    from urllib.parse import urlparse
+    p = urlparse(uri)
+    client = storage.Client(project=CLOUDRUN_JOB_PROJECT)
+    blob = client.bucket(p.netloc).blob(p.path.lstrip("/"))
+    return json.loads(blob.download_as_bytes())
+
+
+@app.get("/api/jobs/from_script/{job_id}")
+async def get_script_job(job_id: str, log_tail_kb: int = 8) -> dict:
+    rec = SCRIPT_JOBS.get(job_id)
+    if not rec:
+        raise HTTPException(404, "script job not found")
+    out = dict(rec)
+    out["elapsed_s"] = round(
+        (rec["completed_at"] or time.time()) - rec["started_at"], 1
+    )
+    log_path = Path(rec["log_path"])
+    if log_path.exists():
+        nbytes = max(1, log_tail_kb) * 1024
+        with open(log_path, "rb") as f:
+            try:
+                f.seek(-nbytes, os.SEEK_END)
+            except OSError:
+                f.seek(0)
+            tail = f.read().decode("utf-8", errors="replace")
+        out["log_tail"] = tail
+    else:
+        out["log_tail"] = ""
+    out["progress"] = _parse_script_job_progress(
+        rec.get("log_path"), state=rec.get("state")
+    )
+    return out
+
+
+@app.get("/api/jobs/from_script/{job_id}/mp4")
+async def get_script_job_mp4(job_id: str):
+    """Serve the rendered mp4 for a finished script-driven job. Handles
+    both local filesystem mp4s (`mp4_path` is a real path) and GCS-hosted
+    mp4s (`mp4_path` is a `gs://` URI from the cloudrun backend).
+    """
+    rec = SCRIPT_JOBS.get(job_id)
+    if not rec:
+        raise HTTPException(404, "script job not found")
+    mp4 = rec.get("mp4_path")
+    if not mp4:
+        raise HTTPException(404, "mp4 not yet available for this job")
+    if mp4.startswith("gs://"):
+        # 302 to a v4 signed URL (15 min). Avoids streaming the mp4
+        # through the orchestrator and burning its egress quota.
+        try:
+            from urllib.parse import urlparse
+            from google.cloud import storage
+            p = urlparse(mp4)
+            client = storage.Client(project=CLOUDRUN_JOB_PROJECT)
+            blob = client.bucket(p.netloc).blob(p.path.lstrip("/"))
+            url = blob.generate_signed_url(
+                version="v4",
+                expiration=900,  # 15 min
+                method="GET",
+            )
+            return RedirectResponse(url, status_code=302)
+        except Exception as e:
+            raise HTTPException(500, f"failed to sign GCS URL: {e}")
+    if not Path(mp4).exists():
+        raise HTTPException(404, "mp4 not yet available for this job")
+    return FileResponse(mp4, media_type="video/mp4", filename=Path(mp4).name)
+
+
+@app.get("/api/jobs/from_script")
+async def list_script_jobs(limit: int = 20) -> dict:
+    items = sorted(
+        SCRIPT_JOBS.values(),
+        key=lambda r: r.get("started_at", 0),
+        reverse=True,
+    )[:limit]
+    return {"jobs": [_script_job_view(r) for r in items]}
+
+
+def _script_job_view(rec: dict) -> dict:
+    """Strip the on-disk log_path and attach a parsed `progress` block.
+    Used by both /api/overview's recent_renders and the list endpoint so
+    the UI can show a live stage strip without an extra round-trip."""
+    out = {k: v for k, v in rec.items() if k != "log_path"}
+    out["progress"] = _parse_script_job_progress(
+        rec.get("log_path"), state=rec.get("state")
+    )
+    return out
+
+
+# ---- Server-side critique (P2 — 2026-05-09) ------------------------------
+#
+# /critique-video used to be a Claude-side skill that bash-sampled frames
+# locally and called `claude -p` with a critique prompt. Same pattern,
+# but the website now owns the execution: it has the mp4 (from a
+# SCRIPT_JOBS record), it has the cache_dir (derivable from --channel +
+# --script paths), and it has Claude CLI in-process via
+# pipeline.llm.call_claude_cli. Skill becomes a thin POST.
+
+
+def _resolve_critique_inputs_from_job(job_id: str) -> dict:
+    """Extract slug + mp4_path + cache_dir from a finished SCRIPT_JOB."""
+    rec = SCRIPT_JOBS.get(job_id)
+    if not rec:
+        raise HTTPException(404, f"script job {job_id} not found")
+    if rec.get("state") not in ("done", "done_no_mp4_found"):
+        raise HTTPException(
+            400, f"job {job_id} is in state {rec.get('state')}; "
+            f"critique requires a completed render"
+        )
+    mp4 = rec.get("mp4_path")
+    if not mp4:
+        raise HTTPException(400, f"job {job_id} has no mp4_path")
+    # Slug: stem of --script path
+    cmd = rec.get("cmd") or []
+    script_path = None
+    channel_yaml = None
+    it = iter(cmd)
+    for tok in it:
+        if tok == "--script":
+            try: script_path = next(it)
+            except StopIteration: pass
+        elif tok == "--channel":
+            try: channel_yaml = next(it)
+            except StopIteration: pass
+    if not script_path:
+        raise HTTPException(400, f"job {job_id} has no --script in cmd")
+    slug = Path(script_path).stem
+    # cache_dir: <niche_root>/cache/<slug>/ — matches make_shorts.py layout
+    sp = Path(script_path)
+    cache_dir = (
+        sp.parent.parent / "cache" / slug
+        if sp.parent.name == "scripts"
+        else Path(mp4).parent / "cache" / slug
+    )
+    return {
+        "slug": slug,
+        "mp4_path": mp4,
+        "cache_dir": str(cache_dir),
+        "channel_yaml": channel_yaml,
+        "script_path": script_path,
+    }
+
+
+@app.post("/api/critique")
+async def create_critique_job(payload: dict) -> dict:
+    """Server-side video critique. Calls pipeline.llm.critic.critique_short
+    with the website's process env.
+
+    Payload (any one of):
+        job_id:   SCRIPT_JOBS id of a finished render. Auto-derives slug,
+                  mp4_path, cache_dir from the job's cmd.
+        mp4_path + cache_dir + slug:   direct override.
+
+    Returns: {critique_id, state}.
+    """
+    mode = payload.get("mode", "video")
+    if mode not in ("video", "audio"):
+        raise HTTPException(400, f"unknown mode {mode!r}; expected video|audio")
+    if mode == "audio":
+        raise HTTPException(501, "audio critique not yet implemented in this endpoint")
+
+    if payload.get("job_id"):
+        inputs = _resolve_critique_inputs_from_job(payload["job_id"])
+        slug = inputs["slug"]
+        mp4_path = inputs["mp4_path"]
+        cache_dir = inputs["cache_dir"]
+    else:
+        slug = payload.get("slug")
+        mp4_path = payload.get("mp4_path")
+        cache_dir = payload.get("cache_dir")
+        if not (slug and mp4_path and cache_dir):
+            raise HTTPException(
+                400,
+                "either job_id OR (slug + mp4_path + cache_dir) is required",
+            )
+    if not Path(mp4_path).exists():
+        raise HTTPException(400, f"mp4 not found: {mp4_path}")
+
+    CRITIQUE_JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    critique_id = uuid.uuid4().hex[:10]
+    out_dir = CRITIQUE_JOB_LOG_DIR / critique_id
+    log_path = CRITIQUE_JOB_LOG_DIR / f"{critique_id}.log"
+
+    CRITIQUE_JOBS[critique_id] = {
+        "critique_id": critique_id,
+        "mode": mode,
+        "slug": slug,
+        "mp4_path": str(mp4_path),
+        "cache_dir": str(cache_dir),
+        "source_job_id": payload.get("job_id"),
+        "state": "running",
+        "started_at": time.time(),
+        "completed_at": None,
+        "verdict": None,
+        "score": None,
+        "error": None,
+        "log_path": str(log_path),
+    }
+
+    async def _run() -> None:
+        from pipeline.llm import critic as _critic
+        rec = CRITIQUE_JOBS[critique_id]
+        try:
+            with open(log_path, "w") as logfh:
+                # Best-effort log mirror — critique_short prints to stdout;
+                # we don't redirect FDs because pipeline.llm.cli expects
+                # to manage its own subprocess pipes. Lightweight log only.
+                logfh.write(f"[critique] starting {mode} critique for slug={slug}\n")
+                logfh.write(f"[critique] mp4={mp4_path}\n")
+                logfh.write(f"[critique] cache={cache_dir}\n")
+                logfh.flush()
+            verdict = await asyncio.to_thread(
+                _critic.critique_short,
+                slug=slug,
+                mp4_path=Path(mp4_path),
+                cache_dir=Path(cache_dir),
+                out_dir=out_dir,
+            )
+            rec["verdict"] = verdict
+            rec["score"] = (
+                verdict.get("score") if isinstance(verdict, dict) else None
+            )
+            rec["state"] = "done"
+        except Exception as e:
+            rec["state"] = "failed"
+            rec["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            rec["completed_at"] = time.time()
+
+    asyncio.create_task(_run())
+    return {"critique_id": critique_id, "state": "running"}
+
+
+@app.get("/api/critique/{critique_id}")
+async def get_critique_job(critique_id: str) -> dict:
+    rec = CRITIQUE_JOBS.get(critique_id)
+    if not rec:
+        raise HTTPException(404, "critique job not found")
+    out = dict(rec)
+    out["elapsed_s"] = round(
+        (rec["completed_at"] or time.time()) - rec["started_at"], 1
+    )
+    return out
+
+
+@app.get("/api/critique")
+async def list_critique_jobs(limit: int = 20) -> dict:
+    items = sorted(
+        CRITIQUE_JOBS.values(),
+        key=lambda r: r.get("started_at", 0),
+        reverse=True,
+    )[:limit]
+    return {
+        "jobs": [
+            {k: v for k, v in r.items() if k not in ("log_path",)}
+            for r in items
+        ]
+    }
+
+
+# ---- Per-render Publish (P3 — 2026-05-09) --------------------------------
+#
+# /api/uploads/from_job is the Publish-button entry. Takes a SCRIPT_JOBS id,
+# resolves channel YAML + slug + mp4 + script JSON from its cmd, calls
+# pipeline.upload.upload_short() in the website's process. On API
+# quotaExceeded (HTTP 403 across all owned channels' shared 10K-unit
+# pool), sets state='quota_exhausted' with a hint to run
+# /upload-via-playwright. Future P3.5: drive Playwright in-process from
+# pipeline/cross_engage_via_playwright.py shape.
+
+
+def _is_quota_exhausted_error(err: BaseException) -> bool:
+    s = str(err).lower()
+    return "quotaexceeded" in s or "uploadlimitexceeded" in s or (
+        "403" in s and "quota" in s
+    )
+
+
+@app.post("/api/uploads/from_job")
+async def create_upload_from_job(payload: dict) -> dict:
+    """Publish a finished script-driven render to YouTube.
+
+    Payload:
+        job_id:    SCRIPT_JOBS id (required)
+        privacy:   "public" | "unlisted" | "private" (default per channel YAML)
+        force:     bool — re-upload even if existing record exists
+        skip_critic: bool — skip pre-upload critic gate
+    """
+    job_id = payload.get("job_id")
+    if not job_id:
+        raise HTTPException(400, "job_id required")
+    rec = SCRIPT_JOBS.get(job_id)
+    if not rec:
+        raise HTTPException(404, f"script job {job_id} not found")
+    if rec.get("state") != "done" or not rec.get("mp4_path"):
+        raise HTTPException(
+            400,
+            f"job {job_id} state={rec.get('state')!r} mp4_path={rec.get('mp4_path')!r}; "
+            f"upload requires a completed render with an mp4",
+        )
+
+    # Resolve --channel and --script from the job's cmd.
+    cmd = rec.get("cmd") or []
+    channel_yaml_path = None
+    script_path = None
+    it = iter(cmd)
+    for tok in it:
+        if tok == "--channel":
+            try: channel_yaml_path = next(it)
+            except StopIteration: pass
+        elif tok == "--script":
+            try: script_path = next(it)
+            except StopIteration: pass
+    if not (channel_yaml_path and script_path):
+        raise HTTPException(
+            400, f"job {job_id} cmd missing --channel or --script flags"
+        )
+
+    repo_root = Path(__file__).resolve().parent.parent
+    mp4_abs = Path(rec["mp4_path"])
+    cyp = (repo_root / channel_yaml_path).resolve() if not Path(channel_yaml_path).is_absolute() else Path(channel_yaml_path)
+    spp = (repo_root / script_path).resolve() if not Path(script_path).is_absolute() else Path(script_path)
+    if not cyp.exists() or not spp.exists() or not mp4_abs.exists():
+        raise HTTPException(
+            400,
+            f"missing inputs: channel_yaml={cyp.exists()} "
+            f"script={spp.exists()} mp4={mp4_abs.exists()}",
+        )
+
+    upload_id = uuid.uuid4().hex[:10]
+    slug = spp.stem
+    # channel_dir = parent of variants/ if variant yaml, else parent
+    channel_dir = (
+        cyp.parent.parent.name if cyp.parent.name == "variants" else cyp.parent.name
+    )
+
+    UPLOAD_JOBS[upload_id] = {
+        "upload_id": upload_id,
+        "source_job_id": job_id,
+        "slug": slug,
+        "channel_yaml": str(cyp),
+        "channel_dir": channel_dir,
+        "mp4_path": str(mp4_abs),
+        "script_path": str(spp),
+        "state": "running",
+        "started_at": time.time(),
+        "completed_at": None,
+        "video_id": None,
+        "video_url": None,
+        "error": None,
+        "quota_exhausted": False,
+        "playwright_fallback_hint": None,
+    }
+
+    async def _run() -> None:
+        from pipeline.upload import upload as _upload
+        rec_u = UPLOAD_JOBS[upload_id]
+        try:
+            channel_yaml = yaml.safe_load(cyp.read_text())
+            script = json.loads(spp.read_text())
+            # Best-effort raw lookup (matches pipeline.upload.upload_short shape)
+            raw_path = spp.parent.parent / "raw" / f"{slug}.json"
+            raw = json.loads(raw_path.read_text()) if raw_path.exists() else None
+            result = await asyncio.to_thread(
+                _upload.upload_short,
+                project_root=repo_root,
+                channel_yaml=channel_yaml,
+                channel_dir=channel_dir,
+                slug=slug,
+                mp4_path=mp4_abs,
+                script=script,
+                raw=raw,
+                privacy_override=payload.get("privacy"),
+                force=bool(payload.get("force", False)),
+                skip_critic=bool(payload.get("skip_critic", False)),
+            )
+            rec_u["video_id"] = (result or {}).get("video_id")
+            rec_u["video_url"] = (result or {}).get("url") or (
+                f"https://www.youtube.com/watch?v={rec_u['video_id']}"
+                if rec_u.get("video_id") else None
+            )
+            rec_u["state"] = "done"
+        except Exception as e:
+            if _is_quota_exhausted_error(e):
+                rec_u["state"] = "quota_exhausted"
+                rec_u["quota_exhausted"] = True
+                rec_u["error"] = (
+                    "YouTube API quota exhausted (project-wide 10K/day pool). "
+                    "Fall back to Studio UI: run /upload-via-playwright "
+                    f"with mp4 = {mp4_abs}"
+                )
+                rec_u["playwright_fallback_hint"] = (
+                    f"PYTHONPATH=. .venv/bin/python -m pipeline.cloud.skill_dispatch render "
+                    f"--cmd <playwright-upload> -- --mp4 {mp4_abs} --slug {slug} "
+                    f"# (Playwright server-side fallback is P3.5 follow-up)"
+                )
+            else:
+                rec_u["state"] = "failed"
+                rec_u["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            rec_u["completed_at"] = time.time()
+
+    asyncio.create_task(_run())
+    return {"upload_id": upload_id, "state": "running"}
+
+
+@app.get("/api/uploads/from_job/{upload_id}")
+async def get_upload_job(upload_id: str) -> dict:
+    rec = UPLOAD_JOBS.get(upload_id)
+    if not rec:
+        raise HTTPException(404, "upload job not found")
+    out = dict(rec)
+    out["elapsed_s"] = round(
+        (rec["completed_at"] or time.time()) - rec["started_at"], 1
+    )
+    return out
+
+
+@app.get("/api/uploads/from_job")
+async def list_upload_jobs(limit: int = 20) -> dict:
+    items = sorted(
+        UPLOAD_JOBS.values(), key=lambda r: r.get("started_at", 0), reverse=True,
+    )[:limit]
+    return {"jobs": items}
+
+
+# ---- Channel cron-drain endpoints (P4 — 2026-05-09) ----------------------
+#
+# Three filesystem-driven cron scripts (one per channel that has a
+# rotating upload backlog) became website-driven endpoints. The schedule
+# now lives in the website (control/scheduler.py); the dashboard surfaces
+# next-up + last-run per channel; manual "drain now" triggers via the UI.
+_CRON_DRAIN_SCRIPTS: dict[str, str] = {
+    "mystoriesanimated": "scripts/upload_next.py",
+    "cosmosdecoded":     "cosmosdecoded/scripts/cron_upload_daily.py",
+    "historyrecapped":   "historyrecapped/scripts/cron_upload_one.py",
+}
+
+
+@app.post("/api/cron/drain")
+async def trigger_cron_drain(payload: dict) -> dict:
+    """Trigger one of the channel-specific upload-rotation scripts.
+
+    Payload:
+        channel: "mystoriesanimated" | "cosmosdecoded" | "historyrecapped"
+        count:   int (default 1) — forwarded to upload_next.py as --count
+                 where supported; ignored by single-shot scripts
+        dry_run: bool (default false)
+    """
+    channel = (payload.get("channel") or "").strip()
+    if channel not in _CRON_DRAIN_SCRIPTS:
+        raise HTTPException(
+            400,
+            f"unknown channel {channel!r}; expected one of "
+            f"{sorted(_CRON_DRAIN_SCRIPTS)}",
+        )
+    repo_root = Path(__file__).resolve().parent.parent
+    script_rel = _CRON_DRAIN_SCRIPTS[channel]
+    if not (repo_root / script_rel).exists():
+        raise HTTPException(500, f"cron script missing: {script_rel}")
+
+    CRON_JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    cron_id = uuid.uuid4().hex[:10]
+    log_path = CRON_JOB_LOG_DIR / f"{cron_id}.log"
+    cmd: list[str] = [
+        os.fspath(repo_root / ".venv" / "bin" / "python"),
+        script_rel,
+    ]
+    # upload_next.py supports --count + --dry-run; the others don't (per
+    # cron_upload_daily / cron_upload_one). Pass them only when known-safe.
+    if channel == "mystoriesanimated":
+        if payload.get("count"):
+            cmd += ["--count", str(int(payload["count"]))]
+        if payload.get("dry_run"):
+            cmd += ["--dry-run"]
+
+    CRON_JOBS[cron_id] = {
+        "cron_id": cron_id,
+        "channel": channel,
+        "cmd": cmd,
+        "state": "running",
+        "started_at": time.time(),
+        "completed_at": None,
+        "exit_code": None,
+        "error": None,
+        "log_path": str(log_path),
+    }
+
+    async def _run() -> None:
+        rec = CRON_JOBS[cron_id]
+        try:
+            with open(log_path, "wb") as logfh:
+                env = os.environ.copy()
+                env["PYTHONPATH"] = str(repo_root) + (
+                    os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+                )
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(repo_root),
+                    env=env,
+                    stdout=logfh,
+                    stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                rec["pid"] = proc.pid
+                await proc.wait()
+            rec["exit_code"] = proc.returncode
+            rec["state"] = "done" if proc.returncode == 0 else "failed"
+        except Exception as e:
+            rec["state"] = "failed"
+            rec["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            rec["completed_at"] = time.time()
+
+    asyncio.create_task(_run())
+    return {"cron_id": cron_id, "state": "running"}
+
+
+@app.get("/api/cron/drain/{cron_id}")
+async def get_cron_drain(cron_id: str, log_tail_kb: int = 8) -> dict:
+    rec = CRON_JOBS.get(cron_id)
+    if not rec:
+        raise HTTPException(404, "cron job not found")
+    out = dict(rec)
+    out["elapsed_s"] = round(
+        (rec["completed_at"] or time.time()) - rec["started_at"], 1
+    )
+    log_path = Path(rec["log_path"])
+    if log_path.exists():
+        nbytes = max(1, log_tail_kb) * 1024
+        with open(log_path, "rb") as f:
+            try: f.seek(-nbytes, os.SEEK_END)
+            except OSError: f.seek(0)
+            out["log_tail"] = f.read().decode("utf-8", errors="replace")
+    else:
+        out["log_tail"] = ""
+    return out
+
+
+@app.get("/api/cron/drain")
+async def list_cron_drain(channel: str | None = None, limit: int = 20) -> dict:
+    items = list(CRON_JOBS.values())
+    if channel:
+        items = [r for r in items if r.get("channel") == channel]
+    items = sorted(items, key=lambda r: r.get("started_at", 0), reverse=True)[:limit]
+    return {
+        "channels": list(_CRON_DRAIN_SCRIPTS.keys()),
+        "jobs": [
+            {k: v for k, v in r.items() if k not in ("log_path",)}
+            for r in items
+        ],
+    }
 
 
 @app.get("/api/jobs/{job_id}")
@@ -2466,7 +4323,7 @@ def _do_upload_blocking(
     headline_override: str | None = None,
 ) -> None:
     """Runs in a worker thread; mutates UPLOADS[slug] as it progresses."""
-    from pipeline import upload as up
+    from pipeline.upload import upload as up
 
     state = UPLOADS[slug]
     try:
@@ -2559,7 +4416,7 @@ async def upload_preflight(slug: str) -> dict:
     rendered template (so the user sees the final string and can edit).
     Tags + privacy come from the channel YAML's upload: block.
     """
-    from pipeline import upload as up
+    from pipeline.upload import upload as up
 
     mp4 = SHORTS_DIR / f"{slug}.mp4"
     if not mp4.exists():
@@ -2601,7 +4458,7 @@ async def upload_preflight(slug: str) -> dict:
     auto_thumb_url = None
     auto_headline = None
     try:
-        from pipeline import thumbnails as thumb_mod
+        from pipeline.utils import thumbnails as thumb_mod
         cache_dir = CACHE_DIR / slug
         out_path = cache_dir / "auto_thumb.jpg"
         scene_paths = thumb_mod.list_scene_frames(cache_dir)
@@ -2655,7 +4512,7 @@ async def upload_auto_thumb(slug: str) -> FileResponse:
 @app.post("/api/uploads/auto-thumb/{slug}/regenerate")
 async def upload_auto_thumb_regenerate(slug: str, payload: dict | None = None) -> dict:
     """Recompose the auto-thumbnail with optional headline / scene / style overrides."""
-    from pipeline import thumbnails as thumb_mod
+    from pipeline.utils import thumbnails as thumb_mod
 
     info = _channel_yaml_for_slug(slug)
     if not info:
@@ -2804,7 +4661,7 @@ async def create_upload(payload: dict) -> dict:
 
     # Idempotency short-circuit, unless force.
     if not force:
-        from pipeline import upload as up
+        from pipeline.upload import upload as up
         existing = up.existing_upload(PROJECT_ROOT, channel_dir, slug)
         if existing:
             UPLOADS[slug] = {
@@ -2844,7 +4701,7 @@ async def get_upload(slug: str) -> dict:
     if state:
         return {"slug": slug, **state}
     # Fallback: read the on-disk record so a reload after upload still works.
-    from pipeline import upload as up
+    from pipeline.upload import upload as up
     info = _channel_yaml_for_slug(slug)
     if info:
         _, channel_dir = info
@@ -2947,7 +4804,7 @@ _REAUTH_JOBS: dict[str, dict[str, Any]] = {}
 @app.get("/api/youtube/auth/status")
 async def youtube_auth_status() -> dict:
     """Per-account OAuth health: token present? has refresh_token? has all SCOPES?"""
-    from pipeline import upload as _upload
+    from pipeline.upload import upload as _upload
     from pipeline.research import cross_engage as _ce
 
     accounts = _ce.list_sibling_accounts()
@@ -3007,7 +4864,7 @@ async def youtube_auth_start(account: str) -> dict:
         [
             py,
             "-c",
-            "from pipeline.upload import authenticate; "
+            "from pipeline.upload.upload import authenticate; "
             f"authenticate({account!r}, interactive=True)",
         ],
         cwd=str(PROJECT_ROOT),
@@ -3094,3 +4951,32 @@ async def youtube_cross_engage_subscribe_all() -> dict:
 
     results = await asyncio.to_thread(_ce.subscribe_all_pairs)
     return {"results": results}
+
+
+# ---------------------------------------------------------------------------
+# Control router include block (Phase 4 — 2026-05-10)
+# ---------------------------------------------------------------------------
+#
+# Mounted AFTER all of web's own @app.* decorators so that overlapping
+# paths (/api/jobs/from_script, /api/research/*, /api/dashboard/*,
+# /api/voices/*, etc.) resolve to web's established handler. Control's
+# routes that DON'T overlap (/agent/*, /api/scheduler/*, /api/state/*,
+# channels, niches v2, burners, ...) attach cleanly. The chat router is
+# intentionally absent — retired in Phase 1.
+#
+app.include_router(_control_agent_router)
+app.include_router(_control_auth_pin_router)
+app.include_router(_control_burner_router)
+app.include_router(_control_channels_router)
+app.include_router(_control_clone_video_router)
+app.include_router(_control_dashboard_router)
+app.include_router(_control_discover_router)
+app.include_router(_control_music_router)
+app.include_router(_control_niche_router)
+app.include_router(_control_niche_specs_router)
+app.include_router(_control_oauth_web_router)
+app.include_router(_control_render_router)
+app.include_router(_control_scheduler_router)
+app.include_router(_control_script_jobs_router)
+app.include_router(_control_state_router)
+app.include_router(_control_voices_router)

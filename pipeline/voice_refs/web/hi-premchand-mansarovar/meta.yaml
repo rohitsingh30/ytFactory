@@ -1,0 +1,11 @@
+label: "Premchand reader \xB7 Anubhav"
+language: hi
+gender: male
+style: literary audiobook
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "archive.org \xB7 mansarovar-premchand (\u0905\u0928\u0941\u092D\u0935 - Anubhaw.mp3)\
+  \ \u2014 PD/CC"

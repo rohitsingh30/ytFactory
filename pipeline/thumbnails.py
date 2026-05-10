@@ -502,7 +502,7 @@ def auto_thumbnail(
 # ---------- CLI for one-off testing -------------------------------------
 
 
-def _cli() -> None:
+def _cli() -> None:  # pragma: no cover
     import argparse
 
     ap = argparse.ArgumentParser(description="Compose a thumbnail for a rendered short.")

@@ -1,0 +1,10 @@
+Source: IndicTTS Phase 3 Hindi female Speaker 2, file train_hindifemale_02566.wav
+Dataset: IIT-Madras Don Lab IndicTTS database — https://www.iitm.ac.in/donlab/indictts/database
+HuggingFace mirror: SPRINGLab/IndicTTS-Hindi
+License: License For Use of Indic TTS (custom; user has access via rsinghtomar54)
+Original: 48 kHz mono, 7.93s
+Trimmed window: full clip, no edits
+Resampled: 24 kHz mono PCM_16 via librosa
+F0 stats: median 188 Hz, std-dev 48 Hz, range 80-316 Hz
+SNR: estimated >=70 dB (anechoic studio recording)
+Archetype: studio-grade neutral storyteller — clean, anechoic, professional reader. Higher SNR than LibriVox alternatives but lower pitch variance (48 Hz vs LibriVox dramatic 87 Hz).

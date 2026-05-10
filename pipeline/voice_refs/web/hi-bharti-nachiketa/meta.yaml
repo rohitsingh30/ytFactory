@@ -1,0 +1,11 @@
+label: "Bharti Parimal \xB7 Nachiketa katha"
+language: hi
+gender: female
+style: kathaa storyteller
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "archive.org \xB7 KahaniNachiketaKiKahani (kahani - Nachiketa Ki Kahani.mp3)\
+  \ \u2014 PD/CC"

@@ -1,0 +1,15 @@
+key: web-mlk-dream
+label: "MLK \xB7 'I Have a Dream'"
+language: en
+gender: male
+style: oratorical, gospel cadence
+use_cases:
+- narrator
+- trailer
+- historical
+source_url: https://archive.org/download/MLKDream/MLKDream.mp3
+source_label: "archive.org \xB7 MLK 1963 'I Have a Dream' (federal PD)"
+start_s: 900.0
+duration_s: 10.0
+notes: ''
+source: "archive.org \xB7 MLK 1963 'I Have a Dream' (federal PD)"

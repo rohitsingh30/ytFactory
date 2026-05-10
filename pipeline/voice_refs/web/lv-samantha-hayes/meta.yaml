@@ -1,0 +1,10 @@
+label: Samantha Hayes
+language: en
+gender: female
+style: "LibriVox \xB7 Wollstonecraft"
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "LibriVox \xB7 Samantha Hayes reads Vindication of the Rights of Woman"

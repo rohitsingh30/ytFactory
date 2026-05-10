@@ -1,0 +1,38 @@
+name: AITA Text
+source_adapter: reddit_api
+
+# TTS — F5-TTS-MLX zero-shot voice clone (Sarah ref).
+tts_provider: cloudrun_chatterbox
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
+tts_speed: 1.05
+
+# Image gen — CLOUD FLUX.2 [klein] 4B via Cloud Run NVIDIA L4
+# (Apache 2.0). New default per docs/research/image_gen_2026.md
+# (canary 2026-05-07). Falls back to local z_image_turbo (mflux) on
+# cloud failure via render-level circuit breaker. For pre-cloudrun
+# parity, set image_provider: z_image_turbo.
+image_provider: cloudrun_flux2_klein
+image_style_prefix: |
+  simple flat 2D doodle illustration, hand-drawn ink line, scribbly
+  cartoon style, cute children's-book aesthetic, minimal pastel colors,
+  no shading, plain pale background
+image_seed: 42
+image_steps: 4  # FLUX.2 klein is distilled to 4 inference steps
+
+# Beat shape
+beat_target_s: 2.0
+beat_max_s: 3.0
+
+# Output
+duration_target_s: [10, 20]
+output_resolution: [1080, 1920]
+
+# Source defaults — top of the day from r/AmItheAsshole self-posts only.
+source:
+  subreddit: AmItheAsshole
+  listing: top
+  timeframe: day
+  limit: 10
+  min_chars: 400
+  max_chars: 6000

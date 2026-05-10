@@ -1,0 +1,11 @@
+label: "Sonali \xB7 Premchand pt2"
+language: hi
+gender: female
+style: literary audiobook
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "archive.org \xB7 dosakhiyan_2512_librivox (dosakhiyan_02_premchand_128kb.mp3)\
+  \ \u2014 PD/CC"

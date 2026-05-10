@@ -1,0 +1,50 @@
+Voice: hindi-female-storyteller-calm
+Use case: Shorts setup + lesson beats; all kathaa long-form
+
+Source
+------
+  archive.org item: dosakhiyan_2512_librivox/dosakhiyan_06
+  collection: LibriVox (collection: librivoxaudio)
+  work: "Do Sakhiyan" by Premchand (Hindi short story)
+  reader: Sonali Ekka (solo female narrator throughout the work)
+  archive.org URL: https://archive.org/details/dosakhiyan_2512_librivox
+  LibriVox catalog: https://librivox.org/do-sakhiyan-by-premchand/
+  source MP3: dosa_06.mp3
+  trim window: start=26.10s  end=31.30s  duration=5.20s
+
+License
+-------
+  CC0 / Public Domain — LibriVox dedicates all recordings to the public domain.
+  Underlying text (Premchand / Panchatantra Hindi translation): public domain in India + worldwide.
+  archive.org licenseurl: http://creativecommons.org/publicdomain/mark/1.0/
+
+Audio metrics (post peak-normalisation to 0.85)
+-----------------------------------------------
+  Format: 24 kHz mono PCM_16 WAV
+  Duration: 5.20s
+  F0 median: 181 Hz  (female speaker confirmed)
+  F0 std-dev: 49 Hz  (target: >=30 Hz to avoid flat-clone bug — passes by wide margin)
+  F0 range: [80, 292] Hz
+  SNR (signal RMS vs intra-clip silence-gap RMS): 53.1 dB
+
+Archetype rationale
+-------------------
+  Conversational epistolary opener (letter-narration); mid-pitch sustained female register with measured cadence — produces calm, grounded F5 narration without flat-announcer bug.
+
+Notes / caveats
+----------------
+  - This clip was passed through a CONSERVATIVE ffmpeg afftdn pass
+    (afftdn=nf=-30:nt=w:tn=1:om=o,highpass=f=80) to lift SNR from 45.2 dB
+    to ~53 dB while preserving F0 std-dev (56 -> 49 Hz, still well above 30 Hz floor).
+    Original (untreated) clip retained as cache/voice_research/cand_calm_a.wav.
+  - SNR is below the 65 dB hard target requested by the curator brief.
+  - This is the LibriVox volunteer recording-environment ceiling — Sonali Ekka's
+    home-studio setup is the cleanest source we found across the entire PD-cleared
+    Hindi female-narrator landscape (only 2 LibriVox Hindi works exist, both her).
+    AI4Bharat Rasa Hindi shard has only male speakers (no female emotional clips).
+    SPRINGLab IndicTTS-Hindi is custom-license-gated (smtiitm@gmail.com clearance).
+  - F0 std-dev (the actual root cause of the production flatness bug per
+    docs/research/hindi_voice_refs_2026_05_07.md) comfortably exceeds the 30 Hz
+    floor at all three picks (49-87 Hz), which is the load-bearing quality gate.
+  - Solo female speaker (Sonali Ekka) — verified per-chapter via the LibriVox catalog.
+  - Devanagari transcript only, no English contamination, ends on `.`/`?`/`।`.

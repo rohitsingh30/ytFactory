@@ -1,0 +1,386 @@
+# History Recapped — documentary war-history Shorts.
+# Channel slug `historyrecapped` (matches the YouTube display name
+# History Recapped, lowercased + concatenated). All paths use
+# `historyrecapped`: channels/, data/intermediate/, data/uploads/,
+# scripts/, OAuth account, niche key.
+#
+# Format pivot 2026-05-03: this channel does NOT use the
+# SportsStoriesAnimated hybrid recipe (illustrated beats + 1 footage
+# cut at the climax). Production renders are 100% archival footage
+# with our narrator on top, word-by-word captions, and inline
+# national-flag emojis. See feedback_history_recapped_format.md
+# for the rule. The image-gen config below is kept for future hybrid
+# experiments, but the production scripts skip image-gen entirely.
+#
+# Production workflow — bypasses make_shorts.py for ~25s renders
+# instead of 30+ min image-gen waste. Reproducible scripts at
+# historyrecapped/scripts/ — see historyrecapped/scripts/README.md for the full
+# recipe. Summary:
+#   1. Hand-author raw + script JSON under historyrecapped/.
+#      Closer must be 3-part: LIKE ask + SUBSCRIBE ask + question
+#      ending in ?. Pattern: "LIKE if you learned something. SUBSCRIBE
+#      for more deep dives. Could you have done it at <X>?"
+#   2. Find HD archival source on YouTube; download once into
+#      sportstoriesanimated/footage/sources/
+#      (cache currently shared across channels). Whisper the source
+#      audio to find visual sequences by narration cue.
+#   3. historyrecapped/scripts/build_100footage.sh — concat 5-7 trim
+#      windows with the blurred-letterbox 9:16 filter, uniform 30fps.
+#   4. historyrecapped/scripts/regen_audio_caps.py — TTS (Kokoro for
+#      Shorts, F5-TTS for long-form) + whisper alignment + word PNG
+#      render. ~25s total.
+#   5. historyrecapped/scripts/final_v2.py — re-mux narration onto silent
+#      video (tpad to match length), inline-flag-composite relevant
+#      word PNGs, burn captions with cut-aware clamping (each word
+#      ends 100ms before its next scene cut so captions don't bleed
+#      across visual transitions).
+#   6. historyrecapped/scripts/upload.py — public, category 27.
+#
+# Sourcing note: use HD restorations from public-archive YouTube
+# channels (US National Archives, IWM, Smithsonian, "WW2 in Color").
+# Do NOT use anything that visibly identifies casualties or civilians.
+# Source audio is muted (audio_mix: 0.0) — the source's own
+# documentary narration would compete with ours.
+
+name: History Recapped
+source_adapter: historyrecapped_manual  # manual curator flow, no auto-pull
+
+# render_style: footage_only — workers/heavy/render_short.py routes this
+# channel through historyrecapped/scripts/render_footage_only.py instead
+# of the standard image-gen path. 100% archival footage with our narrator
+# on top + word captions + inline flag emojis. Image-gen is skipped.
+# Each slug needs a sidecar at historyrecapped/shotlist/<slug>.json with
+# source_url + windows[] (each {in_s, out_s}).
+render_style: footage_only
+# Branding assets at historyrecapped/branding/
+#   icon_800.png         — 800x800 channel avatar (circular medal mark + name)
+#   banner_2560x1440.png — 2560x1440 banner, content fitted to mobile-safe 1546x423
+
+# Narrator visual mode — war stories are third-person voice-overs.
+# The narrator is a documentary VOICE; on-screen visuals are the
+# illustrated battle scenes + the real archival cut-in. Mirrors sports.
+# This switches pipeline/prompts.py to voice-only authoring:
+#   * suppresses any channel-wide character_description (no narrator persona)
+#   * forbids "the narrator", "a man watching", "a historian" etc.
+#   * forces every beat to depict a named real person, equipment, or
+#     pure scene shot — no on-screen analyst.
+# See feedback_sports_no_narrator_on_screen.md for the regression
+# we're preventing.
+narrator_visual_mode: voice_only
+
+# ---- TTS — sober documentary narrator ---------------------------------
+# Cloud-first Shorts: cloudrun_chatterbox with sarah.wav clone (cloud
+# Chatterbox needs a WAV ref, not a kokoro preset name). Long-form
+# runs cloudrun_f5 strictly (see long_form: block below;
+# render_long_form.py rejects any other provider).
+tts_provider: cloudrun_chatterbox
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_ref_text: "Tonight we travel to the Western Front of the Great War. Speak softly. Let the lamp grow dim. Slow your breathing. We will walk together from the warm meadows"
+tts_speed: 1.0
+
+# ---- Image gen — illustrated military-history-book aesthetic ----------
+# Reference: Osprey Publishing combat plates + period war-art (Howard
+# Brodie, Tom Lea). NOT the Tifo soft-sketch palette — that vibe is
+# for stoppage-time celebrations, not Omaha Beach. We need ink hatching,
+# muted earth/military tones, dramatic chiaroscuro lighting.
+#
+# Z-Image-Turbo 6B via mflux. Same provider as sports + today_in_history.
+# DO NOT switch to motion_provider — channel design is illustrated
+# stills between archival cut-ins; AnimateDiff is rejected for this
+# channel for the same reason as sports.
+image_provider: cloudrun_flux2_klein
+#
+# CLASS-OF-BUG note (channel bring-up): the bare phrase "war scene"
+# pushes diffusion toward generic medieval/fantasy battles or video-game
+# screenshots. We pin the ERA explicitly per-prompt (e.g. "1944
+# Normandy", "1940 RAF Fighter Command") and pin EQUIPMENT explicitly
+# (M1 Garand, Spitfire Mk I, T-34/76) so the model doesn't drift to
+# anachronistic kit. Keep the YAML prefix focused on STYLE; the era +
+# equipment lock comes from the script's per-beat scene strings, server-
+# side enforced after LLM authoring (mirrors the sports kit_lock pattern
+# from feedback_sports_cast_locked_tokens.md).
+#
+# CLASS-OF-BUG (diffusion negation trap, feedback_diffusion_negation_trap.md):
+# z_image_turbo amplifies any token regardless of "no"/"without". Style
+# prefix below is pure positive descriptors — never "no gore", "no
+# blood". To suppress imagery we describe what we WANT (formation
+# silhouette, wide landscape, equipment close-up).
+image_style_prefix: |
+  vintage illustrated military history book plate, ink hatching with
+  watercolor wash, muted military palette of khaki olive sepia
+  charcoal and dust-red, dramatic chiaroscuro lighting, period-accurate
+  uniforms and equipment, wide compositional framing, single subject
+  focus, no text, sober documentary tone (never video-game screenshot,
+  never fantasy battle, never modern operator)
+image_seed: 1944  # year of D-Day, Battle of the Bulge, Iwo Jima — locks character look
+image_steps: 4    # M2 Max compile-disabled path; matches sports + today_in_history
+# Z-Image-Turbo caps at 1344 per dim; compose upscales to the
+# 1080x1920 output_resolution in the final render.
+image_width: 768
+image_height: 1344
+
+# QC luminance thresholds — relaxed for chiaroscuro war-art aesthetic.
+# pipeline/quality_gate.py defaults (80 mean / 130 P75) are tuned for
+# AITA pastel-bright cartoons; our khaki/sepia/charcoal plates legitimately
+# render dark and were hitting 3-4 retries per beat (~30 min/beat). Lowering
+# these floors keeps the dark-frame regression catch but stops fighting the
+# channel's deliberate look. Re-tighten if we see actual all-black frames.
+image_min_mean_luminance: 50.0
+image_min_p75_luminance: 90.0
+
+# ---- Beat shape -------------------------------------------------------
+# Slightly slower than sports (2.2s) — war stories are heavier; viewers
+# need a beat to absorb each illustrated plate. Mirrors today_in_history.
+beat_target_s: 3.0
+beat_max_s: 4.5
+
+# ---- Output -----------------------------------------------------------
+# 50-60s — the 2026 Shorts sweet spot (project_shorts_algo_2026).
+duration_target_s: [50, 60]
+output_resolution: [1080, 1920]
+
+# Hold the closer caption for a beat after the audio ends so viewers
+# read the CTA before the loop restarts.
+closer_hold_s: 1.5
+
+# ---- Closer panel — engagement split, war-respectful ------------------
+# LIKE / COMMENT split per feedback_aita_closer_panel.md. War context
+# means we avoid verdict-bait ("WHO WAS RIGHT") and instead drive
+# audience-curating engagement (which battle next, which front).
+# Two lines separated by \n; first = LIKE side, second = COMMENT side.
+closer_format: "SUBSCRIBE for more deep dives\nLIKE if you learned something"
+
+# War stories are third-person documentary narration ("On the morning
+# of June 6th, 1944…") rather than AITA-style first-person hooks.
+# They don't fit the strict AITA hook patterns the script_check
+# strict gate enforces — opt out, same as sports. closer_format
+# still drives the panel render; script_check.py keeps issues at
+# warning severity instead of failing the render.
+script_check_strict: false
+
+# ---- Upload (Stage 8) — LIVE ------------------------------------------
+# Channel SHIPPED 2026-05-03 (first upload: youtu.be/bc7lopoWSY4).
+# Owning Google account: rsinghtomar54@gmail.com. To re-auth:
+#   .venv/bin/python historyrecapped/scripts/auth.py
+#      (uses fixed callback port 8089 — see reference_oauth_setup.md)
+#   3. Flip auto_upload below to true once a few have shipped clean.
+#
+# privacy: private until a couple of mocks land and the user signs off
+# on the format. Once promoted: privacy: public per
+# feedback_upload_public_default.md. category_id 27 is Education
+# (better than 22/People & Blogs for documentary content; news-class
+# 25 risks demonetization on combat footage).
+# min_score: 7 — same bar as sports because the archival cut-in is
+# this channel's USP and a missing/mistimed cut breaks the format.
+upload:
+  account: historyrecapped
+  privacy: private          # promote to public after format sign-off
+  made_for_kids: false
+  category_id: "27"          # Education
+  auto_upload: false
+  min_score: 7
+  tags:
+    - history
+    - history shorts
+    - military history
+    - world war 2
+    - ww2
+    - war history
+    - archival footage
+    - documentary shorts
+    - educational shorts
+    - shorts
+  description_template: |
+    {script.hook}
+
+    📖 Source: {raw.url}
+
+    ━━━━━━━━━━━━━━━━━━━━
+    🎖️ LIKE if you learned something
+    🔔 SUBSCRIBE for more deep dives
+    ━━━━━━━━━━━━━━━━━━━━
+
+    #shorts #history #ww2 #militaryhistory #warhistory #documentary #historyrecapped
+
+# ---- Long-form sleep mode -------------------------------------------------
+# History Recapped also publishes 60-120 min long-form sleep videos to the
+# SAME channel (rsinghtomar54@gmail.com / @HistoryRecapped). 16:9 horizontal,
+# soft narrator, ambient music bed, periodic inline like/sub asks.
+# Renderer: historyrecapped/scripts/render_long_form.py
+#   .venv/bin/python historyrecapped/scripts/render_long_form.py \
+#       --channel historyrecapped --slug <long-slug>
+# See learnings/long_form_channel.md, long_form_support_asks.md, long_form_sources.md
+long_form:
+  # render_mode: archival_footage = trim + letterbox + warm-firelight grade
+  # over web-sourced archive.org clips (NO AI image gen). The image_panels
+  # path is RETIRED 2026-05-04 — z_image_turbo on 89-panel runs hits Metal
+  # GPU command-buffer timeouts and re-loads the 1.35GB checkpoint mid-render.
+  # render_long_form.py hard-errors on render_mode == image_panels to enforce
+  # the pivot at code level (see historyrecapped/scripts/render_long_form.py).
+  render_mode: archival_footage
+  # Voice — F5-TTS-MLX zero-shot voice clone of the soft female sleep
+  # narrator. Ref clip at pipeline/voice_refs/sarah.wav (24 kHz mono,
+  # 9.5 s). Free local synthesis. The ref WAV was re-clipped 2026-05-04
+  # from the in-flight WW1 long-form render's first raw chunk after the
+  # prior wipe lost pipeline/voice_refs/*.wav files.
+  # F5 speed=0.95 + ffmpeg atempo=0.85 → ~135 wpm calm-doc cadence.
+  # atempo=0.7 was rejected 2026-05-04 — pitch-preserve stretch at 1.43x ratio
+  # introduced audible warble/smearing on F5/sarah output. atempo=0.85 (1.18x)
+  # stays in the clean single-pass zone. For TRUE sleep cadence (~110 wpm)
+  # without atempo artifacts, lower tts_speed to 0.7 so F5 generates the slow
+  # speech natively (frame-level), not via post-stretch — but that requires
+  # full re-synth of all chunks.
+  # NEVER use af_nicole (rejected 2026-05-04 as too whispery).
+  tts_provider: cloudrun_f5
+  tts_voice: pipeline/voice_refs/sarah.wav
+  tts_ref_text: "Tonight we travel to the Western Front of the Great War. Speak softly. Let the lamp grow dim. Slow your breathing. We will walk together from the warm meadows"
+  tts_speed: 0.95
+  tts_post_atempo: 0.85
+  tts_chunk_target_chars: 380
+  tts_chunk_join_silence_s: 0.4
+
+  # Audio mix
+  audio_narration_db: -6
+  audio_music_bed_db: -28
+  audio_source_mix: 0.0     # mute the source film's narration + score (ContentID safety)
+
+  # Output
+  duration_target_s: [3600, 7200]
+  output_resolution: [1920, 1080]    # 16:9 horizontal — long-form, NOT Shorts
+  output_fps: 30
+  # Captions ARE on for long-form — earlier "no captions (eyes closed)" rule
+  # is partially retired (2026-05-04). The reference channel runs sentence-
+  # level yellow italic captions; eyes-open viewers in the awake-engagement
+  # window read them. Renderer's PIL-PNG overlay path (build_caption_pngs)
+  # is the memory-light variant; whisper-align stage is the peak — keep
+  # `pgrep -fa render_long_form` clean before kicking off another render.
+  captions_enabled: true
+  # Yellow italic styling matches Sleepy Time History caption signature.
+  # text_rgba is (R, G, B, A) on 0-255; #FFD93D = (255, 217, 61, 255).
+  caption_style:
+    text_rgba: [255, 217, 61, 255]
+    italic: true
+
+  # Channel watermark — faint white sans-serif top-right of every frame,
+  # matches reference channel signature. Rendered to branding/watermark_topright.png
+  # and cached; delete the file to re-render after font/text/opacity changes.
+  watermark:
+    enabled: true
+    text: "HISTORY RECAPPED"
+    font_size: 28
+    text_rgba: [255, 255, 255, 140]   # ~55% opacity white
+    margin: 32                          # px from top + right edges
+
+  # Support asks — INLINE in narration text only. REVISED 2026-05-04 against
+  # the Sleepy Time History reference (148K subs): TWO asks per video, not
+  # five. One soft early ask at ~3-4 min in, one closer. The earlier ~18 min
+  # cadence is RETIRED — over-asking hurts retention more than it helps subs.
+  # See learnings/long_form_support_asks.md for soft-voice template wording
+  # and learnings/long_form_hook_template.md for the surrounding 90s hook.
+
+  # Music bed — looped + crossfaded ambient track. Drop royalty-free wavs
+  # into historyrecapped/music/.
+  music_bed_default: aether-loop.wav
+
+  # Footage cache for long-form sources.
+  footage_dir: footage/long_sources
+
+  # ---- Visual signature — warm firelight + cool dawn ----------------------
+  # Two paths per learnings/long_form_visual_signature.md:
+  #   Path A (this grade) — warm-cool ffmpeg grade applied to archival footage.
+  #     Used as fallback for in-flight renders before Path B is wired.
+  #   Path B (image_style_prefix below) — Z-Image-Turbo comic-illustrated
+  #     panels with a small yellow campfire as the warm-light anchor. This
+  #     is the actual reference channel's production style; Path A on archival
+  #     footage cannot replicate the look.
+  visual_grade:
+    enabled: true
+    # ffmpeg filter inserted after the overlay step in _trim_clip_letterbox().
+    # Goal: warm-cool split grade — push midtones toward warm orange/gold
+    # (firelight) while keeping shadows cool blue (ambient dawn/dusk). NOT
+    # sepia — preset=vintage was rejected 2026-05-04 for monochrome wash.
+    # `colorbalance` is the workhorse: rs/gs/bs shift shadows, rm/gm/bm
+    # shift midtones, rh/gh/bh shift highlights.
+    filter: "eq=gamma=1.04:saturation=0.95,colorbalance=rs=-0.06:gs=-0.02:bs=0.08:rm=0.10:gm=0.04:bm=-0.06:rh=0.06:gh=0.02:bh=-0.04,vignette=PI/5.5"
+
+  # ---- Path B: comic-illustrated panel style (Z-Image-Turbo) -------------
+  # Image style prefix locked 2026-05-04 against sampled frames of Sleepy
+  # Time History "Early Humans" (yt AHTEnwz0bL4). DO NOT change to "painterly"
+  # or "oil-on-canvas" — the reference is graphic-novel illustration, not
+  # gallery-painting. The small-yellow-campfire requirement is the user's
+  # explicit "yellow thing for good feel" ask; per-beat scene strings must
+  # name the warm-light source explicitly because diffusion drops it
+  # otherwise.
+  image_style_prefix: |
+    hand-drawn illustrated panel in the style of a graphic-novel history
+    book, bold dark ink linework with visible hatching for shadow, soft
+    watercolor wash fills, earthy palette of ochre khaki forest-green
+    dusk-blue and warm brown, a small bright yellow campfire or hearth
+    visible at the focal point as the warm-light anchor, cool blue ambient
+    backdrop with distant mountains or water, wide cinematic 16:9 landscape
+    framing with small human figures in period dress, atmospheric depth via
+    foreground silhouette frame (cave mouth or tree silhouette or rock arch),
+    no text, no captions on image, no modern objects, no logo
+  image_provider: cloudrun_flux2_klein
+  image_seed: 1944       # locks character/scene look across an episode
+  image_steps: 4
+  image_width: 1344      # Z-Image-Turbo cap; compose upscales to 1920x1080
+  image_height: 768
+  beat_target_s: 20      # 18-22s per panel = slow Ken Burns hold
+  beat_max_s: 25
+
+  # ---- Long-form upload metadata ------------------------------------------
+  # Separate from the Shorts upload block above — long-form needs sleep-niche
+  # tags + a chapter-stamped description, not the Shorts hashtag pile.
+  upload:
+    privacy: private               # promote to public after format sign-off
+    made_for_kids: false
+    category_id: "27"              # Education
+    auto_upload: false
+    tags:
+      - history for sleep
+      - sleep documentary
+      - history asmr
+      - calming documentary
+      - relaxing history
+      - bedtime history
+      - boring history for sleep
+      - sleepy history
+      - slow narration
+      - narration for sleep
+      - sleep stories
+      - military history
+      - world war 2
+      - ww2
+      - war history
+      - documentary
+    # description_template tokens (resolved at upload time):
+    #   {script.title}        — narration JSON `title` field
+    #   {script.hook}         — narration JSON `hook` field (one-paragraph pitch)
+    #   {script.sources}      — narration JSON `sources` array, joined as bullets
+    #   {chapters_block}      — auto-generated from narration JSON `chapters`
+    #                           array of {start_s, title} → "MM:SS Title" lines
+    description_template: |
+      {script.hook}
+
+      Step into a quiet corner of history with us. Settle in, dim the lights,
+      and let the story carry you. Whether you're winding down for sleep or
+      simply curious, we hope this episode brings you a little peace.
+
+      ━━━━━━━━━━━━━━━━━━━━
+      🔔 SUBSCRIBE for more relaxing history
+      🕯️ LIKE if this helped you rest
+      ━━━━━━━━━━━━━━━━━━━━
+
+      📖 Chapters:
+      {chapters_block}
+
+      📚 Sources:
+      {script.sources}
+
+      A note on process: we use AI tools to help with research drafting,
+      narration, and imagery, while we shape the narrative and verify the
+      facts. These videos blend research with storytelling for entertainment
+      and relaxation — they are not a formal academic source.
+
+      #history #historyforsleep #sleepdocumentary #relaxing #militaryhistory #ww2 #historyrecapped

@@ -1,0 +1,10 @@
+label: John Greenman
+language: en
+gender: male
+style: "LibriVox \xB7 Stowe"
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "LibriVox \xB7 John Greenman reads Uncle Tom's Cabin"

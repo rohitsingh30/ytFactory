@@ -773,7 +773,7 @@ def build_captions_srt(
     lines: list[str] = []
     cue_idx = 1
     for sent in sentences:
-        if not sent:
+        if not sent:  # pragma: no cover — sentence list is built from non-empty cur groups
             continue
         text = " ".join((w.text or "").strip() for w in sent).strip()
         text = _re.sub(r"\s+", " ", text)
@@ -876,7 +876,7 @@ def build_caption_pngs(
 
     cues: list[tuple[Path, float, float]] = []
     for idx, sent in enumerate(sentences):
-        if not sent:
+        if not sent:  # pragma: no cover — sentence list is built from non-empty cur groups
             continue
         text = " ".join((w.text or "").strip() for w in sent).strip()
         text = _re.sub(r"\s+", " ", text)
@@ -1287,7 +1287,7 @@ def build_captions_ass(
         if cur:
             sentences.append(cur)
         for sent in sentences:
-            if not sent:
+            if not sent:  # pragma: no cover — sentence list is built from non-empty cur groups
                 continue
             text = " ".join((w.text or "").strip() for w in sent).strip()
             text = _re.sub(r"\s+", " ", text)

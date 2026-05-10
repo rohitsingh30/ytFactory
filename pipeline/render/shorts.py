@@ -1841,7 +1841,7 @@ def make_short(
         n_footage_matched = sum(1 for b in beat_list if b.kind == "footage")
         footage_clip_paths: dict[int, Path] = {}
         if n_footage_matched:
-            from pipeline import footage as _footage
+            from pipeline.footage import footage as _footage
             for i, b in enumerate(beat_list):
                 if b.kind != "footage" or not b.footage:
                     continue

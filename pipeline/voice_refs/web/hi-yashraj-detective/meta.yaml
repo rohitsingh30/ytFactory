@@ -1,0 +1,11 @@
+label: "Yashraj \xB7 detective drama"
+language: hi
+gender: male
+style: dramatic, narrative
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "archive.org \xB7 detective_vikrant_audiobook_202302 (Episode- 0001.mp3) \u2014\
+  \ PD/CC"

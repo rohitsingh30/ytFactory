@@ -1,0 +1,10 @@
+label: Michael Sirois
+language: en
+gender: male
+style: "LibriVox \xB7 France"
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "LibriVox \xB7 Michael Sirois reads Penguin Island"

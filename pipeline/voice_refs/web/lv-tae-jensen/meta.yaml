@@ -1,0 +1,10 @@
+label: Tae Jensen
+language: en
+gender: ''
+style: "LibriVox \xB7 Bront\xEB"
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "LibriVox \xB7 Tae Jensen reads Villette"

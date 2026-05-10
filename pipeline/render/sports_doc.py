@@ -201,7 +201,7 @@ def _align_anchors_to_narration(
             transcript_joined = " ".join(word_tokens_clean)
             anchor_joined = " ".join(anchor_tokens)
             pos = transcript_joined.find(anchor_joined)
-            if pos >= 0:
+            if pos >= 0:  # pragma: no cover - unreachable with current token-window drift rules
                 # Convert char position to word index by counting spaces.
                 wi_start = transcript_joined.count(" ", 0, pos)
                 best = (wi_start, wi_start + n - 1)

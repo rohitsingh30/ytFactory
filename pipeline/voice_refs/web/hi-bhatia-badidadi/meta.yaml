@@ -1,0 +1,10 @@
+label: "Manmohan Bhatia \xB7 Badi Dadi"
+language: hi
+gender: male
+style: literary audiobook
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "archive.org \xB7 BadiDadi (Manmohan.Bhatia-Badi Dadi-AC.mp3) \u2014 PD/CC"

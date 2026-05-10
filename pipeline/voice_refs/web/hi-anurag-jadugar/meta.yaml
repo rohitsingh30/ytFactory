@@ -1,0 +1,10 @@
+label: "Anurag Sharma \xB7 Chhota Jadugar"
+language: hi
+gender: male
+style: literary audiobook
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "archive.org \xB7 JPChhotaJadugar (JP-Chhota Jadugar.mp3) \u2014 PD/CC"

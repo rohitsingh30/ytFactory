@@ -1,0 +1,48 @@
+name: AITA Animated Motion
+source_adapter: reddit_video
+
+# ASR — Parakeet is opt-in (single model for stages 1+5, ~10× faster than
+# Whisper-turbo on M-series). Falls back gracefully to whisper_mlx if
+# the parakeet-mlx package isn't installed yet.
+asr_provider: parakeet_mlx
+
+# TTS — F5-TTS-MLX zero-shot voice clone (Sarah ref).
+tts_provider: cloudrun_chatterbox
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
+tts_speed: 1.05
+
+# Visuals — animation path. Each beat becomes an AnimateLCM clip
+# (~1-2s @ 8fps) instead of a single static image. LCM = 4-step
+# inference, ~5x faster than the standard AnimateDiff path.
+motion_provider: animatediff_lcm
+# Optional overrides:
+# motion_base_model: frankjoshua/toonyou_beta6
+# motion_adapter_model: wangfuyun/AnimateLCM
+
+# Style prefix — kept short so per-beat scene description fits inside
+# SD1.5's 77-token CLIP cap. The recurring-character description was
+# moved into the per-beat prompts.json (only the beats that actually
+# show the narrator), so scene beats can describe the thing being
+# narrated rather than the narrator's outfit.
+image_style_prefix: |
+  hand-drawn anime illustration, expressive faces, soft lighting,
+  single subject focus, simple composition
+image_seed: 42
+# image_steps: ignored on the motion path; AnimateDiff steps are fixed
+# inside pipeline/animation.py (25 default, 6 for animatediff_lcm).
+
+# Beat shape — keep beats <=3s so a single 24-frame AnimateDiff window
+# covers the whole beat without ToonCrafter chaining.
+beat_target_s: 2.0
+beat_max_s: 3.0
+
+# Output
+duration_target_s: [10, 20]
+output_resolution: [1080, 1920]
+
+# Hold the closer caption (e.g. "AITA?") for this many extra seconds
+# after the audio ends, so viewers have time to read the question and
+# feel the pull to comment. Question-style closers benefit from ~1.5s.
+# 0.0 disables the hold entirely.
+closer_hold_s: 1.5

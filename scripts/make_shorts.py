@@ -26,7 +26,7 @@ from pathlib import Path
 # from any cwd, and falls back gracefully if pipeline is already on path.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+    sys.path.insert(0, str(_REPO_ROOT))  # pragma: no cover
 
 from pipeline.render.shorts import cli_main
 

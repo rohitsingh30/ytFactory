@@ -1,0 +1,10 @@
+label: pww214
+language: en
+gender: ''
+style: "LibriVox \xB7 Fitzgerald"
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "LibriVox \xB7 pww214 reads This Side of Paradise"

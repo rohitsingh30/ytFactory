@@ -113,7 +113,7 @@ def _merge_consecutive_shorts(paragraph: str) -> tuple[str, int]:
                     or an acronym (all-caps multi-letter alphabetic), both
                     of which are case-meaningful and must stay as-is.
                     """
-                    if not s:
+                    if not s:  # pragma: no cover - _split_sentences filters empties
                         return s
                     first_word = s.split(" ", 1)[0]
                     # Strip trailing punctuation off the first word for the

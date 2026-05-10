@@ -1,0 +1,11 @@
+label: "Sharma \xB7 Panchatantra ch2"
+language: hi
+gender: male
+style: storyteller
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "archive.org \xB7 panchatantra_2604_librivox (panchatantra_02_sharma_64kb.mp3)\
+  \ \u2014 PD/CC"

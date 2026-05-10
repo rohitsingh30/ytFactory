@@ -1,0 +1,236 @@
+# Voice catalog — named-voice resolver for ytFactory skills.
+#
+# Skills declare a voice by NAME in their channel config:
+#
+#     tts_voice: hindi-female-storyteller   # resolves via this catalog
+#
+# instead of the legacy path-style:
+#
+#     tts_voice: pipeline/voice_refs/.../ref.wav
+#
+# Both forms are accepted. Name-style lookups go through
+# pipeline.voice_catalog.resolve_voice() which returns the WAV path
+# AND its transcript (ref.txt sidecar) so callers no longer need to
+# duplicate ``tts_ref_text`` in every channel config.
+#
+# Each entry has:
+#   path:        repo-relative path to the ref WAV (5-15s, 24 kHz mono).
+#                IndicF5 / F5-TTS work best at this length; longer refs
+#                are truncated by the model.
+#   transcript:  the spoken transcript of the WAV. Required for F5 +
+#                IndicF5 prosody anchoring.
+#   language:    ISO code (en / hi / etc.) for routing + caption hints.
+#   register:    free-text style hint (storyteller / documentary /
+#                emotional / news-anchor / etc.).
+#   use_cases:   which channels/formats this voice is intended for.
+#                Informational only — nothing enforces it.
+#
+# Storage: WAV + transcript are committed to the repo at
+# ``pipeline/voice_refs/<name>/`` so cloud-rendering containers get
+# them automatically (they're base64-shipped in the /synth request,
+# not pulled from GCS). Single source of truth = the laptop checkout.
+# To add a new voice: drop a 5-15s WAV + a ref.txt next to it under
+# ``pipeline/voice_refs/<voice-name>/`` and add an entry below.
+
+voices:
+  hindi-female-storyteller:
+    path: pipeline/voice_refs/bench/hindutavaanimated__shorts__hindi_female_storyteller/ref.wav
+    transcript: "आ भोपाल सरकार से येही चाहते है की देश वासीयों का ध्यान रहे जिनसे उनका भविष्य उजवल हो"
+    language: hi
+    register: storyteller
+    duration_s: 8.0
+    use_cases: [hindutavaanimated/shorts, hindutavaanimated/kathaa]
+    notes: |
+      Sourced from AI4Bharat IndicVoices-R (CC-BY-4.0); 65+dB SNR,
+      mid-pitch 200-220 Hz, 30-45 age band. Production winner in the
+      2026-05-07 Hindi voice matrix bench. Default voice for the
+      /make-hindutava-short skill.
+
+      LEGACY: produces flat synthesis on dramatic mythology content
+      because the IndicVoices-R "announcer-quality" filter selects
+      flat-F0 reading-task speakers. Replaced 2026-05-07 by the
+      hindi-female-storyteller-{dramatic,calm,devotional} 3-ref
+      rotation; kept here for compat. See
+      docs/research/hindi_voice_refs_2026_05_07.md.
+
+  hindi-female-madhavi-charudatta:
+    path: pipeline/voice_refs/hindi-female-madhavi-charudatta/ref.wav
+    transcript: "रात के सन्नाटे में जब चारों ओर खामोशी छा जाती है तब वो आवाज मन के किसी कोने में गूंजने लगती है"
+    language: hi
+    register: storyteller-podcast
+    duration_s: 12.0
+    use_cases: [hindutavaanimated/long_form, hindutavaanimated/kathaa]
+    notes: |
+      Madhavi Charudatta — Bolti Kahaniyan podcast Hindi reader,
+      Saadat Hasan Manto's "Kutte Ki Dua" (Manto d. 1955 → Indian
+      PD on text; recording uploaded as Community Audio).
+      Source: archive.org/details/MantoKutteKIDuvaMadhavi
+      Clipped 354-366s (12s, max silence 195ms, peak 1.0).
+      Expressive young-mid F podcast register. Picked 2026-05-08
+      from 10-voice audition pack — A/B candidate against Anurag
+      Sharma (M, voice #06).
+
+  hindi-male-anurag-vardaan:
+    path: pipeline/voice_refs/hindi-male-anurag-vardaan/ref.wav
+    transcript: "उस गांव में एक बूढ़ा साधु रहा करता था जिसे लोग बहुत आदर देते थे उसकी कहानियां सबको प्रिय थीं"
+    language: hi
+    register: storyteller-audiobook
+    duration_s: 12.0
+    use_cases: [hindutavaanimated/long_form, hindutavaanimated/kathaa]
+    notes: |
+      Anurag Sharma — Suno Kahani Hindi audiobook reader,
+      Premchand's "Vardaan" (Premchand d. 1936 → Indian PD on
+      text; recording Community Audio).
+      Source: archive.org/details/VardaanByPremchand
+      Clipped 106-118s (12s, max silence 3ms, peak 1.0).
+      Mature M audiobook-narrator register, classical Hindi
+      storytelling cadence. Picked 2026-05-08 from 10-voice
+      audition pack — A/B candidate against Madhavi (F, voice #04).
+
+  hindi-female-librivox-sonali:
+    path: pipeline/voice_refs/hindi-female-librivox-sonali/ref.wav
+    transcript: "मैं सोच ही रही थी कि बहुत दिनों से तुम्हें एक लंबा पत्र लिखूं और घर के सब हाल विस्तार से सुनाऊं"
+    language: hi
+    register: storyteller-audiobook
+    duration_s: 12.0
+    use_cases: [hindutavaanimated/shorts, hindutavaanimated/kathaa, hindutavaanimated/long_form]
+    notes: |
+      Sonali Ekka — LibriVox Hindi solo reader, "Do Sakhiyan" by
+      Munshi Premchand (Public Domain — Premchand d. 1936).
+      Source: archive.org/details/dosakhiyan_2512_librivox part 1
+      `dosakhiyan_01_premchand_128kb.mp3`.
+      Clipped 68-80s from part 1 (active speech, max silence 639ms),
+      volume +1.5×, 24 kHz mono PCM_16. Storyteller-audiobook
+      register — natural epistolary cadence ("read-to-a-friend"
+      tone) vs IIT-M anchor's flatter studio-anchor delivery.
+      Onset profile: 30ms peak 0.351 (harder than IIT-M 0.085) but
+      higher F0 variance. Added 2026-05-08 after IIT-M produced
+      audible click at sentence onsets in five iterations of
+      filter-tuning on krishna-govardhan-leela-long.
+
+  hindi-female-iitm-anchor:
+    path: pipeline/voice_refs/hindi-female-iitm-anchor/ref.wav
+    transcript: "जैसे किसी को फ़ोन लगाना हो, तो आप अपने फ़ोन के वर्चुअल सहायक को आवाज़ देकर कह सकते हैं, कि फ़लां को फ़ोन लगाओ."
+    language: hi
+    register: storyteller-anchor
+    duration_s: 7.93
+    use_cases: [hindutavaanimated/shorts, hindutavaanimated/kathaa]
+    notes: |
+      IndicTTS Phase 3 Hindi female Speaker 2 (IIT-Madras Don Lab,
+      `train_hindifemale_02566.wav`). Anechoic studio recording, ~70 dB SNR.
+      F0 median 188 Hz, std-dev 48 Hz (range 80-316 Hz, ends on '.'),
+      48 kHz native → resampled 24 kHz mono PCM_16.
+      User-picked 2026-05-07 over LibriVox alternatives because the studio
+      recording is cleaner (no room tone). F0 variance is moderate (above
+      the 30 Hz floor but below LibriVox-dramatic's 87 Hz) — if monotony
+      returns, swap in hindi-female-storyteller-dramatic for hook+twist+
+      centerpiece beats.
+      Source: https://www.iitm.ac.in/donlab/indictts/database
+
+  hindi-female-storyteller-dramatic:
+    path: pipeline/voice_refs/hindi-female-storyteller-dramatic/ref.wav
+    transcript: "प्राप्त हुआ ही बोला, भो, आप कौन हो, क्यों आए हो?"
+    language: hi
+    register: storyteller-dramatic
+    duration_s: 5.3
+    use_cases: [hindutavaanimated/shorts]
+    notes: |
+      Sonali Ekka reading Panchatantra (LibriVox, PD-marked CC0).
+      Question-toned story-climax line — F0 169 Hz median, std-dev 87 Hz
+      (range 149-399 Hz), SNR ~62 dB, ends on '?'.
+      Source: https://archive.org/details/panchatantra_2604_librivox
+      Use for Mahabharat / Ramayan Shorts hook + twist + centerpiece
+      beats — the wide pitch range and rising interrogative lift fix
+      the flat-clone bug from the legacy hindi-female-storyteller ref.
+
+  hindi-female-storyteller-calm:
+    path: pipeline/voice_refs/hindi-female-storyteller-calm/ref.wav
+    transcript: "प्यारी पद्मा, कल तुम्हारा खत मिला, आज जवाब लिख रही हूँ।"
+    language: hi
+    register: storyteller-calm
+    duration_s: 5.2
+    use_cases: [hindutavaanimated/shorts, hindutavaanimated/kathaa]
+    notes: |
+      Sonali Ekka reading Premchand "Do Sakhiyan" (LibriVox, PD-marked CC0).
+      Conversational epistolary opener — F0 181 Hz median, std-dev 49 Hz
+      (range 80-292 Hz), SNR ~53 dB (post-conservative ffmpeg afftdn).
+      Source: https://archive.org/details/dosakhiyan_2512_librivox
+      Use for Shorts setup + lesson beats and all kathaa long-form —
+      the measured cadence + intimate register produces calm grounded
+      F5 narration without the flat-announcer bug.
+
+  hindi-female-storyteller-devotional:
+    path: pipeline/voice_refs/hindi-female-storyteller-devotional/ref.wav
+    transcript: "जिसमें पुरुषार्थ है, प्रतिभा है, वह आज नहीं तो कल अवश्य ही धनवान होकर रहेगा।"
+    language: hi
+    register: storyteller-devotional
+    duration_s: 6.9
+    use_cases: [hindutavaanimated/kathaa, hindutavaanimated/shorts]
+    notes: |
+      Sonali Ekka reading Premchand "Do Sakhiyan" (LibriVox, PD-marked CC0).
+      Aphoristic philosophical sentence — F0 225 Hz median, std-dev 64 Hz
+      (range 152-368 Hz), SNR ~61 dB, ends on '।'.
+      Source: https://archive.org/details/dosakhiyan_2512_librivox
+      Use for kathaa invocations / opening shloka glosses / closer
+      dedications — slightly elevated mid-high pitch + measured
+      solemnity + two-part rhetorical structure mirrors devotional
+      couplet cadence. NOT a Sanskrit chant (svara would leak into
+      prose). Hindi PROSE register only.
+
+  english-female-documentary-sarah:
+    path: pipeline/voice_refs/sarah.wav
+    transcript: "Tonight we travel to the western front of the Great War. Speak softly. Let the lamp grow dim. Slow your breathing. We will walk together from the warm meadows of August nineteen fourteen."
+    language: en
+    register: documentary-soft
+    duration_s: 9.5
+    use_cases: [historyrecapped/shorts, historyrecapped/long-form, sportsrecapped/long-form]
+    notes: |
+      Calm, measured, slightly sleepy storytelling cadence. Ideal for
+      sleep-history / long-form documentary / war-history Shorts.
+
+  english-male-history-sleep-narrator:
+    path: pipeline/voice_refs/english-male-history-sleep-narrator/ref.wav
+    transcript: "It might mean sitting near the fire, absently turning a smooth pebble in your fingers, watching the smoke drift upward in twisting ribbons."
+    language: en
+    register: documentary-sleep-male
+    duration_s: 9.96
+    use_cases: [historyrecapped/long-form, historyrecapped/long-form-sleep]
+    notes: |
+      Deep calm male voice for long-form sleep-history. F0 median 121 Hz
+      (IQR 108-126 Hz) — distinctly sub-165Hz male range, well below
+      sarah's mid-soprano register. Sleep-evoking sensory prose ref
+      (no proper nouns, no numbers, soft consonants) — F5-TTS produces
+      consistent slow narrative cadence at this anchor.
+
+      PROVENANCE (2026-05-08): clip extracted from
+      https://youtu.be/AHTEnwz0bL4 ("What Did Early Humans ACTUALLY Do
+      All Day?" from @SleepyTimeHistory) at 4133.0-4143.0s. The source
+      channel describes their voice as "a digital replica of a
+      professional voice actor" — i.e. it is itself a TTS output from
+      a commercial voice-clone service (likely ElevenLabs or HeyGen),
+      not a natural human recording. We use this 10s anchor as the F5
+      reference for the cloudrun_f5 zero-shot pipeline.
+
+      LICENSING / RISK: cloning a TTS-output voice may violate the
+      upstream provider's TOS (ElevenLabs terms forbid using output to
+      train derivative voices). Risks: (a) channel demonetisation if
+      the upstream provider's audio fingerprint detector flags us;
+      (b) C&D from the original voice actor if they discover the
+      derivative. Mitigation paths if a flag fires: revert
+      historyrecapped/config.yaml long_form.tts_voice to sarah.wav
+      (existing safe female ref) or commission a new male voice ref
+      from a CC0/CC-BY archive.org PD audiobook.
+
+      Set as default for historyrecapped/long-form 2026-05-08 by user
+      ask "use voice clone" while cloning Sleepy Time History parity.
+
+  english-male-aita-narrator-michael:
+    path: pipeline/voice_refs/michael.wav
+    transcript: "Ada for refusing to split the bill. My friends ordered $400 of steak and wine."
+    language: en
+    register: emotional
+    duration_s: 6.5
+    use_cases: [mystoriesanimated/aita, mystoriesanimated/aita_cliffhanger]
+    notes: |
+      Reddit-storyteller cadence, slightly aggrieved tone. Fits the
+      AITA mock-monologue register.

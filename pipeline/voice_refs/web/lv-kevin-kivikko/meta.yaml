@@ -1,0 +1,10 @@
+label: Kevin Kivikko
+language: en
+gender: male
+style: "LibriVox \xB7 Dumas"
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "LibriVox \xB7 Kevin Kivikko reads Twenty Years After"

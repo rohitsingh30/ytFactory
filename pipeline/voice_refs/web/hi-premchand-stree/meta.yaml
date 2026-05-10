@@ -1,0 +1,11 @@
+label: "Premchand reader \xB7 Stree aur Purush"
+language: hi
+gender: male
+style: literary audiobook
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "archive.org \xB7 PremchandStreeAurPurush (Premchand-Stree-Aur-Purush.mp3)\
+  \ \u2014 PD/CC"

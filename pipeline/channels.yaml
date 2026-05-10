@@ -1,0 +1,63 @@
+# ytFactory channel manifest — single source of truth for production channels.
+#
+# Adding / renaming / removing a production channel = edit this file.
+# Every other module derives its view from here (control/scheduler.py
+# rotation, pipeline/niches.py mapping, pipeline/niche_schema.py
+# defaults). No special-casing per channel anywhere — every row has
+# the same shape.
+
+channels:
+  - slug: historyrecapped
+    youtube_title: HistoryRecapped
+    youtube_channel_id: UCnaru-eTkTniyzul0lMJMHQ
+    in_rotation: true
+    config_yaml: pipeline/channels/historyrecapped.yaml
+
+  - slug: hindutavaanimated
+    youtube_title: HindutavaJourney
+    youtube_channel_id: UCf2bVNZreMHeTkBoYBNhsag
+    in_rotation: true
+    config_yaml: pipeline/channels/hindutavaanimated.yaml
+
+  - slug: mystoriesanimated
+    youtube_title: My Stories Animated
+    youtube_channel_id: UCNIeHBf--KUegdiJZs_LSZg
+    in_rotation: true
+    config_yaml: pipeline/channels/mystoriesanimated.yaml
+    niches:
+      # niche_key: [state_subdir, variant_yaml_filename]
+      aita:                ["reddit_amitheasshole",             "aita_animated.yaml"]
+      aita_cliffhanger:    ["reddit_amitheasshole_cliffhanger", "aita_cliffhanger_animated.yaml"]
+      tifu:                ["reddit_tifu",                      "tifu.yaml"]
+      malicious:           ["reddit_maliciouscompliance",       "aita_animated.yaml"]
+      prorevenge:          ["reddit_prorevenge",                "aita_animated.yaml"]
+      oddities:            ["wiki_oddities",                    "wiki_oddities.yaml"]
+      tih:                 ["today_in_history",                 "today_in_history.yaml"]
+      aita_cooking:        ["aita_cooking",                     "aita_cooking.yaml"]
+      wiki_misconceptions: ["wiki_misconceptions",              "aita_animated.yaml"]
+
+  - slug: rhymetimejunction
+    youtube_title: RhymeTimeJunction
+    youtube_channel_id: UCMnxP6T-jeJYP_MnkSV8VSg
+    in_rotation: true
+    config_yaml: pipeline/channels/rhymetimejunction.yaml
+
+  - slug: sportsrecapped
+    youtube_title: SportsRecapped
+    youtube_channel_id: UC22NN7HJI277D802JlQ-Pkw
+    in_rotation: true
+    config_yaml: pipeline/channels/sportsrecapped.yaml
+    niches:
+      sports_ranked: ["ranked", "ranked.yaml"]
+
+  - slug: scrollpulse
+    youtube_title: ScrollPulse
+    youtube_channel_id: UCFLO4gxR_j6ZPx9ugfPZ_Pw
+    in_rotation: true
+    config_yaml: pipeline/channels/scrollpulse.yaml
+
+  - slug: cosmosdecoded
+    youtube_title: Cosmos Decoded
+    youtube_channel_id: UCIlAta6E57BlV2cPX0OuLEA
+    in_rotation: true
+    config_yaml: pipeline/channels/cosmosdecoded.yaml

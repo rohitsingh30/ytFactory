@@ -1,0 +1,10 @@
+label: Kimi
+language: en
+gender: ''
+style: "LibriVox \xB7 May"
+use_cases:
+- narrator
+- audiobook
+- storyteller
+duration_s: 10.0
+source: "LibriVox \xB7 Kimi reads Winnetou I"

@@ -1,0 +1,15 @@
+key: web-sonali-premchand
+label: "Sonali \xB7 Hindi (Premchand)"
+language: hi
+gender: female
+style: literary Hindi audiobook
+use_cases:
+- narrator
+- storyteller
+- audiobook
+source_url: https://www.archive.org/download/dosakhiyan_2512_librivox/dosakhiyan_01_premchand_128kb.mp3
+source_label: "LibriVox \xB7 Sonali Ekka reads Premchand (PD)"
+start_s: 68.0
+duration_s: 10.0
+notes: ''
+source: "LibriVox \xB7 Sonali Ekka reads Premchand (PD)"

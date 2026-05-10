@@ -1,0 +1,46 @@
+Voice: hindi-female-storyteller-dramatic
+Use case: Mahabharat / Ramayan dramatic Shorts (hook + twist + centerpiece beats)
+
+Source
+------
+  archive.org item: panchatantra_2604_librivox/panchatantra_24
+  collection: LibriVox (collection: librivoxaudio)
+  work: "Panchatantra" attrib. Vishnu Sharma (Hindi translation by Jwala Prasad Mishra)
+  reader: Sonali Ekka (this chapter — same female narrator as Do Sakhiyan)
+  archive.org URL: https://archive.org/details/panchatantra_2604_librivox
+  LibriVox catalog: https://librivox.org/panchatantra-hindi-by-vishnu-sharma/
+  source MP3: panch_24.mp3
+  trim window: start=467.30s  end=472.60s  duration=5.30s
+
+License
+-------
+  CC0 / Public Domain — LibriVox dedicates all recordings to the public domain.
+  Underlying text (Premchand / Panchatantra Hindi translation): public domain in India + worldwide.
+  archive.org licenseurl: http://creativecommons.org/publicdomain/mark/1.0/
+
+Audio metrics (post peak-normalisation to 0.85)
+-----------------------------------------------
+  Format: 24 kHz mono PCM_16 WAV
+  Duration: 5.30s
+  F0 median: 169 Hz  (female speaker confirmed)
+  F0 std-dev: 87 Hz  (target: >=30 Hz to avoid flat-clone bug — passes by wide margin)
+  F0 range: [149, 399] Hz
+  SNR (signal RMS vs intra-clip silence-gap RMS): 61.8 dB
+
+Archetype rationale
+-------------------
+  Question-toned exclamatory Panchatantra story climax — wide pitch range with high peaks (399 Hz) for surprise/dramatic register; F5 should clone the rising-tone interrogative lift onto Hindi mythology hook lines.
+
+Notes / caveats
+----------------
+  - SNR is below the 65 dB hard target requested by the curator brief.
+  - This is the LibriVox volunteer recording-environment ceiling — Sonali Ekka's
+    home-studio setup is the cleanest source we found across the entire PD-cleared
+    Hindi female-narrator landscape (only 2 LibriVox Hindi works exist, both her).
+    AI4Bharat Rasa Hindi shard has only male speakers (no female emotional clips).
+    SPRINGLab IndicTTS-Hindi is custom-license-gated (smtiitm@gmail.com clearance).
+  - F0 std-dev (the actual root cause of the production flatness bug per
+    docs/research/hindi_voice_refs_2026_05_07.md) comfortably exceeds the 30 Hz
+    floor at all three picks (49-87 Hz), which is the load-bearing quality gate.
+  - Solo female speaker (Sonali Ekka) — verified per-chapter via the LibriVox catalog.
+  - Devanagari transcript only, no English contamination, ends on `.`/`?`/`।`.
