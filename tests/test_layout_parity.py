@@ -88,6 +88,30 @@ class VariantYamlsCoveredTest(unittest.TestCase):
                         p = RenderPaths.from_channel_yaml(rel_path)
                     self.assertEqual(p.channel, ch)
 
+    def test_central_layout_yaml_resolves(self):
+        """Central-config layout (post-2026-05-10 nuclear cleanup):
+        ``pipeline/channels/<slug>.yaml`` and
+        ``pipeline/variants/<slug>/<variant>.yaml`` must resolve to
+        the right channel root.
+
+        Regression test for the cake-orch-v6 crash where the cloud
+        worker passed a ``pipeline/channels/<slug>.yaml`` path to
+        ``RenderPaths.from_channel_yaml`` and got a ValueError —
+        all 22 images had already rendered + the mp4 was on disk
+        when the path resolver exploded.
+        """
+        from pathlib import Path
+        # Central-channel layout.
+        p1 = RenderPaths.from_channel_yaml(
+            Path("pipeline/channels/mystoriesanimated.yaml")
+        )
+        self.assertEqual(p1.channel, "mystoriesanimated")
+        # Central-variants layout.
+        p2 = RenderPaths.from_channel_yaml(
+            Path("pipeline/variants/mystoriesanimated/aita_animated.yaml")
+        )
+        self.assertEqual(p2.channel, "mystoriesanimated")
+
 
 # NICHE_CHANNEL_NicheDirsExistTest deleted 2026-05-10 — niche state
 # moved to gs://ytfactory-prod-v2-state/<channel>/<niche>/. The chan_dir

@@ -247,6 +247,20 @@ class RenderPaths:
         path = Path(yaml_str)
         if path.name == "config.yaml":
             return cls.for_channel(path.parent.name, project_root=project_root)
+        # Central-config layout (post-2026-05-10 nuclear cleanup):
+        # ``pipeline/channels/<slug>.yaml`` (set by
+        # pipeline.channels._channel_yaml_path). The slug is the file
+        # stem; the channel root is ``project_root/<slug>``.
+        if (path.parent.name == "channels"
+                and path.parent.parent.name == "pipeline"
+                and path.suffix == ".yaml"):
+            return cls.for_channel(path.stem, project_root=project_root)
+        # Central-variants layout: ``pipeline/variants/<slug>/<variant>.yaml``.
+        # Same intent — variant lives under a central tree, slug is the
+        # parent dir name.
+        if (path.parent.parent.name == "variants"
+                and path.parent.parent.parent.name == "pipeline"):
+            return cls.for_channel(path.parent.name, project_root=project_root)
         if path.parent.name == "variants":
             # Unregistered variant — treat as a flat channel rooted at
             # the channel folder. Loud-warn so the operator adds a
@@ -262,6 +276,8 @@ class RenderPaths:
         raise ValueError(
             f"cannot resolve channel from yaml path {channel_yaml!r}: "
             f"expected <channel>/config.yaml, <channel>/variants/*.yaml, "
+            f"pipeline/channels/<slug>.yaml, "
+            f"pipeline/variants/<slug>/*.yaml, "
             f"or a path matching pipeline.niches.NICHE_CHANNEL"
         )
 
