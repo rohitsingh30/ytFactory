@@ -213,6 +213,37 @@ export YTFACTORY_RENDER_BACKEND=laptop
 .venv/bin/python -m workers.agent.main
 ```
 
+## Lessons from the cake-orch smoke runs (2026-05-10)
+
+Eight smoke runs to get the website end-to-end. Every fix below
+remains in production and is tested.
+
+| run | what failed | fix | commit |
+|---|---|---|---|
+| v1 | `mode=stub` even though docs claimed `real` was default | env defaulted to `stub` in code; flip on the live JOB | (env) |
+| v2 | `FileNotFoundError: claude` on every LLM call | LLM backend dispatcher with Azure backend | `c4689f7` |
+| v3 | env wiped + `gcloud not found` for ID-token fetch | metadata-server auth path before falling through to gcloud | `9e36af5` |
+| v4 | duplicate `cloudrun_auth` modules drifted | unify `pipeline/cloud/cloudrun_auth.py` to a re-export shim | `ebf4933` |
+| v5 | ffmpeg concat list-file used relative chunk paths | resolve absolute paths before writing the list-file | `212ed4c` |
+| v5 | FLUX.2 service `CUDA out of memory` (real cause: Qwen3 not in VRAM math) | `enable_model_cpu_offload()` — see `docs/cloudrun_image.md` | `6d90a66` |
+| v6 | `RenderPaths.from_channel_yaml` didn't recognize `pipeline/channels/<slug>.yaml` | new path patterns — see `docs/channel_layout.md` | `db15530` |
+| v7 | worker mp4-lookup hardcoded `Path(channel_yaml).parent` | look up via the same `RenderPaths` resolver the renderer uses | `d3d1f88` |
+| v8 | **mp4 + thumb landed in GCS, status=done** | — | — |
+
+Recurring pattern across all eight: every time a new layer fired,
+**a different module on the worker side made a layout assumption that
+diverged from what the renderer / image-service actually did**. The
+fix is always the same — share one resolver / one source of truth.
+The orchestrator pattern (`docs/llm_orchestrator.md`) makes this
+explicit at the validator layer; the path bugs above are the same
+class of drift at the filesystem layer.
+
+**Operator gotcha:** `gcloud run jobs update --update-env-vars` is
+DESTRUCTIVE on this revision shape — it COLLAPSES every env not
+named in the flag. Lost the entire Azure + CLOUDRUN_*_URL set during
+v3 → v4. Always inspect the env after the command and re-add anything
+missing. See `docs/cloud_run_set_secrets_destructive.md`.
+
 ## Files
 
 - `cloud/render-worker-v2/Dockerfile` — image
@@ -220,5 +251,8 @@ export YTFACTORY_RENDER_BACKEND=laptop
 - `cloud/render-worker-v2/entrypoint.py` — Firestore-driven main loop with stub + real mode handlers
 - `cloud/render-worker-v2/deploy.sh` — Cloud Build + Job deploy
 - `control/cloud_run.py` — control-plane trigger
-- `pipeline/llm/cli.py` — three-backend selector + Azure adapter + Anthropic adapter
+- `pipeline/llm/cli.py` — three-backend selector + Azure adapter + Anthropic adapter (see `docs/llm_backend_dispatcher.md`)
+- `pipeline/llm/orchestrator.py` — constraint-aware retry runner (see `docs/llm_orchestrator.md`)
+- `pipeline/cloudrun_auth.py` — Google ID token via metadata-server / gcloud
+- `pipeline/paths.py` — `RenderPaths.from_channel_yaml` (see `docs/channel_layout.md`)
 - `pipeline/asr.py` — `faster_whisper` backend

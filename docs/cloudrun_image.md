@@ -4,20 +4,34 @@
 > web-next (sidebar → Cloud) — populated by the daily snapshot in
 > `docs/cloudrun_admin_panel.md`.
 
-> **Status (2026-05-07):** `ytfactory-image-flux2-klein` is LIVE in
-> `asia-southeast1` on NVIDIA L4 with **`--min-instances=0`** (scale
-> to zero when idle, ~$0/mo idle). Cold-load is hidden via the
-> pre-warmup script `cloud/warm_image_services.sh` (run before
+> **Status (2026-05-10):** `ytfactory-image-flux2-klein` is LIVE in
+> `asia-southeast1` on NVIDIA L4 with **`--min-instances=1`,
+> `--max-instances=2`, `--concurrency=2`**. Cold-load is hidden via
+> the pre-warmup script `cloud/warm_image_services.sh` (run before
 > render windows) plus the in-pipeline `images.warmup()` background
 > thread. 16 channel/variant YAMLs flipped from
 > `image_provider: z_image_turbo` (local mflux) to
 > `image_provider: cloudrun_flux2_klein`. Local mflux stays as
 > automatic render-level circuit-breaker fallback.
 >
+> **2026-05-10 fix — `enable_model_cpu_offload()`.** The pre-2026-05-10
+> server.py used `pipe.to("cuda")` which OOM'd on the very first
+> `/generate` call. The Dockerfile estimate "~13 GB at bf16" ignored
+> the 8B Qwen3 text encoder — real total is 4B transformer + 8B
+> Qwen3 = 12B params @ bf16 ≈ 24 GB, exceeds L4's 22 GiB usable VRAM.
+> Live trace: `21.94 of 21.96 GiB used` before any inference. Fix:
+> diffusers' `enable_model_cpu_offload()` keeps submodules on CPU
+> until needed; peak VRAM drops to ~12-14 GB. Per-call latency
+> went from **~3.86 s → ~17-19 s warm** (the cost of CPU↔GPU
+> migration); per-render image-stage time at 22 beats went from
+> ~85-105 s → ~12-13 min. Acceptable for production today; for
+> latency-sensitive workloads bump to A100 40 GB and skip offload.
+>
 > **Cost-conscious config:** see "Cost analysis" below. Earlier
 > drafts of this doc said ~$80/mo for `min-instances=1` — that was
 > wrong; actual L4 pricing is ~$700-815/mo per always-warm service.
-> Production runs min=0 + pre-warm.
+> Production runs min=0 + pre-warm; for the cake-orch debug round
+> we ran min=1 to reduce cold-load noise.
 >
 > Z-Image-Turbo cloud service exists but is BLOCKED by a cold-load
 > reliability issue — see "Z-Image follow-up" below and

@@ -25,6 +25,24 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
 
 ## ONE-OFFs noted (no project-doc needed)
 
+- 2026-05-11 — **Selector edits need post-edit grep-verify.** The
+  LIKE_SELECTORS dislike-guard fix recurred as a regression mid-
+  session — the file briefly went back to the broken substring-only
+  selectors before being re-fixed. Suspected cause: I claimed the
+  edit was applied without re-grepping the file. Selectors don't
+  have unit-test coverage, so an inverted match silently ships and
+  disengages until a live probe catches it. **New discipline:** for
+  any LIKE_SELECTORS / SUBSCRIBE_SELECTORS / similar edit that has
+  no unit test, follow with
+  `grep -n -A6 "^LIKE_SELECTORS = " <file>` immediately and
+  visually confirm the new string. Future audit recipe (catch
+  siblings):
+  `grep -rn "aria-label\*=" pipeline/cross_engage/ web/ control/ | grep -v dislike` —
+  any match without an explicit `:not([aria-label*='dislike' i])`
+  is a candidate for the same misclassification. Memory:
+  `feedback_burner_engage_cloud_v2.md` (extended with 2026-05-11
+  recurrence note).
+
 - 2026-05-10 — **Two-code-path-for-same-symptom heuristic.** When
   the user says "still no stats" after a fix lands, the response
   pattern is: don't assume the fix is wrong, look for a SECOND code
@@ -199,3 +217,25 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
   fails on the same COPY, check `ls web-next/public` before assuming
   Dockerfile is broken. Recipe: `git ls-files web-next/public/ | head`
   should always have ≥1 entry.
+- 2026-05-10 — **cake-orch end-to-end shipped (8 smokes, 7 commits).**
+  First production website-driven render exposed eight separate gaps
+  in the post-cutover infra. Persisted as 7 cross-channel feedback
+  files + 3 new docs (`docs/llm_orchestrator.md`,
+  `docs/llm_backend_dispatcher.md`,
+  `docs/prompt_validator_drift_invariant.md`) + extensions to
+  `docs/cloudrun_image.md` (FLUX OOM root cause + cpu_offload),
+  `docs/cloudrun_render_worker.md` (lessons table), `docs/channel_layout.md`
+  (4-layout matrix), `docs/full_cloud_cutover_2026_05_09.md` (status
+  pointer), `docs/cloud_run_set_secrets_destructive.md` (Job-shape
+  evidence), `docs/channel-learnings/mystoriesanimated/channel.md`
+  (orchestrator rewrite stage note). Recurring meta-pattern: every
+  post-cutover stage made independent layout/auth/path assumptions
+  that diverged from sibling modules — fix is always to share one
+  resolver / one source of truth (orchestrator pattern at validator
+  layer; `RenderPaths` at filesystem layer; `cloudrun_auth` shim for
+  modules duplicated across `pipeline/` and `pipeline/cloud/`). Sweep
+  recipe to catch sibling drift before next deploy: `find pipeline/
+  -name '<basename>.py' | sort | uniq -c | awk '$1 > 1'` for any
+  module with two copies; `grep -rn "Path(channel_yaml).parent" cloud/
+  pipeline/ control/` for any mp4/output lookup that bypasses
+  `RenderPaths`.

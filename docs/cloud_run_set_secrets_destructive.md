@@ -70,4 +70,10 @@ the matching `cloud/<service>/deploy.sh` `--set-secrets` line.
 - `docs/youtube_stats_refresh.md` — the work that surfaced it.
 - `docs/cloud_service_dep_playbook.md` — Cloud-Run service-creation
   playbook; this rule is now cited there too.
+- `docs/cloudrun_render_worker.md` "Lessons from the cake-orch smoke
+  runs" — new evidence (2026-05-10): `--update-env-vars` on the
+  Cloud Run JOB shape collapsed `AZURE_OPENAI_*` + every
+  `CLOUDRUN_*_URL` between cake-orch v3 → v4. Same class of bug at
+  the Job revision level (not just Service revisions). Always
+  inspect env after running the command.
 - Memory: `~/.claude/projects/-Users-rohit-ytFactory/memory/feedback_cloud_run_set_secrets_destructive.md`

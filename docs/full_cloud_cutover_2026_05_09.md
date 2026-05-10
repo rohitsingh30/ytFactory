@@ -7,6 +7,23 @@ caught a hangup when the launching shell exited; burner-channels page
 This doc captures the end-to-end migration in one place. Plan
 artifact: `/Users/rohit/.copilot/session-state/.../plan.md` (session-private).
 
+> **2026-05-10 update — website end-to-end CONFIRMED in production.**
+> After the cutover landed, the very first real Create-from-website
+> render exposed eight separate post-cutover gaps (mode=stub default,
+> claude-binary missing, gcloud missing, dup auth modules, ffmpeg
+> concat relative paths, FLUX.2 OOM, RenderPaths central layout,
+> worker mp4-lookup mismatch). All eight fixed; cake-orch-v8 shipped
+> a real 8.45 MB mp4 + thumb to `gs://ytfactory-prod-v2-artifacts/
+> jobs/<id>/`. Full timeline + commit-by-commit table in
+> [`docs/cloudrun_render_worker.md`](./cloudrun_render_worker.md)
+> "Lessons from the cake-orch smoke runs". Major architectural
+> additions made during the debug:
+> [LLM backend dispatcher](./llm_backend_dispatcher.md),
+> [constraint-aware orchestrator](./llm_orchestrator.md),
+> [prompt-validator drift invariant](./prompt_validator_drift_invariant.md),
+> FLUX.2 `enable_model_cpu_offload()` (see
+> [`docs/cloudrun_image.md`](./cloudrun_image.md)).
+
 ## Final state (2026-05-09 evening)
 
 ```

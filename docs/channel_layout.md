@@ -120,6 +120,26 @@ p = RenderPaths.from_channel_dir("mystoriesanimated/reddit_amitheasshole")
 p.ensure_dirs(Subdir.NARRATIONS, Subdir.UPLOADS, Subdir.CACHE)
 ```
 
+`RenderPaths.from_channel_yaml` recognises FOUR layouts (added the
+two central-config patterns 2026-05-10 after `cake-orch-v6` crashed
+all the way at the end of a 20-min render with `cannot resolve
+channel from yaml path`):
+
+| pattern | example | resolves to |
+|---|---|---|
+| `<channel>/config.yaml` | `mystoriesanimated/config.yaml` | `mystoriesanimated` (flat) |
+| `<channel>/variants/<v>.yaml` (in `NICHE_CHANNEL`) | `mystoriesanimated/variants/aita_animated.yaml` | `mystoriesanimated/reddit_amitheasshole` |
+| `pipeline/channels/<slug>.yaml` (central, post-2026-05-10) | `pipeline/channels/mystoriesanimated.yaml` | `mystoriesanimated` |
+| `pipeline/variants/<slug>/<v>.yaml` (central) | `pipeline/variants/mystoriesanimated/aita.yaml` | `mystoriesanimated` |
+
+The cloud worker's `_channel_yaml_for()` returns the third form
+(via `pipeline.channels._channel_yaml_path`); the renderer subprocess
+then passes that path to `RenderPaths.from_channel_yaml`. Pre-fix
+the resolver only knew the first two patterns and the renderer
+crashed AFTER all 22 images + the mp4 had landed on disk. The
+regression test in `tests/test_layout_parity.py::test_central_layout_yaml_resolves`
+asserts every pattern resolves to the same channel root.
+
 ## Adding a new channel
 
 1. `mkdir <channel>/` and write `<channel>/config.yaml`.
