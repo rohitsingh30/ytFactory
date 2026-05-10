@@ -435,6 +435,117 @@ class TestIsRunning(unittest.TestCase):
         }):
             self.assertFalse(is_running("s"))
 
+    def test_accepts_pre_fetched_state_skips_read(self):
+        """When ``state`` is passed, ``read_state`` is NOT called —
+        the dashboard's bulk path relies on this to avoid a second
+        round trip per burner."""
+        recent = datetime.now(timezone.utc).isoformat()
+        with patch.object(_mod, "read_state") as mock_read:
+            self.assertTrue(is_running(
+                "s", state={"phase": "watching", "last_action_at": recent},
+            ))
+        mock_read.assert_not_called()
+
+    def test_pre_fetched_none_state_means_not_running(self):
+        # ``state=None`` falls back to read_state; ``state={}`` is treated
+        # as "no state file" and short-circuits to False.
+        with patch.object(_mod, "read_state") as mock_read:
+            self.assertFalse(is_running("s", state={}))
+        mock_read.assert_not_called()
+
+
+# ── prewarm ──────────────────────────────────────────────────────────────────
+
+
+class TestPrewarmStates(unittest.TestCase):
+    def setUp(self):
+        _mod._GCS_STATE_CACHE.clear()
+        _mod._GCS_CLIENT = None
+
+    def tearDown(self):
+        _mod._GCS_STATE_CACHE.clear()
+        _mod._GCS_CLIENT = None
+
+    def test_noop_without_bucket(self):
+        with patch.object(_mod, "_state_bucket", return_value=None):
+            _mod.prewarm_states(["a", "b"])  # must not raise
+        self.assertEqual(_mod._GCS_STATE_CACHE, {})
+
+    def test_noop_without_client(self):
+        with patch.object(_mod, "_state_bucket", return_value="bk"), \
+             patch.object(_mod, "_gcs_client", return_value=None):
+            _mod.prewarm_states(["a", "b"])
+        self.assertEqual(_mod._GCS_STATE_CACHE, {})
+
+    def test_noop_empty_slugs(self):
+        fake_client = MagicMock()
+        with patch.object(_mod, "_state_bucket", return_value="bk"), \
+             patch.object(_mod, "_gcs_client", return_value=fake_client):
+            _mod.prewarm_states([])
+        fake_client.list_blobs.assert_not_called()
+
+    def test_one_list_blobs_then_per_present_download(self):
+        """The whole point of this function: ONE list_blobs and only
+        downloading the slugs that actually have state in GCS."""
+        present_blob = MagicMock()
+        present_blob.name = "burner_engage/alpha.json"
+        unrelated_blob = MagicMock()
+        unrelated_blob.name = "burner_engage/zeta.json"
+
+        download_blob = MagicMock()
+        download_blob.download_as_text = MagicMock(
+            return_value='{"phase": "watching"}',
+        )
+        fake_bucket = MagicMock()
+        fake_bucket.blob = MagicMock(return_value=download_blob)
+        fake_client = MagicMock()
+        fake_client.bucket = MagicMock(return_value=fake_bucket)
+        fake_client.list_blobs = MagicMock(return_value=iter([present_blob, unrelated_blob]))
+
+        with patch.object(_mod, "_state_bucket", return_value="bk"), \
+             patch.object(_mod, "_gcs_client", return_value=fake_client):
+            _mod.prewarm_states(["alpha", "beta", "gamma"])
+
+        # ONE list_blobs op for the whole batch.
+        fake_client.list_blobs.assert_called_once_with("bk", prefix="burner_engage/")
+        # Only `alpha` is present in the listing AND requested → one download.
+        # `zeta` is in the listing but not requested; `beta`/`gamma` are
+        # requested but not present — no download for them.
+        fake_bucket.blob.assert_called_once_with("burner_engage/alpha.json")
+
+        # Cache populated for ALL requested slugs (None for the absent ones)
+        # so a subsequent read_state() doesn't fan back out to GCS.
+        self.assertEqual(_mod._GCS_STATE_CACHE["alpha"][1], {"phase": "watching"})
+        self.assertIsNone(_mod._GCS_STATE_CACHE["beta"][1])
+        self.assertIsNone(_mod._GCS_STATE_CACHE["gamma"][1])
+
+    def test_list_blobs_failure_is_swallowed(self):
+        fake_client = MagicMock()
+        fake_client.list_blobs = MagicMock(side_effect=RuntimeError("network"))
+        with patch.object(_mod, "_state_bucket", return_value="bk"), \
+             patch.object(_mod, "_gcs_client", return_value=fake_client):
+            _mod.prewarm_states(["a"])  # must not raise
+        # On failure, cache is NOT populated — read_state will fall
+        # through to its own per-slug path.
+        self.assertEqual(_mod._GCS_STATE_CACHE, {})
+
+    def test_download_failure_caches_none(self):
+        present_blob = MagicMock()
+        present_blob.name = "burner_engage/alpha.json"
+        download_blob = MagicMock()
+        download_blob.download_as_text = MagicMock(side_effect=RuntimeError("boom"))
+        fake_bucket = MagicMock()
+        fake_bucket.blob = MagicMock(return_value=download_blob)
+        fake_client = MagicMock()
+        fake_client.bucket = MagicMock(return_value=fake_bucket)
+        fake_client.list_blobs = MagicMock(return_value=iter([present_blob]))
+
+        with patch.object(_mod, "_state_bucket", return_value="bk"), \
+             patch.object(_mod, "_gcs_client", return_value=fake_client):
+            _mod.prewarm_states(["alpha"])
+
+        self.assertIsNone(_mod._GCS_STATE_CACHE["alpha"][1])
+
 
 # ── worker helpers ───────────────────────────────────────────────────────────
 

@@ -325,6 +325,106 @@ The laptop agent log at `/tmp/ytfactory-laptop-agent.err` should show
 brand-switch verify line `✓ switched to <slug> (UC…)` before any
 `liked …` lines.
 
+## Engagement modes (2026-05-11)
+
+Cross-engage isn't one-size-fits-all anymore — the burner row exposes
+**two controls**: a dedicated **Subscribe** button (one-click hot
+path → `subscribe_only`, the most-used mode) plus a **Cross-engage ▾**
+dropdown for the three higher-intensity modes. Each mode picks a
+different mix of actions per video tab:
+
+| Mode | UI surface | Like | Subscribe | Watch loop | Comments | Exits when |
+|---|---|---|---|---|---|---|
+| `subscribe_only` | **Subscribe** button (direct) | — | ✓ once/channel | — | — | all channels subbed |
+| `like_subscribe` | Cross-engage ▾ menu | ✓ once/video | ✓ once/channel | — | — | all videos liked + all channels subbed |
+| `like_subscribe_view` (default) | Cross-engage ▾ menu | ✓ once/video | ✓ once/channel | ✓ forever | — | Stop button |
+| `complete` | Cross-engage ▾ menu | ✓ once/video | ✓ once/channel | ✓ forever | ✓ random 30%, max 15/run, ≥270s apart | Stop button |
+
+The split is intentional: the operator was repeatedly opening the
+dropdown just to pick `subscribe_only`, so it got promoted to a
+direct button. `subscribe_only` stays in `ENGAGE_MODES` and the
+server still validates it — the UI just filters it out of the
+DropdownMenu items via
+`ENGAGE_MODES.filter((m) => m !== "subscribe_only").map(...)`.
+
+The mode is selected in three layers — make sure each stays in lock-step:
+
+1. **UI** ([`web-next/app/app/burner-channels/page.tsx`](../web-next/app/app/burner-channels/page.tsx) +
+   [`web-next/lib/api.ts`](../web-next/lib/api.ts)) — the
+   `ENGAGE_MODES` tuple, `ENGAGE_MODE_LABELS`, and
+   `ENGAGE_MODE_DESCRIPTIONS` exports drive the shadcn DropdownMenu
+   AND the Subscribe direct-button. The Subscribe button hardcodes
+   `start("subscribe_only")`; the dropdown filters that mode out.
+2. **API** ([`control/routes/burner_routes.py:start_engage`](../control/routes/burner_routes.py)) —
+   POST body `{"mode": "..."}` is validated against
+   `burner_engage.ALL_MODES` and embedded in `TaskEnvelope.payload.mode`.
+3. **Worker** ([`pipeline/cross_engage/burner_engage.py:run`](../pipeline/cross_engage/burner_engage.py)) —
+   `mode` arg branches the cycle logic via three booleans
+   (`do_like` / `do_watch_loop` / `do_comments`).
+
+Adding a fifth mode = touch all three. There is no central enum the
+UI imports from Python; the four-string tuple is duplicated. If we
+add a 5th and only update two layers, the old one quietly becomes
+"unknown mode" (HTTP 400 from the API) on the missed layer. Cheap
+acceptable cost for now (UI is TS, backend is Python; sharing types
+across the boundary would mean codegen).
+
+### Bounded vs infinite modes
+
+`subscribe_only` and `like_subscribe` exit when no tab still needs
+engagement work (or every tab's `like_attempts` / `sub_attempts` has
+maxed at 3). The cycle loop checks at the top of each tick:
+
+```python
+if not needs_work and not do_watch_loop:
+    state.phase = "stopped"
+    _bump_action(state, f"all engagement done for mode={mode} — exiting clean")
+    break
+```
+
+`like_subscribe_view` and `complete` skip that exit and keep cycling
+forever for watch-time accumulation; only the Stop button (or
+`request_stop()` CLI) terminates them.
+
+### Comments — LLM-generated, capped (`MODE_COMPLETE` only)
+
+Comment volume + pacing was tuned to stay under YouTube's
+shadow-ban radar for a fresh-trust burner account:
+
+- **Subset:** `COMMENT_SUBSET_FRACTION = 0.30` of the catalog,
+  randomly picked at run start (stable across cycle re-visits so
+  the choice doesn't drift if random-pick re-runs).
+- **Hard cap:** `MAX_COMMENTS_PER_RUN = 15` per worker run
+  (30% × 58 ≈ 17 → capped to 15).
+- **Spacing:** `MIN_SECONDS_BETWEEN_COMMENTS = 270` (~4.5 min) →
+  ~13 comments/hr maximum, comfortably under the
+  "auto-flagged" threshold.
+
+Comment text is generated per-video via
+[`pipeline.llm.cli.call_llm`](../pipeline/llm/cli.py) (Azure GPT
+on cloud, Claude on laptop — same dispatcher every other LLM call
+uses). 5-15 word casual comment based on video title; the
+fallback pool (`_COMMENT_FALLBACK_POOL`) of 15 generic phrases
+fires when the LLM call errors out (network blip, quota hit) so
+the worker never blocks on the LLM.
+
+### Live verification
+
+Validated 2026-05-11 with a `subscribe_only` smoke run on
+`zgsbhqszdheo`: cycle log shows
+`cycling 58 tabs (mode=subscribe_only, do_like=False, do_watch_loop=False, do_comments=False)…`
+followed by `subscribed to historyrecapped` /
+`subscribed to mystoriesanimated` lines, **zero `liked X` lines**,
+and the cycle will exit clean when all 7 production channels are
+subbed.
+
+### See also
+
+- [`docs/all_tabs_cycle_pattern.md`](all_tabs_cycle_pattern.md) — the
+  Phase-0+Phase-1 architecture all engagement modes ride on.
+- [`docs/many_chrome_tabs.md`](many_chrome_tabs.md) — the Chrome flags
+  + page.goto policy that make 50+ simultaneous YouTube tabs survivable.
+
 ## Files touched
 
 - [`web/server.py`](../web/server.py) — `auth_middleware` K_SERVICE bypass

@@ -32,10 +32,15 @@ class CatalogBase(unittest.TestCase):
         ]
         for p in self._patches:
             p.start()
+        # Reset the module-level catalog_count() TTL cache — the tests
+        # mutate the on-disk fixture between calls and would otherwise
+        # see a stale count from a prior test method.
+        catalog._GCS_COUNT_CACHE = None
 
     def tearDown(self) -> None:
         for p in self._patches:
             p.stop()
+        catalog._GCS_COUNT_CACHE = None
         import shutil
         shutil.rmtree(self._scratch, ignore_errors=True)
 

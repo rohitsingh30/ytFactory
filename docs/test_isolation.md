@@ -85,3 +85,144 @@ the trigger (auto-test rule).
 - `CLAUDE.md` § "Auto-test rule" — the trigger.
 - `CLAUDE.md` § "Website-first production" — establishes 8765 (web)
   and 8766 (control plane) as canonical dev ports tests must avoid.
+
+---
+
+## sys.modules + parent-package-attribute pollution (2026-05-10)
+
+Same theme — silent state leaking between tests — but on a different
+axis. After the test-suite recovery on 2026-05-10 (149 → 0 failures),
+a class of pollution surfaced that wasn't covered by the port-isolation
+rule above: tests that monkey-patch `sys.modules["googleapiclient.*"]`
+or `sys.modules["control.storage"]` etc. without restoring it leak the
+fake into every subsequent test in the same process. Worse — Python's
+`from package import submodule` idiom binds the submodule onto the
+*package object* as an attribute, so even
+`patch.dict("sys.modules", {"<pkg>.<sub>": fake})` is a no-op once the
+real submodule has been imported anywhere in the suite.
+
+### The two leak classes
+
+**Class A — bare sys.modules install:**
+
+```python
+def _install_fake_googleapiclient(youtube):
+    sys.modules["googleapiclient"] = types.ModuleType(...)
+    sys.modules["googleapiclient.discovery"] = ...
+    # No restore. Every later test that imports googleapiclient
+    # gets the fake; .build(credentials=...) explodes with
+    # AttributeError.
+```
+
+3 test files in this repo had this pattern as of 2026-05-10
+(`test_research_cross_engage`, `test_pipeline_youtube_stats`,
+`test_research_youtube`). They polluted 5+ unrelated test files
+(`test_routes_oauth`, `test_routes_script_jobs`, `test_state_routes`,
+`test_upload_youtube`, `test_e2e_happy_path`).
+
+**Class B — parent-package-attribute precedence:**
+
+```python
+# In an earlier test:
+from control import storage         # binds control.storage = real_module
+
+# In the failing test:
+with patch.dict("sys.modules", {"control.storage": mock_storage}):
+    # CPython's IMPORT_FROM bytecode prefers control.storage attr
+    # over sys.modules["control.storage"] — the mock is NEVER seen.
+    from control import storage as _gcs
+```
+
+Same hazard for `from google.cloud import storage`,
+`from google.cloud import firestore`,
+`from pipeline.footage import yt_dlp_cloudrun`,
+`from pipeline.audio import asr`, etc.
+
+### The fix — three-layer
+
+**1. Suite-level conftest fixture (recommended):**
+
+`conftest.py` at the repo root snapshots + restores both `sys.modules`
+keys AND the package-attribute bindings around every test. Cheap (a
+small dict comprehension) and catches all pollution at the suite
+boundary, no per-test changes required. See `conftest.py` —
+``_restore_googleapiclient_modules`` autouse fixture.
+
+```python
+@pytest.fixture(autouse=True)
+def _restore_googleapiclient_modules():
+    saved = {k: sys.modules.get(k) for k in _GOOGLE_KEYS}
+    google_cloud_pkg = sys.modules.get("google.cloud")
+    saved_storage_attr = getattr(google_cloud_pkg, "storage", None) \
+        if google_cloud_pkg is not None else None
+    yield
+    # Restore sys.modules + delattr / setattr the package attribute
+    # so the next test re-resolves through sys.modules cleanly.
+    ...
+```
+
+**2. Per-helper save+restore (when helper is hot-path):**
+
+If a test helper installs fakes from inside multiple test classes,
+make the helper return the saved-snapshot dict so the caller's
+`tearDown` can pass it to a sibling `_uninstall_*` helper. See
+`tests/test_pipeline_youtube_stats.py::_install_fake_googleapiclient`
+for the canonical pattern.
+
+**3. Pipeline-side lazy resolve (for legitimate test mockability):**
+
+When pipeline code needs to be mockable via `patch.dict("sys.modules",
+...)` in tests, resolve the submodule via `sys.modules` directly so
+the patch wins regardless of attribute-binding state:
+
+```python
+# Instead of:
+from pipeline.footage import yt_dlp_cloudrun
+yt_dlp_cloudrun.download(...)
+
+# Use:
+import importlib, sys
+yt_dlp_cloudrun = sys.modules.get("pipeline.footage.yt_dlp_cloudrun") \
+    or importlib.import_module("pipeline.footage.yt_dlp_cloudrun")
+yt_dlp_cloudrun.download(...)
+```
+
+This pattern is in `pipeline/voice_clone.py::_download_audio`,
+`pipeline/upload/upload.py::_mirror_record_to_gcs`, and
+`pipeline/research/youtube.py::_build_youtube` (via the package
+re-export); see `pipeline/{images,upload}/__init__.py` for the
+package-level PEP 562 lazy `__getattr__` form (which fixes
+`patch.object(pkg, attr)` too).
+
+### Audit recipes
+
+```bash
+# Tests that install fake sys.modules entries without restore:
+grep -rnE "sys\.modules\[\"(googleapiclient|google\.cloud|pipeline\.|control\.)" tests/ --include='*.py' | grep -v "saved\|restore\|patch.dict"
+
+# Pipeline call sites that should lazy-resolve via sys.modules:
+grep -rnE "^from (pipeline|control|google\.cloud)\.[a-z_]+ import [a-z]" pipeline/ control/ --include='*.py' | grep -v "noqa: lazy-import"
+
+# Package __init__.py files using static re-exports (susceptible to
+# patch.object miss):
+grep -rnE "^from pipeline\.[a-z_]+\.[a-z_]+ import" pipeline/*/__init__.py
+```
+
+### Why this is structural, not advisory
+
+In a 4000-test suite, any one test that installs a fake without
+restore creates O(N) pollution opportunities for the rest of the
+suite. The 2026-05-10 incident bloomed from 3 leak sources into 35
+test failures across 8 test files; the root-cause fix (conftest +
+PEP 562 re-exports + lazy resolve in pipeline) eliminated all of
+them in one pass. Per-test workarounds were considered and rejected
+— they don't compose.
+
+### Memory + sweep
+
+- `feedback_test_isolation_control_storage_attr.md` — original
+  observation (2026-05-10 perf pass) + the recommended workaround.
+  This doc supersedes the "real fix when prioritized" section in
+  that memory file with the conftest-level pattern.
+- `feedback_sys_modules_test_pollution.md` — 2026-05-10 cleanup
+  audit + grep recipes.

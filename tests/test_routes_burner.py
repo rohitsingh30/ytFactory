@@ -46,16 +46,22 @@ class TestListBurners(unittest.IsolatedAsyncioTestCase):
                        return_value=state):
                 with patch("control.routes.burner_routes.burner_engage.is_running",
                            return_value=True):
-                    with patch("control.routes.burner_routes.catalog.catalog_count",
-                               return_value=5):
-                        async with httpx.AsyncClient(transport=transport,
-                                                     base_url="http://test") as client:
-                            r = await client.get("/api/burner_channels")
+                    with patch("control.routes.burner_routes.burner_engage.prewarm_states") as prewarm:
+                        with patch("control.routes.burner_routes.catalog.catalog_count",
+                                   return_value=5):
+                            async with httpx.AsyncClient(transport=transport,
+                                                         base_url="http://test") as client:
+                                r = await client.get("/api/burner_channels")
         self.assertEqual(r.status_code, 200)
         data = r.json()
         self.assertEqual(len(data["burners"]), 1)
         self.assertEqual(data["burners"][0]["phase"], "liking")
         self.assertTrue(data["burners"][0]["running"])
+        # The route MUST prewarm the state cache before iterating —
+        # without this, each read_state would fan out to its own GCS
+        # round trip and the dashboard's 5s poll would tail-latency
+        # at >10s on Cloud Run.
+        prewarm.assert_called_once_with(["burner1"])
 
     async def test_list_with_null_state(self) -> None:
         """Burner with no state (never run)."""
@@ -68,11 +74,12 @@ class TestListBurners(unittest.IsolatedAsyncioTestCase):
                        return_value=None):
                 with patch("control.routes.burner_routes.burner_engage.is_running",
                            return_value=False):
-                    with patch("control.routes.burner_routes.catalog.catalog_count",
-                               return_value=0):
-                        async with httpx.AsyncClient(transport=transport,
-                                                     base_url="http://test") as client:
-                            r = await client.get("/api/burner_channels")
+                    with patch("control.routes.burner_routes.burner_engage.prewarm_states"):
+                        with patch("control.routes.burner_routes.catalog.catalog_count",
+                                   return_value=0):
+                            async with httpx.AsyncClient(transport=transport,
+                                                         base_url="http://test") as client:
+                                r = await client.get("/api/burner_channels")
         self.assertEqual(r.status_code, 200)
         self.assertIsNone(r.json()["burners"][0]["phase"])
 

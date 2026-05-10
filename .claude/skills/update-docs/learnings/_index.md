@@ -209,14 +209,32 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
   Workaround: run `tests/test_upload_youtube.py` in isolation. Real
   fix when prioritized: `patch("control.storage", mock, create=True)`.
   Memory: `feedback_test_isolation_control_storage_attr.md`.
-- 2026-05-10 — **`web-next/public/` directory was missing.** Cloud
-  Build for ytfactory-web-next failed at `COPY web-next/public ./public`
-  step because the dir doesn't exist (was never created or got deleted
-  in prior cleanup). **Fixed inline** by `mkdir -p web-next/public &&
-  touch web-next/public/.gitkeep`. Future audit: if web-next deploy
-  fails on the same COPY, check `ls web-next/public` before assuming
-  Dockerfile is broken. Recipe: `git ls-files web-next/public/ | head`
-  should always have ≥1 entry.
+- 2026-05-11 — **Hot-path-from-N-way-dropdown UX heuristic.** When
+  the operator repeatedly picks one option from a multi-option
+  dropdown ("subscriber only mode … is easy to do, so remove that
+  from options and direct button for it"), the right move is to
+  promote that option to a **dedicated direct button beside** the
+  dropdown — not to reorder the menu, not to make it the default
+  highlight. Keep the backend enum unchanged (server still validates
+  all original modes); the UI just hard-wires the button's onClick
+  to `start("<mode>")` and filters that mode out of the dropdown
+  items via `ENGAGE_MODES.filter((m) => m !== "<mode>").map(...)`.
+  Concrete instance: burner-channels Subscribe button promoted from
+  `subscribe_only` dropdown item, deployed in
+  `ytfactory-web-next-00014-6g9` 2026-05-11. Two project docs that
+  described the UI as a "four-mode dropdown" went stale at the same
+  moment — fixed inline this run:
+  `docs/cross_engage_cloud_v2.md` § Engagement modes (table now has
+  a UI-surface column + paragraph explaining the split) +
+  `docs/burner_channels.md` § architecture-refresh banner. Future
+  audit recipe to catch sibling stale "N-option dropdown" claims
+  whenever a UI surface gets refactored:
+  `grep -rnE "dropdown.*option|option.*dropdown|N.{0,5}mode.{0,15}dropdown|four[- ]mode.{0,15}dropdown" docs/ <channel>/learnings/ --include='*.md'` —
+  cross-reference any hit against the current `web-next/` page to
+  confirm the doc still matches reality. Escalate to CLASS-OF-BUG
+  if the same hot-path-promotion happens on a second admin surface
+  (would deserve its own `docs/web_ux_hot_path_buttons.md`); single
+  observation today.
 - 2026-05-10 — **cake-orch end-to-end shipped (8 smokes, 7 commits).**
   First production website-driven render exposed eight separate gaps
   in the post-cutover infra. Persisted as 7 cross-channel feedback
@@ -239,3 +257,49 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
   module with two copies; `grep -rn "Path(channel_yaml).parent" cloud/
   pipeline/ control/` for any mp4/output lookup that bypasses
   `RenderPaths`.
+- 2026-05-10 (late) — **Test-suite recovery: 149 → 0 fails.** Five
+  durable findings persisted from a session where another agent
+  committed in parallel + stashed my WIP, and the unstash re-surfaced
+  multiple test-pollution clusters:
+  1. `feedback_sys_modules_test_pollution.md` + `docs/test_isolation.md`
+     extension — conftest autouse fixture snapshots/restores both
+     `sys.modules["googleapiclient.*"]` AND `google.cloud.{storage,
+     firestore}` package-attr bindings every test. Fixed 35
+     cross-file fails. Sweep:
+     `grep -rnE "sys\.modules\[\"(googleapiclient|google\.cloud|pipeline\.|control\.)" tests/`.
+  2. `feedback_apfs_package_shadowing.md` + `docs/case_insensitive_package_shadowing.md` —
+     `pipeline/audio.py` (1873 lines) shadowed by empty
+     `pipeline/audio/` package on APFS. Same hazard hit
+     `pipeline/images.py`. Sweep:
+     `find pipeline/ -maxdepth 2 -name "*.py" | sed 's|.py$||' | sort > /tmp/f && find pipeline/ -maxdepth 2 -mindepth 2 -type d > /tmp/d && comm -12 /tmp/f /tmp/d`.
+  3. `feedback_cloudrun_local_fallback_pattern.md` +
+     `docs/cloudrun_local_fallback_pattern.md` — `_local_fallback_or_raise`
+     so missing `mlx` in post-cleanup venv re-raises original
+     `CloudRunUnavailable` not `ModuleNotFoundError`. Wired into 6
+     TTS providers. Sweep:
+     `grep -nE "if _fallback_disabled|raise CloudRunUnavailable" pipeline/tts/cloudrun.py | grep -v _local_fallback_or_raise`.
+  4. `feedback_cloudrun_tts_server_validation.md` + `docs/cloudrun_tts.md`
+     § Known operational notes — every TTS server's
+     `_ref_audio_to_path` MUST guard empty/short b64 → 400, not 500
+     after librosa "Format not recognised". Chatterbox + indicf5
+     hardened + deployed (builds `b9fd027c` SUCCESS). Sweep:
+     `grep -nE "_ref_audio_to_path|base64.b64decode\(req\." cloud/tts-*/server.py`.
+  5. Updated existing `feedback_test_isolation_control_storage_attr.md`
+     with the new conftest-level recommended fix. Updated
+     `pipeline/audio/__init__.py` docstring with pointer to shadowing
+     doc.
+
+  Meta-pattern (worth a future SKILL.md rule if it repeats): when
+  Class A is "tests install fakes without restore" AND Class B is
+  "package-attr binding bypasses sys.modules patch", the systemic
+  fix is suite-wide conftest snapshot/restore, NOT per-test cleanup.
+  Per-test workarounds don't compose across N test files.
+
+  Stash-pop after parallel-agent commit — workflow gotcha: when
+  another agent commits while you're mid-edit, your work gets
+  stashed and the pop can leave a mix of conflicts + silent
+  overwrites. Run `git status --short | head -20` AND
+  `pytest --tb=no -q | tail -3` BEFORE assuming all my fixes
+  survived. Several files silently re-overwritten on the pop this
+  session — no CLASS-OF-BUG yet (single observation), escalate if
+  it repeats.

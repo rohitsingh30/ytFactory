@@ -186,6 +186,28 @@ path. Click into any → "Delete account" to nuke (irreversible).
 
 ## Cross-engagement from a burner (2026-05-09)
 
+> **Architecture refresh (2026-05-11).** The cross-engage worker no
+> longer uses the legacy "open one tab → engage → next" pattern.
+> It now opens all 58 catalog tabs upfront in Phase 0 and cycles
+> through them in a unified act+verify+watch loop in Phase 1, with
+> four user-selectable engagement modes
+> (`subscribe_only` / `like_subscribe` / `like_subscribe_view` /
+> `complete`). UI surface (later 2026-05-11): the burner row
+> exposes a dedicated **Subscribe** button (one-click hot path →
+> `subscribe_only`) next to a **Cross-engage ▾** dropdown that
+> covers the three higher-intensity modes. See:
+>
+> - [`docs/all_tabs_cycle_pattern.md`](all_tabs_cycle_pattern.md) — the architecture.
+> - [`docs/many_chrome_tabs.md`](many_chrome_tabs.md) — Chrome flags + goto policy needed for 50+ simultaneous tabs.
+> - [`docs/cross_engage_cloud_v2.md`](cross_engage_cloud_v2.md) § Engagement modes — the four backend modes + the split UI surface (Subscribe button + 3-option dropdown).
+>
+> The text below documents the older single-burner-attached script
+> (`pipeline.cross_engage_burner_attached`) which is still the
+> reference for `--all-burners` cycle runs and for one-off CLI
+> debugging, but the dashboard's Subscribe / Cross-engage controls
+> use the new cycle pattern via
+> `pipeline.cross_engage.burner_engage.run`.
+
 [`pipeline/cross_engage_burner_attached.py`](../pipeline/cross_engage_burner_attached.py)
 drives a burner brand-account through the production catalog —
 `like` + `subscribe to source channel` per video — with the same

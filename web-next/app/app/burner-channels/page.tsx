@@ -11,6 +11,7 @@ import {
   Play,
   Square,
   Sparkles,
+  UserPlus,
   X,
   Youtube,
 } from "lucide-react";
@@ -239,6 +240,24 @@ function BurnerRow({
                 Last run
               </Button>
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy || !burner.profile_known}
+              onClick={() => start("subscribe_only")}
+              title={
+                burner.profile_known
+                  ? "Subscribe to every catalog channel once and exit. No likes, no watch loop."
+                  : `Add ${burner.slug} → email mapping in ~/.config/ytfactory/profile_map.json first`
+              }
+            >
+              {busy ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <UserPlus className="h-3.5 w-3.5" />
+              )}
+              Subscribe
+            </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -264,7 +283,7 @@ function BurnerRow({
                   Engagement mode
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                {ENGAGE_MODES.map((m) => (
+                {ENGAGE_MODES.filter((m) => m !== "subscribe_only").map((m) => (
                   <DropdownMenuItem
                     key={m}
                     onSelect={() => start(m)}

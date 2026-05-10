@@ -43,14 +43,22 @@ WORKER_LOG_DIR = PROJECT_ROOT / "data" / "burner_engage" / "logs"
 @router.get("")
 async def list_burners() -> dict:
     burners = burner_engage.list_burner_channels()
-    # Hydrate live status (running / stopped / never-run)
+    # Hydrate live status (running / stopped / never-run).
+    # Prewarm the GCS state cache with ONE list_blobs + parallel
+    # downloads — without this, each `read_state(slug)` below would
+    # fan out to its own GCS round trip (49 burners × ~100ms = ~5s
+    # per dashboard poll, with the page polling every 5s).
     catalog_size = catalog.catalog_count()
+    burner_engage.prewarm_states([b["slug"] for b in burners])
     out = []
     for b in burners:
         st = burner_engage.read_state(b["slug"])
         out.append({
             **b,
-            "running": burner_engage.is_running(b["slug"]),
+            # Pass the already-fetched state so is_running doesn't
+            # re-resolve it (the 2s TTL cache hides this on warm runs
+            # but a cold poll would otherwise pay double).
+            "running": burner_engage.is_running(b["slug"], state=st),
             "phase": (st or {}).get("phase"),
             "last_action_at": (st or {}).get("last_action_at"),
             "last_action_msg": (st or {}).get("last_action_msg"),

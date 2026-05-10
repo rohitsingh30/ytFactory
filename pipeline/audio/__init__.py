@@ -1,5 +1,14 @@
 """Stage 4 — TTS dispatcher + backward-compatibility facade.
 
+This module **lives at** ``pipeline/audio/__init__.py`` (the package
+form), not ``pipeline/audio.py`` (the flat form). Both must NOT
+coexist in the repo — see ``docs/case_insensitive_package_shadowing.md``
+for the APFS shadowing pitfall the audio facade hit on 2026-05-10.
+The submodule shims ``pipeline/audio/{asr,align,beats,transcribe,
+audio}.py`` re-export the underlying flat modules so callers using
+either ``from pipeline.audio import audio`` or
+``from pipeline import audio`` resolve to the same code.
+
 This module is a **compatibility facade** for what used to be a single
 1,873-line file. The actual provider implementations now live under
 :mod:`pipeline.tts`:

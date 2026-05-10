@@ -218,6 +218,18 @@ If your local cron jobs auto-launch Chrome (e.g. `pipeline.research.cross_engage
 
 ## Engagement actions (like, subscribe) on the watch page
 
+> **For 50+ simultaneous tabs** (e.g. cross-engage against the full
+> production catalog), the per-tab engagement code below still
+> applies, but the launcher needs three extra tunings —
+> `--mute-audio`, `wait_until="commit"` on `page.goto`, and a
+> 1-second per-tab open throttle — or `Page.goto` stalls 30-60 s/tab
+> as the audio decoders saturate CPU. See
+> [`docs/many_chrome_tabs.md`](many_chrome_tabs.md) for the full story.
+>
+> The cycle pattern that uses these tunings (open all upfront, then
+> rotate act+verify+watch) is documented at
+> [`docs/all_tabs_cycle_pattern.md`](all_tabs_cycle_pattern.md).
+
 Validated 2026-05-08 against `l_7wQXOeVPc` from 4 sibling profiles via
 `pipeline.cross_engage_via_playwright`. The watch page (`youtube.com/watch?v=`)
 exposes both like and subscribe in stable selectors — prefer it over

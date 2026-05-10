@@ -404,6 +404,34 @@ gcloud beta quotas info describe \
 * **HF_TOKEN is required for gated models.** Indic Parler is ToS-gated.
   Higgs's PierrunoYT mirror is NOT gated but the variable is set on
   every service for consistency. Read from `~/.cache/huggingface/token`.
+* **Server-side validation rule (added 2026-05-10).** Every TTS server
+  MUST validate `req.ref_audio_b64` BEFORE handing off to the
+  underlying model. Empty/short b64 → return 400 with a clear message
+  (do NOT decode → write 0-byte WAV → librosa "Format not recognised"
+  → 500). The 2026-05-10 incident: chatterbox + indicf5 both crashed
+  with 500 when `_synth_cloudrun_chatterbox(ref_audio_path="", ...)`
+  forwarded an empty `ref_audio_b64`. Hardened both servers — see
+  `cloud/tts-chatterbox/server.py::_ref_audio_to_path` and
+  `cloud/tts-indicf5/server.py::_ref_audio_to_path` for the canonical
+  guard:
+
+  ```python
+  if not ref_b64:
+      raise ValueError(
+          "empty ref_audio_b64 — <model> is a voice-cloning model "
+          "and requires a base64-encoded reference WAV."
+      )
+  raw = base64.b64decode(ref_b64)
+  if len(raw) < 44:  # WAV header is 44 bytes minimum
+      raise ValueError(
+          f"ref_audio_b64 decoded to {len(raw)} bytes — too small."
+      )
+  ```
+
+  For any new TTS service you add, use this guard verbatim. Audit
+  recipe: `grep -nE "_ref_audio_to_path|base64\\.b64decode\\(req\\." cloud/tts-*/server.py`
+  — every match should have a `len(raw) < 44` check or an empty-b64
+  guard.
 
 ---
 
@@ -736,6 +764,16 @@ gcloud beta quotas info describe \
   first time, expect a one-time ~10-15 s "load Higgs onto GPU" delay
   on the first request. Subsequent requests for that container are
   warm.
+
+---
+
+## Related runbooks
+
+- [`docs/cloudrun_local_fallback_pattern.md`](./cloudrun_local_fallback_pattern.md) —
+  the `_local_fallback_or_raise` helper every cloud TTS provider uses
+  to keep `CloudRunUnavailable` as the single failure mode when the
+  laptop venv lacks `mlx`/`torch` (post laptop nuclear cleanup
+  2026-05-09).
 
 ---
 

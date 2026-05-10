@@ -1,11 +1,12 @@
 {
   "slug": "afddfdf",
   "channel_id": "UCwKxho5ZLIgoH52eEun8T7g",
-  "started_at": "2026-05-10T19:20:03.901784+00:00",
-  "phase": "stopped",
-  "last_action_at": "2026-05-10T19:30:30.553893+00:00",
-  "last_action_msg": "worker exited cleanly",
-  "stop_requested": true,
+  "started_at": "2026-05-10T20:20:59.570681+00:00",
+  "phase": "watching",
+  "last_action_at": "2026-05-10T20:23:25.224409+00:00",
+  "last_action_msg": "cycling 58 tabs (mode=like_subscribe, do_like=True, do_watch_loop=False, do_comments=False)\u2026",
+  "stop_requested": false,
+  "mode": "like_subscribe",
   "videos": [
     {
       "video_id": "wu7BuDTsY9s",
@@ -20,7 +21,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "N6RAm-982-M",
@@ -35,7 +40,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "HBP1SJaGr6g",
@@ -46,11 +55,15 @@
       "liked": false,
       "subscribed": false,
       "tab_open": true,
-      "last_focused_at": "2026-05-10T19:22:56.484770+00:00",
-      "watch_seconds": 17,
+      "last_focused_at": "",
+      "watch_seconds": 0,
       "error": "",
-      "like_attempts": 1,
-      "sub_attempts": 0
+      "like_attempts": 0,
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "WbmzAEUNq50",
@@ -61,11 +74,15 @@
       "liked": false,
       "subscribed": false,
       "tab_open": true,
-      "last_focused_at": "2026-05-10T19:29:27.699293+00:00",
-      "watch_seconds": 18,
+      "last_focused_at": "",
+      "watch_seconds": 0,
       "error": "",
-      "like_attempts": 1,
-      "sub_attempts": 0
+      "like_attempts": 0,
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "Q-ne_1-rams",
@@ -80,7 +97,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "mod678bL17E",
@@ -95,7 +116,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "VUhT2YpyCVU",
@@ -106,11 +131,15 @@
       "liked": false,
       "subscribed": false,
       "tab_open": true,
-      "last_focused_at": "2026-05-10T19:27:27.446138+00:00",
-      "watch_seconds": 18,
+      "last_focused_at": "",
+      "watch_seconds": 0,
       "error": "",
-      "like_attempts": 1,
-      "sub_attempts": 0
+      "like_attempts": 0,
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "l_7wQXOeVPc",
@@ -121,11 +150,15 @@
       "liked": false,
       "subscribed": false,
       "tab_open": true,
-      "last_focused_at": "2026-05-10T19:26:58.411645+00:00",
-      "watch_seconds": 32,
+      "last_focused_at": "",
+      "watch_seconds": 0,
       "error": "",
-      "like_attempts": 2,
-      "sub_attempts": 0
+      "like_attempts": 0,
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "B0-NpKYMeF4",
@@ -140,7 +173,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "1-Ubb91WzBU",
@@ -155,7 +192,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "XQVOJGt_dQM",
@@ -166,11 +207,15 @@
       "liked": false,
       "subscribed": false,
       "tab_open": true,
-      "last_focused_at": "2026-05-10T19:30:20.817230+00:00",
-      "watch_seconds": 69,
-      "error": "like-click ineffective after 3 tries",
-      "like_attempts": 3,
-      "sub_attempts": 0
+      "last_focused_at": "",
+      "watch_seconds": 0,
+      "error": "",
+      "like_attempts": 0,
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "REYwS8Ul87w",
@@ -185,7 +230,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "uky88KTVNU8",
@@ -200,7 +249,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "mH_zbzXv9wE",
@@ -215,7 +268,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "FQ_sli5ZoXE",
@@ -230,7 +287,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "3qC6tU_YHrw",
@@ -245,7 +306,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "pL2oZfTecSw",
@@ -260,7 +325,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "QvcCTZmUjHA",
@@ -275,7 +344,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "e_zauVYi5z0",
@@ -290,7 +363,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "AZV1pZ8v3h8",
@@ -305,7 +382,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "rf2vDkYVpo4",
@@ -320,7 +401,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "Z9mJiarEftE",
@@ -335,7 +420,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "PcsH1EIv8dc",
@@ -350,7 +439,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "Z0Msjw9pfMA",
@@ -365,7 +458,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "wZVMOZjyGGA",
@@ -376,11 +473,15 @@
       "liked": false,
       "subscribed": false,
       "tab_open": true,
-      "last_focused_at": "2026-05-10T19:28:32.741251+00:00",
-      "watch_seconds": 13,
+      "last_focused_at": "",
+      "watch_seconds": 0,
       "error": "",
-      "like_attempts": 1,
-      "sub_attempts": 0
+      "like_attempts": 0,
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "1JMV7KVeSiM",
@@ -391,11 +492,15 @@
       "liked": false,
       "subscribed": false,
       "tab_open": true,
-      "last_focused_at": "2026-05-10T19:23:29.052529+00:00",
-      "watch_seconds": 15,
+      "last_focused_at": "",
+      "watch_seconds": 0,
       "error": "",
-      "like_attempts": 1,
-      "sub_attempts": 0
+      "like_attempts": 0,
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "lTE68VKbm0A",
@@ -410,7 +515,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "r6SnM8hR7oA",
@@ -425,7 +534,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "0cpwx8f8364",
@@ -440,7 +553,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "ewXYBjYZ_SU",
@@ -455,7 +572,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "ecKm6ZTjNv4",
@@ -470,7 +591,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "s4XbDSdbGCc",
@@ -485,7 +610,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "qS0DZFnn1f0",
@@ -500,7 +629,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "AgOfnbP5Srg",
@@ -515,7 +648,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "ivDLKsOT-G4",
@@ -530,7 +667,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "39QnyZ9WEhI",
@@ -541,11 +682,15 @@
       "liked": false,
       "subscribed": false,
       "tab_open": true,
-      "last_focused_at": "2026-05-10T19:24:58.906031+00:00",
-      "watch_seconds": 14,
+      "last_focused_at": "",
+      "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "D76jBMCk0P4",
@@ -560,7 +705,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "i6um3_9DT6M",
@@ -575,7 +724,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "z1x_0cIa2nU",
@@ -590,7 +743,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "-JXKUhb39tE",
@@ -601,11 +758,15 @@
       "liked": false,
       "subscribed": false,
       "tab_open": true,
-      "last_focused_at": "2026-05-10T19:26:02.658544+00:00",
-      "watch_seconds": 8,
+      "last_focused_at": "",
+      "watch_seconds": 0,
       "error": "",
-      "like_attempts": 1,
-      "sub_attempts": 0
+      "like_attempts": 0,
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "nIEq7zKUg9E",
@@ -620,7 +781,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "bc7lopoWSY4",
@@ -635,7 +800,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "Tf92NmOA0lw",
@@ -650,7 +819,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "e2EVteSItkE",
@@ -665,7 +838,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "5IfG6nA7Ngc",
@@ -680,7 +857,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "WQep72LMSsU",
@@ -695,7 +876,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "vQ8WX0-7-B0",
@@ -710,7 +895,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "fkgHWNOzMlk",
@@ -725,7 +914,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "D3Y5-8jExIQ",
@@ -740,7 +933,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "ntjacxNrNDM",
@@ -751,11 +948,15 @@
       "liked": false,
       "subscribed": false,
       "tab_open": true,
-      "last_focused_at": "2026-05-10T19:30:01.206979+00:00",
-      "watch_seconds": 8,
+      "last_focused_at": "",
+      "watch_seconds": 0,
       "error": "",
-      "like_attempts": 1,
-      "sub_attempts": 0
+      "like_attempts": 0,
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "weTiXP3rEgM",
@@ -766,11 +967,15 @@
       "liked": false,
       "subscribed": false,
       "tab_open": true,
-      "last_focused_at": "2026-05-10T19:28:01.821800+00:00",
-      "watch_seconds": 17,
+      "last_focused_at": "",
+      "watch_seconds": 0,
       "error": "",
-      "like_attempts": 1,
-      "sub_attempts": 0
+      "like_attempts": 0,
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "HHtMxhnsNVE",
@@ -785,7 +990,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "Zr5qPM0NeHg",
@@ -800,7 +1009,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "OrfAjUBUCno",
@@ -815,7 +1028,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "a3mwYZiMObU",
@@ -830,7 +1047,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "Jy9qJTTvwN4",
@@ -845,7 +1066,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "a6kDmMtGyJU",
@@ -856,11 +1081,15 @@
       "liked": false,
       "subscribed": false,
       "tab_open": true,
-      "last_focused_at": "2026-05-10T19:25:33.641441+00:00",
-      "watch_seconds": 15,
+      "last_focused_at": "",
+      "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     },
     {
       "video_id": "EeO0M7Y5v60",
@@ -875,7 +1104,11 @@
       "watch_seconds": 0,
       "error": "",
       "like_attempts": 0,
-      "sub_attempts": 0
+      "sub_attempts": 0,
+      "visit_count": 0,
+      "commented": false,
+      "comment_attempts": 0,
+      "comment_text": ""
     }
   ]
 }

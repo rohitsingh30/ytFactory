@@ -42,10 +42,11 @@ import shutil
 import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,70 @@ def _read_state_gcs(slug: str) -> dict | None:
         data = None
     _GCS_STATE_CACHE[slug] = (now + _GCS_CACHE_TTL_S, data)
     return data
+
+
+def prewarm_states(slugs: Iterable[str]) -> None:
+    """Bulk-fill the GCS state cache for ``slugs`` so a subsequent
+    series of ``read_state(slug)`` calls is served entirely from
+    memory.
+
+    Single ``list_blobs(prefix='burner_engage/')`` discovers which
+    burners actually have a state file in GCS — typically a small
+    handful out of ~50 — then concurrent ``download_as_text`` for
+    only those. Slugs without a present blob are cached as ``None``
+    so the per-slug read path skips its own ``exists()`` round trip.
+
+    No-op when the bucket isn't configured or the GCS client isn't
+    importable. Best-effort: errors fall through to the per-slug
+    code path (which then pays the full cost). The dashboard's
+    ``GET /api/burner_channels`` calls this once per request to
+    collapse 49 round-trips into ~3.
+    """
+    bucket_name = _state_bucket()
+    if not bucket_name:
+        return
+    cli = _gcs_client()
+    if cli is None:
+        return
+    slug_list = list(slugs)
+    if not slug_list:
+        return
+
+    now = time.time()
+    expires = now + _GCS_CACHE_TTL_S
+    wanted = set(slug_list)
+    present: set[str] = set()
+
+    try:
+        prefix = f"{_GCS_STATE_PREFIX}/"
+        suffix = ".json"
+        for blob in cli.list_blobs(bucket_name, prefix=prefix):
+            name = blob.name
+            if not name.endswith(suffix):
+                continue
+            stem = name[len(prefix):-len(suffix)]
+            if stem in wanted:
+                present.add(stem)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("burner_engage: prewarm list_blobs failed: %s", e)
+        return
+
+    def _fetch(slug: str) -> tuple[str, dict | None]:
+        try:
+            blob = cli.bucket(bucket_name).blob(_gcs_state_blob_name(slug))
+            return slug, json.loads(blob.download_as_text())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("burner_engage[%s]: prewarm download failed: %s", slug, e)
+            return slug, None
+
+    if present:
+        with ThreadPoolExecutor(max_workers=min(8, len(present))) as pool:
+            for slug, data in pool.map(_fetch, sorted(present)):
+                _GCS_STATE_CACHE[slug] = (expires, data)
+
+    for slug in slug_list:
+        if slug not in present:
+            _GCS_STATE_CACHE[slug] = (expires, None)
 
 
 def _write_stop_sentinel_gcs(slug: str) -> bool:
@@ -413,6 +478,13 @@ class VideoState:
     # action stops being retried for that tab.
     like_attempts: int = 0
     sub_attempts: int = 0
+    # Per-tab cycle visit counter (added 2026-05-11). Each time the
+    # cycle picks this tab and brings it to front + acts/dwells, this
+    # increments. Once it crosses MAX_VISITS_PER_TAB the tab is closed
+    # and dropped from rotation — caps per-video watch-time at a
+    # human-plausible amount and gives the worker a natural exit even
+    # in the infinite-loop modes.
+    visit_count: int = 0
     # Commenting (added 2026-05-11 with the engagement-modes feature).
     # Only populated when the worker's mode is MODE_COMPLETE and this
     # video was randomly selected into the comment subset (~30% of
@@ -488,6 +560,14 @@ MAX_COMMENTS_PER_RUN = 15
 # threshold for a freshly-trusted account.
 MIN_SECONDS_BETWEEN_COMMENTS = 270
 
+# Per-tab visit cap (added 2026-05-11). Each tab is closed and
+# removed from rotation after this many cycle visits. Bounds per-video
+# watch-time at MAX_VISITS_PER_TAB × (8-20 s dwell) ≈ 40-100 s — plenty
+# of signal, not bot-suspicious. Once every tab hits the cap the worker
+# exits cleanly, even in infinite-loop modes
+# (MODE_LIKE_SUBSCRIBE_VIEW / MODE_COMPLETE).
+MAX_VISITS_PER_TAB = 5
+
 
 def _state_path(slug: str) -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -559,14 +639,19 @@ def request_stop(slug: str) -> None:
     _write_stop_sentinel_gcs(slug)
 
 
-def is_running(slug: str) -> bool:
+def is_running(slug: str, *, state: dict | None = None) -> bool:
     """Cheap liveness check — sidecar exists AND last_action recent.
 
     Defines "alive" as last_action_at within the last 90 seconds. The
     worker's tab cycle ticks every 20-45s so 90s is comfortably above
     the upper bound. Phase=='stopped' or 'failed' always returns False.
+
+    ``state``: optional pre-fetched state dict so callers iterating
+    many burners (the dashboard list endpoint) can avoid the redundant
+    second ``read_state`` round trip — important on a cold poll where
+    the 2s TTL cache hasn't filled yet.
     """
-    s = read_state(slug)
+    s = state if state is not None else read_state(slug)
     if not s:
         return False
     if s.get("phase") in ("stopped", "failed"):
@@ -1302,8 +1387,41 @@ def run(slug: str, *, headless: bool = False, mode: str = DEFAULT_MODE) -> int:
                     # responsive (~5 ticks × ~10s = 50s max stale).
                     tick += 1
                     err_streaks[pg] = 0  # success → reset error streak
+
+                    # Per-tab visit cap (added 2026-05-11). Increment
+                    # AFTER the dwell so a freshly-opened tab gets at
+                    # least one full action+watch pass before being
+                    # counted. When the count crosses the cap, close
+                    # the tab and drop it from rotation — caps watch-
+                    # time per video and gives infinite-loop modes a
+                    # natural exit.
+                    vs.visit_count += 1
+                    if vs.visit_count >= MAX_VISITS_PER_TAB:
+                        try:
+                            pg.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        pages = [p for p in pages if p is not pg]
+                        video_pages.pop(pg, None)
+                        err_streaks.pop(pg, None)
+                        vs.tab_open = False
+                        _bump_action(
+                            state,
+                            f"closed {vs.video_id} after {vs.visit_count} visits "
+                            f"(remaining tabs: {len(pages)})",
+                        )
+
                     if tick % 5 == 0:
                         _save_state(state)
+
+                    if not pages:
+                        state.phase = "stopped"
+                        _bump_action(
+                            state,
+                            f"all tabs hit {MAX_VISITS_PER_TAB}-visit cap — exiting clean",
+                        )
+                        _save_state(state)
+                        break
 
                     end = time.monotonic() + dwell
                     while time.monotonic() < end:

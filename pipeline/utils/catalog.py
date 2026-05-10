@@ -51,6 +51,15 @@ _GCS_CACHE_TTL_S = 5.0
 _GCS_CLIENT = None  # lazy module-global storage client
 _GCS_ENTRIES_CACHE: dict[str, tuple[float, list]] = {}
 
+# `catalog_count()` is hit on every poll of /api/burner_channels (the
+# dashboard refreshes every 5s) and would otherwise fan out to one
+# `list_blobs` per production channel — ~1k blobs per call across the
+# 7-channel stable, several seconds round-trip on Cloud Run. Uploads
+# happen at most a few times per day, so a 60s TTL is more than fine
+# and turns the steady-state cost into ~0ms.
+_GCS_COUNT_CACHE: tuple[float, int] | None = None
+_COUNT_CACHE_TTL_S = 60.0
+
 
 def _state_bucket() -> str | None:
     return os.environ.get(_STATE_BUCKET_ENV) or None
@@ -255,7 +264,17 @@ def catalog_count() -> int:
     """Cheap count without materialising every record's body.
 
     Cloud-aware: when ``YTFACTORY_STATE_BUCKET`` is set, counts blobs
-    in GCS (avoiding the per-blob download). Falls back to disk."""
+    in GCS (avoiding the per-blob download). Falls back to disk.
+
+    Memoised for ``_COUNT_CACHE_TTL_S`` seconds (60s) so the dashboard's
+    5s polling loop doesn't hammer GCS — see module-level
+    ``_GCS_COUNT_CACHE`` for the rationale.
+    """
+    global _GCS_COUNT_CACHE  # noqa: PLW0603
+    now = time.time()
+    if _GCS_COUNT_CACHE is not None and _GCS_COUNT_CACHE[0] > now:
+        return _GCS_COUNT_CACHE[1]
+
     bucket = _state_bucket()
     if bucket:
         cli = _gcs_client()
@@ -270,6 +289,7 @@ def catalog_count() -> int:
                                 and not parts[-1].startswith("_")
                                 and not blob.name.endswith(".x.json")):
                             n += 1
+                _GCS_COUNT_CACHE = (now + _COUNT_CACHE_TTL_S, n)
                 return n
             except Exception as e:  # noqa: BLE001
                 logger.warning("catalog_count: GCS list failed, falling back to disk: %s", e)
@@ -283,6 +303,7 @@ def catalog_count() -> int:
             if f.name.startswith("_") or f.name.endswith(".x.json"):
                 continue
             n += 1
+    _GCS_COUNT_CACHE = (now + _COUNT_CACHE_TTL_S, n)
     return n
 
 
