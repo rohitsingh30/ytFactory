@@ -172,6 +172,72 @@ iterations. **The playbook saves that.** New service → read it first.
 
 ---
 
+## LLM backend dispatcher (2026-05-10 — COMPLETE)
+
+`pipeline/llm/cli.py::call_claude_cli` is now a backend dispatcher,
+not a thin subprocess wrapper. Every call site (rewrite, cast,
+prompts, critic, audio_critic, imitate, wiki research, …) goes
+through the same entry point and gets routed by the
+`YTFACTORY_LLM_BACKEND` env to one of:
+
+- **`cli`** — shells out to the `claude` binary (laptop default,
+  free per call against your Pro/Max OAuth plan). Vision-aware
+  (`add_dirs` + `allowed_tools=["Read"]`) only on this backend.
+- **`azure_openai`** (cloud render-worker default) — uses
+  `openai.AzureOpenAI` against the same Azure deployment that powers
+  the chat assistant. Reuses existing `AZURE_OPENAI_*` secrets, no
+  separate spend. Tier alias → deployment via `AZURE_OPENAI_MODEL_*`
+  env (or generic `AZURE_OPENAI_MODEL`).
+- **`anthropic_sdk`** — uses `anthropic.Anthropic` with
+  `ANTHROPIC_API_KEY`. Pay-per-token; opens a separate billing line.
+
+Auto-detection (when env not set): `claude` binary on PATH → `cli`;
+else Azure env present → `azure_openai`; else Anthropic key →
+`anthropic_sdk`; else `cli` (will surface a clear error).
+
+`call_llm` is a public alias for `call_claude_cli` — newer code can
+use the friendlier name.
+
+### Where things live
+
+- **Dispatcher + adapters:** `pipeline/llm/cli.py`
+- **Tests:** `tests/test_llm_dispatcher.py` + `tests/test_pipeline_llm.py`
+- **Cloud Run JOB env contract:** `docs/cloudrun_render_worker.md`
+
+### How a real cloud render flows (post-dispatcher)
+
+1. Browser → `/api/chat` → Azure (proposal extraction, unchanged).
+2. Browser → `/api/chat/confirm` → Firestore `jobs/<id>` + render task.
+3. Control plane → `gcloud run jobs execute ytfactory-render-worker-v2
+   --update-env-vars=YTFACTORY_JOB_ID=<id>`.
+4. Worker (real mode): `pipeline.llm.rewrite.rewrite()` →
+   `call_claude_cli(stage="rewrite")` → `_choose_backend()` returns
+   `azure_openai` → `_call_azure_openai()` → Azure responds with
+   `Script` JSON → persisted to `<channel>/scripts/<slug>.json`.
+5. Worker shells out to `python -m pipeline.render.shorts --script ...
+   --channel ...` which runs cast / prompts / images / tts / asr /
+   compose against the cloud TTS + image services.
+
+Vision stages (anatomy_check, critic, imitate_analyze) stay laptop-
+only until we wire IP-Adapter image inlining for the SDK backends.
+
+### Toggling
+
+```bash
+# Switch the live cloud worker to Anthropic SDK instead:
+gcloud run jobs update ytfactory-render-worker-v2 \
+  --region asia-southeast1 --project ytfactory-prod-v2 \
+  --update-env-vars=YTFACTORY_LLM_BACKEND=anthropic_sdk \
+  --update-secrets=ANTHROPIC_API_KEY=anthropic-key:latest
+
+# Or back to stub mode while debugging:
+gcloud run jobs update ytfactory-render-worker-v2 \
+  --region asia-southeast1 --project ytfactory-prod-v2 \
+  --update-env-vars=YTFACTORY_RENDER_MODE=stub
+```
+
+---
+
 ## Layout reference
 
 Per-channel layout is the canonical 2026-05-05 spec. **Use

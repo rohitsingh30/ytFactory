@@ -1,9 +1,12 @@
 # Cloud Run render worker (Layer 2)
 
 > **Status:** scaffolded 2026-05-09. Real-mode handlers wired
-> 2026-05-09. **Default LLM backend = Azure OpenAI** (reuses your
-> existing chat-assistant deployment — no separate spend). Anthropic
-> SDK is the optional alternative.
+> 2026-05-09. **LLM backend dispatcher landed 2026-05-10** —
+> `pipeline/llm/cli.py` now dispatches `call_claude_cli` to one of
+> three implementations (`cli` / `azure_openai` / `anthropic_sdk`) on
+> the `YTFACTORY_LLM_BACKEND` env. **Default in cloud = Azure OpenAI**
+> (reuses the chat-assistant's `AZURE_OPENAI_*` secrets — no separate
+> spend). Anthropic SDK is the optional alternative.
 
 This is the cloud-native replacement for the laptop agent. The product
 no longer depends on a Mac being awake.
@@ -41,11 +44,22 @@ triggers one execution per render via the `google-cloud-run` SDK.
 | **`azure_openai`** (cloud default) | Cloud Run JOB | Reuses your existing `AZURE_OPENAI_*` deployment — same one the chat assistant already uses. **No new bill.** |
 | `anthropic_sdk` | Cloud Run JOB (alternative) | Pay-per-token Anthropic API. Opens a separate billing line. |
 
-Selection order:
+Selection order (implemented in `pipeline/llm/cli.py::_choose_backend`):
 
-1. `YTFACTORY_LLM_BACKEND` env (`cli` / `anthropic_sdk` / `azure_openai`)
-2. Auto: prefer `cli` if binary present, else Azure if its env is
-   set, else Anthropic SDK if its env is set.
+1. `YTFACTORY_LLM_BACKEND` env, if set to a valid value
+   (`cli` / `azure_openai` / `anthropic_sdk`).
+2. Else: if the `claude` binary is on `PATH` → `cli` (laptop dev: free
+   OAuth-billed Pro/Max plan).
+3. Else: if Azure env present → `azure_openai`.
+4. Else: if `ANTHROPIC_API_KEY` set → `anthropic_sdk`.
+5. Final fallback: `cli` (will surface a clear error if `claude` isn't
+   installed).
+
+Vision-aware kwargs (`add_dirs`, `allowed_tools`) are only supported
+on the `cli` backend today — the SDK backends raise `ClaudeCLIError`
+if you pass them. Stages that need vision (anatomy_check, critic,
+imitate_analyze) are laptop-only for now; the cloud render worker only
+invokes pure-text stages (rewrite, cast, prompts).
 
 ### Azure OpenAI tier mapping
 
@@ -74,6 +88,23 @@ If your Azure project has a `gpt-5.3-chat` deployment (per
 | `stub` | Each stage sleeps ~2s; the upload stage drops a placeholder mp4. Useful when LLM keys aren't wired yet. |
 
 Flip via `YTFACTORY_RENDER_MODE` on the JOB.
+
+## Customize-form override contract (2026-05-10)
+
+The worker subprocess auto-forwards every `proposal.channel_overrides`
+entry from Firestore to `python -m pipeline.render.shorts` as a
+repeated `--override KEY=VALUE` flag. New user-facing knobs on the
+create-page form land at the renderer with no worker change required.
+
+The full 3-layer wiring rule (schema → form submit → worker forward)
+is documented in [`docs/customize_form_to_render_contract.md`](./customize_form_to_render_contract.md).
+The worker side is the third layer; if you're adding a new field, the
+schema + submit changes are usually the only two you need to touch.
+
+Anti-pattern this fixes: pre-2026-05-10 the worker had no override
+translation, so any new schema field round-tripped through Firestore
+and died silently at the worker boundary. Symptom was wrong output,
+not a visible error.
 
 ## Cloud-native pipeline ports (delivered 2026-05-09)
 

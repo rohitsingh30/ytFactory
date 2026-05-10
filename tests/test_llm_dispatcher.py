@@ -1,0 +1,455 @@
+"""Tests for the multi-backend LLM dispatcher in ``pipeline.llm.cli``.
+
+Covers:
+- ``_select_backend`` precedence (env override → auto-detect → cli default)
+- ``call_claude_cli`` dispatching to the right backend implementation
+- Azure OpenAI backend: client construction, JSON-schema response_format,
+  fallback to json_object on response_format errors, telemetry tagging
+- Anthropic SDK backend: client construction, JSON parsing, telemetry
+- Vision-aware kwargs (add_dirs / allowed_tools) rejected on non-cli backends
+"""
+from __future__ import annotations
+
+import os
+import sys
+import types
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from tests._helpers import PROJECT_ROOT  # noqa: F401
+
+from pipeline.llm import cli as llm_cli
+
+
+def _clear_backend_env(monkey_keys: list[str] | None = None) -> dict[str, str]:
+    """Snapshot + clear every env var the dispatcher cares about."""
+    keys = monkey_keys or [
+        "YTFACTORY_LLM_BACKEND",
+        "AZURE_OPENAI_ENDPOINT",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_API_VERSION",
+        "AZURE_OPENAI_MODEL",
+        "AZURE_OPENAI_MODEL_HAIKU",
+        "AZURE_OPENAI_MODEL_OPUS",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_MODEL_OPUS",
+    ]
+    saved = {k: os.environ.pop(k, None) for k in keys if k in os.environ}
+    return saved
+
+
+def _restore_env(saved: dict[str, str | None]) -> None:
+    for k, v in saved.items():
+        if v is not None:
+            os.environ[k] = v
+
+
+class SelectBackendTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved = _clear_backend_env()
+
+    def tearDown(self) -> None:
+        _clear_backend_env()
+        _restore_env(self._saved)
+
+    def test_default_falls_back_to_cli_when_no_claude_or_creds(self) -> None:
+        with patch.object(llm_cli, "_shutil_which", return_value=None):
+            self.assertEqual(llm_cli._choose_backend(), llm_cli.BACKEND_CLI)
+
+    def test_claude_binary_on_path_wins_when_no_explicit_env(self) -> None:
+        with patch.object(llm_cli, "_shutil_which", return_value="/usr/bin/claude"):
+            self.assertEqual(llm_cli._choose_backend(), llm_cli.BACKEND_CLI)
+
+    def test_explicit_env_wins_over_claude_binary(self) -> None:
+        os.environ["YTFACTORY_LLM_BACKEND"] = "azure_openai"
+        with patch.object(llm_cli, "_shutil_which", return_value="/usr/bin/claude"):
+            self.assertEqual(llm_cli._choose_backend(), llm_cli.BACKEND_AZURE)
+        os.environ["YTFACTORY_LLM_BACKEND"] = "anthropic_sdk"
+        with patch.object(llm_cli, "_shutil_which", return_value="/usr/bin/claude"):
+            self.assertEqual(llm_cli._choose_backend(), llm_cli.BACKEND_ANTHROPIC)
+
+    def test_unknown_backend_falls_through_to_autodetect(self) -> None:
+        os.environ["YTFACTORY_LLM_BACKEND"] = "bogus-name"
+        os.environ["AZURE_OPENAI_ENDPOINT"] = "https://x.openai.azure.com"
+        os.environ["AZURE_OPENAI_API_KEY"] = "sk-azure"
+        with patch.object(llm_cli, "_shutil_which", return_value=None):
+            self.assertEqual(llm_cli._choose_backend(), llm_cli.BACKEND_AZURE)
+
+    def test_autodetect_azure_when_no_claude_and_creds_present(self) -> None:
+        os.environ["AZURE_OPENAI_ENDPOINT"] = "https://x.openai.azure.com"
+        os.environ["AZURE_OPENAI_API_KEY"] = "sk-azure"
+        with patch.object(llm_cli, "_shutil_which", return_value=None):
+            self.assertEqual(llm_cli._choose_backend(), llm_cli.BACKEND_AZURE)
+
+    def test_autodetect_anthropic_when_only_anthropic_key(self) -> None:
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant"
+        with patch.object(llm_cli, "_shutil_which", return_value=None):
+            self.assertEqual(llm_cli._choose_backend(), llm_cli.BACKEND_ANTHROPIC)
+
+    def test_should_use_sdk_helper(self) -> None:
+        with patch.object(llm_cli, "_shutil_which", return_value="/usr/bin/claude"):
+            self.assertFalse(llm_cli._should_use_sdk())
+        os.environ["YTFACTORY_LLM_BACKEND"] = "azure_openai"
+        self.assertTrue(llm_cli._should_use_sdk())
+
+    def test_select_backend_alias(self) -> None:
+        self.assertIs(llm_cli._select_backend, llm_cli._choose_backend)
+
+
+class TierMappingTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved = _clear_backend_env()
+
+    def tearDown(self) -> None:
+        _clear_backend_env()
+        _restore_env(self._saved)
+
+    def test_azure_default_per_tier(self) -> None:
+        self.assertEqual(llm_cli._azure_model_for("haiku"),  "gpt-4o-mini")
+        self.assertEqual(llm_cli._azure_model_for("sonnet"), "gpt-4o-mini")
+        self.assertEqual(llm_cli._azure_model_for("opus"),   "gpt-4o")
+
+    def test_azure_per_tier_override(self) -> None:
+        os.environ["AZURE_OPENAI_MODEL_HAIKU"] = "gpt-4o-mini-deploy"
+        os.environ["AZURE_OPENAI_MODEL_OPUS"] = "gpt-5.3-chat"
+        self.assertEqual(llm_cli._azure_model_for("haiku"), "gpt-4o-mini-deploy")
+        self.assertEqual(llm_cli._azure_model_for("opus"),  "gpt-5.3-chat")
+        self.assertEqual(llm_cli._azure_model_for("sonnet"), "gpt-4o-mini")
+
+    def test_azure_generic_override_applies_to_all_tiers(self) -> None:
+        os.environ["AZURE_OPENAI_MODEL"] = "gpt-5.3-chat"
+        for tier in ("haiku", "sonnet", "opus"):
+            self.assertEqual(llm_cli._azure_model_for(tier), "gpt-5.3-chat")
+
+    def test_azure_per_tier_beats_generic(self) -> None:
+        os.environ["AZURE_OPENAI_MODEL"] = "gpt-5.3-chat"
+        os.environ["AZURE_OPENAI_MODEL_HAIKU"] = "gpt-4o-mini"
+        self.assertEqual(llm_cli._azure_model_for("haiku"), "gpt-4o-mini")
+        self.assertEqual(llm_cli._azure_model_for("opus"),  "gpt-5.3-chat")
+
+    def test_azure_deployment_alias(self) -> None:
+        self.assertIs(llm_cli._azure_deployment, llm_cli._azure_model_for)
+
+    def test_anthropic_default_per_tier(self) -> None:
+        self.assertEqual(llm_cli._anthropic_model_for("haiku"),  "claude-haiku-4-5")
+        self.assertEqual(llm_cli._anthropic_model_for("sonnet"), "claude-sonnet-4-5")
+        self.assertEqual(llm_cli._anthropic_model_for("opus"),   "claude-opus-4-5")
+
+    def test_anthropic_unknown_tier_passes_through(self) -> None:
+        # Lets call sites pass a literal model id.
+        self.assertEqual(
+            llm_cli._anthropic_model_for("claude-opus-4-7"),
+            "claude-opus-4-7",
+        )
+
+    def test_anthropic_env_override(self) -> None:
+        os.environ["ANTHROPIC_MODEL_OPUS"] = "claude-opus-4-7-internal"
+        self.assertEqual(llm_cli._anthropic_model_for("opus"),
+                         "claude-opus-4-7-internal")
+
+
+class DispatcherRoutingTest(unittest.TestCase):
+    """Verify ``call_claude_cli`` dispatches to the right private function."""
+
+    def setUp(self) -> None:
+        self._saved = _clear_backend_env()
+
+    def tearDown(self) -> None:
+        _clear_backend_env()
+        _restore_env(self._saved)
+
+    def test_routes_to_cli_subprocess_by_default(self) -> None:
+        with patch.object(llm_cli, "_shutil_which", return_value="/usr/bin/claude"), \
+             patch.object(llm_cli, "_call_claude_cli_subprocess",
+                          return_value={"ok": 1}) as mock:
+            out = llm_cli.call_claude_cli("hi", model="opus", stage="rewrite")
+        self.assertEqual(out, {"ok": 1})
+        self.assertEqual(mock.call_count, 1)
+
+    def test_routes_to_azure_when_env_set(self) -> None:
+        os.environ["YTFACTORY_LLM_BACKEND"] = "azure_openai"
+        with patch.object(llm_cli, "_call_azure_openai",
+                          return_value={"x": 2}) as mock:
+            out = llm_cli.call_claude_cli("hi", model="opus", stage="rewrite")
+        self.assertEqual(out, {"x": 2})
+        self.assertEqual(mock.call_count, 1)
+        kwargs = mock.call_args.kwargs
+        self.assertEqual(kwargs["model"], "opus")
+        self.assertEqual(kwargs["stage"], "rewrite")
+
+    def test_routes_to_anthropic_when_env_set(self) -> None:
+        os.environ["YTFACTORY_LLM_BACKEND"] = "anthropic_sdk"
+        with patch.object(llm_cli, "_call_anthropic_sdk",
+                          return_value="hello") as mock:
+            out = llm_cli.call_claude_cli(
+                "hi", output_json=False, model="haiku", stage="rewrite"
+            )
+        self.assertEqual(out, "hello")
+        self.assertEqual(mock.call_count, 1)
+
+    def test_vision_kwargs_rejected_on_azure_backend(self) -> None:
+        os.environ["YTFACTORY_LLM_BACKEND"] = "azure_openai"
+        with self.assertRaises(llm_cli.ClaudeCLIError) as ctx:
+            llm_cli.call_claude_cli(
+                "critique these frames",
+                add_dirs=[Path("/tmp/frames")],
+                allowed_tools=["Read"],
+                model="opus",
+                stage="critic",
+            )
+        self.assertIn("does not support add_dirs", str(ctx.exception))
+
+    def test_vision_kwargs_allowed_on_cli_backend(self) -> None:
+        os.environ["YTFACTORY_LLM_BACKEND"] = "cli"
+        with patch.object(llm_cli, "_call_claude_cli_subprocess",
+                          return_value={"ok": 1}) as mock:
+            llm_cli.call_claude_cli(
+                "critique these frames",
+                add_dirs=[Path("/tmp/frames")],
+                allowed_tools=["Read"],
+                model="opus",
+                stage="critic",
+            )
+        self.assertEqual(mock.call_count, 1)
+
+
+class AzureBackendTest(unittest.TestCase):
+    """Drive _call_azure_openai end-to-end with a fake openai SDK."""
+
+    def setUp(self) -> None:
+        self._saved = _clear_backend_env()
+        os.environ["AZURE_OPENAI_ENDPOINT"] = "https://x.openai.azure.com"
+        os.environ["AZURE_OPENAI_API_KEY"] = "sk-azure"
+        # Inject a fake `openai` module so the lazy import inside
+        # _build_azure_client picks it up.
+        self._saved_module = sys.modules.get("openai")
+        self._fake_client = MagicMock(name="AzureOpenAIClient")
+        self._fake_client.chat.completions.create = MagicMock()
+        fake_openai = types.ModuleType("openai")
+        fake_openai.AzureOpenAI = MagicMock(return_value=self._fake_client)  # type: ignore[attr-defined]
+        sys.modules["openai"] = fake_openai
+
+    def tearDown(self) -> None:
+        if self._saved_module is not None:
+            sys.modules["openai"] = self._saved_module
+        else:
+            sys.modules.pop("openai", None)
+        _clear_backend_env()
+        _restore_env(self._saved)
+
+    def _make_resp(self, content: str, *, prompt_tokens: int = 10,
+                   completion_tokens: int = 20):
+        return MagicMock(
+            choices=[MagicMock(message=MagicMock(content=content))],
+            usage=MagicMock(prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens),
+        )
+
+    def test_text_call_returns_string(self) -> None:
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp("plain text reply")
+        out = llm_cli._call_azure_openai(
+            "say hi", output_json=False, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite",
+        )
+        self.assertEqual(out, "plain text reply")
+        kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["messages"][0]["role"], "user")
+        # No JSON_HINT augmentation when output_json=False.
+        self.assertNotIn("ONLY a JSON object", kwargs["messages"][0]["content"])
+        self.assertNotIn("response_format", kwargs)
+
+    def test_json_call_augments_prompt_and_uses_json_object(self) -> None:
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{"hook":"AITA story","narration":"..."}')
+        out = llm_cli._call_azure_openai(
+            "rewrite this", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite",
+        )
+        self.assertEqual(out, {"hook": "AITA story", "narration": "..."})
+        kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        self.assertIn("ONLY a JSON object", kwargs["messages"][0]["content"])
+        self.assertEqual(kwargs["response_format"], {"type": "json_object"})
+
+    def test_json_schema_uses_structured_response_format(self) -> None:
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{"score": 7}')
+        schema = {"type": "object", "properties": {"score": {"type": "integer"}}}
+        out = llm_cli._call_azure_openai(
+            "critique this", output_json=True, json_schema=schema,
+            model="opus", timeout_s=30, stage="audio_critic",
+        )
+        self.assertEqual(out, {"score": 7})
+        kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        rf = kwargs["response_format"]
+        self.assertEqual(rf["type"], "json_schema")
+        self.assertEqual(rf["json_schema"]["name"], "audio_critic")
+        self.assertEqual(rf["json_schema"]["schema"], schema)
+        # Schema text embedded in user prompt.
+        self.assertIn("matching this schema", kwargs["messages"][0]["content"])
+
+    def test_response_format_failure_retries_without_response_format(self) -> None:
+        self._fake_client.chat.completions.create.side_effect = [
+            Exception("Invalid 'response_format' parameter for this deployment"),
+            self._make_resp('{"score": 5}'),
+        ]
+        schema = {"type": "object", "properties": {"score": {"type": "integer"}}}
+        out = llm_cli._call_azure_openai(
+            "critique", output_json=True, json_schema=schema,
+            model="opus", timeout_s=30, stage="audio_critic",
+        )
+        self.assertEqual(out, {"score": 5})
+        self.assertEqual(self._fake_client.chat.completions.create.call_count, 2)
+        retry_kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        # Retry drops response_format entirely (the spec — older
+        # deployments reject ALL response_format values).
+        self.assertNotIn("response_format", retry_kwargs)
+
+    def test_other_exceptions_propagate_as_claude_cli_error(self) -> None:
+        self._fake_client.chat.completions.create.side_effect = \
+            Exception("rate limit exceeded")
+        with self.assertRaises(llm_cli.ClaudeCLIError) as ctx:
+            llm_cli._call_azure_openai(
+                "x", output_json=True, json_schema=None,
+                model="opus", timeout_s=30, stage="rewrite",
+            )
+        self.assertIn("rate limit", str(ctx.exception))
+
+    def test_missing_credentials_raises(self) -> None:
+        os.environ.pop("AZURE_OPENAI_API_KEY", None)
+        with self.assertRaises(llm_cli.ClaudeCLIError) as ctx:
+            llm_cli._build_azure_client(timeout_s=30)
+        self.assertIn("AZURE_OPENAI_ENDPOINT", str(ctx.exception))
+
+    def test_per_tier_env_resolves_to_deployment(self) -> None:
+        os.environ["AZURE_OPENAI_MODEL_HAIKU"] = "gpt-4o-mini-deploy"
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{}')
+        llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="haiku", timeout_s=30, stage="rewrite",
+        )
+        kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["model"], "gpt-4o-mini-deploy")
+
+
+class AnthropicBackendTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved = _clear_backend_env()
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-fake"
+        self._saved_module = sys.modules.get("anthropic")
+        self._fake_client = MagicMock(name="AnthropicClient")
+        self._fake_client.messages.create = MagicMock()
+        fake_anthropic = types.ModuleType("anthropic")
+        fake_anthropic.Anthropic = MagicMock(return_value=self._fake_client)  # type: ignore[attr-defined]
+        sys.modules["anthropic"] = fake_anthropic
+
+    def tearDown(self) -> None:
+        if self._saved_module is not None:
+            sys.modules["anthropic"] = self._saved_module
+        else:
+            sys.modules.pop("anthropic", None)
+        _clear_backend_env()
+        _restore_env(self._saved)
+
+    def _make_resp(self, text: str, *, input_tokens: int = 10,
+                   output_tokens: int = 20):
+        block = MagicMock(type="text", text=text)
+        return MagicMock(
+            content=[block],
+            usage=MagicMock(input_tokens=input_tokens,
+                            output_tokens=output_tokens),
+        )
+
+    def test_text_call_returns_string(self) -> None:
+        self._fake_client.messages.create.return_value = \
+            self._make_resp("plain reply")
+        out = llm_cli._call_anthropic_sdk(
+            "say hi", output_json=False, json_schema=None,
+            model="haiku", timeout_s=30, stage="rewrite",
+        )
+        self.assertEqual(out, "plain reply")
+        kwargs = self._fake_client.messages.create.call_args.kwargs
+        self.assertEqual(kwargs["model"], "claude-haiku-4-5")
+
+    def test_json_call_augments_prompt(self) -> None:
+        self._fake_client.messages.create.return_value = \
+            self._make_resp('{"hook":"x"}')
+        out = llm_cli._call_anthropic_sdk(
+            "rewrite", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite",
+        )
+        self.assertEqual(out, {"hook": "x"})
+        kwargs = self._fake_client.messages.create.call_args.kwargs
+        self.assertIn("ONLY a JSON object", kwargs["messages"][0]["content"])
+
+    def test_json_schema_embedded_in_prompt(self) -> None:
+        self._fake_client.messages.create.return_value = \
+            self._make_resp('{"a":1}')
+        schema = {"type": "object", "properties": {"a": {"type": "integer"}}}
+        llm_cli._call_anthropic_sdk(
+            "rewrite", output_json=True, json_schema=schema,
+            model="opus", timeout_s=30, stage="rewrite",
+        )
+        kwargs = self._fake_client.messages.create.call_args.kwargs
+        self.assertIn("matching this schema", kwargs["messages"][0]["content"])
+
+    def test_concatenates_multiple_text_blocks(self) -> None:
+        block1 = MagicMock(type="text", text='{"a":')
+        block2 = MagicMock(type="text", text=' 1}')
+        block3 = MagicMock(type="tool_use", text=None)  # ignored
+        self._fake_client.messages.create.return_value = MagicMock(
+            content=[block1, block2, block3], usage=None,
+        )
+        out = llm_cli._call_anthropic_sdk(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite",
+        )
+        self.assertEqual(out, {"a": 1})
+
+    def test_unknown_model_passes_through_to_api(self) -> None:
+        self._fake_client.messages.create.return_value = \
+            self._make_resp("hi")
+        llm_cli._call_anthropic_sdk(
+            "x", output_json=False, json_schema=None,
+            model="claude-opus-4-7-experimental", timeout_s=30, stage="rewrite",
+        )
+        kwargs = self._fake_client.messages.create.call_args.kwargs
+        self.assertEqual(kwargs["model"], "claude-opus-4-7-experimental")
+
+    def test_exception_wraps_as_claude_cli_error(self) -> None:
+        self._fake_client.messages.create.side_effect = \
+            Exception("api unavailable")
+        with self.assertRaises(llm_cli.ClaudeCLIError) as ctx:
+            llm_cli._call_anthropic_sdk(
+                "x", output_json=False, json_schema=None,
+                model="opus", timeout_s=30, stage="rewrite",
+            )
+        self.assertIn("api unavailable", str(ctx.exception))
+
+    def test_missing_api_key_propagates_via_sdk_error(self) -> None:
+        # When ANTHROPIC_API_KEY is missing the real SDK raises
+        # AuthenticationError on the first call. We simulate that by
+        # making the fake client raise; our adapter must wrap it.
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        self._fake_client.messages.create.side_effect = \
+            Exception("authentication failed: no api key")
+        with self.assertRaises(llm_cli.ClaudeCLIError) as ctx:
+            llm_cli._call_anthropic_sdk(
+                "x", output_json=False, json_schema=None,
+                model="opus", timeout_s=30, stage="rewrite",
+            )
+        self.assertIn("authentication", str(ctx.exception).lower())
+
+
+class CallLlmAliasTest(unittest.TestCase):
+    """Verify the new ``call_llm`` alias is the same dispatcher."""
+
+    def test_call_llm_is_same_object_as_call_claude_cli(self) -> None:
+        from pipeline.llm import call_llm, call_claude_cli
+        self.assertIs(call_llm, call_claude_cli)
+
+
+if __name__ == "__main__":
+    unittest.main()

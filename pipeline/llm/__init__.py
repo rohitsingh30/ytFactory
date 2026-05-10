@@ -19,8 +19,15 @@ from __future__ import annotations
 
 # Re-export the Claude CLI surface so `from pipeline.llm import X` still works.
 from pipeline.llm.cli import (  # noqa: F401
+    BACKEND_ANTHROPIC,
+    BACKEND_AZURE,
+    BACKEND_CLI,
     ClaudeCLIError,
     call_claude_cli,
+    call_llm,
     model_for,
+    _choose_backend,
     _parse_inner_json,
+    _select_backend,
+    _should_use_sdk,
 )

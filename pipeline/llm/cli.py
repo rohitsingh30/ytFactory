@@ -1,27 +1,103 @@
-"""Single subprocess wrapper around the `claude` CLI for in-pipeline LLM calls.
+"""LLM client for in-pipeline authoring + critique calls.
 
-The pipeline is local-first; we don't want an Anthropic SDK dependency or
-an API key in the environment. The user already has Claude Code installed
-and authenticated, so every LLM-authored stage (rewrite, cast, per-beat
-prompts, post-render critique) shells out to `claude -p`.
+Three backends, selected by the ``YTFACTORY_LLM_BACKEND`` env var:
 
-Defaults aim for utility-call shape: fast, no tool use, no session
-persistence, structured JSON envelope, Haiku unless overridden.
+* ``cli`` (default on laptop) — shells out to the ``claude`` binary.
+  Free per call against the user's Claude Pro/Max OAuth plan. Supports
+  vision-aware calls via ``add_dirs`` + ``allowed_tools=["Read"]``.
+
+* ``azure_openai`` (default in cloud render-worker) — uses the
+  ``openai.AzureOpenAI`` SDK against the same Azure deployment that
+  serves the chat assistant. Reuses the existing
+  ``AZURE_OPENAI_*`` secrets — no separate spend.
+
+* ``anthropic_sdk`` — uses the ``anthropic`` SDK with
+  ``ANTHROPIC_API_KEY``. Pay-per-token, opens a separate billing line.
+
+The public entry point ``call_claude_cli`` keeps its name (every existing
+call site already uses it) but now dispatches on the env var. Tier
+aliases (``haiku`` / ``sonnet`` / ``opus``) are mapped to concrete model
+IDs / deployment names per backend — the call sites stay tier-agnostic.
+
+Vision-aware features (``add_dirs`` + ``allowed_tools``) are only
+implemented on the ``cli`` backend today; the SDK backends raise
+``ClaudeCLIError`` if those kwargs are passed. The cloud render-worker
+only invokes pure-text stages (rewrite, cast, per-beat prompts) so this
+limitation doesn't block production.
 """
 
 from __future__ import annotations
 
+import base64
 import json
+import logging
 import os
 import re
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 from .. import telemetry as _tlm
 
+logger = logging.getLogger(__name__)
+
 
 CLAUDE_BIN = "claude"
+
+# Re-exported so tests can monkeypatch ``llm_cli.subprocess.run`` and
+# ``llm_cli.shutil.which`` without poking at the stdlib module directly.
+import shutil  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Backend selection
+# ---------------------------------------------------------------------------
+
+BACKEND_CLI = "cli"
+BACKEND_AZURE = "azure_openai"
+BACKEND_ANTHROPIC = "anthropic_sdk"
+_VALID_BACKENDS = {BACKEND_CLI, BACKEND_AZURE, BACKEND_ANTHROPIC}
+
+
+def _shutil_which(name: str) -> str | None:
+    """Wrapper around :func:`shutil.which` so tests can mock binary discovery."""
+    return shutil.which(name)
+
+
+def _choose_backend() -> str:
+    """Decide which LLM backend to use.
+
+    Order of precedence:
+      1. ``YTFACTORY_LLM_BACKEND`` env var, if set to a valid value.
+      2. If the ``claude`` binary is on PATH → ``cli`` (laptop dev: free
+         OAuth-billed Pro/Max plan).
+      3. Else if Azure creds are set → ``azure_openai``.
+      4. Else if ``ANTHROPIC_API_KEY`` is set → ``anthropic_sdk``.
+      5. Final fallback → ``cli`` (call will fail if claude isn't on PATH,
+         but this surfaces the misconfiguration loudly).
+    """
+    explicit = (os.environ.get("YTFACTORY_LLM_BACKEND") or "").strip().lower()
+    if explicit in _VALID_BACKENDS:
+        return explicit
+    if explicit:
+        logger.warning("ignoring unknown YTFACTORY_LLM_BACKEND=%r — auto-detecting", explicit)
+
+    if _shutil_which(CLAUDE_BIN):
+        return BACKEND_CLI
+    if os.environ.get("AZURE_OPENAI_ENDPOINT") and os.environ.get("AZURE_OPENAI_API_KEY"):
+        return BACKEND_AZURE
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return BACKEND_ANTHROPIC
+    return BACKEND_CLI
+
+
+def _should_use_sdk() -> bool:
+    """True when the configured backend is one of the cloud SDKs."""
+    return _choose_backend() in (BACKEND_AZURE, BACKEND_ANTHROPIC)
+
+
+# Back-compat alias for callers / tests that reference the older name.
+_select_backend = _choose_backend
 
 # Conservative budget cap per call. Pipeline now defaults to opus
 # everywhere (see _DEFAULT_MODEL_BY_STAGE), where output tokens are
@@ -72,9 +148,86 @@ _DEFAULT_MODEL_BY_STAGE: dict[str, str] = {
 
 
 def model_for(stage: str) -> str:
-    """Return the claude CLI model alias for a pipeline stage."""
+    """Return the tier alias (haiku/sonnet/opus) for a pipeline stage."""
     env_key = f"YTFACTORY_MODEL_{stage.upper()}"
     return os.environ.get(env_key) or _DEFAULT_MODEL_BY_STAGE.get(stage, "opus")
+
+
+# ---------------------------------------------------------------------------
+# Per-backend tier → concrete-model maps
+# ---------------------------------------------------------------------------
+
+# Azure deployment names. Override per-tier via env so the same code
+# works against any Azure deployment naming scheme.
+#
+# Defaults are the conservative cost choices (gpt-4o-mini for the cheap
+# tiers, gpt-4o for opus). The live ytfactory-prod-v2 deployment ships
+# only ``gpt-5.3-chat`` (set via ``AZURE_OPENAI_MODEL``), which then
+# overrides every tier — call sites pick the tier and the env decides
+# the deployment.
+_AZURE_TIER_DEFAULTS: dict[str, str] = {
+    "haiku":  "gpt-4o-mini",
+    "sonnet": "gpt-4o-mini",
+    "opus":   "gpt-4o",
+}
+
+
+def _azure_model_for(tier: str) -> str:
+    """Resolve a tier alias (``haiku``/``sonnet``/``opus``) to an Azure
+    deployment name. Per-tier env wins over the generic env wins over
+    the built-in default.
+    """
+    env_key = f"AZURE_OPENAI_MODEL_{tier.upper()}"
+    explicit = os.environ.get(env_key)
+    if explicit:
+        return explicit
+    if (generic := os.environ.get("AZURE_OPENAI_MODEL")):
+        return generic
+    return _AZURE_TIER_DEFAULTS.get(tier, _AZURE_TIER_DEFAULTS["opus"])
+
+
+# Back-compat alias.
+_azure_deployment = _azure_model_for
+
+
+# Anthropic SDK model IDs. Override per-tier via env. Unknown tier
+# names pass through verbatim — lets call sites that already know the
+# concrete model id (e.g. ``model="claude-opus-4-7"``) keep working.
+_ANTHROPIC_TIER_DEFAULTS: dict[str, str] = {
+    "haiku":  "claude-haiku-4-5",
+    "sonnet": "claude-sonnet-4-5",
+    "opus":   "claude-opus-4-5",
+}
+
+
+def _anthropic_model_for(tier: str) -> str:
+    env_key = f"ANTHROPIC_MODEL_{tier.upper()}"
+    if (explicit := os.environ.get(env_key)):
+        return explicit
+    return _ANTHROPIC_TIER_DEFAULTS.get(tier, tier)
+
+
+# Back-compat alias for the older name from the first draft.
+_anthropic_model = _anthropic_model_for
+
+
+def _infer_stage_from_model(model: str) -> str:
+    """Best-effort fallback when a caller didn't pass ``stage=``.
+
+    Today every stage in ``_DEFAULT_MODEL_BY_STAGE`` resolves to the same
+    model so this only disambiguates when an env override changes one
+    stage's model. Worst case we tag ``"unknown"`` — strictly better than
+    the pre-fix behaviour where every llm_call event bucketed as ``"?"``.
+
+    Call sites should pass ``stage="cast"`` etc. explicitly; this helper
+    is only here so a single forgotten call site doesn't poison the
+    whole telemetry rollup.
+    """
+    matches = [s for s, m in _DEFAULT_MODEL_BY_STAGE.items()
+               if (os.environ.get(f"YTFACTORY_MODEL_{s.upper()}") or m) == model]
+    if len(matches) == 1:
+        return matches[0]
+    return "unknown"
 
 
 def call_claude_cli(
@@ -87,36 +240,110 @@ def call_claude_cli(
     model: str = "haiku",
     timeout_s: int = DEFAULT_TIMEOUT_S,
     budget_usd: float = DEFAULT_BUDGET_USD,
+    stage: str | None = None,
 ) -> str | dict:
-    """Run `claude -p <prompt>` and return either the raw text response
-    or a parsed JSON object (if ``output_json``).
+    """Call the configured LLM backend and return text or parsed JSON.
 
-    By default we run in ``--bare`` mode (no hooks, no CLAUDE.md auto-load,
-    no skills) with all tools disabled — these are pure text-in/text-out
-    utility calls. Pass ``allowed_tools=["Read", "Write"]`` if a specific
-    stage genuinely needs filesystem access (e.g. critic reading frames).
+    Backend is chosen via :func:`_select_backend` (env-driven). The
+    function name is preserved for back-compat — every existing call
+    site already uses ``call_claude_cli`` and is unaffected by the
+    backend switch.
 
     Args:
         prompt: The user message.
-        output_json: Parse the response as JSON. The CLI's outer envelope
-            (``--output-format json``) is always parsed; ``output_json``
-            controls whether the inner ``result`` field is then JSON-decoded.
-        json_schema: Optional JSON Schema passed to ``--json-schema`` for
-            structured-output validation. Only meaningful with output_json.
-        add_dirs: Directories to expose to file-aware tools. Implies tool
-            use; pair with ``allowed_tools``.
-        allowed_tools: Whitelist of built-in tool names (e.g. ["Read"]).
-            ``None`` disables all tools (default for pure text calls).
-        model: ``haiku`` (default — cheap, fast) or ``sonnet`` / ``opus``.
-        timeout_s: Subprocess timeout.
-        budget_usd: Hard cost cap.
+        output_json: Parse the response as a JSON object/array.
+        json_schema: Optional JSON Schema for structured-output
+            validation. Honoured by ``cli`` (passes ``--json-schema``)
+            and Azure (uses Responses API ``response_format=json_schema``);
+            on Anthropic SDK we fall back to ``response_format=json_object``
+            + a "respond with JSON only" hint appended to the prompt.
+        add_dirs: Filesystem dirs the model can read (vision-aware
+            calls). **Only supported by the cli backend** — passing
+            this to the SDK backends raises ``ClaudeCLIError`` because
+            the SDKs need the images explicitly inlined as content
+            parts and the call sites (anatomy_check, critic,
+            imitate_analyze) only run on the laptop today.
+        allowed_tools: Tool whitelist. Same restriction as ``add_dirs``.
+        model: Tier alias (``haiku`` / ``sonnet`` / ``opus``). Mapped
+            to a concrete model per backend (see ``_AZURE_TIER_DEFAULTS``
+            and ``_ANTHROPIC_TIER_DEFAULTS``).
+        timeout_s: Per-call timeout in seconds.
+        budget_usd: Hard cost cap (passed to the cli backend; the SDK
+            backends rely on ``max_completion_tokens``).
+        stage: Pipeline stage name recorded in telemetry.
 
     Returns:
-        ``dict`` if ``output_json`` else ``str`` — the model's response,
-        with the CLI envelope already stripped.
+        ``dict`` / ``list`` if ``output_json`` else ``str``.
 
     Raises:
-        ClaudeCLIError on non-zero exit or envelope ``is_error: true``.
+        ClaudeCLIError: on any backend failure (subprocess error, SDK
+            HTTP error, JSON parse error, schema-validation error).
+    """
+    backend = _select_backend()
+    resolved_stage = stage or _infer_stage_from_model(model)
+
+    # Vision / tool-use is currently CLI-only.
+    if backend != BACKEND_CLI and (add_dirs or allowed_tools):
+        raise ClaudeCLIError(
+            f"backend {backend!r} does not support add_dirs / allowed_tools "
+            f"(stage={resolved_stage!r}). Vision-aware stages "
+            "(anatomy_check, critic, imitate_analyze) require "
+            "YTFACTORY_LLM_BACKEND=cli."
+        )
+
+    if backend == BACKEND_AZURE:
+        return _call_azure_openai(
+            prompt,
+            output_json=output_json,
+            json_schema=json_schema,
+            model=model,
+            timeout_s=timeout_s,
+            stage=resolved_stage,
+        )
+    if backend == BACKEND_ANTHROPIC:
+        return _call_anthropic_sdk(
+            prompt,
+            output_json=output_json,
+            json_schema=json_schema,
+            model=model,
+            timeout_s=timeout_s,
+            stage=resolved_stage,
+        )
+    return _call_claude_cli_subprocess(
+        prompt,
+        output_json=output_json,
+        json_schema=json_schema,
+        add_dirs=add_dirs,
+        allowed_tools=allowed_tools,
+        model=model,
+        timeout_s=timeout_s,
+        budget_usd=budget_usd,
+        stage=resolved_stage,
+    )
+
+
+# Public alias — newer code can call ``call_llm`` instead of the
+# legacy ``call_claude_cli`` name. Both go through the same dispatcher.
+call_llm = call_claude_cli
+
+
+def _call_claude_cli_subprocess(
+    prompt: str,
+    *,
+    output_json: bool = True,
+    json_schema: dict | None = None,
+    add_dirs: list[Path] | None = None,
+    allowed_tools: list[str] | None = None,
+    model: str = "haiku",
+    timeout_s: int = DEFAULT_TIMEOUT_S,
+    budget_usd: float = DEFAULT_BUDGET_USD,
+    stage: str | None = None,
+) -> str | dict:
+    """Original ``claude``-binary subprocess implementation.
+
+    Identical to the pre-dispatcher behaviour. Kept private so the
+    public entry point can dispatch on backend without breaking the
+    existing pure-CLI test surface.
     """
     cmd: list[str] = [
         CLAUDE_BIN,
@@ -151,10 +378,12 @@ def call_claude_cli(
 
     job_id = os.environ.get("YTFACTORY_JOB_ID") or None
     tlm_meta = {
+        "backend": BACKEND_CLI,
         "model": model,
         "prompt_chars": len(prompt),
         "schema": json_schema is not None,
         "tools": list(allowed_tools or []),
+        "stage": stage or _infer_stage_from_model(model),
     }
     t0 = time.time()
     try:
@@ -280,3 +509,289 @@ def _parse_inner_json(text: str) -> dict | list:
     raise ClaudeCLIError(
         f"could not parse JSON from model output:\n{text[:1000]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Azure OpenAI backend (default in cloud render-worker)
+# ---------------------------------------------------------------------------
+
+# JSON-only nudge appended to the user prompt when ``output_json=True``
+# and we're not relying on the deployment's structured-output mode.
+_JSON_HINT = (
+    "Respond with ONLY a JSON object or array — no prose, no markdown "
+    "fences, no commentary before or after."
+)
+
+
+def _augment_prompt_for_json(prompt: str, json_schema: dict | None) -> str:
+    """Append a JSON-only instruction (and the schema, if any) to the prompt.
+
+    Both Azure and Anthropic backends use this so the model returns
+    parseable JSON even when the SDK doesn't expose strict structured-
+    output modes. The exact phrasing is what the spec tests assert on:
+    ``"matching this schema"`` when a schema is provided, ``"ONLY a JSON
+    object"`` otherwise.
+    """
+    if json_schema is None:
+        return f"{prompt}\n\n{_JSON_HINT}"
+    schema_text = json.dumps(json_schema, indent=2, sort_keys=True)
+    return (
+        f"{prompt}\n\n"
+        "Return a single JSON value matching this schema (no prose, no "
+        "markdown fences, no commentary):\n"
+        f"{schema_text}"
+    )
+
+
+def _build_azure_client(timeout_s: int) -> Any:
+    """Construct a fresh Azure OpenAI client per call.
+
+    Per-call (rather than process-cached) keeps the timeout honest —
+    each stage can specify its own — and means a credential refresh
+    just works without a process restart.
+    """
+    endpoint = (os.environ.get("AZURE_OPENAI_ENDPOINT") or "").strip()
+    api_key = (os.environ.get("AZURE_OPENAI_API_KEY") or "").strip()
+    if not endpoint or not api_key:
+        raise ClaudeCLIError(
+            "azure_openai backend selected but AZURE_OPENAI_ENDPOINT / "
+            "AZURE_OPENAI_API_KEY are not set"
+        )
+    try:
+        from openai import AzureOpenAI  # type: ignore  # noqa: PLC0415
+    except ImportError as e:
+        raise ClaudeCLIError(
+            "azure_openai backend requires the `openai` package "
+            "(pip install openai>=1.40)"
+        ) from e
+    return AzureOpenAI(
+        azure_endpoint=endpoint,
+        api_key=api_key,
+        api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
+        timeout=float(timeout_s),
+    )
+
+
+def _call_azure_openai(
+    prompt: str,
+    *,
+    output_json: bool,
+    json_schema: dict | None,
+    model: str,
+    timeout_s: int,
+    stage: str | None = None,
+) -> str | dict:
+    """Call Azure OpenAI chat-completions with our prompt → text or parsed JSON.
+
+    Args:
+        prompt: User prompt. When ``output_json=True`` it gets a
+            JSON-only suffix appended (and the schema, if supplied) so
+            the model knows to skip prose.
+        output_json: Parse the response as JSON.
+        json_schema: When set, the request uses
+            ``response_format={"type":"json_schema", ...}`` (a hard
+            structured-output mode); on a deployment that doesn't
+            support it, we retry once **without** ``response_format``
+            and parse the response client-side.
+        model: Tier alias (``haiku``/``sonnet``/``opus``) — resolved to
+            an Azure deployment name via :func:`_azure_model_for`.
+        timeout_s: Per-call timeout in seconds, passed to the SDK
+            client constructor.
+        stage: Pipeline stage tag for telemetry.
+    """
+    client = _build_azure_client(timeout_s)
+    deployment = _azure_model_for(model)
+    user_prompt = (
+        _augment_prompt_for_json(prompt, json_schema)
+        if output_json else prompt
+    )
+
+    job_id = os.environ.get("YTFACTORY_JOB_ID") or None
+    tlm_meta = {
+        "backend": BACKEND_AZURE,
+        "model": deployment,
+        "tier": model,
+        "prompt_chars": len(prompt),
+        "schema": json_schema is not None,
+        "stage": stage,
+    }
+
+    kwargs: dict[str, Any] = {
+        "model": deployment,
+        "messages": [{"role": "user", "content": user_prompt}],
+    }
+    if output_json:
+        if json_schema is not None:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": stage or "response",
+                    "schema": json_schema,
+                    "strict": False,
+                },
+            }
+        else:
+            kwargs["response_format"] = {"type": "json_object"}
+
+    t0 = time.time()
+    try:
+        resp = client.chat.completions.create(**kwargs)
+    except Exception as e:
+        # On a `response_format`-related rejection (older deployments
+        # don't support either json_schema or json_object), retry once
+        # WITHOUT response_format. Any other failure → ClaudeCLIError.
+        msg = str(e)
+        if (
+            output_json
+            and "response_format" in msg
+            and "response_format" in kwargs
+        ):
+            kwargs.pop("response_format", None)
+            try:
+                resp = client.chat.completions.create(**kwargs)
+            except Exception as e2:  # noqa: BLE001
+                _tlm.track("llm_call", category="llm", success=False,
+                           duration_ms=int((time.time() - t0) * 1000),
+                           job_id=job_id,
+                           metadata={**tlm_meta, "error": str(e2)[:200],
+                                     "retry": "no_response_format"})
+                raise ClaudeCLIError(
+                    f"azure_openai chat error (post-retry): {e2}"
+                ) from e2
+        else:
+            _tlm.track("llm_call", category="llm", success=False,
+                       duration_ms=int((time.time() - t0) * 1000),
+                       job_id=job_id,
+                       metadata={**tlm_meta, "error": msg[:200]})
+            raise ClaudeCLIError(f"azure_openai chat error: {e}") from e
+
+    text = (resp.choices[0].message.content or "").strip()
+    usage = getattr(resp, "usage", None)
+    _tlm.track(
+        "llm_call",
+        category="llm",
+        success=True,
+        duration_ms=int((time.time() - t0) * 1000),
+        job_id=job_id,
+        metadata={
+            **tlm_meta,
+            "input_tokens":  getattr(usage, "prompt_tokens", None),
+            "output_tokens": getattr(usage, "completion_tokens", None),
+        },
+    )
+
+    if not output_json:
+        return text
+    return _parse_inner_json(text)
+
+
+# ---------------------------------------------------------------------------
+# Anthropic SDK backend (alternative cloud option)
+# ---------------------------------------------------------------------------
+
+
+def _build_anthropic_client(timeout_s: int) -> Any:
+    """Construct a fresh Anthropic client per call.
+
+    The SDK auto-loads ``ANTHROPIC_API_KEY`` from env on construction
+    (and raises ``AuthenticationError`` on the first API call if it's
+    missing) — we don't pre-validate so test fakes can stub the
+    constructor without setting an env var.
+    """
+    try:
+        from anthropic import Anthropic  # type: ignore  # noqa: PLC0415
+    except ImportError as e:
+        raise ClaudeCLIError(
+            "anthropic_sdk backend requires the `anthropic` package "
+            "(pip install anthropic>=0.40)"
+        ) from e
+    return Anthropic(timeout=float(timeout_s))
+
+
+def _call_anthropic_sdk(
+    prompt: str,
+    *,
+    output_json: bool,
+    json_schema: dict | None,
+    model: str,
+    timeout_s: int,
+    stage: str | None = None,
+) -> str | dict:
+    """Call the Anthropic Messages API → return text or parsed JSON.
+
+    The SDK doesn't expose JSON-schema-strict output, so we lean on
+    prompt augmentation: ``_augment_prompt_for_json`` adds a "respond
+    only with JSON" tail (and embeds the schema when supplied), and we
+    parse client-side via :func:`_parse_inner_json`. Schema validation
+    is left to the caller (most call sites do a shape check on the
+    returned dict).
+    """
+    client = _build_anthropic_client(timeout_s)
+    model_id = _anthropic_model_for(model)
+    user_prompt = (
+        _augment_prompt_for_json(prompt, json_schema)
+        if output_json else prompt
+    )
+
+    job_id = os.environ.get("YTFACTORY_JOB_ID") or None
+    tlm_meta = {
+        "backend": BACKEND_ANTHROPIC,
+        "model": model_id,
+        "tier": model,
+        "prompt_chars": len(prompt),
+        "schema": json_schema is not None,
+        "stage": stage,
+    }
+
+    t0 = time.time()
+    try:
+        resp = client.messages.create(
+            model=model_id,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception as e:
+        _tlm.track("llm_call", category="llm", success=False,
+                   duration_ms=int((time.time() - t0) * 1000),
+                   job_id=job_id,
+                   metadata={**tlm_meta, "error": str(e)[:200]})
+        raise ClaudeCLIError(f"anthropic_sdk error: {e}") from e
+
+    parts = [
+        getattr(blk, "text", "")
+        for blk in (resp.content or [])
+        if getattr(blk, "type", "text") == "text" and getattr(blk, "text", None)
+    ]
+    text = "".join(parts).strip()
+    usage = getattr(resp, "usage", None)
+    _tlm.track(
+        "llm_call",
+        category="llm",
+        success=True,
+        duration_ms=int((time.time() - t0) * 1000),
+        job_id=job_id,
+        metadata={
+            **tlm_meta,
+            "input_tokens":  getattr(usage, "input_tokens", None),
+            "output_tokens": getattr(usage, "output_tokens", None),
+        },
+    )
+
+    if not output_json:
+        return text
+    return _parse_inner_json(text)
+
+
+# ---------------------------------------------------------------------------
+# Test-only helpers
+# ---------------------------------------------------------------------------
+
+
+def _reset_clients_for_tests() -> None:
+    """Backwards-compatible no-op.
+
+    The Azure / Anthropic clients are now built per call, so there is
+    nothing to clear. Kept callable so any older test that imported
+    this helper continues to work.
+    """
+    return None
