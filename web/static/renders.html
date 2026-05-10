@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ytFactory · console</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+    background: #020617;
+    color: #e2e8f0;
+  }
+  .stat-num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+  .header-glow {
+    background:
+      radial-gradient(circle at 10% 0%, rgba(124, 58, 237, .18) 0%, transparent 40%),
+      radial-gradient(circle at 90% 0%, rgba(14, 165, 233, .14) 0%, transparent 40%),
+      rgba(2, 6, 23, .85);
+    backdrop-filter: blur(12px);
+  }
+
+  .tile {
+    background: linear-gradient(180deg, rgba(15, 23, 42, .9), rgba(2, 6, 23, .9));
+    border: 1px solid rgba(51, 65, 85, .6);
+    transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
+  }
+  .tile:hover { border-color: rgba(148, 163, 184, .35); }
+
+  .channel-card { transition: all .18s ease; }
+  .channel-card:hover {
+    transform: translateY(-1px);
+    border-color: rgba(148, 163, 184, .4);
+    box-shadow: 0 10px 24px -8px rgba(0,0,0,.6);
+  }
+
+  .pulse-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 9999px;
+    background: #34d399;
+    box-shadow: 0 0 0 0 rgba(52, 211, 153, .55);
+    animation: pulse 1.8s ease-out infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(52, 211, 153, .55); }
+    70%  { box-shadow: 0 0 0 9px rgba(52, 211, 153, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+  }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 9999px;
+    font-size: 10px; font-weight: 600; letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .badge-running { background: #1e3a8a; color: #93c5fd; }
+  .badge-done    { background: #064e3b; color: #6ee7b7; }
+  .badge-failed  { background: #7f1d1d; color: #fca5a5; }
+  .badge-other   { background: #422006; color: #fcd34d; }
+  .badge-info    { background: #312e81; color: #c4b5fd; }
+  .health-dot {
+    width: 7px; height: 7px; border-radius: 9999px; display: inline-block;
+  }
+  .health-up   { background: #34d399; box-shadow: 0 0 8px rgba(52,211,153,.6); }
+  .health-down { background: #ef4444; box-shadow: 0 0 8px rgba(239,68,68,.6); }
+  .health-unk  { background: #64748b; }
+
+  pre.log {
+    background: #0b1120; color: #cbd5e1; font-size: 11px;
+    padding: 10px; border-radius: 6px; max-height: 280px;
+    overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  video { background: #000; border-radius: 8px; }
+
+  /* Stage strip — 4 dots + connecting bar that fill as a render progresses. */
+  .stage-strip {
+    display: flex; align-items: center; gap: 6px;
+    margin-top: 8px;
+    font-size: 10px; color: #64748b;
+  }
+  .stage-dot {
+    width: 18px; height: 18px; border-radius: 9999px;
+    border: 1px solid #334155; background: #0f172a;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 700; color: #475569;
+    flex-shrink: 0;
+    transition: all .25s ease;
+  }
+  .stage-dot.done {
+    background: #064e3b; border-color: #10b981; color: #6ee7b7;
+  }
+  .stage-dot.active {
+    background: #1e3a8a; border-color: #3b82f6; color: #bfdbfe;
+    box-shadow: 0 0 0 0 rgba(59,130,246,.55);
+    animation: pulse-blue 1.6s ease-out infinite;
+  }
+  @keyframes pulse-blue {
+    0%   { box-shadow: 0 0 0 0 rgba(59,130,246,.55); }
+    70%  { box-shadow: 0 0 0 7px rgba(59,130,246,0); }
+    100% { box-shadow: 0 0 0 0 rgba(59,130,246,0); }
+  }
+  .stage-bar {
+    flex: 1; height: 3px; background: #1e293b; border-radius: 2px;
+    overflow: hidden; min-width: 6px;
+  }
+  .stage-bar-fill {
+    height: 100%; background: linear-gradient(90deg, #10b981, #3b82f6);
+    transition: width .5s ease;
+  }
+  .stage-label {
+    margin-left: 6px; color: #94a3b8;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .btn {
+    display: inline-block; padding: 6px 14px; border-radius: 6px;
+    font-size: 13px; font-weight: 500;
+    background: rgba(30,41,59,.7); color: #e2e8f0;
+    border: 1px solid #334155;
+    cursor: pointer; transition: background .12s ease, border-color .12s ease;
+  }
+  .btn:hover:not(:disabled) { background: rgba(51,65,85,.8); border-color: #475569; }
+  .btn:disabled { opacity: .35; cursor: not-allowed; }
+  .btn-primary {
+    background: linear-gradient(180deg, #2563eb, #1d4ed8);
+    border-color: transparent; color: #f8fafc;
+    font-weight: 600;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: linear-gradient(180deg, #3b82f6, #2563eb);
+  }
+  .btn-danger {
+    background: rgba(127,29,29,.5); border-color: rgba(220,38,38,.4);
+    color: #fee2e2;
+  }
+
+  /* channel accent rings */
+  .accent-rose    { box-shadow: inset 0 0 0 1px rgba(244,63,94,.3); }
+  .accent-amber   { box-shadow: inset 0 0 0 1px rgba(245,158,11,.3); }
+  .accent-emerald { box-shadow: inset 0 0 0 1px rgba(16,185,129,.3); }
+  .accent-sky     { box-shadow: inset 0 0 0 1px rgba(14,165,233,.3); }
+  .accent-violet  { box-shadow: inset 0 0 0 1px rgba(139,92,246,.3); }
+  .accent-fuchsia { box-shadow: inset 0 0 0 1px rgba(217,70,239,.3); }
+  .accent-orange  { box-shadow: inset 0 0 0 1px rgba(249,115,22,.3); }
+  .accent-cyan    { box-shadow: inset 0 0 0 1px rgba(6,182,212,.3); }
+</style>
+</head>
+<body>
+
+<!-- ============ HEADER ============ -->
+<header class="header-glow border-b border-slate-800">
+  <div class="max-w-7xl mx-auto px-6 py-5 flex items-center justify-between gap-6">
+    <div class="flex items-center gap-3">
+      <div class="text-2xl">🎬</div>
+      <div>
+        <h1 class="text-xl font-semibold text-white tracking-tight">ytFactory · console</h1>
+        <p class="text-xs text-slate-400 -mt-0.5">render · preview · critique · publish</p>
+      </div>
+    </div>
+    <nav class="flex items-center gap-6 text-sm">
+      <a href="/renders" class="text-white font-medium">console</a>
+      <a href="/dashboard" class="text-slate-400 hover:text-white transition">analytics</a>
+      <a href="/" class="text-slate-400 hover:text-white transition">make a short</a>
+      <span id="last-refresh" class="text-xs text-slate-500 hidden sm:inline">—</span>
+    </nav>
+  </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-6 py-8 space-y-8">
+
+  <!-- ============ STATUS STRIP ============ -->
+  <section class="grid grid-cols-2 md:grid-cols-4 gap-3">
+    <div class="tile rounded-xl px-5 py-4">
+      <div class="text-[11px] text-slate-500 uppercase tracking-wide mb-1">Cloud Run health</div>
+      <div id="health-row" class="flex items-center gap-3 mt-1 text-xs"></div>
+    </div>
+    <div class="tile rounded-xl px-5 py-4">
+      <div class="text-[11px] text-slate-500 uppercase tracking-wide mb-1">In flight</div>
+      <div class="flex items-end gap-2">
+        <div class="text-3xl font-semibold stat-num text-white" id="kpi-inflight">0</div>
+        <div class="text-xs text-slate-500 mb-1.5">renders</div>
+      </div>
+    </div>
+    <div class="tile rounded-xl px-5 py-4">
+      <div class="text-[11px] text-slate-500 uppercase tracking-wide mb-1">Queue depth</div>
+      <div class="flex items-end gap-2">
+        <div class="text-3xl font-semibold stat-num text-white" id="kpi-queue">0</div>
+        <div class="text-xs text-slate-500 mb-1.5">rendered, unpublished</div>
+      </div>
+    </div>
+    <div class="tile rounded-xl px-5 py-4">
+      <div class="text-[11px] text-slate-500 uppercase tracking-wide mb-1">Total uploaded</div>
+      <div class="flex items-end gap-2">
+        <div class="text-3xl font-semibold stat-num text-white" id="kpi-uploaded">0</div>
+        <div class="text-xs text-slate-500 mb-1.5"><span id="kpi-channels">0</span> channels live</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CHANNELS ============ -->
+  <section>
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-semibold text-white">Channels</h2>
+      <span class="text-xs text-slate-500">click to render · drain · view</span>
+    </div>
+    <div id="channel-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3"></div>
+  </section>
+
+  <!-- ============ RECENT RENDERS ============ -->
+  <section>
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-semibold text-white">Recent renders</h2>
+      <span id="recent-summary" class="text-xs text-slate-500">—</span>
+    </div>
+    <div id="render-list" class="space-y-3"></div>
+    <div id="empty-renders" class="hidden tile rounded-xl py-14 text-center text-slate-500">
+      <p class="text-sm">No renders yet on this server instance.</p>
+      <p class="text-xs mt-2">Trigger one via a <code class="bg-slate-800 px-1.5 py-0.5 rounded">/make-*</code> skill or click <b>Render</b> on a channel above.</p>
+    </div>
+  </section>
+
+</main>
+
+<!-- ============ TOAST ============ -->
+<div id="toast" class="fixed bottom-6 right-6 hidden tile rounded-lg px-5 py-3 text-sm shadow-2xl"></div>
+
+<script>
+const REFRESH_MS = 5000;
+
+// ----- channel display config -----
+const CHANNEL_CONFIG = {
+  mystoriesanimated:   { label: "MyStoriesAnimated",    accent: "rose",    emoji: "📖", desc: "Reddit / TIFU / Wiki / TIH" },
+  cosmosdecoded:       { label: "Cosmos Decoded",       accent: "sky",     emoji: "🌌", desc: "Physics & space" },
+  historyrecapped:     { label: "History Recapped",     accent: "amber",   emoji: "🏛️", desc: "Archival war history + sleep" },
+  hindutavaanimated:   { label: "HindutavaAnimated",    accent: "orange",  emoji: "🕉️", desc: "Hindi mythology" },
+  sportsrecapped:      { label: "SportsRecapped",       accent: "emerald", emoji: "⚽", desc: "Football explainers + docs" },
+  scrollpulse:         { label: "ScrollPulse",          accent: "fuchsia", emoji: "📰", desc: "Reddit/X split-screen + AI Recap" },
+  rhymetimejunction:   { label: "Rhyme Time Junction",  accent: "violet",  emoji: "🎵", desc: "Bilingual nursery rhymes" },
+};
+
+// ----- helpers -----
+function escapeHtml(s) {
+  if (s == null) return "";
+  return s.toString()
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+function fmtElapsed(s) {
+  if (s == null) return "—";
+  if (s < 60) return s.toFixed(0) + "s";
+  const m = Math.floor(s / 60), r = Math.floor(s % 60);
+  if (m < 60) return `${m}m ${r.toString().padStart(2, "0")}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${(m % 60).toString().padStart(2, "0")}m`;
+}
+function ago(iso) {
+  if (!iso) return "—";
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return "—";
+  const sec = (Date.now() - t) / 1000;
+  return fmtElapsed(sec) + " ago";
+}
+function badgeClass(state) {
+  if (state === "running") return "badge-running";
+  if (state === "done") return "badge-done";
+  if (state === "failed") return "badge-failed";
+  if (state === "queued") return "badge-info";
+  return "badge-other";
+}
+function showToast(msg, ms = 3500) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.classList.remove("hidden");
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.add("hidden"), ms);
+}
+
+// ----- data fetchers -----
+async function fetchOverview() {
+  try {
+    const r = await fetch("/api/overview");
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+async function fetchScriptJobDetail(id) {
+  try {
+    const r = await fetch(`/api/jobs/from_script/${id}?log_tail_kb=12`);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+// ----- renderers -----
+function renderHealth(services) {
+  const row = document.getElementById("health-row");
+  row.innerHTML = services.map((s) => {
+    const cls = s.configured ? "health-up" : "health-unk";
+    return `
+      <div class="flex items-center gap-1.5" title="${escapeHtml(s.url || "URL not set")}">
+        <span class="health-dot ${cls}"></span>
+        <span class="text-slate-300">${escapeHtml(s.label)}</span>
+      </div>`;
+  }).join("");
+}
+
+function renderKPIs(d) {
+  document.getElementById("kpi-inflight").textContent = d.in_flight ?? 0;
+  document.getElementById("kpi-queue").textContent = d.totals?.queue_depth ?? 0;
+  document.getElementById("kpi-uploaded").textContent = d.totals?.uploaded ?? 0;
+  document.getElementById("kpi-channels").textContent = d.totals?.channels_count ?? 0;
+}
+
+function renderChannels(channels) {
+  const grid = document.getElementById("channel-grid");
+  grid.innerHTML = channels.map((c) => {
+    const cfg = CHANNEL_CONFIG[c.channel] || { label: c.channel, accent: "sky", emoji: "📺", desc: "" };
+    if (!c.exists) return "";
+    return `
+      <div class="channel-card tile accent-${cfg.accent} rounded-xl p-5">
+        <div class="flex items-start justify-between mb-3">
+          <div>
+            <div class="text-2xl mb-1">${cfg.emoji}</div>
+            <h3 class="text-sm font-semibold text-white">${escapeHtml(cfg.label)}</h3>
+            <p class="text-[11px] text-slate-500">${escapeHtml(cfg.desc)}</p>
+          </div>
+          ${c.cron_drain_supported ? `<span class="badge badge-info" title="cron-drainable">cron</span>` : ""}
+        </div>
+        <div class="grid grid-cols-3 gap-2 mb-4 text-center">
+          <div>
+            <div class="text-lg font-semibold stat-num text-white">${c.uploaded_count}</div>
+            <div class="text-[10px] text-slate-500 uppercase">uploaded</div>
+          </div>
+          <div>
+            <div class="text-lg font-semibold stat-num text-white">${c.rendered_count}</div>
+            <div class="text-[10px] text-slate-500 uppercase">rendered</div>
+          </div>
+          <div>
+            <div class="text-lg font-semibold stat-num ${c.queue_depth > 0 ? 'text-amber-400' : 'text-white'}">${c.queue_depth}</div>
+            <div class="text-[10px] text-slate-500 uppercase">queue</div>
+          </div>
+        </div>
+        <div class="flex flex-col gap-1.5 text-[11px] text-slate-400 mb-3">
+          <div>last upload: ${escapeHtml(ago(c.last_upload_iso))}</div>
+        </div>
+        <div class="flex gap-2">
+          ${c.cron_drain_supported ? `<button class="btn flex-1 text-xs" onclick="drainChannel('${c.channel}')">drain&nbsp;next</button>` : ""}
+          <button class="btn ${c.cron_drain_supported ? "" : "flex-1"} text-xs" onclick="copyMakeCmd('${c.channel}')" title="Copy /make-* skill name">how&nbsp;to&nbsp;render</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderStageStrip(j) {
+  // Hide the strip altogether for terminal jobs that wouldn't add info.
+  if (j.state === "done" && !j.progress) return "";
+  const p = j.progress || { phase_index: 0, phase_total: 4, percent: 0, text: "" };
+  const idx = p.phase_index || 0;
+  const total = p.phase_total || 4;
+  const pct = Math.max(0, Math.min(100, p.percent ?? 0));
+  // Render N dots with bars between them.
+  const labels = ["TTS", "Beats", "Images", "Compose"];
+  let dots = "";
+  for (let i = 1; i <= total; i++) {
+    let cls = "stage-dot";
+    if (j.state === "failed" && i === Math.max(idx, 1)) cls += " done"; // freeze at failed phase
+    else if (j.state === "done" || j.state === "done_no_mp4_found" || i < idx) cls += " done";
+    else if (i === idx && j.state === "running") cls += " active";
+    dots += `<span class="${cls}" title="${escapeHtml(labels[i-1] || "")}">${i}</span>`;
+    if (i < total) dots += `<span class="stage-bar"><span class="stage-bar-fill" style="width:${i < idx ? 100 : (i === idx ? Math.min(100, pct) : 0)}%"></span></span>`;
+  }
+  const text = j.state === "running"
+    ? (p.text || "Running…")
+    : (j.state === "failed" ? `Failed at ${p.phase_label || "?"}` : "");
+  return `
+    <div class="stage-strip">
+      ${dots}
+      <span class="stage-label">${escapeHtml(text)}</span>
+    </div>`;
+}
+
+function renderRecent(list) {
+  const empty = document.getElementById("empty-renders");
+  const wrap = document.getElementById("render-list");
+  if (!list || list.length === 0) {
+    empty.classList.remove("hidden");
+    wrap.innerHTML = "";
+    document.getElementById("recent-summary").textContent = "no renders yet";
+    return;
+  }
+  empty.classList.add("hidden");
+  document.getElementById("recent-summary").textContent =
+    `${list.length} recent · ${list.filter(r => r.state === "running").length} live`;
+  wrap.innerHTML = list.map((j) => {
+    const elapsed = j.completed_at
+      ? fmtElapsed(j.completed_at - j.started_at)
+      : fmtElapsed(Date.now() / 1000 - j.started_at);
+    const mp4Url = j.mp4_path ? `/api/jobs/from_script/${j.job_id}/mp4` : null;
+    const failed = j.state === "failed";
+    const showStrip = j.state === "running" || j.state === "failed";
+    return `
+      <div class="tile rounded-xl p-4" data-job="${j.job_id}">
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-3 mb-1.5 flex-wrap">
+              <span class="badge ${badgeClass(j.state)}">${j.state || "?"}</span>
+              ${j.state === "running" ? '<span class="pulse-dot"></span>' : ""}
+              <span class="text-[11px] text-slate-500 font-mono">${j.job_id}</span>
+              <span class="text-[11px] text-slate-500">${elapsed}</span>
+            </div>
+            <h3 class="text-sm font-medium text-slate-200 truncate">${escapeHtml(j.label || "(unlabeled)")}</h3>
+            ${failed && j.error ? `<p class="text-xs text-rose-400 mt-1">${escapeHtml(j.error)}</p>` : ""}
+            ${j.mp4_path ? `<p class="text-[11px] text-slate-500 mt-1 font-mono truncate">${escapeHtml(j.mp4_path)}</p>` : ""}
+            ${showStrip ? renderStageStrip(j) : ""}
+          </div>
+          <div class="flex flex-col gap-2 shrink-0">
+            <button class="btn text-xs" onclick="toggleDetails('${j.job_id}')">log</button>
+            ${mp4Url ? `<button class="btn text-xs" onclick="togglePlayer('${j.job_id}')">▶ preview</button>` : ""}
+            ${j.mp4_path ? `<button class="btn text-xs" onclick="kickCritique('${j.job_id}')" id="crit-btn-${j.job_id}">critique</button>` : ""}
+            ${j.mp4_path ? `<button class="btn btn-primary text-xs" onclick="kickPublish('${j.job_id}')" id="pub-btn-${j.job_id}">publish</button>` : ""}
+            ${failed ? `<button class="btn btn-danger text-xs" onclick="showToast('Re-render via the originating /make-* skill — they kick the renderer through this same endpoint.')">retry</button>` : ""}
+          </div>
+        </div>
+        <div id="player-${j.job_id}" class="hidden mt-3">
+          ${mp4Url ? `<video controls class="w-full max-w-xs" src="${mp4Url}"></video>` : ""}
+        </div>
+        <div id="details-${j.job_id}" class="hidden mt-3">
+          <pre class="log" id="log-${j.job_id}">loading…</pre>
+        </div>
+        <div id="critique-${j.job_id}" class="hidden mt-3 border-t border-slate-800 pt-3"></div>
+        <div id="publish-${j.job_id}" class="hidden mt-3 border-t border-slate-800 pt-3"></div>
+      </div>
+    `;
+  }).join("");
+}
+
+// ----- actions -----
+async function toggleDetails(id) {
+  const el = document.getElementById(`details-${id}`);
+  if (el.classList.contains("hidden")) {
+    el.classList.remove("hidden");
+    const d = await fetchScriptJobDetail(id);
+    document.getElementById(`log-${id}`).textContent = d?.log_tail || "(no log yet)";
+  } else {
+    el.classList.add("hidden");
+  }
+}
+function togglePlayer(id) {
+  document.getElementById(`player-${id}`).classList.toggle("hidden");
+}
+function copyMakeCmd(channel) {
+  const skillByChan = {
+    mystoriesanimated:   "/make-mystories-short",
+    cosmosdecoded:       "/make-cosmos-short",
+    historyrecapped:     "/make-history-short",
+    hindutavaanimated:   "/make-hindutava-short",
+    sportsrecapped:      "/make-football-explainer (or /make-sports-doc, /make-last5)",
+    scrollpulse:         "/make-reddit-thread",
+    rhymetimejunction:   "/make-rhyme",
+  };
+  showToast(`Run: ${skillByChan[channel] || channel}`, 5000);
+}
+async function drainChannel(channel) {
+  if (!confirm(`Drain one upload from ${channel}? (uploads next in queue, sets publish_at to ~20 min out)`)) return;
+  showToast(`Draining ${channel}…`);
+  try {
+    const r = await fetch("/api/cron/drain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel, count: 1 }),
+    });
+    const j = await r.json();
+    if (r.ok) {
+      showToast(`Drain started: ${j.cron_id}. Refreshing…`, 4000);
+    } else {
+      showToast(`Drain failed: ${j.detail || r.status}`, 5000);
+    }
+  } catch (e) {
+    showToast(`Drain error: ${e}`, 5000);
+  }
+}
+
+// ----- critique (unchanged from P2) -----
+async function kickCritique(jobId) {
+  const btn = document.getElementById(`crit-btn-${jobId}`);
+  if (btn) { btn.disabled = true; btn.textContent = "critiquing…"; }
+  const panel = document.getElementById(`critique-${jobId}`);
+  panel.classList.remove("hidden");
+  panel.innerHTML = `<p class="text-sm text-slate-400">submitting critique…</p>`;
+  try {
+    const r = await fetch("/api/critique", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: jobId, mode: "video" }),
+    });
+    if (!r.ok) {
+      panel.innerHTML = `<p class="text-sm text-rose-400">critique failed: ${escapeHtml(await r.text())}</p>`;
+      if (btn) { btn.disabled = false; btn.textContent = "critique"; }
+      return;
+    }
+    const j = await r.json();
+    panel.innerHTML = `<p class="text-sm text-slate-400">running… (${j.critique_id}). vision-quality model is ~30-90s.</p>`;
+    pollCritique(jobId, j.critique_id);
+  } catch (e) {
+    panel.innerHTML = `<p class="text-sm text-rose-400">critique error: ${escapeHtml(e.toString())}</p>`;
+    if (btn) { btn.disabled = false; btn.textContent = "critique"; }
+  }
+}
+async function pollCritique(jobId, cid) {
+  for (let i = 0; i < 240; i++) {
+    await new Promise(r => setTimeout(r, 5000));
+    let rec;
+    try { const r = await fetch(`/api/critique/${cid}`); if (!r.ok) continue; rec = await r.json(); } catch { continue; }
+    if (rec.state === "done") { renderCritique(jobId, rec); return; }
+    if (rec.state === "failed") {
+      const panel = document.getElementById(`critique-${jobId}`);
+      panel.innerHTML = `<p class="text-sm text-rose-400">critique failed: ${escapeHtml(rec.error || "")}</p>`;
+      const btn = document.getElementById(`crit-btn-${jobId}`);
+      if (btn) { btn.disabled = false; btn.textContent = "critique (retry)"; }
+      return;
+    }
+  }
+}
+function renderCritique(jobId, rec) {
+  const panel = document.getElementById(`critique-${jobId}`);
+  const v = rec.verdict || {};
+  const score = v.score ?? rec.score;
+  const sysFixes = v.system_corrections || [];
+  const oneOffs = v.specific_fixes || v.one_off_fixes || [];
+  panel.innerHTML = `
+    <div class="flex items-center gap-3 mb-2">
+      <span class="badge badge-${score && score >= 7 ? "done" : score && score >= 5 ? "other" : "failed"}">score ${score ?? "?"}</span>
+      <span class="text-xs text-slate-500">${rec.elapsed_s}s</span>
+    </div>
+    <p class="text-sm text-slate-200 mb-3">${escapeHtml(v.one_line_take || "(no summary)")}</p>
+    ${sysFixes.length ? `<details class="mb-2"><summary class="text-xs text-amber-400 cursor-pointer">${sysFixes.length} class-of-bug fixes</summary><ul class="text-xs text-slate-300 mt-2 space-y-1 pl-4 list-disc">${sysFixes.map(f => `<li><b>${escapeHtml(f.issue_class || "?")}</b>: ${escapeHtml(f.fix || "?")}</li>`).join("")}</ul></details>` : ""}
+    ${oneOffs.length ? `<details><summary class="text-xs text-slate-400 cursor-pointer">${oneOffs.length} one-off notes</summary><ul class="text-xs text-slate-400 mt-2 space-y-1 pl-4 list-disc">${oneOffs.map(f => `<li>${escapeHtml(typeof f === "string" ? f : (f.fix || JSON.stringify(f)))}</li>`).join("")}</ul></details>` : ""}
+  `;
+  const btn = document.getElementById(`crit-btn-${jobId}`);
+  if (btn) { btn.disabled = false; btn.textContent = "critique"; }
+}
+
+// ----- publish (unchanged from P3) -----
+async function kickPublish(jobId) {
+  if (!confirm("Publish to YouTube? (privacy from channel YAML default)")) return;
+  const btn = document.getElementById(`pub-btn-${jobId}`);
+  if (btn) { btn.disabled = true; btn.textContent = "publishing…"; }
+  const panel = document.getElementById(`publish-${jobId}`);
+  panel.classList.remove("hidden");
+  panel.innerHTML = `<p class="text-sm text-slate-400">submitting upload…</p>`;
+  try {
+    const r = await fetch("/api/uploads/from_job", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: jobId }),
+    });
+    if (!r.ok) {
+      panel.innerHTML = `<p class="text-sm text-rose-400">publish error: ${escapeHtml(await r.text())}</p>`;
+      if (btn) { btn.disabled = false; btn.textContent = "publish"; }
+      return;
+    }
+    const j = await r.json();
+    panel.innerHTML = `<p class="text-sm text-slate-400">uploading… (${j.upload_id}). YouTube takes 30-90s.</p>`;
+    pollUpload(jobId, j.upload_id);
+  } catch (e) {
+    panel.innerHTML = `<p class="text-sm text-rose-400">publish error: ${escapeHtml(e.toString())}</p>`;
+    if (btn) { btn.disabled = false; btn.textContent = "publish"; }
+  }
+}
+async function pollUpload(jobId, uid) {
+  for (let i = 0; i < 120; i++) {
+    await new Promise(r => setTimeout(r, 5000));
+    let rec;
+    try { const r = await fetch(`/api/uploads/from_job/${uid}`); if (!r.ok) continue; rec = await r.json(); } catch { continue; }
+    if (rec.state === "done") { renderPublishDone(jobId, rec); return; }
+    if (rec.state === "failed" || rec.state === "quota_exhausted") {
+      renderPublishFailed(jobId, rec, rec.state === "quota_exhausted"); return;
+    }
+  }
+}
+function renderPublishDone(jobId, rec) {
+  document.getElementById(`publish-${jobId}`).innerHTML = `
+    <div class="flex items-center gap-3">
+      <span class="badge badge-done">published</span>
+      <a href="${escapeHtml(rec.video_url)}" target="_blank" class="text-sm text-sky-400 hover:underline">${escapeHtml(rec.video_url)}</a>
+    </div>`;
+  const btn = document.getElementById(`pub-btn-${jobId}`);
+  if (btn) { btn.disabled = true; btn.textContent = "published"; }
+}
+function renderPublishFailed(jobId, rec, quota) {
+  document.getElementById(`publish-${jobId}`).innerHTML = `
+    <div class="flex items-center gap-3 mb-2">
+      <span class="badge ${quota ? "badge-other" : "badge-failed"}">${quota ? "quota exhausted" : "failed"}</span>
+    </div>
+    <p class="text-sm text-slate-200 mb-2">${escapeHtml(rec.error || "(no error)")}</p>
+    ${rec.playwright_fallback_hint ? `<pre class="log">${escapeHtml(rec.playwright_fallback_hint)}</pre>` : ""}`;
+  const btn = document.getElementById(`pub-btn-${jobId}`);
+  if (btn) { btn.disabled = false; btn.textContent = "retry publish"; }
+}
+
+// ----- main loop -----
+// Use a faster cadence while anything is in-flight so the stage strip
+// updates fluidly (per-image events fire ~every 2-4s on cloudrun_flux2).
+// Idle cadence stays at 5s to keep dashboard load light.
+const REFRESH_FAST_MS = 1500;
+const REFRESH_IDLE_MS = REFRESH_MS;
+let _refreshTimer = null;
+async function refresh() {
+  const d = await fetchOverview();
+  if (!d) {
+    document.getElementById("last-refresh").textContent = "fetch failed (server down?)";
+    scheduleRefresh(REFRESH_IDLE_MS);
+    return;
+  }
+  renderHealth(d.services || []);
+  renderKPIs(d);
+  renderChannels(d.channels || []);
+  renderRecent(d.recent_renders || []);
+  document.getElementById("last-refresh").textContent =
+    "refreshed " + new Date().toLocaleTimeString();
+
+  // Keep open log panes fresh
+  for (const j of (d.recent_renders || [])) {
+    const dPane = document.getElementById(`details-${j.job_id}`);
+    if (dPane && !dPane.classList.contains("hidden")) {
+      const detail = await fetchScriptJobDetail(j.job_id);
+      const pre = document.getElementById(`log-${j.job_id}`);
+      if (pre && detail?.log_tail) pre.textContent = detail.log_tail;
+    }
+  }
+  const inflight = (d.recent_renders || []).some(r => r.state === "running")
+    || (d.in_flight ?? 0) > 0;
+  scheduleRefresh(inflight ? REFRESH_FAST_MS : REFRESH_IDLE_MS);
+}
+function scheduleRefresh(ms) {
+  if (_refreshTimer) clearTimeout(_refreshTimer);
+  _refreshTimer = setTimeout(refresh, ms);
+}
+refresh();
+</script>
+</body>
+</html>

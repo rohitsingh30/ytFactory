@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ytFactory · Admin · Access requests</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
+  <header class="border-b border-slate-800 px-6 py-4 flex items-center justify-between">
+    <div>
+      <h1 class="text-lg font-semibold tracking-tight">Access requests</h1>
+      <p class="text-xs text-slate-500" id="me"></p>
+    </div>
+    <nav class="text-xs text-slate-400 flex gap-4">
+      <a href="/" class="hover:text-slate-200">Home</a>
+      <a href="/renders" class="hover:text-slate-200">Renders</a>
+      <form action="/api/auth/logout" method="post">
+        <button class="hover:text-slate-200">Sign out</button>
+      </form>
+    </nav>
+  </header>
+
+  <main class="max-w-5xl mx-auto p-6">
+    <section class="mb-10">
+      <h2 class="text-sm font-medium text-slate-300 mb-3">Pending</h2>
+      <div id="pending" class="rounded-lg border border-slate-800 overflow-hidden">
+        <div class="p-6 text-sm text-slate-500">loading…</div>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="text-sm font-medium text-slate-300 mb-3">All users</h2>
+      <div id="users" class="rounded-lg border border-slate-800 overflow-hidden">
+        <div class="p-6 text-sm text-slate-500">loading…</div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    async function loadMe() {
+      const r = await fetch('/api/auth/whoami', { cache: 'no-store' });
+      const j = await r.json();
+      document.getElementById('me').textContent =
+        j.email + (j.is_admin ? ' · admin' : '');
+    }
+
+    function row(u, opts = {}) {
+      const dt = u.requested_at ? new Date(u.requested_at).toLocaleString() : '—';
+      const status = u.status || 'unknown';
+      const badge = ({
+        approved: 'bg-emerald-500/20 text-emerald-300',
+        pending:  'bg-amber-500/20 text-amber-300',
+        denied:   'bg-rose-500/20 text-rose-300',
+      })[status] || 'bg-slate-700 text-slate-300';
+      const actions = opts.actions ? `
+        <div class="flex gap-2 justify-end">
+          <button data-act="approve" data-email="${u.email}"
+                  class="px-2.5 py-1 text-xs rounded
+                         bg-emerald-600 hover:bg-emerald-500">Approve</button>
+          <button data-act="deny" data-email="${u.email}"
+                  class="px-2.5 py-1 text-xs rounded
+                         bg-rose-600 hover:bg-rose-500">Deny</button>
+        </div>` : '';
+      return `<tr class="border-t border-slate-800">
+        <td class="px-4 py-3 text-sm">${u.email}${u.is_admin ? ' <span class="text-xs text-violet-400">(admin)</span>' : ''}</td>
+        <td class="px-4 py-3 text-xs text-slate-400">${u.name || '—'}</td>
+        <td class="px-4 py-3 text-xs"><span class="px-2 py-0.5 rounded ${badge}">${status}</span></td>
+        <td class="px-4 py-3 text-xs text-slate-400">${dt}</td>
+        <td class="px-4 py-3 text-right">${actions}</td>
+      </tr>`;
+    }
+
+    function table(rows, withActions) {
+      if (!rows.length) {
+        return `<div class="p-6 text-sm text-slate-500">none</div>`;
+      }
+      return `<table class="w-full text-left">
+        <thead class="bg-slate-900/40">
+          <tr class="text-xs text-slate-400">
+            <th class="px-4 py-2 font-medium">Email</th>
+            <th class="px-4 py-2 font-medium">Name</th>
+            <th class="px-4 py-2 font-medium">Status</th>
+            <th class="px-4 py-2 font-medium">Requested</th>
+            <th class="px-4 py-2"></th>
+          </tr>
+        </thead>
+        <tbody>${rows.map((r) => row(r, { actions: withActions })).join('')}</tbody>
+      </table>`;
+    }
+
+    async function refresh() {
+      const [pending, users] = await Promise.all([
+        fetch('/api/admin/requests').then((r) => r.json()),
+        fetch('/api/admin/users').then((r) => r.json()),
+      ]);
+      document.getElementById('pending').innerHTML = table(pending.pending || [], true);
+      document.getElementById('users').innerHTML = table(users.users || [], false);
+    }
+
+    document.addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('button[data-act]');
+      if (!btn) return;
+      const email = btn.dataset.email;
+      const act = btn.dataset.act;
+      btn.disabled = true;
+      btn.textContent = act === 'approve' ? 'approving…' : 'denying…';
+      try {
+        const r = await fetch(`/api/admin/requests/${encodeURIComponent(email)}/${act}`, { method: 'POST' });
+        if (!r.ok) throw new Error(await r.text());
+        await refresh();
+      } catch (e) {
+        alert('failed: ' + e.message);
+      }
+    });
+
+    loadMe();
+    refresh();
+    setInterval(refresh, 30_000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,3251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ytFactory — make a Short</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif; }
+  .stage-card { transition: all .25s ease; }
+  .stage-card.active { box-shadow: 0 0 0 2px rgba(99,102,241,.4); }
+  .pulse-dot { animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  .scene-card { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .niche-card.selected { outline: 3px solid white; outline-offset: 2px; }
+  .voice-card.selected { background: linear-gradient(to bottom right, rgb(99 102 241 / .25), rgb(168 85 247 / .25)); border-color: rgb(168 85 247); }
+  audio { width: 100%; }
+  .seed-card.active { box-shadow: 0 0 0 2px rgba(168,85,247,.55); }
+  .seed-card.done   { border-color: rgba(16,185,129,.45); background: rgba(16,185,129,.06); }
+  .seed-card.error  { border-color: rgba(244,63,94,.6); background: rgba(244,63,94,.08); }
+  .chip { display:inline-block; padding:2px 8px; border-radius:9999px; background:rgb(30 41 59); font-size:11px; color:rgb(203 213 225); margin:2px; }
+
+  /* --- right-docked AI chat panel --- */
+  #chat-panel {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 380px;
+    background: rgb(15 23 42 / .98); border-left: 1px solid rgb(30 41 59);
+    display: flex; flex-direction: column; z-index: 30;
+    transition: transform .25s ease;
+  }
+  #chat-panel.collapsed { transform: translateX(360px); }
+  #chat-panel-toggle {
+    position: absolute; top: 50%; left: -28px; transform: translateY(-50%);
+    width: 28px; height: 56px;
+    background: rgb(30 41 59); border-right: 0;
+    border: 1px solid rgb(51 65 85); border-radius: 8px 0 0 8px;
+    color: rgb(203 213 225); cursor: pointer;
+    display: grid; place-items: center; font-size: 14px;
+  }
+  #chat-panel-toggle:hover { background: rgb(51 65 85); }
+  #chat-log { flex: 1; overflow-y: auto; padding: 12px; }
+  #chat-log .msg { margin-bottom: 10px; display: flex; }
+  #chat-log .msg .bubble { padding: 8px 12px; border-radius: 12px; max-width: 88%;
+    line-height: 1.4; white-space: pre-wrap; word-wrap: break-word; font-size: 13px; }
+  #chat-log .msg.user { justify-content: flex-end; }
+  #chat-log .msg.user .bubble { background: rgb(99 102 241); color: white; }
+  #chat-log .msg.bot .bubble { background: rgb(30 41 59); color: rgb(226 232 240); }
+  #chat-log .proposal-card { border: 1px solid rgb(245 158 11 / .5); border-radius: 10px;
+    padding: 10px 12px; margin: 6px 0; background: rgb(245 158 11 / .06); font-size: 12px; }
+  #chat-log .proposal-card h4 { color: rgb(252 211 77); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .05em; margin: 0 0 6px; font-weight: 700; }
+  #chat-log .proposal-card dl { display: grid; grid-template-columns: max-content 1fr;
+    gap: 3px 8px; margin: 0; }
+  #chat-log .proposal-card dt { color: rgb(148 163 184); }
+  #chat-log .proposal-card dd { margin: 0; color: rgb(226 232 240); word-break: break-word; }
+  #chat-log .proposal-card button { margin-top: 8px; background: rgb(252 211 77); color: rgb(30 41 59);
+    border: 0; padding: 6px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  #chat-log .proposal-card button:hover { filter: brightness(1.05); }
+  #chat-log .proposal-card button:disabled { opacity: .5; cursor: not-allowed; }
+  #chat-form { display: flex; gap: 6px; padding: 10px; border-top: 1px solid rgb(30 41 59); }
+  #chat-input { flex: 1; padding: 8px 12px; background: rgb(15 23 42); color: rgb(226 232 240);
+    border: 1px solid rgb(51 65 85); border-radius: 8px; font: inherit; font-size: 13px; }
+  #chat-input:focus { outline: 0; border-color: rgb(99 102 241); }
+  #chat-send { background: rgb(99 102 241); color: white; border: 0;
+    padding: 8px 14px; border-radius: 8px; font-weight: 600; font-size: 13px; cursor: pointer; }
+  #chat-send:disabled { opacity: .5; cursor: not-allowed; }
+  #chat-status { font-size: 11px; color: rgb(148 163 184); padding: 2px 12px; min-height: 16px; }
+  #chat-status.ok { color: rgb(34 197 94); }
+  #chat-status.err { color: rgb(248 113 113); }
+  /* Nudge main content in so the right panel doesn't cover it on wide screens. */
+  @media (min-width: 1280px) { body { padding-right: 380px; } body.chat-collapsed { padding-right: 20px; } }
+
+  /* --- Mobile ( < 768px ): chat panel becomes a full-width overlay --- */
+  @media (max-width: 767px) {
+    #chat-panel { width: 100%; transform: translateX(100%); }
+    #chat-panel.expanded { transform: translateX(0); }
+    /* On mobile we ignore the persisted "collapsed" preference; default
+       state is collapsed (off-screen) and the toggle slides it in. */
+    #chat-panel.collapsed { transform: translateX(100%); }
+    #chat-panel-toggle {
+      left: -36px; width: 36px; height: 60px; font-size: 18px;
+      background: rgb(99 102 241); color: white; border-color: rgb(79 70 229);
+    }
+    body, body.chat-collapsed { padding-right: 0 !important; }
+    /* Niche cards a bit wider so they fill the viewport better on phones. */
+    .niche-reel-card { width: calc(100vw - 64px); max-width: 320px; }
+  }
+
+  /* --- Niche reel: horizontally-scrolling 9:16 cards --- */
+  .reel-scroll {
+    display: flex; gap: 18px; overflow-x: auto; overflow-y: visible;
+    padding: 6px 4px 28px;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: thin;
+    scrollbar-color: rgb(71 85 105) transparent;
+  }
+  .reel-scroll::-webkit-scrollbar { height: 8px; }
+  .reel-scroll::-webkit-scrollbar-track { background: transparent; }
+  .reel-scroll::-webkit-scrollbar-thumb { background: rgb(51 65 85); border-radius: 4px; }
+  .reel-scroll::-webkit-scrollbar-thumb:hover { background: rgb(99 102 241); }
+
+  .niche-reel-card {
+    position: relative; flex: 0 0 auto;
+    width: 280px; aspect-ratio: 9 / 16;
+    border-radius: 18px; overflow: hidden;
+    scroll-snap-align: start;
+    cursor: pointer;
+    box-shadow: 0 6px 24px -8px rgb(0 0 0 / .55);
+    transition: transform .25s ease, box-shadow .25s ease;
+    isolation: isolate;
+  }
+  .niche-reel-card:hover {
+    transform: translateY(-4px) scale(1.015);
+    box-shadow: 0 14px 40px -10px rgb(0 0 0 / .6);
+  }
+  .niche-reel-card .bg-gradient {
+    position: absolute; inset: 0; z-index: 0;
+  }
+  .niche-reel-card .bg-emoji {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    font-size: 180px; opacity: .12; z-index: 0;
+    transform: translate(-8%, -10%) rotate(-12deg);
+    user-select: none;
+  }
+  .niche-reel-card .scrim {
+    position: absolute; inset: 0; z-index: 1;
+    background: linear-gradient(to bottom, rgba(0,0,0,0) 30%, rgba(0,0,0,.55) 70%, rgba(0,0,0,.85) 100%);
+  }
+  .niche-reel-card .content {
+    position: relative; z-index: 2; height: 100%;
+    display: flex; flex-direction: column; justify-content: space-between;
+    padding: 16px 16px 18px; color: white;
+  }
+  .niche-reel-card .label {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .12em;
+    color: rgba(255,255,255,.7); font-weight: 700;
+  }
+  .niche-reel-card .title {
+    font-size: 22px; font-weight: 800; line-height: 1.1; margin-top: 4px;
+    text-shadow: 0 2px 8px rgba(0,0,0,.35);
+  }
+  .niche-reel-card .tagline {
+    font-size: 12px; line-height: 1.35; color: rgba(255,255,255,.85); margin-top: 6px;
+  }
+  .niche-reel-card .hooks {
+    margin-top: auto; display: flex; flex-direction: column; gap: 6px;
+  }
+  .niche-reel-card .hook {
+    font-size: 11.5px; line-height: 1.3; color: rgba(255,255,255,.85);
+    background: rgba(0,0,0,.35); border: 1px solid rgba(255,255,255,.08);
+    padding: 6px 9px; border-radius: 8px;
+    overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
+    -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+  .niche-reel-card .cta {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 12px;
+    font-size: 13px; font-weight: 700; color: white;
+  }
+  .niche-reel-card .cta::after {
+    content: "→"; transition: transform .2s ease;
+  }
+  .niche-reel-card:hover .cta::after { transform: translateX(4px); }
+  .niche-reel-card.selected {
+    outline: 3px solid rgba(255,255,255,.9); outline-offset: 2px;
+  }
+  .reel-empty { color: rgb(148 163 184); padding: 40px 24px; text-align: center; }
+</style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+
+<header class="border-b border-slate-800 backdrop-blur sticky top-0 bg-slate-950/80 z-10">
+  <div class="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-rose-500 to-violet-500 grid place-items-center text-white font-black">y</div>
+      <div>
+        <div class="text-lg font-bold">ytFactory</div>
+        <div class="text-xs text-slate-400">one click → AI Short</div>
+      </div>
+    </div>
+    <div class="flex items-center gap-4">
+      <!-- Research/Telemetry hooks live on the legacy localhost server. They
+           404 on the cloud control plane and will be re-enabled once those
+           routes are ported in a follow-up. -->
+      <button id="research-btn" class="hidden text-sm text-slate-400 hover:text-slate-100">📚 Research</button>
+      <button id="telemetry-btn" class="hidden text-sm text-slate-400 hover:text-slate-100">📊 Telemetry</button>
+      <a href="/dashboard" class="text-sm text-slate-400 hover:text-slate-100" title="Live YouTube analytics for every uploaded Short">📈 Dashboard</a>
+      <a href="/api/health" target="_blank" rel="noopener"
+        class="text-xs text-slate-500 hover:text-slate-300 font-mono"
+        title="Agent presence + spend usage">⚡ /health</a>
+      <button id="reset-btn" class="text-sm text-slate-400 hover:text-slate-100 hidden">← Make another</button>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-6xl mx-auto px-6 py-8">
+
+  <!-- ============ STEP 1: PICKER ============ -->
+  <section id="picker" class="space-y-10">
+    <div class="space-y-3">
+      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-800/70 border border-slate-700/60 text-xs text-slate-300">
+        <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block pulse-dot"></span>
+        Live cloud render — <span class="text-slate-400">describe a Short, get a Short.</span>
+      </div>
+      <h1 class="text-4xl sm:text-5xl font-extrabold tracking-tight bg-gradient-to-r from-white via-slate-100 to-slate-300 bg-clip-text text-transparent">
+        Make a Short.<br class="sm:hidden"> <span class="text-slate-400 font-bold">Pick a channel.</span>
+      </h1>
+      <p class="text-slate-400 max-w-xl">
+        Each card is a publishing channel with a locked aesthetic. Tap one to seed the chat —
+        or just describe what you want in the panel on the right.
+      </p>
+    </div>
+
+    <!-- niche reel -->
+    <div>
+      <div class="flex items-baseline justify-between mb-2 px-1">
+        <h2 class="text-sm uppercase tracking-wider text-slate-400">Channels</h2>
+        <div id="niche-selected-label" class="text-sm text-slate-300"></div>
+      </div>
+      <div id="niche-reel" class="reel-scroll">
+        <div class="reel-empty" id="niche-empty">Loading channels…</div>
+      </div>
+      <!-- Legacy grid kept hidden for back-compat with any code that probes for it. -->
+      <div id="niche-grid" class="hidden"></div>
+
+      <!-- riff: URL + count, only visible when "Riff on a YouTube Short" is selected -->
+      <div id="riff-form" class="hidden mt-4 p-4 rounded-xl border border-pink-500/30 bg-pink-500/5 space-y-3">
+        <div>
+          <label class="text-xs uppercase tracking-wider text-slate-400 mb-1 block">YouTube URL or video id</label>
+          <input id="riff-url" type="text" placeholder="https://www.youtube.com/shorts/..."
+            class="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm font-mono"/>
+        </div>
+        <div class="flex items-center gap-3">
+          <label class="text-xs uppercase tracking-wider text-slate-400">How many Shorts?</label>
+          <input id="riff-n" type="number" min="1" max="5" value="3"
+            class="w-16 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm"/>
+          <span class="text-xs text-slate-500">Each takes ~6–9 minutes. Rendered sequentially.</span>
+        </div>
+        <div class="text-xs text-slate-500 leading-snug">
+          AI will analyse the source video (transcript + sample frames) to extract its hook style,
+          tone, structure, and aesthetic — then write fresh story seeds in the same niche with
+          completely different content. Niche-match snaps to one of the existing channels.
+        </div>
+      </div>
+    </div>
+
+    <!-- voice (hidden — chat panel owns voice selection now) -->
+    <div class="hidden">
+      <div class="flex items-baseline justify-between mb-3">
+        <h2 class="text-sm uppercase tracking-wider text-slate-400">2 · Narrator voice</h2>
+        <div id="voice-selected-label" class="text-sm text-slate-300"></div>
+      </div>
+      <div id="voice-grid" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"></div>
+      <div class="text-xs text-slate-500 mt-3">Click ▶ to preview a 3-second AITA-style sample. First click on a voice synthesises and caches the clip (~2s).</div>
+
+      <!-- Clone-from-YouTube panel -->
+      <div class="mt-5">
+        <button id="clone-toggle"
+          class="text-xs text-violet-300 hover:text-violet-200 underline-offset-2 hover:underline">
+          + Clone a voice from YouTube
+        </button>
+        <div id="clone-form" class="hidden mt-3 p-4 rounded-xl border border-violet-500/30 bg-violet-500/5 space-y-3">
+          <div class="text-xs text-slate-400 leading-snug">
+            Paste a YouTube URL where the protagonist talks solo (no music, no second voice).
+            We pull a 5–15s clip, transcribe it, and use F5-TTS to clone that voice for the
+            narration. The clip downloads + transcribes in ~30s.
+          </div>
+          <div>
+            <label class="text-xs uppercase tracking-wider text-slate-400 mb-1 block">YouTube URL</label>
+            <input id="clone-url" type="text" placeholder="https://www.youtube.com/watch?v=..."
+              class="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm font-mono"/>
+          </div>
+          <div class="flex items-center gap-3 flex-wrap">
+            <label class="text-xs uppercase tracking-wider text-slate-400">Start (s)</label>
+            <input id="clone-start" type="number" min="0" step="1" value="0"
+              class="w-20 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm"/>
+            <label class="text-xs uppercase tracking-wider text-slate-400">Duration (s)</label>
+            <input id="clone-duration" type="number" min="5" max="15" step="1" value="10"
+              class="w-20 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm"/>
+            <button id="clone-submit"
+              class="ml-auto px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 rounded text-sm font-medium">
+              Clone voice
+            </button>
+          </div>
+          <div id="clone-status" class="text-xs text-slate-400 hidden"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- "How it works" — replaces the old Generate button + render-time disclosure -->
+    <div class="pt-4 border-t border-slate-800">
+      <details class="text-sm text-slate-400">
+        <summary class="cursor-pointer select-none hover:text-slate-200">How does this work?</summary>
+        <div class="mt-3 space-y-2 text-slate-400 max-w-2xl">
+          <p>You chat with the assistant on the right; it extracts a render proposal once
+            it has channel + topic. Hit "Make this Short" and the job lands in the cloud
+            queue. The laptop agent (your own Mac) leases the task, runs the existing
+            pipeline (Kokoro/F5 TTS, Whisper, mflux/Z-Image-Turbo, ffmpeg compose) and
+            uploads the finished mp4 to GCS. Cost target: under $10/month at low traffic.</p>
+        </div>
+      </details>
+    </div>
+
+    <!-- legacy hidden bits kept so existing JS bindings don't crash -->
+    <button id="generate-btn" class="hidden" disabled></button>
+  </section>
+
+  <!-- ============ STEP 2: PER-NICHE EDIT PAGE ============ -->
+  <section id="edit-section" class="hidden space-y-6">
+    <div class="flex items-center gap-3">
+      <button id="edit-back" class="text-sm text-slate-400 hover:text-slate-100 flex items-center gap-1">
+        <span>←</span> Back to channels
+      </button>
+    </div>
+
+    <!-- Niche identity banner — gradient + emoji + label, mirrors the card -->
+    <div id="edit-banner" class="relative overflow-hidden rounded-2xl border border-slate-800">
+      <div id="edit-banner-gradient" class="absolute inset-0 bg-gradient-to-br"></div>
+      <div id="edit-banner-emoji" class="absolute right-6 top-1/2 -translate-y-1/2 text-[120px] opacity-15 select-none rotate-[-12deg]"></div>
+      <div class="absolute inset-0 bg-gradient-to-r from-black/30 via-transparent to-transparent"></div>
+      <div class="relative px-6 py-7">
+        <div class="text-[10px] uppercase tracking-[0.18em] text-white/70 font-bold">make a short for</div>
+        <div id="edit-banner-title" class="text-3xl font-extrabold mt-1"></div>
+        <div id="edit-banner-tagline" class="text-sm text-white/85 mt-1 max-w-lg"></div>
+      </div>
+    </div>
+
+    <!-- Form -->
+    <form id="edit-form" class="space-y-5">
+      <div>
+        <label class="block text-xs uppercase tracking-wider text-slate-400 mb-2">Topic <span class="text-rose-400">*</span></label>
+        <textarea id="edit-topic" required rows="2" placeholder="One sentence: what's the Short about?"
+          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-violet-500 resize-none"></textarea>
+        <div id="edit-topic-suggestions" class="flex flex-wrap gap-2 mt-2"></div>
+      </div>
+
+      <div>
+        <label class="block text-xs uppercase tracking-wider text-slate-400 mb-2">Notes <span class="text-slate-600 normal-case font-normal">(optional)</span></label>
+        <textarea id="edit-notes" rows="3" placeholder="Any direction — characters, mood, beats, references…"
+          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-violet-500 resize-none"></textarea>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs uppercase tracking-wider text-slate-400 mb-2">
+            Length <span id="edit-length-display" class="text-slate-200 normal-case ml-1">55s</span>
+          </label>
+          <input id="edit-length" type="range" min="30" max="90" value="55" step="5"
+            class="w-full accent-violet-500"/>
+          <div class="flex justify-between text-[10px] text-slate-500 mt-1 px-0.5">
+            <span>30s</span><span>50–60s sweet spot</span><span>90s</span>
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs uppercase tracking-wider text-slate-400 mb-2">Source</label>
+          <select id="edit-source-kind"
+            class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-violet-500">
+            <option value="auto">AI picks (default)</option>
+            <option value="user_text">My text — use the topic + notes verbatim</option>
+            <option value="reddit_url">Reddit URL</option>
+            <option value="wikipedia_topic">Wikipedia topic</option>
+            <option value="youtube_video">YouTube video</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="edit-source-ref-wrap" class="hidden">
+        <label class="block text-xs uppercase tracking-wider text-slate-400 mb-2">Source reference</label>
+        <input id="edit-source-ref" type="text"
+          placeholder="https://reddit.com/r/AmItheAsshole/comments/... or 'Sergio Agüero'"
+          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-sm font-mono focus:outline-none focus:border-violet-500"/>
+      </div>
+
+      <div class="flex items-center justify-between pt-3 border-t border-slate-800">
+        <div class="text-xs text-slate-500">Cost: ~$0 (cloud is just orchestration; render runs free on your laptop).</div>
+        <button id="edit-submit" type="submit"
+          class="px-6 py-3 bg-gradient-to-r from-rose-500 to-violet-500 rounded-xl font-bold text-white disabled:opacity-40 disabled:cursor-not-allowed hover:shadow-xl hover:shadow-violet-500/30 transition">
+          Generate Short →
+        </button>
+      </div>
+    </form>
+
+    <!-- Job status (shown after submit) -->
+    <div id="edit-job-status" class="hidden space-y-4 mt-6"></div>
+  </section>
+
+  <!-- ============ STEP 1.5: RIFF — analyze + per-seed lobby ============ -->
+  <section id="riff-lobby" class="hidden space-y-6">
+    <div class="flex items-center justify-between">
+      <div>
+        <h1 class="text-2xl font-bold">Riffing on a YouTube Short</h1>
+        <div id="riff-source" class="text-xs text-slate-400 font-mono break-all mt-1"></div>
+      </div>
+      <div id="riff-elapsed" class="text-sm text-slate-400 font-mono">00:00</div>
+    </div>
+
+    <!-- Phase 1: analyze -->
+    <div id="riff-analyze-card" class="p-4 rounded-xl border border-slate-800 bg-slate-900/40">
+      <div class="flex items-center gap-3">
+        <div id="riff-analyze-icon" class="w-8 h-8 rounded-full grid place-items-center text-sm font-bold bg-violet-500 text-white pulse-dot">•</div>
+        <div class="flex-1">
+          <div class="text-sm font-semibold">Analyse source — transcript + frames → imitation profile</div>
+          <div id="riff-analyze-detail" class="text-xs text-slate-400 mt-0.5">downloading video + sampling frames…</div>
+        </div>
+      </div>
+      <div id="riff-profile-panel" class="hidden mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+      </div>
+    </div>
+
+    <!-- Phase 2: ideate -->
+    <div id="riff-ideate-card" class="p-4 rounded-xl border border-slate-800 bg-slate-900/40 hidden">
+      <div class="flex items-center gap-3">
+        <div id="riff-ideate-icon" class="w-8 h-8 rounded-full grid place-items-center text-sm font-bold bg-slate-700 text-slate-400">·</div>
+        <div class="flex-1">
+          <div class="text-sm font-semibold">Generate fresh story seeds</div>
+          <div id="riff-ideate-detail" class="text-xs text-slate-400 mt-0.5">waiting for profile…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Phase 3: per-seed renders -->
+    <div id="riff-seeds" class="space-y-3"></div>
+
+    <!-- Phase 4: gallery (final) -->
+    <div id="riff-gallery" class="hidden space-y-3">
+      <div class="text-sm uppercase tracking-wider text-slate-400">Your Shorts</div>
+      <div id="riff-gallery-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+    </div>
+  </section>
+
+  <!-- ============ STEP 2: RENDER LOBBY ============ -->
+  <section id="lobby" class="hidden">
+    <div class="flex items-center justify-between mb-6">
+      <div>
+        <h1 id="lobby-title" class="text-2xl font-bold">Making your Short</h1>
+        <div id="lobby-sub" class="text-sm text-slate-400 mt-1"></div>
+      </div>
+      <div id="elapsed-clock" class="text-sm text-slate-400 font-mono">00:00</div>
+    </div>
+
+    <div class="bg-slate-900 rounded-full overflow-hidden h-2 mb-6">
+      <div id="progress-bar" class="bg-gradient-to-r from-rose-500 to-violet-500 h-full transition-all duration-500" style="width: 0%"></div>
+    </div>
+
+    <!-- 2-column layout: stages on the left, evolving preview on the right -->
+    <div class="grid grid-cols-1 md:grid-cols-[3fr_2fr] gap-6">
+
+      <!-- LEFT: stage list + scene cards underneath -->
+      <div class="space-y-6">
+        <div id="stage-list" class="space-y-2"></div>
+        <div id="scene-section" class="hidden space-y-3">
+          <div class="text-sm text-slate-400 uppercase tracking-wide">Scenes being painted</div>
+          <div id="scene-grid" class="grid grid-cols-2 sm:grid-cols-3 gap-3"></div>
+        </div>
+      </div>
+
+      <!-- RIGHT: evolving preview panel — sticky on desktop -->
+      <div>
+        <div class="md:sticky md:top-24 space-y-3">
+          <div class="text-sm text-slate-400 uppercase tracking-wide flex items-center justify-between">
+            <span id="preview-label">Preview</span>
+            <span id="preview-state" class="text-xs text-slate-500"></span>
+          </div>
+          <div id="preview-panel" class="rounded-xl border border-slate-800 bg-slate-900/40 overflow-hidden">
+
+            <!-- Idle state -->
+            <div id="preview-idle" class="aspect-[9/16] grid place-items-center text-slate-500 p-8 text-center">
+              <div>
+                <div class="w-16 h-16 rounded-full border-4 border-slate-800 border-t-violet-500 animate-spin mx-auto mb-4"></div>
+                <div class="text-sm">Standing by — voice arrives in ~5 seconds</div>
+              </div>
+            </div>
+
+            <!-- Audio player (shown when TTS done) -->
+            <div id="preview-audio" class="hidden p-4 space-y-3">
+              <!-- The hero box is the "stage": starts as a gradient placeholder
+                   while images render, swaps to a slideshow once the first
+                   img_NN.png lands on disk, then to the final video on
+                   compose-done. Only one of -gradient / -slideshow / final
+                   video is visible at a time. -->
+              <div class="aspect-[9/16] rounded-lg overflow-hidden relative bg-slate-900">
+                <!-- (a) gradient placeholder — visible until first image -->
+                <div id="preview-gradient"
+                     class="absolute inset-0 bg-gradient-to-br from-rose-500/30 to-violet-500/30 grid place-items-center">
+                  <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <svg class="w-32 h-32 text-white/20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3a9 9 0 100 18 9 9 0 000-18zm-1.5 5.5l5 3.5-5 3.5v-7z"/></svg>
+                  </div>
+                  <div class="relative text-center text-white/90 px-6">
+                    <div class="text-xs uppercase tracking-wider opacity-70 mb-2">Narration</div>
+                    <div id="preview-audio-voice" class="text-lg font-bold"></div>
+                    <div id="preview-audio-narration" class="text-xs mt-3 leading-snug opacity-80 max-h-32 overflow-y-auto"></div>
+                  </div>
+                </div>
+                <!-- (b) live slideshow — populated by addSlideshowImage()
+                     as image/done events arrive, cycles every 1.5s -->
+                <div id="preview-slideshow" class="absolute inset-0 hidden bg-black">
+                  <img id="slideshow-img"
+                       class="w-full h-full object-cover transition-opacity duration-300"
+                       alt="">
+                  <div class="absolute bottom-2 right-2 px-2 py-0.5 rounded bg-black/60 text-[10px] text-white/80 font-mono"
+                       id="slideshow-counter"></div>
+                </div>
+              </div>
+              <audio id="audio-player" controls preload="auto"></audio>
+              <div class="text-xs text-slate-400">Listen while the scenes paint. The video player will replace this when ready.</div>
+            </div>
+
+            <!-- Video player (shown when compose done) -->
+            <div id="preview-video" class="hidden">
+              <video id="video-player" controls autoplay class="w-full aspect-[9/16] bg-black"></video>
+              <div class="p-3 flex flex-wrap gap-2">
+                <a id="download-btn" class="flex-1 text-center px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium" download>Download mp4</a>
+                <button id="critic-btn" class="px-4 py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-sm font-medium">Run auto-critic</button>
+                <button id="upload-btn" class="px-4 py-2 bg-rose-600 hover:bg-rose-500 rounded-lg text-sm font-medium">Upload to YouTube</button>
+              </div>
+              <!-- Upload review form (opens before any upload fires) -->
+              <div id="upload-panel" class="hidden p-3 border-t border-slate-800 bg-slate-900/60 text-sm space-y-3">
+
+                <div id="upload-form-existing" class="hidden p-2 border border-amber-700 bg-amber-950/40 rounded text-xs text-amber-200"></div>
+
+                <div id="upload-form" class="space-y-3">
+                  <div class="text-xs uppercase tracking-wide text-slate-400">Channel</div>
+                  <div id="upload-channel-info" class="text-xs text-slate-300 font-mono"></div>
+
+                  <div>
+                    <label class="text-xs uppercase tracking-wide text-slate-400">Title (max 100 chars)</label>
+                    <select id="upload-title-select" class="w-full mt-1 bg-slate-800 text-slate-100 px-2 py-1.5 rounded text-sm">
+                      <!-- title options injected here; last entry: "✏ Custom…" -->
+                    </select>
+                    <input id="upload-title-custom" type="text" maxlength="100"
+                           class="hidden w-full mt-1 bg-slate-800 text-slate-100 px-2 py-1.5 rounded text-sm"
+                           placeholder="Enter custom title…" />
+                    <div class="text-[10px] text-slate-500 mt-0.5"><span id="upload-title-count">0</span>/100</div>
+                  </div>
+
+                  <div>
+                    <label class="text-xs uppercase tracking-wide text-slate-400">Description (max 5000)</label>
+                    <textarea id="upload-description" rows="6" maxlength="5000"
+                              class="w-full mt-1 bg-slate-800 text-slate-100 px-2 py-1.5 rounded text-xs font-mono leading-tight"></textarea>
+                    <div class="text-[10px] text-slate-500 mt-0.5"><span id="upload-desc-count">0</span>/5000</div>
+                  </div>
+
+                  <div>
+                    <label class="text-xs uppercase tracking-wide text-slate-400">Tags (comma-separated)</label>
+                    <input id="upload-tags" type="text"
+                           class="w-full mt-1 bg-slate-800 text-slate-100 px-2 py-1.5 rounded text-xs" />
+                  </div>
+
+                  <div class="grid grid-cols-2 gap-3">
+                    <div>
+                      <label class="text-xs uppercase tracking-wide text-slate-400">Privacy</label>
+                      <select id="upload-privacy" class="w-full mt-1 bg-slate-800 text-slate-100 px-2 py-1.5 rounded text-sm">
+                        <option value="private">Private</option>
+                        <option value="unlisted">Unlisted</option>
+                        <option value="public">Public</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label class="text-xs uppercase tracking-wide text-slate-400">Schedule (optional)</label>
+                      <input id="upload-publish-at" type="datetime-local"
+                             class="w-full mt-1 bg-slate-800 text-slate-100 px-2 py-1.5 rounded text-sm" />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label class="text-xs uppercase tracking-wide text-slate-400">Thumbnail</label>
+                    <div id="upload-thumbnail-grid" class="mt-1 grid grid-cols-4 gap-2"></div>
+                    <!-- Auto-thumbnail headline editor (visible when "auto" chosen) -->
+                    <div id="upload-auto-thumb-controls" class="mt-2 space-y-2 p-2 bg-slate-900 rounded border border-slate-800">
+                      <div class="flex items-center gap-2">
+                        <label class="text-[11px] uppercase tracking-wide text-slate-400 w-20">Headline</label>
+                        <input id="upload-thumb-headline" type="text" maxlength="60"
+                               class="flex-1 bg-slate-800 text-slate-100 px-2 py-1 rounded text-xs"
+                               placeholder="Auto-derived from script.hook" />
+                        <button id="upload-thumb-regen" type="button"
+                                class="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded text-xs">↻ Regenerate</button>
+                      </div>
+                    </div>
+                    <div class="mt-2 flex items-center gap-3">
+                      <label class="text-xs text-slate-400 cursor-pointer">
+                        <input type="file" id="upload-custom-thumb" accept="image/png,image/jpeg" class="hidden" />
+                        <span class="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded">Upload custom thumbnail…</span>
+                      </label>
+                      <span id="upload-custom-thumb-status" class="text-[10px] text-slate-500"></span>
+                    </div>
+                  </div>
+
+                  <label class="flex items-center text-xs text-slate-400">
+                    <input type="checkbox" id="upload-force" class="mr-2"> Force re-upload (creates a new YouTube video)
+                  </label>
+                  <label class="flex items-center text-xs text-slate-400">
+                    <input type="checkbox" id="upload-skip-critic" class="mr-2"> Skip critic gate (ship even if score &lt; min_score)
+                  </label>
+
+                  <div class="flex gap-2 pt-2 border-t border-slate-800">
+                    <button id="upload-cancel-btn" class="flex-1 px-3 py-2 bg-slate-800 hover:bg-slate-700 rounded text-sm">Cancel</button>
+                    <button id="upload-confirm-btn" class="flex-1 px-3 py-2 bg-rose-600 hover:bg-rose-500 rounded text-sm font-medium">Upload to YouTube</button>
+                  </div>
+                </div>
+
+                <!-- Progress / result, shown only while/after the upload runs -->
+                <div id="upload-progress" class="hidden space-y-2">
+                  <div id="upload-status" class="text-xs text-slate-300"></div>
+                  <div class="w-full h-1.5 bg-slate-800 rounded overflow-hidden">
+                    <div id="upload-progress-bar" class="h-full bg-rose-500 transition-all" style="width:0%"></div>
+                  </div>
+                  <div id="upload-result" class="hidden text-xs"></div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Score / final summary slot below the preview -->
+          <div id="result-summary" class="hidden bg-slate-900/60 border border-slate-800 rounded-lg p-4 text-sm space-y-2">
+            <div class="text-xs uppercase text-slate-400 tracking-wide">Total render</div>
+            <div id="result-elapsed" class="text-xl font-mono"></div>
+            <div id="result-slug" class="text-xs text-slate-500 font-mono break-all"></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ TELEMETRY DASHBOARD ============ -->
+  <section id="telemetry" class="hidden space-y-6">
+    <div class="flex items-baseline justify-between">
+      <div>
+        <h1 class="text-3xl font-bold mb-1">Telemetry</h1>
+        <p class="text-slate-400 text-sm">Pipeline activity, durations, and costs from the local JSONL log.</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <select id="tlm-window" class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm">
+          <option value="1">Last 1h</option>
+          <option value="24" selected>Last 24h</option>
+          <option value="168">Last 7d</option>
+          <option value="720">Last 30d</option>
+          <option value="8760">Last 1y</option>
+        </select>
+        <button id="tlm-refresh" class="text-sm px-3 py-1 bg-slate-800 hover:bg-slate-700 rounded">Refresh</button>
+      </div>
+    </div>
+
+    <!-- KPI tiles -->
+    <div id="tlm-overview" class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3"></div>
+
+    <!-- LATENCY ENGINEERING VIEW -->
+    <!-- This is the headline answer to "where is time going?" The
+         hotspot bar shows the % share of total wall time per stage so
+         the dominant stage (image gen at 97.6%) is impossible to miss.
+         Error fingerprints collapse 17 raw failures into 2-3 root
+         causes the user can actually fix. -->
+    <div>
+      <h2 class="text-sm uppercase tracking-wider text-slate-400 mb-2">Latency hotspots</h2>
+      <div id="tlm-hotspots" class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden"></div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div>
+        <h2 class="text-sm uppercase tracking-wider text-slate-400 mb-2">Job health (success rate · p50/p90)</h2>
+        <div id="tlm-job-health" class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden"></div>
+      </div>
+      <div>
+        <h2 class="text-sm uppercase tracking-wider text-slate-400 mb-2">Image QC retries</h2>
+        <div id="tlm-image-retries" class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden"></div>
+      </div>
+    </div>
+
+    <div>
+      <h2 class="text-sm uppercase tracking-wider text-slate-400 mb-2">Error groups (by traceback fingerprint)</h2>
+      <div id="tlm-error-groups" class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden"></div>
+    </div>
+
+    <div>
+      <h2 class="text-sm uppercase tracking-wider text-slate-400 mb-2">Slowest recent job — critical path</h2>
+      <div id="tlm-slowest" class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden"></div>
+    </div>
+
+    <!-- per-niche (legacy table — kept for the avg-duration view) -->
+    <div>
+      <h2 class="text-sm uppercase tracking-wider text-slate-400 mb-2">Per niche</h2>
+      <div id="tlm-niches" class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden"></div>
+    </div>
+
+    <!-- per-stage timings -->
+    <div>
+      <h2 class="text-sm uppercase tracking-wider text-slate-400 mb-2">Per pipeline stage</h2>
+      <div id="tlm-stages" class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden"></div>
+    </div>
+
+    <!-- LLM models -->
+    <div>
+      <div class="flex items-baseline justify-between mb-2">
+        <h2 class="text-sm uppercase tracking-wider text-slate-400">LLM calls (claude CLI)</h2>
+        <div class="text-[11px] text-slate-500">Cost is the API list price the CLI reports — not billed on a Pro/Max plan, you pay the flat subscription.</div>
+      </div>
+      <div id="tlm-llm" class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden"></div>
+    </div>
+
+    <!-- recent errors -->
+    <div>
+      <h2 class="text-sm uppercase tracking-wider text-slate-400 mb-2">Recent errors</h2>
+      <div id="tlm-errors" class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden"></div>
+    </div>
+  </section>
+
+  <!-- ============ RESEARCH DASHBOARD ============ -->
+  <section id="research" class="hidden space-y-6">
+    <div class="flex items-baseline justify-between">
+      <div>
+        <h1 class="text-3xl font-bold mb-1">Research</h1>
+        <p class="text-slate-400 text-sm">Cross-channel index of every short, every channel YAML, and every durable learning.</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <span id="rsr-built-at" class="text-xs text-slate-500"></span>
+        <button id="rsr-refresh-stats" class="text-sm px-3 py-1 bg-slate-800 hover:bg-slate-700 rounded" title="Pull fresh YouTube view/like/comment counts">Refresh stats</button>
+        <button id="rsr-rebuild" class="text-sm px-3 py-1 bg-slate-800 hover:bg-slate-700 rounded">Rebuild index</button>
+      </div>
+    </div>
+
+    <!-- KPI tiles -->
+    <div id="rsr-kpis" class="grid grid-cols-2 md:grid-cols-5 gap-3"></div>
+
+    <!-- tab strip inside the research view -->
+    <div class="flex gap-2 border-b border-slate-800">
+      <button class="rsr-tab px-3 py-2 text-sm border-b-2 border-violet-500 text-slate-100" data-tab="videos">Videos</button>
+      <button class="rsr-tab px-3 py-2 text-sm border-b-2 border-transparent text-slate-400 hover:text-slate-100" data-tab="channels">Channels</button>
+      <button class="rsr-tab px-3 py-2 text-sm border-b-2 border-transparent text-slate-400 hover:text-slate-100" data-tab="learnings">Learnings</button>
+    </div>
+
+    <!-- videos -->
+    <div id="rsr-tab-videos" class="space-y-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <input id="rsr-v-search" type="text" placeholder="filter by slug, title, hook, channel…" class="flex-1 min-w-[240px] bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm"/>
+        <select id="rsr-v-channel" class="bg-slate-900 border border-slate-700 rounded px-2 py-2 text-sm"><option value="">all channels</option></select>
+        <select id="rsr-v-status" class="bg-slate-900 border border-slate-700 rounded px-2 py-2 text-sm">
+          <option value="">all statuses</option>
+          <option value="local">has local artefacts</option>
+          <option value="orphan">no local match</option>
+          <option value="critiqued">has critique</option>
+          <option value="no_critique">no critique</option>
+        </select>
+        <span id="rsr-v-count" class="text-xs text-slate-500"></span>
+      </div>
+      <div id="rsr-v-table" class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden"></div>
+    </div>
+
+    <!-- channels -->
+    <div id="rsr-tab-channels" class="hidden space-y-3">
+      <div class="text-xs text-slate-500">One row per <span class="text-slate-300">&lt;channel&gt;/config.yaml</span>, joined live with the YouTube channel meta (subscribers / total views / video count).</div>
+      <div id="rsr-c-table" class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden"></div>
+    </div>
+
+    <!-- learnings -->
+    <div id="rsr-tab-learnings" class="hidden space-y-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <input id="rsr-l-search" type="text" placeholder="filter by title, body, channel…" class="flex-1 min-w-[240px] bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm"/>
+        <select id="rsr-l-source" class="bg-slate-900 border border-slate-700 rounded px-2 py-2 text-sm">
+          <option value="">all sources</option>
+          <option value="memory">memory</option>
+          <option value="critique">critique</option>
+        </select>
+        <select id="rsr-l-type" class="bg-slate-900 border border-slate-700 rounded px-2 py-2 text-sm">
+          <option value="">all types</option>
+          <option value="feedback">feedback</option>
+          <option value="project">project</option>
+          <option value="reference">reference</option>
+          <option value="class-of-bug">class-of-bug</option>
+        </select>
+        <span id="rsr-l-count" class="text-xs text-slate-500"></span>
+      </div>
+      <div id="rsr-l-list" class="space-y-2"></div>
+    </div>
+  </section>
+
+</main>
+
+<!-- =================== AI CHAT PANEL (right-docked) =================== -->
+<aside id="chat-panel">
+  <button id="chat-panel-toggle" title="Toggle chat" aria-label="Toggle chat">›</button>
+  <div class="px-3 py-2 border-b border-slate-800 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <div class="w-6 h-6 rounded-md bg-gradient-to-br from-indigo-500 to-purple-500 grid place-items-center text-xs font-black">✦</div>
+      <div class="text-sm font-semibold">AI assistant</div>
+    </div>
+    <div id="chat-session" class="text-[10px] text-slate-500 font-mono"></div>
+  </div>
+  <div id="chat-log"></div>
+  <div id="chat-status">Describe a Short you want to make.</div>
+  <form id="chat-form" autocomplete="off">
+    <input id="chat-input" type="text" placeholder='e.g. "AITA short — burned my SIL\'s cake"' required>
+    <button id="chat-send" type="submit">Send</button>
+  </form>
+</aside>
+
+<script>
+// =================== AI chat panel — wires /api/chat ===================
+(function () {
+  let sessionId = "";
+  const PROD_PROXY = "";   // same-origin
+
+  const $ = (id) => document.getElementById(id);
+  const log = () => $("chat-log");
+
+  function setStatus(text, kind = "") {
+    const s = $("chat-status");
+    s.textContent = text;
+    s.className = kind || "";
+  }
+
+  function appendMsg(role, text) {
+    const row = document.createElement("div");
+    row.className = `msg ${role}`;
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = text;
+    row.appendChild(bubble);
+    log().appendChild(row);
+    log().scrollTop = log().scrollHeight;
+  }
+
+  function appendProposal(p) {
+    const card = document.createElement("div");
+    card.className = "proposal-card";
+    const h = document.createElement("h4");
+    h.textContent = "draft proposal";
+    card.appendChild(h);
+    const dl = document.createElement("dl");
+    for (const [k, v] of Object.entries(p)) {
+      if (v === null || v === undefined || v === "") continue;
+      const dt = document.createElement("dt");
+      dt.textContent = k;
+      const dd = document.createElement("dd");
+      dd.textContent = String(v);
+      dl.append(dt, dd);
+    }
+    card.appendChild(dl);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Make this Short";
+    btn.onclick = () => confirmProposal(btn, card);
+    card.appendChild(btn);
+    log().appendChild(card);
+    log().scrollTop = log().scrollHeight;
+  }
+
+  async function send(message) {
+    appendMsg("user", message);
+    setStatus("thinking…");
+    $("chat-send").disabled = true;
+    try {
+      const r = await fetch(PROD_PROXY + "/api/chat", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({message, session_id: sessionId}),
+      });
+      if (!r.ok) {
+        if (r.status === 429) throw new Error("Daily limit reached. Try again after UTC midnight.");
+        if (r.status === 503) throw new Error("AI budget for today is used up. Service resumes after UTC midnight.");
+        throw new Error(`HTTP ${r.status}`);
+      }
+      const body = await r.json();
+      sessionId = body.session_id;
+      $("chat-session").textContent = "session " + sessionId.slice(0, 8);
+      appendMsg("bot", body.response);
+      if (body.proposal) appendProposal(body.proposal);
+      setStatus(body.configured ? "" : "Azure not configured", body.configured ? "" : "err");
+    } catch (e) {
+      setStatus(`error: ${e.message}`, "err");
+    } finally {
+      $("chat-send").disabled = false;
+    }
+  }
+
+  async function confirmProposal(btn, card) {
+    btn.disabled = true;
+    setStatus("queueing render…");
+    try {
+      const r = await fetch(PROD_PROXY + "/api/chat/confirm", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({session_id: sessionId}),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+      const body = await r.json();
+      setStatus(`queued — job ${body.job_id.slice(0, 8)}`, "ok");
+      // Spawn an inline status card under this proposal that polls /api/jobs/{id}.
+      const status = makeChatStatusCard(body.job_id);
+      card.appendChild(status.node);
+      pollChatJobStatus(body.job_id, status);
+    } catch (e) {
+      setStatus(`error: ${e.message}`, "err");
+      btn.disabled = false;
+    }
+  }
+
+  // Inline status node that lives inside the chat-log proposal card.
+  function makeChatStatusCard(jobId) {
+    const node = document.createElement("div");
+    node.className = "mt-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5 text-[12px] space-y-1";
+    node.innerHTML = `
+      <div class="flex items-center gap-2">
+        <span class="js-emoji">⏳</span>
+        <span class="js-label flex-1 text-emerald-200">Queued — waiting for the laptop agent</span>
+      </div>
+      <div class="js-substage text-[10px] text-slate-400 font-mono">job ${jobId.slice(0, 8)}…</div>
+      <div class="js-result hidden mt-2 flex flex-wrap gap-2"></div>
+      <div class="js-error hidden text-[11px] text-rose-300 font-mono whitespace-pre-wrap"></div>
+    `;
+    return {node, jobId};
+  }
+
+  async function pollChatJobStatus(jobId, panel) {
+    const STAGE_LABELS = {
+      queued: ["⏳", "Queued — waiting for the laptop agent"],
+      rewrite_cast: ["✍️", "Rewriting + casting via Claude"],
+      render: ["🎬", "Rendering scenes locally"],
+      gcs_upload: ["☁️", "Uploading to cloud storage"],
+      youtube_upload: ["📺", "Publishing to YouTube"],
+      research_handoff: ["📊", "Handing off to analytics"],
+      done: ["✅", "Done — your Short is ready"],
+      cancelled: ["🚫", "Cancelled"],
+    };
+    let timer = null;
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/jobs/${jobId}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const job = await r.json();
+        const stage = job.stage || "queued";
+        const [emoji, label] = STAGE_LABELS[stage] || ["🔄", stage];
+        panel.node.querySelector(".js-emoji").textContent = emoji;
+        panel.node.querySelector(".js-label").textContent = label;
+        panel.node.querySelector(".js-substage").textContent =
+          `job ${jobId.slice(0, 8)} · status ${job.status}`;
+        if (job.status === "failed" || job.status === "cancelled") {
+          const err = panel.node.querySelector(".js-error");
+          err.classList.remove("hidden");
+          err.textContent = job.error || "(no error message)";
+          return;  // stop polling
+        }
+        if (job.status === "done") {
+          const res = panel.node.querySelector(".js-result");
+          res.classList.remove("hidden");
+          if (job.youtube_url) {
+            const a = document.createElement("a");
+            a.href = job.youtube_url; a.target = "_blank"; a.rel = "noopener";
+            a.className = "px-2.5 py-1 rounded bg-red-600 hover:bg-red-500 text-white text-[11px] font-semibold";
+            a.textContent = "▶ YouTube"; res.appendChild(a);
+          }
+          if (job.short_signed_url) {
+            const a = document.createElement("a");
+            a.href = job.short_signed_url; a.target = "_blank"; a.rel = "noopener"; a.download = "";
+            a.className = "px-2.5 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-semibold";
+            a.textContent = "⬇ mp4"; res.appendChild(a);
+          }
+          return;  // stop polling
+        }
+      } catch (e) {
+        console.warn("chat job poll failed", e);
+      }
+      timer = setTimeout(tick, 3000);
+    };
+    timer = setTimeout(tick, 1500);
+  }
+
+  $("chat-form").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const inp = $("chat-input");
+    const v = inp.value.trim();
+    if (!v) return;
+    inp.value = "";
+    send(v);
+  });
+
+  // Toggle / restore from localStorage so the user's preference persists.
+  // Mobile (<768px): default is collapsed regardless of the persisted
+  // preference — we don't want a saved "open" state from desktop to leave
+  // the panel covering a phone viewport on first load.
+  function isMobile() {
+    return window.matchMedia('(max-width: 767px)').matches;
+  }
+  function applyCollapsed(collapsed) {
+    const panel = $("chat-panel");
+    const btn = $("chat-panel-toggle");
+    panel.classList.toggle("collapsed", collapsed);
+    panel.classList.toggle("expanded", !collapsed);
+    document.body.classList.toggle("chat-collapsed", collapsed);
+    btn.textContent = collapsed ? (isMobile() ? "✦" : "‹") : (isMobile() ? "✕" : "›");
+    btn.title = collapsed ? "Open chat" : "Close chat";
+  }
+  let collapsed = isMobile() ? true : localStorage.getItem("ytf-chat-collapsed") === "1";
+  applyCollapsed(collapsed);
+  $("chat-panel-toggle").addEventListener("click", () => {
+    collapsed = !collapsed;
+    if (!isMobile()) {
+      localStorage.setItem("ytf-chat-collapsed", collapsed ? "1" : "0");
+    }
+    applyCollapsed(collapsed);
+  });
+  // Re-apply on viewport resize so rotating a phone doesn't strand the panel.
+  window.addEventListener('resize', () => applyCollapsed(collapsed));
+})();
+</script>
+
+<script>
+// ====================================================================
+//   STATE
+// ====================================================================
+
+const state = {
+  niche: null,
+  voice: null,
+  voiceCloneId: null,   // set when the user picks a YouTube-cloned voice
+  niches: [],
+  voices: [],
+  voiceClones: [],
+  jobId: null,
+  jobStart: 0,
+  audioShown: false,
+  videoShown: false,
+  slug: null,           // set once the pipeline emits a slug for the current job
+};
+
+const NICHE_LABELS = {};
+const VOICE_LABELS = {};
+
+// ====================================================================
+//   HELPERS
+// ====================================================================
+
+function escapeHtml(s) {
+  return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c]));
+}
+
+function fmtElapsed(ms) {
+  const s = Math.max(0, Math.floor(ms/1000));
+  return `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+}
+
+function showSection(id) {
+  ['picker', 'lobby', 'riff-lobby', 'telemetry', 'research'].forEach(s => {
+    document.getElementById(s).classList.toggle('hidden', s !== id);
+  });
+  // The reset/back button doubles as "back to picker" from any non-picker view.
+  document.getElementById('reset-btn').classList.toggle('hidden', id === 'picker');
+  document.getElementById('telemetry-btn').classList.toggle('hidden', id === 'telemetry');
+  document.getElementById('research-btn').classList.toggle('hidden', id === 'research');
+}
+
+function refreshGenerateBtn() {
+  if (state.niche === 'riff') {
+    const url = (document.getElementById('riff-url')?.value || '').trim();
+    document.getElementById('generate-btn').disabled = !url;
+  } else {
+    const haveVoice = !!(state.voice || state.voiceCloneId);
+    document.getElementById('generate-btn').disabled = !(state.niche && haveVoice);
+  }
+}
+
+// ====================================================================
+//   STEP 1 — pickers
+// ====================================================================
+
+function escapeAttr(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+async function loadNiches() {
+  let niches = [];
+  try {
+    const data = await (await fetch('/api/niches')).json();
+    niches = data.niches || [];
+  } catch (e) {
+    console.warn('niche fetch failed', e);
+  }
+  state.niches = niches;
+  const reel = document.getElementById('niche-reel');
+  reel.innerHTML = '';
+  if (!niches.length) {
+    reel.innerHTML = '<div class="reel-empty">No channels available — check /api/niches</div>';
+    return;
+  }
+  niches.forEach((n) => {
+    NICHE_LABELS[n.key] = n.label;
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'niche-reel-card';
+    card.dataset.key = n.key;
+    const hooksHtml = (n.sample_hooks || []).slice(0, 3)
+      .map(h => `<div class="hook">${escapeHtml(h)}</div>`).join('');
+    card.innerHTML = `
+      <div class="bg-gradient bg-gradient-to-br ${escapeAttr(n.color_from)} ${escapeAttr(n.color_to)}"></div>
+      <div class="bg-emoji">${escapeHtml(n.emoji || '✦')}</div>
+      <div class="scrim"></div>
+      <div class="content">
+        <div>
+          <div class="label">channel</div>
+          <div class="title">${escapeHtml(n.label)}</div>
+          <div class="tagline">${escapeHtml(n.tagline || n.description || '')}</div>
+        </div>
+        <div>
+          <div class="hooks">${hooksHtml}</div>
+          <div class="cta">Start a Short</div>
+        </div>
+      </div>
+    `;
+    card.addEventListener('click', () => selectNiche(n));
+    reel.appendChild(card);
+  });
+}
+
+/**
+ * Click a niche card → if it's the "open prompt" card, open the chat
+ * panel (free-form conversation). Any other card opens the per-niche
+ * editing page so the user gets a structured form for that genre.
+ */
+function selectNiche(n) {
+  state.niche = n.key;
+  state.activeNiche = n;
+  document.querySelectorAll('.niche-reel-card').forEach(c => c.classList.toggle('selected', c.dataset.key === n.key));
+  document.getElementById('niche-selected-label').textContent = `Selected: ${n.label}`;
+
+  if (n.key === 'open') {
+    return openChatPanelForNiche(n);
+  }
+  openEditPageForNiche(n);
+}
+
+function openChatPanelForNiche(n) {
+  const panel = document.getElementById('chat-panel');
+  if (panel && panel.classList.contains('collapsed')) {
+    panel.classList.remove('collapsed');
+    document.body.classList.remove('chat-collapsed');
+    localStorage.setItem('ytf-chat-collapsed', '0');
+    const btn = document.getElementById('chat-panel-toggle');
+    if (btn) { btn.textContent = '›'; btn.title = 'Close chat'; }
+  }
+  const log = document.getElementById('chat-log');
+  if (log) {
+    const row = document.createElement('div');
+    row.className = 'msg bot';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = `${n.emoji || '✦'} ${n.label} ready. Tell me the topic — one or two sentences is enough.`;
+    row.appendChild(bubble);
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+  }
+  const input = document.getElementById('chat-input');
+  if (input) {
+    if (n.prefill) {
+      input.value = n.prefill;
+      input.focus();
+      const len = input.value.length;
+      try { input.setSelectionRange(len, len); } catch (_) {}
+    } else { input.focus(); }
+  }
+}
+
+// ====================================================================
+//   PER-NICHE EDIT PAGE
+// ====================================================================
+
+function openEditPageForNiche(n) {
+  // Hide picker, show edit section.
+  document.getElementById('picker').classList.add('hidden');
+  const edit = document.getElementById('edit-section');
+  edit.classList.remove('hidden');
+
+  // Banner styling — reuse the card gradient + emoji.
+  const grad = document.getElementById('edit-banner-gradient');
+  grad.className = `absolute inset-0 bg-gradient-to-br ${n.color_from} ${n.color_to}`;
+  document.getElementById('edit-banner-emoji').textContent = n.emoji || '✦';
+  document.getElementById('edit-banner-title').textContent = n.label;
+  document.getElementById('edit-banner-tagline').textContent = n.tagline || n.description || '';
+
+  // Reset form state.
+  document.getElementById('edit-form').classList.remove('hidden');
+  document.getElementById('edit-job-status').classList.add('hidden');
+  document.getElementById('edit-job-status').innerHTML = '';
+  document.getElementById('edit-topic').value = '';
+  document.getElementById('edit-notes').value = '';
+  document.getElementById('edit-length').value = '55';
+  document.getElementById('edit-length-display').textContent = '55s';
+  document.getElementById('edit-source-kind').value = 'auto';
+  document.getElementById('edit-source-ref').value = '';
+  document.getElementById('edit-source-ref-wrap').classList.add('hidden');
+  document.getElementById('edit-submit').disabled = false;
+
+  // Topic suggestions = the niche's sample hooks (clickable to pre-fill).
+  const suggestionsBox = document.getElementById('edit-topic-suggestions');
+  suggestionsBox.innerHTML = '';
+  (n.sample_hooks || []).forEach((h) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'text-[11px] px-2.5 py-1 rounded-full bg-slate-800/70 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-slate-100 transition';
+    btn.textContent = h;
+    btn.addEventListener('click', () => {
+      document.getElementById('edit-topic').value = h;
+      document.getElementById('edit-topic').focus();
+    });
+    suggestionsBox.appendChild(btn);
+  });
+
+  // Scroll to top so the user sees the banner first.
+  window.scrollTo({top: 0, behavior: 'smooth'});
+  document.getElementById('edit-topic').focus();
+}
+
+function closeEditPage() {
+  document.getElementById('edit-section').classList.add('hidden');
+  document.getElementById('picker').classList.remove('hidden');
+  // Clear job-poll if it's running.
+  if (state.jobPollTimer) { clearTimeout(state.jobPollTimer); state.jobPollTimer = null; }
+}
+
+// ---- form interactions ----
+function _editInit() {
+  const lenInput = document.getElementById('edit-length');
+  const lenDisplay = document.getElementById('edit-length-display');
+  if (lenInput && lenDisplay) {
+    lenInput.addEventListener('input', () => { lenDisplay.textContent = `${lenInput.value}s`; });
+  }
+
+  const srcSel = document.getElementById('edit-source-kind');
+  if (srcSel) {
+    srcSel.addEventListener('change', () => {
+      const wrap = document.getElementById('edit-source-ref-wrap');
+      const needsRef = srcSel.value === 'reddit_url' || srcSel.value === 'wikipedia_topic' || srcSel.value === 'youtube_video';
+      wrap.classList.toggle('hidden', !needsRef);
+    });
+  }
+
+  const back = document.getElementById('edit-back');
+  if (back) back.addEventListener('click', closeEditPage);
+
+  const form = document.getElementById('edit-form');
+  if (form) form.addEventListener('submit', onEditSubmit);
+}
+
+async function onEditSubmit(ev) {
+  ev.preventDefault();
+  const niche = state.activeNiche;
+  if (!niche) return;
+  const topic = document.getElementById('edit-topic').value.trim();
+  if (!topic) return;
+  const notes = document.getElementById('edit-notes').value.trim();
+  const length_s = parseInt(document.getElementById('edit-length').value, 10);
+  const source_kind = document.getElementById('edit-source-kind').value;
+  const source_ref = document.getElementById('edit-source-ref').value.trim() || null;
+
+  document.getElementById('edit-submit').disabled = true;
+
+  let body;
+  try {
+    const r = await fetch('/api/render', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        channel: niche.channel_key_for_chat || niche.key,
+        topic, notes, length_s, source_kind, source_ref,
+        format: niche.default_format || 'animated',
+      }),
+    });
+    if (!r.ok) {
+      const errText = (await r.text()).slice(0, 300);
+      if (r.status === 429) throw new Error('Daily render limit hit. Try again after UTC midnight.');
+      throw new Error(`HTTP ${r.status}: ${errText}`);
+    }
+    body = await r.json();
+  } catch (e) {
+    document.getElementById('edit-submit').disabled = false;
+    showJobError(e.message);
+    return;
+  }
+
+  // Hide the form, show the live status panel + start polling.
+  document.getElementById('edit-form').classList.add('hidden');
+  startJobStatusPoll(body.job_id, niche);
+}
+
+// ---- live job status ----
+const STAGE_LABELS = {
+  queued:           ['⏳', 'Queued — waiting for the laptop agent to lease the task'],
+  rewrite_cast:     ['✍️',  'Rewriting narration + casting characters via Claude'],
+  render:           ['🎬', 'Rendering scenes (image gen → TTS → captions → ffmpeg compose)'],
+  gcs_upload:       ['☁️',  'Uploading mp4 to cloud storage'],
+  youtube_upload:   ['📺', 'Publishing to YouTube'],
+  research_handoff: ['📊', 'Handing off to the research / analytics pipeline'],
+  done:             ['✅', 'Done — your Short is ready'],
+};
+
+function startJobStatusPoll(jobId, niche) {
+  const wrap = document.getElementById('edit-job-status');
+  wrap.classList.remove('hidden');
+  wrap.innerHTML = `
+    <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-5 space-y-4">
+      <div class="flex items-baseline justify-between">
+        <div>
+          <div class="text-xs uppercase tracking-wider text-slate-400">Job</div>
+          <div class="font-mono text-sm" id="js-job-id">${jobId.slice(0, 8)}…</div>
+        </div>
+        <div class="text-xs text-slate-400">Polls every 3s · keep this tab open</div>
+      </div>
+      <div id="js-stage" class="flex items-center gap-3">
+        <div class="text-3xl" id="js-emoji">⏳</div>
+        <div class="flex-1">
+          <div class="text-sm font-medium" id="js-label">Queued — waiting for the laptop agent</div>
+          <div class="text-xs text-slate-500 mt-0.5" id="js-substage"></div>
+        </div>
+      </div>
+      <div class="rounded-lg bg-slate-950 border border-slate-800 p-3 hidden" id="js-error"></div>
+      <div id="js-result" class="hidden space-y-2"></div>
+    </div>
+  `;
+
+  const tick = async () => {
+    try {
+      const r = await fetch(`/api/jobs/${jobId}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const job = await r.json();
+      renderJobStatus(job, niche);
+      if (job.status === 'done' || job.status === 'failed') return;  // stop polling
+    } catch (e) {
+      console.warn('job poll failed', e);
+    }
+    state.jobPollTimer = setTimeout(tick, 3000);
+  };
+  state.jobPollTimer = setTimeout(tick, 1500);
+}
+
+function renderJobStatus(job, niche) {
+  const stage = job.stage || 'queued';
+  const [emoji, label] = STAGE_LABELS[stage] || ['🔄', stage];
+  document.getElementById('js-emoji').textContent = emoji;
+  document.getElementById('js-label').textContent = label;
+  document.getElementById('js-substage').textContent = job.status === 'failed' ? 'failed' : `status: ${job.status}`;
+
+  if (job.status === 'failed') {
+    const err = document.getElementById('js-error');
+    err.classList.remove('hidden');
+    err.innerHTML = `<div class="text-xs text-rose-300 font-mono whitespace-pre-wrap">${escapeHtml(job.error || 'unknown error')}</div>`;
+  }
+
+  if (job.status === 'done') {
+    const result = document.getElementById('js-result');
+    result.classList.remove('hidden');
+    const yt = job.youtube_url
+      ? `<a href="${escapeAttr(job.youtube_url)}" target="_blank" rel="noopener" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-semibold">▶ Watch on YouTube</a>`
+      : '';
+    const dl = job.short_signed_url
+      ? `<a href="${escapeAttr(job.short_signed_url)}" target="_blank" rel="noopener" download class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-semibold">⬇ Download mp4</a>`
+      : '';
+    result.innerHTML = `
+      <div class="flex flex-wrap gap-3 items-center">${yt}${dl}</div>
+      <button id="js-make-another" class="text-sm text-slate-400 hover:text-slate-100 underline-offset-2 hover:underline">← Make another for ${escapeHtml(niche.label)}</button>
+    `;
+    const again = document.getElementById('js-make-another');
+    if (again) again.addEventListener('click', () => openEditPageForNiche(niche));
+  }
+}
+
+function showJobError(msg) {
+  const wrap = document.getElementById('edit-job-status');
+  wrap.classList.remove('hidden');
+  wrap.innerHTML = `
+    <div class="rounded-2xl border border-rose-500/40 bg-rose-500/10 p-4">
+      <div class="text-sm font-semibold text-rose-300 mb-1">Couldn't queue render</div>
+      <div class="text-xs text-rose-200/80 font-mono whitespace-pre-wrap">${escapeHtml(msg)}</div>
+    </div>
+  `;
+}
+
+// Initialize edit-page bindings once the DOM has loaded.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _editInit);
+} else { _editInit(); }
+
+function renderVoiceGrid() {
+  const grid = document.getElementById('voice-grid');
+  grid.innerHTML = '';
+
+  // Cloned voices render first so the user sees their custom picks.
+  state.voiceClones.forEach(c => {
+    const isSelected = state.voiceCloneId === c.clone_id;
+    const card = document.createElement('div');
+    card.className = `voice-card p-3 rounded-lg border border-violet-500/40 bg-violet-500/5 cursor-pointer transition ${isSelected ? 'selected' : ''}`;
+    card.dataset.cloneId = c.clone_id;
+    const sample = (c.ref_text || '').slice(0, 80);
+    card.innerHTML = `
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <div class="font-semibold truncate flex items-center gap-1">
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-violet-600/40 text-violet-100 uppercase tracking-wider">YT</span>
+            <span>Cloned voice</span>
+          </div>
+          <div class="text-xs text-slate-400 truncate">${escapeHtml(c.clone_id)}</div>
+        </div>
+        <div class="flex flex-col items-end gap-1">
+          <button data-play-clone="${c.clone_id}" data-url="${c.sample_url}"
+            class="play-btn w-8 h-8 rounded-full bg-slate-700 hover:bg-violet-600 grid place-items-center text-sm flex-shrink-0">▶</button>
+          <button data-delete-clone="${c.clone_id}" title="Delete clone"
+            class="text-[10px] text-slate-500 hover:text-rose-400">✕</button>
+        </div>
+      </div>
+      <div class="text-xs text-slate-500 mt-2 leading-snug italic">"${escapeHtml(sample)}${c.ref_text && c.ref_text.length > 80 ? '…' : ''}"</div>
+    `;
+    card.addEventListener('click', (ev) => {
+      if (ev.target.closest('.play-btn') || ev.target.closest('[data-delete-clone]')) return;
+      state.voiceCloneId = c.clone_id;
+      state.voice = null;
+      document.querySelectorAll('.voice-card').forEach(x => x.classList.remove('selected'));
+      card.classList.add('selected');
+      document.getElementById('voice-selected-label').textContent = `Selected: cloned voice ${c.clone_id}`;
+      refreshGenerateBtn();
+    });
+    grid.appendChild(card);
+  });
+
+  state.voices.forEach(v => {
+    const isSelected = state.voice === v.id && !state.voiceCloneId;
+    const card = document.createElement('div');
+    card.className = `voice-card p-3 rounded-lg border border-slate-800 bg-slate-900/40 cursor-pointer transition ${isSelected ? 'selected' : ''}`;
+    card.dataset.id = v.id;
+    card.innerHTML = `
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <div class="font-semibold truncate">${escapeHtml(v.label)}</div>
+          <div class="text-xs text-slate-400 truncate">${escapeHtml(v.accent || '')}</div>
+        </div>
+        <button data-play="${v.id}" data-url="${v.sample_url}"
+          class="play-btn w-8 h-8 rounded-full bg-slate-700 hover:bg-violet-600 grid place-items-center text-sm flex-shrink-0">▶</button>
+      </div>
+      <div class="text-xs text-slate-500 mt-2 leading-snug">${escapeHtml(v.tone || '')}</div>
+    `;
+    card.addEventListener('click', (ev) => {
+      if (ev.target.closest('.play-btn')) return;
+      state.voice = v.id;
+      state.voiceCloneId = null;
+      document.querySelectorAll('.voice-card').forEach(x => x.classList.remove('selected'));
+      card.classList.add('selected');
+      document.getElementById('voice-selected-label').textContent = `Selected: ${v.label}`;
+      refreshGenerateBtn();
+    });
+    grid.appendChild(card);
+  });
+}
+
+async function loadVoices() {
+  const [voicesRes, clonesRes] = await Promise.all([
+    fetch('/api/voices').then(r => r.json()),
+    fetch('/api/voice_clones').then(r => r.json()).catch(() => ({clones: []})),
+  ]);
+  state.voices = voicesRes.voices;
+  state.voice = voicesRes.default;
+  state.voiceClones = clonesRes.clones || [];
+  voicesRes.voices.forEach(v => { VOICE_LABELS[v.id] = v.label; });
+  renderVoiceGrid();
+  document.getElementById('voice-selected-label').textContent = `Selected: ${VOICE_LABELS[state.voice]}`;
+  refreshGenerateBtn();
+
+  // Single shared <audio> element for previews to avoid concurrent playback.
+  let previewAudio = null;
+  let currentPlayBtn = null;
+  document.getElementById('voice-grid').addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('.play-btn');
+    if (!btn) return;
+    ev.stopPropagation();
+    const url = btn.dataset.url;
+    if (currentPlayBtn === btn && previewAudio && !previewAudio.paused) {
+      previewAudio.pause();
+      btn.textContent = '▶';
+      return;
+    }
+    if (previewAudio) previewAudio.pause();
+    if (currentPlayBtn) currentPlayBtn.textContent = '▶';
+    btn.textContent = '⏳';
+    previewAudio = new Audio(url);
+    previewAudio.onplaying = () => btn.textContent = '⏸';
+    previewAudio.onpause   = () => btn.textContent = '▶';
+    previewAudio.onended   = () => btn.textContent = '▶';
+    previewAudio.onerror   = () => btn.textContent = '✗';
+    currentPlayBtn = btn;
+    try { await previewAudio.play(); } catch (_) { btn.textContent = '✗'; }
+  });
+
+  // Delete-clone delegate.
+  document.getElementById('voice-grid').addEventListener('click', async (ev) => {
+    const del = ev.target.closest('[data-delete-clone]');
+    if (!del) return;
+    ev.stopPropagation();
+    const id = del.dataset.deleteClone;
+    if (!confirm(`Delete cloned voice ${id}?`)) return;
+    await fetch(`/api/voice_clones/${id}`, { method: 'DELETE' });
+    if (state.voiceCloneId === id) state.voiceCloneId = null;
+    state.voiceClones = state.voiceClones.filter(c => c.clone_id !== id);
+    renderVoiceGrid();
+    refreshGenerateBtn();
+  });
+}
+
+// ----- Clone-from-YouTube form -----
+function wireCloneForm() {
+  const toggle = document.getElementById('clone-toggle');
+  const form = document.getElementById('clone-form');
+  toggle.addEventListener('click', () => {
+    form.classList.toggle('hidden');
+    if (!form.classList.contains('hidden')) {
+      document.getElementById('clone-url').focus();
+    }
+  });
+
+  const submit = document.getElementById('clone-submit');
+  const status = document.getElementById('clone-status');
+  submit.addEventListener('click', async () => {
+    const url = document.getElementById('clone-url').value.trim();
+    const start = parseFloat(document.getElementById('clone-start').value || '0');
+    const duration = parseFloat(document.getElementById('clone-duration').value || '10');
+    if (!url) { status.classList.remove('hidden'); status.textContent = 'Paste a YouTube URL.'; return; }
+    if (!(duration >= 5 && duration <= 15)) {
+      status.classList.remove('hidden');
+      status.textContent = 'Duration must be between 5 and 15 seconds.';
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = 'Cloning…';
+    status.classList.remove('hidden');
+    status.textContent = 'Downloading audio + transcribing… ~30s';
+    try {
+      const res = await fetch('/api/voice_clones', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ url, start, duration }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({error: res.statusText}));
+        throw new Error(err.error || res.statusText);
+      }
+      const data = await res.json();
+      // Refresh full list so we get created_at + canonical fields.
+      const list = await fetch('/api/voice_clones').then(r => r.json());
+      state.voiceClones = list.clones || [];
+      state.voiceCloneId = data.clone_id;
+      state.voice = null;
+      renderVoiceGrid();
+      document.getElementById('voice-selected-label').textContent = `Selected: cloned voice ${data.clone_id}`;
+      refreshGenerateBtn();
+      status.textContent = `✓ Cloned. Transcript: "${data.ref_text}"`;
+      document.getElementById('clone-url').value = '';
+    } catch (e) {
+      status.textContent = `✗ ${e.message}`;
+    } finally {
+      submit.disabled = false;
+      submit.textContent = 'Clone voice';
+    }
+  });
+}
+
+// ====================================================================
+//   STEP 2 — render lobby
+// ====================================================================
+
+const STAGES = [
+  { key: 'pull',    label: 'Pull a story from the source',                  weight: 5  },
+  { key: 'rewrite', label: 'Rewrite into a hook-first narration',           weight: 5  },
+  { key: 'cast',    label: 'Cast a narrator that matches the story',        weight: 5  },
+  { key: 'tts',     label: 'Synthesise voice (Kokoro)',                     weight: 5  },
+  { key: 'beats',   label: 'Align words to audio (Whisper)',                weight: 10 },
+  { key: 'prompts', label: 'Author per-beat scene prompts',                 weight: 15 },
+  { key: 'image',   label: 'Generate illustrated scenes',                   weight: 45 },
+  { key: 'compose', label: 'Compose the video (ffmpeg)',                    weight: 8  },
+  { key: 'critic',  label: 'Auto-critique (skipped in web UI)',             weight: 2  },
+];
+
+const stageState = {};
+let elapsedTimer = null;
+let pollTimer = null;
+
+function renderStageCards() {
+  const container = document.getElementById('stage-list');
+  container.innerHTML = '';
+  STAGES.forEach(s => {
+    stageState[s.key] = stageState[s.key] || { status: 'idle', detail: '' };
+    const st = stageState[s.key];
+    const isActive = st.status === 'active';
+    const isDone   = st.status === 'done';
+    const isError  = st.status === 'error';
+    const card = document.createElement('div');
+    card.className = `stage-card flex items-center gap-3 p-3 rounded-lg border ${
+      isError ? 'border-rose-500/60 bg-rose-500/10' :
+      isDone  ? 'border-emerald-500/40 bg-emerald-500/5' :
+      isActive? 'border-violet-500/60 bg-violet-500/10 active' :
+                'border-slate-800 bg-slate-900/40'
+    }`;
+    const icon = isDone ? '✓' : isError ? '!' : isActive ? '•' : '·';
+    const iconCls = isDone ? 'bg-emerald-500 text-emerald-50' :
+                    isError? 'bg-rose-500 text-rose-50' :
+                    isActive? 'bg-violet-500 text-white pulse-dot' :
+                              'bg-slate-800 text-slate-500';
+    card.innerHTML = `
+      <div class="w-7 h-7 rounded-full grid place-items-center text-sm font-bold ${iconCls}">${icon}</div>
+      <div class="flex-1 min-w-0">
+        <div class="text-sm font-medium">${s.label}</div>
+        <div class="text-xs text-slate-400 mt-0.5 truncate">${st.detail || ''}</div>
+      </div>
+      <div class="text-xs text-slate-500 font-mono flex-shrink-0">${st.elapsed || ''}</div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+function setStage(key, patch) {
+  stageState[key] = { ...(stageState[key] || {}), ...patch };
+  renderStageCards();
+  recomputeProgressBar();
+}
+
+function recomputeProgressBar() {
+  let earned = 0, total = 0;
+  STAGES.forEach(s => {
+    total += s.weight;
+    if (stageState[s.key]?.status === 'done') earned += s.weight;
+    else if (stageState[s.key]?.status === 'active') earned += s.weight * 0.4;
+  });
+  document.getElementById('progress-bar').style.width = `${Math.round(earned/total*100)}%`;
+}
+
+function showFatalError(msg) {
+  const fullMsg = msg || 'unknown error';
+  // The server now folds a tail of subprocess stdout (Python tracebacks,
+  // RuntimeError text, etc.) into the error message after a newline.
+  // Split so the first line is the headline and the rest goes into a
+  // scrollable mono block — readable instead of one collapsed line.
+  const nl = fullMsg.indexOf('\n');
+  const headline = nl === -1 ? fullMsg : fullMsg.slice(0, nl);
+  const detail   = nl === -1 ? ''      : fullMsg.slice(nl + 1);
+  STAGES.forEach(s => {
+    if (stageState[s.key]?.status === 'active') setStage(s.key, { status: 'error', detail: 'aborted: ' + headline });
+  });
+  let banner = document.getElementById('fatal-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'fatal-banner';
+    banner.className = 'p-4 rounded-lg border border-rose-500 bg-rose-500/10 text-rose-200 mb-4';
+    document.querySelector('#lobby').prepend(banner);
+  }
+  const detailHtml = detail
+    ? `<pre class="text-xs mt-2 p-2 bg-black/40 rounded max-h-64 overflow-auto whitespace-pre-wrap font-mono">${escapeHtml(detail)}</pre>`
+    : '';
+  banner.innerHTML = `<div class="font-bold">Job failed</div>
+    <div class="text-sm mt-1">${escapeHtml(headline)}</div>
+    ${detailHtml}
+    <button class="mt-3 px-3 py-1.5 bg-rose-600 hover:bg-rose-500 rounded text-sm" onclick="document.getElementById('reset-btn').click()">Try again</button>`;
+}
+
+function showSceneCards(prompts) {
+  if (!prompts || !prompts.length) return;
+  document.getElementById('scene-section').classList.remove('hidden');
+  const grid = document.getElementById('scene-grid');
+  if (grid.dataset.n === String(prompts.length)) return; // already rendered
+  grid.dataset.n = String(prompts.length);
+  grid.innerHTML = '';
+  prompts.forEach((p, i) => {
+    const div = document.createElement('div');
+    div.className = 'scene-card p-2.5 rounded-lg border border-slate-800 bg-slate-900/40';
+    div.innerHTML = `
+      <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-1">scene ${i+1}</div>
+      <div id="scene-thumb-${i}" class="aspect-[9/16] bg-slate-800/50 rounded mb-2 flex items-center justify-center text-slate-600 text-[10px]">rendering…</div>
+      <div class="text-[11px] text-slate-300 leading-snug font-bold">${escapeHtml(p.key_visual||'')}</div>
+      <div class="text-[10px] text-slate-500 mt-1 leading-snug">${escapeHtml(p.scene||'')}</div>
+    `;
+    grid.appendChild(div);
+  });
+}
+
+function refreshThumbs(jobId, total) {
+  for (let i = 0; i < total; i++) {
+    const el = document.getElementById(`scene-thumb-${i}`);
+    if (!el || el.dataset.loaded === '1') continue;
+    const img = new Image();
+    img.onload = () => {
+      el.dataset.loaded = '1';
+      el.style.backgroundImage = `url(/api/jobs/${jobId}/thumb/${i}?_=${Date.now()})`;
+      el.style.backgroundSize = 'cover';
+      el.style.backgroundPosition = 'center';
+      el.innerText = '';
+    };
+    img.onerror = () => {};
+    img.src = `/api/jobs/${jobId}/thumb/${i}?_=${Date.now()}`;
+  }
+}
+
+function showAudioPanel(jobId, narration) {
+  if (state.audioShown || state.videoShown) return;
+  state.audioShown = true;
+  document.getElementById('preview-idle').classList.add('hidden');
+  document.getElementById('preview-audio').classList.remove('hidden');
+  document.getElementById('preview-label').textContent = 'Narration';
+  document.getElementById('preview-state').textContent = 'audio ready · video painting';
+  document.getElementById('preview-audio-voice').textContent = VOICE_LABELS[state.voice] || state.voice || '';
+  if (narration) document.getElementById('preview-audio-narration').textContent = narration;
+  const player = document.getElementById('audio-player');
+  player.src = `/api/jobs/${jobId}/audio?_=${Date.now()}`;
+  player.load();
+}
+
+// ---- Live slideshow during image generation -------------------------
+// As each img_NN.png lands on disk (triggered by image/done events
+// from the backend), push the 0-indexed beat into slideshow.beats and
+// — on the first arrival — kick off a cycle interval that advances
+// every 1.5s through whatever has been generated so far. New images
+// joining mid-cycle just extend the array; the cursor wraps.
+const slideshow = {
+  beats: [],          // 0-indexed beat numbers whose img_NN.png is on disk
+  cursor: 0,
+  interval: null,
+  jobId: null,
+};
+
+function resetSlideshow() {
+  slideshow.beats = [];
+  slideshow.cursor = 0;
+  slideshow.jobId = null;
+  if (slideshow.interval) { clearInterval(slideshow.interval); slideshow.interval = null; }
+  const ss = document.getElementById('preview-slideshow');
+  const grad = document.getElementById('preview-gradient');
+  if (ss) ss.classList.add('hidden');
+  if (grad) grad.classList.remove('hidden');
+  const img = document.getElementById('slideshow-img');
+  if (img) img.removeAttribute('src');
+}
+
+function _renderSlideshowFrame() {
+  if (!slideshow.beats.length) return;
+  const ss = document.getElementById('preview-slideshow');
+  const grad = document.getElementById('preview-gradient');
+  const img = document.getElementById('slideshow-img');
+  const counter = document.getElementById('slideshow-counter');
+  if (!ss || !img) return;
+  // First frame: hide the gradient, reveal the slideshow.
+  if (ss.classList.contains('hidden')) {
+    grad.classList.add('hidden');
+    ss.classList.remove('hidden');
+  }
+  const beat = slideshow.beats[slideshow.cursor % slideshow.beats.length];
+  // Brief opacity dip on swap so the cycle is visible even when two
+  // adjacent frames look similar (same character, different scene).
+  img.style.opacity = '0';
+  setTimeout(() => {
+    img.src = `/api/jobs/${slideshow.jobId}/thumb/${beat}?_=${Date.now()}`;
+    img.style.opacity = '1';
+  }, 120);
+  if (counter) counter.textContent = `${(slideshow.cursor % slideshow.beats.length) + 1}/${slideshow.beats.length}`;
+}
+
+function addSlideshowImage(jobId, beatIndex) {
+  if (slideshow.jobId !== jobId) {
+    // New job — wipe stale state from a prior render.
+    resetSlideshow();
+    slideshow.jobId = jobId;
+  }
+  if (slideshow.beats.includes(beatIndex)) return;
+  slideshow.beats.push(beatIndex);
+  slideshow.beats.sort((a, b) => a - b);
+  // First image: render immediately and start the cycle.
+  if (slideshow.beats.length === 1) {
+    slideshow.cursor = 0;
+    _renderSlideshowFrame();
+    slideshow.interval = setInterval(() => {
+      slideshow.cursor = (slideshow.cursor + 1) % Math.max(1, slideshow.beats.length);
+      _renderSlideshowFrame();
+    }, 1500);
+  }
+}
+
+function stopSlideshow() {
+  if (slideshow.interval) { clearInterval(slideshow.interval); slideshow.interval = null; }
+}
+
+function showVideoPanel(jobId, mp4Url) {
+  state.videoShown = true;
+  document.getElementById('preview-idle').classList.add('hidden');
+  document.getElementById('preview-audio').classList.add('hidden');
+  document.getElementById('preview-video').classList.remove('hidden');
+  document.getElementById('preview-label').textContent = 'Final Short';
+  document.getElementById('preview-state').textContent = 'ready';
+  const v = document.getElementById('video-player');
+  v.src = mp4Url;
+  document.getElementById('download-btn').href = mp4Url;
+  // Final video took over — stop cycling the build-up slideshow.
+  stopSlideshow();
+}
+
+async function startJob() {
+  if (state.niche === 'riff') return startRiffJob();
+  if (!state.niche) return;
+  if (!state.voice && !state.voiceCloneId) return;
+  const options = state.voiceCloneId
+    ? { voice_clone_id: state.voiceCloneId }
+    : { voice: state.voice };
+  const res = await fetch('/api/jobs', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ niche: state.niche, options }),
+  });
+  const data = await res.json();
+  state.jobId = data.job_id;
+  state.jobStart = Date.now();
+  state.audioShown = false;
+  state.videoShown = false;
+  resetSlideshow();
+  STAGES.forEach(s => stageState[s.key] = { status: 'idle', detail: '' });
+  renderStageCards();
+  const voiceLabel = state.voiceCloneId
+    ? `cloned voice ${state.voiceCloneId}`
+    : VOICE_LABELS[state.voice];
+  document.getElementById('lobby-title').textContent = `Making your ${NICHE_LABELS[state.niche]}`;
+  document.getElementById('lobby-sub').textContent = `Voice: ${voiceLabel} · Job ${state.jobId}`;
+  document.getElementById('progress-bar').style.width = '0%';
+  document.getElementById('scene-section').classList.add('hidden');
+  document.getElementById('preview-idle').classList.remove('hidden');
+  document.getElementById('preview-audio').classList.add('hidden');
+  document.getElementById('preview-video').classList.add('hidden');
+  document.getElementById('preview-label').textContent = 'Preview';
+  document.getElementById('preview-state').textContent = '';
+  document.getElementById('result-summary').classList.add('hidden');
+  const old = document.getElementById('fatal-banner'); if (old) old.remove();
+  showSection('lobby');
+
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  elapsedTimer = setInterval(() => {
+    document.getElementById('elapsed-clock').textContent = fmtElapsed(Date.now() - state.jobStart);
+  }, 250);
+
+  subscribeEvents(state.jobId);
+  pollJob(state.jobId);
+}
+
+
+// ====================================================================
+//   RIFF — multi-Short workflow (analyze → ideate → render N)
+// ====================================================================
+
+const riffSeedState = {};   // seed_idx → { slug, title, hook, mp4Shown }
+
+const RIFF_STAGE_SHORT = {
+  pull:'pull', rewrite:'rewrite', cast:'cast', tts:'tts', beats:'align',
+  prompts:'prompts', image:'paint', compose:'compose',
+};
+
+function riffSeedCard(idx, total, info) {
+  const card = document.createElement('div');
+  card.className = 'seed-card p-4 rounded-xl border border-slate-800 bg-slate-900/40 transition';
+  card.id = `seed-card-${idx}`;
+  card.innerHTML = `
+    <div class="flex items-baseline justify-between mb-2">
+      <div class="font-semibold text-sm">Short ${idx+1} of ${total}</div>
+      <div id="seed-${idx}-status" class="text-xs text-slate-500">queued</div>
+    </div>
+    <div id="seed-${idx}-title" class="text-sm text-slate-200 leading-snug">${escapeHtml(info?.title || '…')}</div>
+    <div id="seed-${idx}-hook" class="text-xs text-slate-400 mt-1 leading-snug">${escapeHtml(info?.hook || '')}</div>
+    <div class="mt-3 flex flex-wrap gap-1.5" id="seed-${idx}-stages"></div>
+    <div id="seed-${idx}-result" class="hidden mt-3"></div>
+  `;
+  return card;
+}
+
+function setSeedStage(idx, stage, status, detail) {
+  const slot = document.getElementById(`seed-${idx}-stages`);
+  if (!slot) return;
+  let chip = document.getElementById(`seed-${idx}-stage-${stage}`);
+  if (!chip) {
+    chip = document.createElement('span');
+    chip.id = `seed-${idx}-stage-${stage}`;
+    chip.className = 'chip';
+    slot.appendChild(chip);
+  }
+  chip.textContent = (RIFF_STAGE_SHORT[stage] || stage) + (detail ? ` · ${detail}` : '');
+  chip.style.background = status === 'done' ? 'rgba(16,185,129,.2)'
+                       : status === 'active' ? 'rgba(168,85,247,.25)'
+                       : status === 'error' ? 'rgba(244,63,94,.25)'
+                       : 'rgb(30 41 59)';
+  const card = document.getElementById(`seed-card-${idx}`);
+  if (card) {
+    card.classList.remove('active','done','error');
+    if (status === 'error') card.classList.add('error');
+    else if (stage === 'compose' && status === 'done') card.classList.add('done');
+    else card.classList.add('active');
+  }
+  const statusEl = document.getElementById(`seed-${idx}-status`);
+  if (statusEl) {
+    statusEl.textContent = status === 'error' ? 'failed'
+                         : (stage === 'compose' && status === 'done') ? 'ready'
+                         : `${stage} (${status})`;
+  }
+}
+
+function setSeedResult(idx, mp4Url, slug) {
+  if (riffSeedState[idx]?.mp4Shown) return;
+  const slot = document.getElementById(`seed-${idx}-result`);
+  if (slot) {
+    slot.classList.remove('hidden');
+    slot.innerHTML = `
+      <video controls class="w-full aspect-[9/16] bg-black rounded mb-2" src="${mp4Url}"></video>
+      <a href="${mp4Url}" download class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded inline-block">Download mp4</a>
+    `;
+  }
+  document.getElementById('riff-gallery').classList.remove('hidden');
+  if (!document.getElementById(`gallery-${idx}`)) {
+    const card = document.createElement('div');
+    card.id = `gallery-${idx}`;
+    card.className = 'p-3 rounded-xl border border-slate-800 bg-slate-900/40';
+    card.innerHTML = `
+      <video controls class="w-full aspect-[9/16] bg-black rounded mb-2" src="${mp4Url}"></video>
+      <div class="text-xs text-slate-300 mb-1">Short ${idx+1}</div>
+      <div class="text-xs text-slate-500 font-mono break-all">${escapeHtml(slug || '')}</div>
+      <a href="${mp4Url}" download class="mt-2 text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded inline-block">Download mp4</a>
+    `;
+    document.getElementById('riff-gallery-grid').appendChild(card);
+  }
+  riffSeedState[idx] = { ...(riffSeedState[idx]||{}), mp4Shown: true };
+}
+
+function showRiffProfile(profile) {
+  const panel = document.getElementById('riff-profile-panel');
+  panel.classList.remove('hidden');
+  const themes = (profile.themes || []).map(t => `<span class="chip">${escapeHtml(t)}</span>`).join('');
+  panel.innerHTML = `
+    <div><div class="text-slate-500 uppercase tracking-wider text-[10px]">Niche match</div><div class="font-semibold">${escapeHtml(profile.niche_match || '')}</div></div>
+    <div><div class="text-slate-500 uppercase tracking-wider text-[10px]">Suggested voice</div><div class="font-semibold">${escapeHtml(profile.suggested_voice || '')}</div></div>
+    <div class="sm:col-span-2"><div class="text-slate-500 uppercase tracking-wider text-[10px]">Hook template</div><div>${escapeHtml(profile.hook_template || '')}</div></div>
+    <div class="sm:col-span-2"><div class="text-slate-500 uppercase tracking-wider text-[10px]">Structure</div><div>${escapeHtml(profile.structure || '')}</div></div>
+    <div><div class="text-slate-500 uppercase tracking-wider text-[10px]">Tone</div><div>${escapeHtml(profile.tone || '')}</div></div>
+    <div><div class="text-slate-500 uppercase tracking-wider text-[10px]">Pacing</div><div>${escapeHtml(profile.pacing || '')}</div></div>
+    <div class="sm:col-span-2"><div class="text-slate-500 uppercase tracking-wider text-[10px]">Themes</div><div>${themes}</div></div>
+  `;
+}
+
+async function startRiffJob() {
+  const url = document.getElementById('riff-url').value.trim();
+  const n = parseInt(document.getElementById('riff-n').value, 10) || 3;
+  if (!url) return;
+  const opts = { url, n };
+  if (state.voiceCloneId) opts.voice_clone_id = state.voiceCloneId;
+  else if (state.voice) opts.voice = state.voice;
+  const res = await fetch('/api/jobs', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ niche: 'riff', options: opts }),
+  });
+  if (!res.ok) {
+    alert(`Failed to start riff job: ${await res.text()}`);
+    return;
+  }
+  const data = await res.json();
+  state.jobId = data.job_id;
+  state.jobStart = Date.now();
+
+  document.getElementById('riff-source').textContent = `${url} · job ${state.jobId}`;
+  document.getElementById('riff-profile-panel').classList.add('hidden');
+  document.getElementById('riff-profile-panel').innerHTML = '';
+  document.getElementById('riff-analyze-detail').textContent = 'downloading video + sampling frames…';
+  const aIcon = document.getElementById('riff-analyze-icon');
+  aIcon.className = 'w-8 h-8 rounded-full grid place-items-center text-sm font-bold bg-violet-500 text-white pulse-dot';
+  aIcon.textContent = '•';
+  document.getElementById('riff-ideate-card').classList.add('hidden');
+  const iIcon = document.getElementById('riff-ideate-icon');
+  iIcon.className = 'w-8 h-8 rounded-full grid place-items-center text-sm font-bold bg-slate-700 text-slate-400';
+  iIcon.textContent = '·';
+  document.getElementById('riff-ideate-detail').textContent = 'waiting for profile…';
+  document.getElementById('riff-seeds').innerHTML = '';
+  document.getElementById('riff-gallery').classList.add('hidden');
+  document.getElementById('riff-gallery-grid').innerHTML = '';
+  Object.keys(riffSeedState).forEach(k => delete riffSeedState[k]);
+  showSection('riff-lobby');
+
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  elapsedTimer = setInterval(() => {
+    document.getElementById('riff-elapsed').textContent = fmtElapsed(Date.now() - state.jobStart);
+  }, 250);
+
+  subscribeRiffEvents(state.jobId, n);
+  pollRiff(state.jobId);
+}
+
+function subscribeRiffEvents(jobId, total) {
+  const es = new EventSource(`/api/jobs/${jobId}/events`);
+  const allStages = ['riff_analyze','riff_ideate','pull','rewrite','cast','tts','beats','prompts','image','compose','critic','done','error'];
+  allStages.forEach(name => {
+    es.addEventListener(name, ev => {
+      let p = {}; try { p = JSON.parse(ev.data); } catch {}
+      const stage = p.stage, status = p.status, msg = p.message || '', data = p.data || {};
+      if (stage === 'error' || status === 'error') {
+        // Dedupe — EventSource auto-reconnects and replays the log, so
+        // without this the same error banner stacks N times.
+        let banner = document.getElementById('riff-error-banner');
+        if (!banner) {
+          banner = document.createElement('div');
+          banner.id = 'riff-error-banner';
+          banner.className = 'p-4 rounded-lg border border-rose-500 bg-rose-500/10 text-rose-200';
+          document.getElementById('riff-seeds').prepend(banner);
+        }
+        banner.textContent = msg || 'unknown error';
+        es.close();
+        return;
+      }
+      if (stage === 'riff_analyze') {
+        const icon = document.getElementById('riff-analyze-icon');
+        document.getElementById('riff-analyze-detail').textContent = msg;
+        if (status === 'done') {
+          icon.classList.remove('pulse-dot','bg-violet-500');
+          icon.classList.add('bg-emerald-500'); icon.textContent = '✓';
+          showRiffProfile({
+            niche_match: data.niche_match, hook_template: data.hook_template,
+            suggested_voice: data.suggested_voice, length_target_s: data.length_target_s,
+            themes: data.themes,
+          });
+          document.getElementById('riff-ideate-card').classList.remove('hidden');
+        }
+        return;
+      }
+      if (stage === 'riff_ideate') {
+        const icon = document.getElementById('riff-ideate-icon');
+        document.getElementById('riff-ideate-detail').textContent = msg;
+        if (status === 'start') {
+          icon.classList.remove('bg-slate-700','text-slate-400');
+          icon.classList.add('bg-violet-500','text-white','pulse-dot');
+          icon.textContent = '•';
+        }
+        if (status === 'done') {
+          icon.classList.remove('pulse-dot','bg-violet-500');
+          icon.classList.add('bg-emerald-500'); icon.textContent = '✓';
+          const seedsRoot = document.getElementById('riff-seeds');
+          seedsRoot.innerHTML = '';
+          (data.seeds || []).forEach((s, i) => {
+            riffSeedState[i] = { slug: s.slug, title: s.title, hook: s.hook };
+            seedsRoot.appendChild(riffSeedCard(i, total, s));
+          });
+        }
+        return;
+      }
+      const idx = (data.seed_idx ?? null);
+      if (idx === null) return;
+      if (stage === 'compose' && status === 'done' && data.mp4) {
+        setSeedStage(idx, 'compose', 'done', '');
+        setSeedResult(idx, data.mp4, riffSeedState[idx]?.slug);
+        return;
+      }
+      const detail = (stage === 'image' && data.i && data.total) ? `${data.i}/${data.total}` : '';
+      setSeedStage(idx, stage, status, detail);
+    });
+  });
+  es.addEventListener('ping', () => {});
+  es.onerror = () => { /* polling fills in */ };
+}
+
+function pollRiff(jobId) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const r = await fetch(`/api/jobs/${jobId}`);
+      if (!r.ok) return;
+      const j = await r.json();
+      if (j.profile && Object.keys(j.profile).length) showRiffProfile(j.profile);
+      (j.mp4s || []).forEach(s => setSeedResult(s.seed_idx, s.mp4, s.slug));
+      if (j.state === 'done' || j.state === 'error') {
+        clearInterval(pollTimer);
+        if (elapsedTimer) clearInterval(elapsedTimer);
+      }
+    } catch {}
+  }, 3000);
+}
+
+
+function pollJob(jobId) {
+  if (pollTimer) clearInterval(pollTimer);
+  let consecutive404 = 0;
+  pollTimer = setInterval(async () => {
+    try {
+      const r = await fetch(`/api/jobs/${jobId}`);
+      if (r.status === 404) {
+        // Two consecutive 404s — the JOBS dict was wiped (server
+        // restart). The pipeline subprocess MAY still be running
+        // (start_new_session=True) but we can't track it from the
+        // browser. Surface this clearly instead of sitting on a stale
+        // "Image 4/7" forever.
+        consecutive404 += 1;
+        if (consecutive404 >= 2) {
+          clearInterval(pollTimer);
+          showServerRestartBanner(jobId);
+        }
+        return;
+      }
+      consecutive404 = 0;
+      const j = await r.json();
+      if (j.beat_prompts && j.beat_prompts.length) {
+        showSceneCards(j.beat_prompts);
+        refreshThumbs(jobId, j.beat_prompts.length);
+      }
+      if (j.state === 'done') {
+        clearInterval(pollTimer);
+        finalise(jobId, j);
+      } else if (j.state === 'error') {
+        clearInterval(pollTimer);
+        showFatalError(j.error || 'unknown error');
+      }
+    } catch (_) {}
+  }, 2500);
+}
+
+function showServerRestartBanner(jobId) {
+  STAGES.forEach(s => {
+    if (stageState[s.key]?.status === 'active') {
+      setStage(s.key, { status: 'error', detail: 'tracking lost (server restarted)' });
+    }
+  });
+  let banner = document.getElementById('fatal-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'fatal-banner';
+    banner.className = 'p-4 rounded-lg border border-amber-500 bg-amber-500/10 text-amber-200 mb-4';
+    document.querySelector('#lobby').prepend(banner);
+  }
+  banner.innerHTML = `<div class="font-bold">Lost the live trail of this job</div>
+    <div class="text-sm mt-1">
+      The server restarted (or is unreachable) so we can't stream progress for
+      job <span class="font-mono">${escapeHtml(jobId)}</span> anymore.
+      The pipeline subprocess may still be running — it now survives server
+      restarts as of this build, so check
+      <span class="font-mono"></span> in a few minutes; the mp4
+      should land there if it was past the image-gen stage.
+    </div>
+    <div class="flex gap-2 mt-3">
+      <button class="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 rounded text-sm" onclick="document.getElementById('reset-btn').click()">Start a new job</button>
+      <button class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-sm" onclick="(async()=>{const r=await fetch('/api/jobs/${jobId}'); if(r.ok){location.reload()}})()">Recheck</button>
+    </div>`;
+}
+
+function subscribeEvents(jobId) {
+  const es = new EventSource(`/api/jobs/${jobId}/events`);
+  const stageStartedAt = {};
+  ['pull','rewrite','cast','tts','beats','prompts','image','compose','critic','done','error']
+    .forEach(name => {
+      es.addEventListener(name, ev => {
+        let payload = {};
+        try { payload = JSON.parse(ev.data); } catch (_) {}
+        const stage = payload.stage;
+        const status = payload.status;
+        const message = payload.message || '';
+        const data = payload.data || {};
+
+        if (stage === 'error' || status === 'error') {
+          showFatalError(message || 'unknown error');
+          es.close();
+          return;
+        }
+
+        if (status === 'start') {
+          stageStartedAt[stage] = Date.now();
+          setStage(stage, { status: 'active', detail: message, elapsed: '' });
+        } else if (status === 'progress') {
+          let detail = message;
+          if (stage === 'image' && data.i && data.total) detail = `Image ${data.i} / ${data.total}`;
+          setStage(stage, { status: 'active', detail });
+        } else if (status === 'done') {
+          const ms = Date.now() - (stageStartedAt[stage] || Date.now());
+          setStage(stage, { status: 'done', detail: message, elapsed: `${(ms/1000).toFixed(1)}s` });
+
+          // The moment TTS finishes, swap the right panel into audio mode.
+          if (stage === 'tts') {
+            // narration text isn't on this event; fetch the snapshot for it.
+            fetch(`/api/jobs/${jobId}`).then(r => r.json()).then(j => {
+              const narr = (j.events || []).find(e => e.stage === 'pull' && e.data && e.data.slug);
+              showAudioPanel(jobId);
+            }).catch(()=>showAudioPanel(jobId));
+          }
+
+          // Per-image done: img_NN.png is on disk, push it into the
+          // live slideshow so the user has something to watch while
+          // the rest of the beats render. data.beat_index is 0-indexed
+          // (matches the thumb endpoint); data.i is the 1-indexed
+          // display number (already used by the progress branch).
+          if (stage === 'image' && typeof data.beat_index === 'number') {
+            // If the audio panel hasn't shown yet (rare — image gen
+            // beat 0 finishing before TTS done), nudge it open so
+            // there's somewhere visible to render the slideshow.
+            if (!state.audioShown && !state.videoShown) {
+              showAudioPanel(jobId);
+            }
+            addSlideshowImage(jobId, data.beat_index);
+          }
+        }
+      });
+    });
+  es.addEventListener('ping', () => {});
+  es.onerror = () => { /* polling fills in */ };
+}
+
+async function finalise(jobId, snapshot) {
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  showVideoPanel(jobId, snapshot.mp4_url);
+  document.getElementById('result-summary').classList.remove('hidden');
+  document.getElementById('result-elapsed').textContent = fmtElapsed(Date.now() - state.jobStart);
+  document.getElementById('result-slug').textContent = snapshot.slug || '';
+  state.slug = snapshot.slug || state.slug;
+}
+
+document.getElementById('reset-btn').addEventListener('click', () => {
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  if (pollTimer) clearInterval(pollTimer);
+  state.jobId = null;
+  showSection('picker');
+});
+
+document.getElementById('generate-btn').addEventListener('click', startJob);
+
+document.getElementById('critic-btn').addEventListener('click', () => {
+  alert('Auto-critic coming soon — runs Sonnet vision on the rendered frames and surfaces class-of-bug fixes for the pipeline.');
+});
+
+// ---- Upload to YouTube ---------------------------------------------------
+//
+// Two-phase flow:
+//   1. Click "Upload to YouTube" → fetches /api/uploads/preflight/<slug>
+//      and prefills the review form (title / description / tags / thumb).
+//   2. Click "Upload to YouTube" inside the form → POSTs the (possibly
+//      edited) payload to /api/uploads, then polls for progress.
+
+const upload = {
+  slug: null,
+  thumbChoice: 'auto',         // 'auto' | 'scene:<idx>' | 'custom'
+  customThumbStaged: false,    // true once the user uploaded a custom thumb
+  pollHandle: null,
+};
+
+function _ensureSlug() {
+  let slug = state.slug;
+  if (slug) return Promise.resolve(slug);
+  if (!state.jobId) return Promise.resolve(null);
+  return fetch('/api/jobs/' + state.jobId).then(r => r.json()).then(j => {
+    state.slug = j.slug || null;
+    return state.slug;
+  }).catch(() => null);
+}
+
+function _renderThumbGrid(scenes, autoThumbUrl) {
+  const grid = document.getElementById('upload-thumbnail-grid');
+  let html = '';
+  // Auto-composed card (the big-text thumbnail composer's output).
+  html += `
+    <label class="cursor-pointer thumb-tile" data-choice="auto" id="thumb-tile-auto">
+      ${autoThumbUrl
+        ? `<img src="${autoThumbUrl}" class="aspect-[9/16] object-cover rounded border-2 border-rose-500" loading="lazy" />`
+        : `<div class="aspect-[9/16] bg-slate-800 border-2 border-slate-700 rounded flex items-center justify-center text-[10px] text-slate-400 text-center px-1">Auto-composed<br/>(generating…)</div>`}
+      <div class="text-center text-[10px] text-rose-400 mt-0.5">auto · composed</div>
+    </label>`;
+  // YouTube-default card.
+  html += `
+    <label class="cursor-pointer thumb-tile" data-choice="youtube">
+      <div class="aspect-[9/16] bg-slate-800 border-2 border-slate-700 rounded flex items-center justify-center text-[10px] text-slate-400 text-center px-1">
+        YT default<br/>(no upload)
+      </div>
+    </label>`;
+  for (const s of scenes) {
+    html += `
+      <label class="cursor-pointer thumb-tile" data-choice="scene:${s.index}">
+        <img src="${s.url}" class="aspect-[9/16] object-cover rounded border-2 border-slate-700" loading="lazy" />
+        <div class="text-center text-[10px] text-slate-500 mt-0.5">scene ${s.index}</div>
+      </label>`;
+  }
+  // Custom slot (visible once a custom thumb is uploaded).
+  html += `
+    <label class="cursor-pointer thumb-tile hidden" data-choice="custom" id="thumb-tile-custom">
+      <div class="aspect-[9/16] bg-slate-800 border-2 border-slate-700 rounded flex items-center justify-center text-[10px] text-slate-400 text-center px-1">
+        Custom
+      </div>
+    </label>`;
+  grid.innerHTML = html;
+  grid.querySelectorAll('.thumb-tile').forEach(tile => {
+    tile.addEventListener('click', () => _setThumbChoice(tile.dataset.choice));
+  });
+  _setThumbChoice('auto');
+}
+
+function _setThumbChoice(choice) {
+  upload.thumbChoice = choice;
+  document.querySelectorAll('#upload-thumbnail-grid .thumb-tile').forEach(tile => {
+    const sel = tile.dataset.choice === choice;
+    tile.querySelectorAll('.aspect-\\[9\\/16\\], img').forEach(el => {
+      el.classList.toggle('border-rose-500', sel);
+      el.classList.toggle('border-slate-700', !sel);
+      el.classList.toggle('ring-2', sel);
+      el.classList.toggle('ring-rose-500/40', sel);
+    });
+  });
+}
+
+function _populateUploadForm(p) {
+  // Channel info banner.
+  document.getElementById('upload-channel-info').textContent =
+    `${p.channel_label}  ·  ${p.channel_yaml}  ·  account=${p.account}`;
+
+  // Title dropdown.
+  const sel = document.getElementById('upload-title-select');
+  const opts = (p.title_options && p.title_options.length) ? p.title_options : [p.title];
+  sel.innerHTML = opts.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('') +
+                  `<option value="__custom__">✏ Custom…</option>`;
+  sel.value = opts.includes(p.title) ? p.title : opts[0];
+  const customInput = document.getElementById('upload-title-custom');
+  customInput.classList.add('hidden');
+  customInput.value = '';
+  document.getElementById('upload-title-count').textContent = sel.value.length;
+
+  // Description / tags / privacy.
+  document.getElementById('upload-description').value = p.description || '';
+  document.getElementById('upload-desc-count').textContent = (p.description || '').length;
+  document.getElementById('upload-tags').value = (p.tags || []).join(', ');
+  document.getElementById('upload-privacy').value = p.privacy || 'private';
+  document.getElementById('upload-publish-at').value = '';
+  document.getElementById('upload-force').checked = false;
+
+  // Thumbnail grid + auto-thumbnail headline editor.
+  _renderThumbGrid(p.scene_thumbs || [], p.auto_thumb_url || null);
+  if (p.custom_thumb_present) {
+    document.getElementById('thumb-tile-custom').classList.remove('hidden');
+  }
+  document.getElementById('upload-thumb-headline').placeholder =
+    (p.auto_headline ? `e.g. ${p.auto_headline}` : 'Auto-derived from script.hook');
+  document.getElementById('upload-thumb-headline').value = '';
+
+  // Existing-upload banner.
+  const banner = document.getElementById('upload-form-existing');
+  if (p.existing_upload && p.existing_upload.video_id) {
+    banner.classList.remove('hidden');
+    banner.innerHTML =
+      `Already uploaded: <a class="underline text-amber-100" href="${p.existing_upload.url}" target="_blank">${p.existing_upload.video_id}</a>` +
+      ` (${p.existing_upload.privacy || '?'}, ${p.existing_upload.uploaded_at || '?'}). ` +
+      `Tick "Force re-upload" to push another copy.`;
+  } else {
+    banner.classList.add('hidden');
+  }
+
+  // Reset progress section.
+  document.getElementById('upload-progress').classList.add('hidden');
+  document.getElementById('upload-result').classList.add('hidden');
+  document.getElementById('upload-progress-bar').style.width = '0%';
+  document.getElementById('upload-form').classList.remove('hidden');
+}
+
+async function _openUploadForm() {
+  const slug = await _ensureSlug();
+  if (!slug) { alert('No slug — render a Short first.'); return; }
+  upload.slug = slug;
+  upload.customThumbStaged = false;
+  document.getElementById('upload-panel').classList.remove('hidden');
+  document.getElementById('upload-form').classList.add('hidden');  // hide while loading
+  document.getElementById('upload-channel-info').textContent = 'Loading…';
+  try {
+    const r = await fetch('/api/uploads/preflight/' + encodeURIComponent(slug));
+    if (!r.ok) throw new Error(await r.text());
+    const p = await r.json();
+    _populateUploadForm(p);
+  } catch (e) {
+    document.getElementById('upload-channel-info').textContent = 'Error: ' + (e.message || e);
+  }
+}
+
+async function _submitUpload() {
+  const slug = upload.slug;
+  if (!slug) return;
+
+  const titleSel = document.getElementById('upload-title-select');
+  let title = titleSel.value;
+  if (title === '__custom__') {
+    title = (document.getElementById('upload-title-custom').value || '').trim();
+    if (!title) { alert('Custom title is empty.'); return; }
+  }
+  const description = document.getElementById('upload-description').value;
+  const tags = document.getElementById('upload-tags').value;
+  const privacy = document.getElementById('upload-privacy').value;
+  const publishAtLocal = document.getElementById('upload-publish-at').value;
+  const publish_at = publishAtLocal ? new Date(publishAtLocal).toISOString() : null;
+  const force = document.getElementById('upload-force').checked;
+  const skip_critic = document.getElementById('upload-skip-critic').checked;
+
+  // Validate thumbnail choice — if custom but nothing staged, error.
+  if (upload.thumbChoice === 'custom' && !upload.customThumbStaged) {
+    alert('Pick a custom thumbnail file first, or change the thumbnail choice.');
+    return;
+  }
+
+  document.getElementById('upload-form').classList.add('hidden');
+  document.getElementById('upload-progress').classList.remove('hidden');
+  document.getElementById('upload-status').textContent = 'Starting…';
+
+  try {
+    const r = await fetch('/api/uploads', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        slug, title, description, tags, privacy, publish_at, force,
+        skip_critic,
+        thumbnail: upload.thumbChoice,
+        headline: (document.getElementById('upload-thumb-headline').value || '').trim() || null,
+      }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    if (upload.pollHandle) clearInterval(upload.pollHandle);
+    upload.pollHandle = setInterval(() => _pollUpload(slug), 1500);
+    _pollUpload(slug);
+  } catch (e) {
+    document.getElementById('upload-status').textContent = '';
+    document.getElementById('upload-result').classList.remove('hidden');
+    document.getElementById('upload-result').innerHTML =
+      '<div class="text-rose-400">✗ ' + escapeHtml(e.message || String(e)) + '</div>';
+  }
+}
+
+async function _pollUpload(slug) {
+  try {
+    const r = await fetch('/api/uploads/' + encodeURIComponent(slug));
+    if (!r.ok) throw new Error('status ' + r.status);
+    const s = await r.json();
+    const bar = document.getElementById('upload-progress-bar');
+    const status = document.getElementById('upload-status');
+    const result = document.getElementById('upload-result');
+    bar.style.width = (s.progress || 0) + '%';
+    if (s.state === 'starting') {
+      status.textContent = 'Authenticating with YouTube…';
+    } else if (s.state === 'uploading') {
+      status.textContent = 'Uploading… ' + (s.progress || 0).toFixed(1) + '%';
+    } else if (s.state === 'done') {
+      status.textContent = s.cached ? 'Already uploaded — showing cached record.' : 'Upload complete.';
+      bar.style.width = '100%';
+      result.classList.remove('hidden');
+      const studio = s.studio_url || ('https://studio.youtube.com/video/' + s.video_id + '/edit');
+      result.innerHTML =
+        '<div class="text-emerald-400">✓ uploaded as <code class="text-emerald-300">' + escapeHtml(s.video_id || '?') + '</code></div>' +
+        '<div class="mt-1"><a class="text-sky-400 hover:underline" href="' + s.video_url + '" target="_blank" rel="noopener">' + s.video_url + '</a></div>' +
+        '<div class="mt-1"><a class="text-sky-400 hover:underline text-xs" href="' + studio + '" target="_blank" rel="noopener">Open in YouTube Studio →</a></div>';
+      clearInterval(upload.pollHandle);
+      upload.pollHandle = null;
+    } else if (s.state === 'error') {
+      status.textContent = '';
+      result.classList.remove('hidden');
+      result.innerHTML = '<div class="text-rose-400">✗ ' + escapeHtml(s.error || 'unknown error') + '</div>';
+      clearInterval(upload.pollHandle);
+      upload.pollHandle = null;
+    }
+  } catch (e) {
+    console.error('upload poll', e);
+  }
+}
+
+// Wire form interactions.
+document.getElementById('upload-btn').addEventListener('click', _openUploadForm);
+document.getElementById('upload-cancel-btn').addEventListener('click', () => {
+  document.getElementById('upload-panel').classList.add('hidden');
+});
+document.getElementById('upload-confirm-btn').addEventListener('click', _submitUpload);
+
+// Regenerate the auto-thumbnail with the operator's headline edit.
+document.getElementById('upload-thumb-regen').addEventListener('click', async () => {
+  const slug = upload.slug;
+  if (!slug) return;
+  const btn = document.getElementById('upload-thumb-regen');
+  const headline = (document.getElementById('upload-thumb-headline').value || '').trim() || null;
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch('/api/uploads/auto-thumb/' + encodeURIComponent(slug) + '/regenerate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ headline }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const j = await r.json();
+    // Replace the auto-tile image with the freshly-composed one.
+    const tile = document.getElementById('thumb-tile-auto');
+    if (tile && j.auto_thumb_url) {
+      tile.querySelector('img, div').outerHTML =
+        `<img src="${j.auto_thumb_url}" class="aspect-[9/16] object-cover rounded border-2 border-rose-500" />`;
+    }
+    _setThumbChoice('auto');
+  } catch (e) {
+    alert('Regenerate failed: ' + (e.message || e));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '↻ Regenerate';
+  }
+});
+
+document.getElementById('upload-title-select').addEventListener('change', (e) => {
+  const customInput = document.getElementById('upload-title-custom');
+  if (e.target.value === '__custom__') {
+    customInput.classList.remove('hidden');
+    customInput.focus();
+    document.getElementById('upload-title-count').textContent = customInput.value.length;
+  } else {
+    customInput.classList.add('hidden');
+    document.getElementById('upload-title-count').textContent = e.target.value.length;
+  }
+});
+document.getElementById('upload-title-custom').addEventListener('input', (e) => {
+  document.getElementById('upload-title-count').textContent = e.target.value.length;
+});
+document.getElementById('upload-description').addEventListener('input', (e) => {
+  document.getElementById('upload-desc-count').textContent = e.target.value.length;
+});
+
+// Custom thumbnail upload.
+document.getElementById('upload-custom-thumb').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  if (file.size > 2 * 1024 * 1024) {
+    alert('Thumbnail must be ≤ 2 MB (YouTube limit).');
+    e.target.value = '';
+    return;
+  }
+  const slug = upload.slug;
+  if (!slug) return;
+  const status = document.getElementById('upload-custom-thumb-status');
+  status.textContent = 'Uploading…';
+  try {
+    const r = await fetch('/api/uploads/custom-thumb/' + encodeURIComponent(slug), {
+      method: 'POST',
+      headers: {'Content-Type': file.type},
+      body: file,
+    });
+    if (!r.ok) throw new Error(await r.text());
+    upload.customThumbStaged = true;
+    document.getElementById('thumb-tile-custom').classList.remove('hidden');
+    // Show a preview by replacing the placeholder text with the image.
+    const tile = document.getElementById('thumb-tile-custom');
+    const url = URL.createObjectURL(file);
+    tile.innerHTML =
+      `<img src="${url}" class="aspect-[9/16] object-cover rounded border-2 border-slate-700" />` +
+      `<div class="text-center text-[10px] text-slate-500 mt-0.5">custom</div>`;
+    tile.addEventListener('click', () => _setThumbChoice('custom'));
+    _setThumbChoice('custom');
+    status.textContent = `Staged ${file.name} (${(file.size/1024).toFixed(0)} KB)`;
+  } catch (err) {
+    status.textContent = 'Failed: ' + (err.message || err);
+  }
+});
+
+// ====================================================================
+//   TELEMETRY DASHBOARD
+// ====================================================================
+
+function fmtMs(ms) {
+  if (!ms || ms < 0) return '–';
+  if (ms < 1000) return ms + 'ms';
+  if (ms < 60000) return (ms/1000).toFixed(1) + 's';
+  const m = Math.floor(ms/60000);
+  const s = Math.round((ms%60000)/1000);
+  return m + 'm ' + s + 's';
+}
+function fmtNum(n) {
+  if (n === null || n === undefined) return '–';
+  if (n >= 1_000_000) return (n/1_000_000).toFixed(2) + 'M';
+  if (n >= 1_000)     return (n/1_000).toFixed(1) + 'k';
+  return String(n);
+}
+function fmtCost(usd) {
+  if (!usd) return '$0';
+  if (usd < 0.01) return '$' + usd.toFixed(4);
+  return '$' + usd.toFixed(2);
+}
+function relTime(ts) {
+  const d = Date.now()/1000 - ts;
+  if (d < 60)    return Math.round(d) + 's ago';
+  if (d < 3600)  return Math.round(d/60) + 'm ago';
+  if (d < 86400) return Math.round(d/3600) + 'h ago';
+  return Math.round(d/86400) + 'd ago';
+}
+
+function tile(label, value, sub) {
+  return `<div class="p-4 bg-slate-900/50 border border-slate-800 rounded-xl">
+    <div class="text-[10px] uppercase tracking-wider text-slate-500">${escapeHtml(label)}</div>
+    <div class="text-2xl font-bold mt-1">${escapeHtml(String(value))}</div>
+    ${sub ? `<div class="text-xs text-slate-400 mt-0.5">${escapeHtml(sub)}</div>` : ''}
+  </div>`;
+}
+
+function renderOverview(data) {
+  const el = document.getElementById('tlm-overview');
+  const sr = data.success_rate;
+  el.innerHTML = [
+    tile('Jobs', data.jobs_finished, `${data.jobs_started} started`),
+    tile('Success', sr === null ? '–' : sr + '%',
+         `${data.jobs_success} ok / ${data.jobs_failed} fail`),
+    tile('Avg duration', fmtMs(data.avg_job_ms),
+         `p95 ${fmtMs(data.p95_job_ms)}`),
+    tile('LLM calls', fmtNum(data.llm_calls),
+         `${fmtNum(data.llm_input_tokens + data.llm_output_tokens)} tokens`),
+    tile('Notional LLM cost', fmtCost(data.llm_cost_usd),
+         'API list price · not billed on Pro/Max'),
+    tile('Stage errors', data.stage_errors, 'across all jobs'),
+  ].join('');
+
+  // Per-niche table (driven off overview.by_niche).
+  const niches = Object.entries(data.by_niche || {});
+  const nichesEl = document.getElementById('tlm-niches');
+  if (!niches.length) {
+    nichesEl.innerHTML = '<div class="p-4 text-slate-500 text-sm">No jobs in this window.</div>';
+  } else {
+    nichesEl.innerHTML = `
+      <table class="w-full text-sm">
+        <thead class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-900/60">
+          <tr>
+            <th class="text-left px-4 py-2">Niche</th>
+            <th class="text-right px-4 py-2">Total</th>
+            <th class="text-right px-4 py-2">Success</th>
+            <th class="text-right px-4 py-2">Failed</th>
+            <th class="text-right px-4 py-2">Avg duration</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${niches.map(([n, d]) => `
+            <tr class="border-t border-slate-800">
+              <td class="px-4 py-2 font-mono">${escapeHtml(n)}</td>
+              <td class="px-4 py-2 text-right">${d.total}</td>
+              <td class="px-4 py-2 text-right text-emerald-400">${d.success}</td>
+              <td class="px-4 py-2 text-right ${d.failed ? 'text-rose-400' : 'text-slate-500'}">${d.failed}</td>
+              <td class="px-4 py-2 text-right font-mono">${fmtMs(d.avg_ms)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>`;
+  }
+}
+
+function renderStages(data) {
+  const el = document.getElementById('tlm-stages');
+  if (!data.stages || !data.stages.length) {
+    el.innerHTML = '<div class="p-4 text-slate-500 text-sm">No stage events in this window.</div>';
+    return;
+  }
+  // Bars are sized relative to the slowest stage's avg.
+  const maxAvg = Math.max(...data.stages.map(s => s.avg_ms));
+  el.innerHTML = `
+    <table class="w-full text-sm">
+      <thead class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-900/60">
+        <tr>
+          <th class="text-left px-4 py-2">Stage</th>
+          <th class="text-right px-4 py-2">Runs</th>
+          <th class="text-right px-4 py-2">Avg</th>
+          <th class="text-right px-4 py-2">p50</th>
+          <th class="text-right px-4 py-2">p95</th>
+          <th class="text-right px-4 py-2">Max</th>
+          <th class="text-left px-4 py-2 w-[35%]">Avg duration</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${data.stages.map(s => {
+          const pct = Math.max(2, Math.round(s.avg_ms / maxAvg * 100));
+          return `<tr class="border-t border-slate-800">
+            <td class="px-4 py-2 font-mono">${escapeHtml(s.stage)}</td>
+            <td class="px-4 py-2 text-right">${s.count}</td>
+            <td class="px-4 py-2 text-right font-mono">${fmtMs(s.avg_ms)}</td>
+            <td class="px-4 py-2 text-right font-mono text-slate-400">${fmtMs(s.p50_ms)}</td>
+            <td class="px-4 py-2 text-right font-mono text-slate-400">${fmtMs(s.p95_ms)}</td>
+            <td class="px-4 py-2 text-right font-mono text-slate-500">${fmtMs(s.max_ms)}</td>
+            <td class="px-4 py-2">
+              <div class="h-2 rounded bg-slate-800 overflow-hidden">
+                <div class="h-full bg-gradient-to-r from-violet-500 to-rose-500" style="width:${pct}%"></div>
+              </div>
+            </td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
+}
+
+function renderLLM(data) {
+  const el = document.getElementById('tlm-llm');
+  if (!data.models || !data.models.length) {
+    el.innerHTML = '<div class="p-4 text-slate-500 text-sm">No LLM calls in this window.</div>';
+    return;
+  }
+  el.innerHTML = `
+    <table class="w-full text-sm">
+      <thead class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-900/60">
+        <tr>
+          <th class="text-left px-4 py-2">Model</th>
+          <th class="text-right px-4 py-2">Calls</th>
+          <th class="text-right px-4 py-2">Errors</th>
+          <th class="text-right px-4 py-2">Input tok</th>
+          <th class="text-right px-4 py-2">Output tok</th>
+          <th class="text-right px-4 py-2" title="API list price — not billed on Pro/Max">Notional $</th>
+          <th class="text-right px-4 py-2">Avg ms</th>
+          <th class="text-right px-4 py-2">p95 ms</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${data.models.map(m => `<tr class="border-t border-slate-800">
+          <td class="px-4 py-2 font-mono">${escapeHtml(m.model)}</td>
+          <td class="px-4 py-2 text-right">${m.calls}</td>
+          <td class="px-4 py-2 text-right ${m.errors ? 'text-rose-400' : 'text-slate-500'}">${m.errors}</td>
+          <td class="px-4 py-2 text-right font-mono">${fmtNum(m.input_tokens)}</td>
+          <td class="px-4 py-2 text-right font-mono">${fmtNum(m.output_tokens)}</td>
+          <td class="px-4 py-2 text-right font-mono">${fmtCost(m.cost_usd)}</td>
+          <td class="px-4 py-2 text-right font-mono">${fmtMs(m.avg_ms)}</td>
+          <td class="px-4 py-2 text-right font-mono text-slate-400">${fmtMs(m.p95_ms)}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+function renderErrors(data) {
+  const el = document.getElementById('tlm-errors');
+  if (!data.errors || !data.errors.length) {
+    el.innerHTML = '<div class="p-4 text-emerald-400/80 text-sm">No errors in this window.</div>';
+    return;
+  }
+  el.innerHTML = `
+    <ul class="divide-y divide-slate-800">
+      ${data.errors.map(e => {
+        const meta = e.metadata || {};
+        const headline = meta.message || meta.error || meta.stage || e.event;
+        const detail = [meta.niche, meta.stage, meta.model].filter(Boolean).join(' · ');
+        return `<li class="px-4 py-3">
+          <div class="flex items-baseline justify-between gap-3">
+            <div class="text-sm">
+              <span class="font-mono text-rose-400">${escapeHtml(e.event)}</span>
+              ${detail ? `<span class="text-slate-400 text-xs ml-2">${escapeHtml(detail)}</span>` : ''}
+            </div>
+            <div class="text-xs text-slate-500 font-mono whitespace-nowrap">${escapeHtml(relTime(e.ts))}</div>
+          </div>
+          <div class="text-xs text-slate-300 mt-1 break-words">${escapeHtml(String(headline).slice(0,300))}</div>
+          ${e.job_id ? `<div class="text-[10px] text-slate-600 font-mono mt-0.5">job ${escapeHtml(e.job_id)}</div>` : ''}
+        </li>`;
+      }).join('')}
+    </ul>`;
+}
+
+// ---- engineering latency view --------------------------------------
+// One panel per signal in /api/telemetry/latency. Goal: the bottleneck
+// jumps out without the user having to scan numbers.
+
+function renderHotspots(data) {
+  const el = document.getElementById('tlm-hotspots');
+  const rows = data.hotspots || [];
+  if (!rows.length) {
+    el.innerHTML = '<div class="p-4 text-slate-500 text-sm">No stage events in this window.</div>';
+    return;
+  }
+  // Color the dominant stage red (>50%), warn at 25%, otherwise neutral.
+  const colorFor = (pct) => pct >= 50 ? 'from-rose-500 to-rose-700'
+                          : pct >= 25 ? 'from-amber-500 to-amber-700'
+                                      : 'from-violet-500 to-indigo-700';
+  el.innerHTML = `
+    <table class="w-full text-sm">
+      <thead class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-900/60">
+        <tr>
+          <th class="text-left px-4 py-2">Stage</th>
+          <th class="text-right px-4 py-2">Calls</th>
+          <th class="text-right px-4 py-2">Total</th>
+          <th class="text-right px-4 py-2">Share</th>
+          <th class="text-right px-4 py-2">p50</th>
+          <th class="text-right px-4 py-2">p90</th>
+          <th class="text-right px-4 py-2">Max</th>
+          <th class="text-left px-4 py-2 w-[35%]">Share of total wall time</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(s => `
+          <tr class="border-t border-slate-800">
+            <td class="px-4 py-2 font-mono">${escapeHtml(s.stage)}</td>
+            <td class="px-4 py-2 text-right">${s.count}</td>
+            <td class="px-4 py-2 text-right font-mono">${fmtMs(s.total_ms)}</td>
+            <td class="px-4 py-2 text-right font-mono ${s.share_pct >= 50 ? 'text-rose-400' : s.share_pct >= 25 ? 'text-amber-400' : 'text-slate-300'}">${s.share_pct}%</td>
+            <td class="px-4 py-2 text-right font-mono text-slate-400">${fmtMs(s.p50_ms)}</td>
+            <td class="px-4 py-2 text-right font-mono text-slate-400">${fmtMs(s.p90_ms)}</td>
+            <td class="px-4 py-2 text-right font-mono text-slate-500">${fmtMs(s.max_ms)}</td>
+            <td class="px-4 py-2">
+              <div class="h-2 rounded bg-slate-800 overflow-hidden">
+                <div class="h-full bg-gradient-to-r ${colorFor(s.share_pct)}" style="width:${Math.max(2, s.share_pct)}%"></div>
+              </div>
+            </td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+function renderJobHealth(data) {
+  const el = document.getElementById('tlm-job-health');
+  const rows = data.job_health || [];
+  if (!rows.length) {
+    el.innerHTML = '<div class="p-4 text-slate-500 text-sm">No jobs in this window.</div>';
+    return;
+  }
+  el.innerHTML = `
+    <table class="w-full text-sm">
+      <thead class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-900/60">
+        <tr>
+          <th class="text-left px-4 py-2">Niche</th>
+          <th class="text-right px-4 py-2">Started</th>
+          <th class="text-right px-4 py-2">OK</th>
+          <th class="text-right px-4 py-2">Failed</th>
+          <th class="text-right px-4 py-2">Success</th>
+          <th class="text-right px-4 py-2">p50</th>
+          <th class="text-right px-4 py-2">p90</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(j => {
+          const sr = j.success_rate_pct;
+          const srColor = sr === null ? 'text-slate-500' :
+            sr >= 80 ? 'text-emerald-400' :
+            sr >= 50 ? 'text-amber-400' : 'text-rose-400';
+          return `<tr class="border-t border-slate-800">
+            <td class="px-4 py-2 font-mono">${escapeHtml(j.niche)}</td>
+            <td class="px-4 py-2 text-right">${j.started}</td>
+            <td class="px-4 py-2 text-right text-emerald-400">${j.ok}</td>
+            <td class="px-4 py-2 text-right ${j.failed ? 'text-rose-400' : 'text-slate-500'}">${j.failed}</td>
+            <td class="px-4 py-2 text-right font-mono ${srColor}">${sr === null ? '—' : sr + '%'}</td>
+            <td class="px-4 py-2 text-right font-mono text-slate-400">${fmtMs(j.p50_ms)}</td>
+            <td class="px-4 py-2 text-right font-mono text-slate-400">${fmtMs(j.p90_ms)}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
+}
+
+function renderImageRetries(data) {
+  const el = document.getElementById('tlm-image-retries');
+  const rows = data.image_retries || [];
+  if (!rows.length) {
+    el.innerHTML = `<div class="p-4 text-slate-500 text-sm">
+      No image_attempt events yet. Retry rate will appear here once a
+      job has run with the structured per-attempt telemetry enabled.
+    </div>`;
+    return;
+  }
+  el.innerHTML = `
+    <table class="w-full text-sm">
+      <thead class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-900/60">
+        <tr>
+          <th class="text-left px-4 py-2">Niche</th>
+          <th class="text-right px-4 py-2">Attempts</th>
+          <th class="text-right px-4 py-2">Retries</th>
+          <th class="text-right px-4 py-2">QC fails</th>
+          <th class="text-right px-4 py-2">Retry %</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => {
+          const c = r.retry_pct >= 30 ? 'text-rose-400' :
+                    r.retry_pct >= 15 ? 'text-amber-400' : 'text-emerald-400';
+          return `<tr class="border-t border-slate-800">
+            <td class="px-4 py-2 font-mono">${escapeHtml(r.niche)}</td>
+            <td class="px-4 py-2 text-right">${r.attempts}</td>
+            <td class="px-4 py-2 text-right">${r.retries}</td>
+            <td class="px-4 py-2 text-right text-slate-400">${r.qc_fails}</td>
+            <td class="px-4 py-2 text-right font-mono ${c}">${r.retry_pct}%</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
+}
+
+function renderErrorGroups(data) {
+  const el = document.getElementById('tlm-error-groups');
+  const groups = data.error_groups || [];
+  if (!groups.length) {
+    el.innerHTML = '<div class="p-4 text-emerald-400/80 text-sm">No errors in this window.</div>';
+    return;
+  }
+  el.innerHTML = `
+    <ul class="divide-y divide-slate-800">
+      ${groups.map(g => `<li class="px-4 py-3">
+        <div class="flex items-baseline justify-between gap-3">
+          <div class="text-sm">
+            <span class="font-mono text-rose-400">${g.count}×</span>
+            <span class="text-slate-300 ml-2">${escapeHtml(g.fingerprint)}</span>
+          </div>
+          <div class="text-xs text-slate-500 font-mono whitespace-nowrap">
+            ${g.last_ts ? relTime(g.last_ts) : ''}
+          </div>
+        </div>
+        <div class="text-[11px] text-slate-500 mt-1">
+          niches: ${g.niches.length ? g.niches.map(n => `<span class="font-mono text-slate-400">${escapeHtml(n)}</span>`).join(', ') : '—'}
+          · stages: ${g.stages.length ? g.stages.map(s => `<span class="font-mono text-slate-400">${escapeHtml(s)}</span>`).join(', ') : '—'}
+        </div>
+        <pre class="text-[11px] text-slate-400 mt-1 whitespace-pre-wrap break-words">${escapeHtml(g.headline)}</pre>
+      </li>`).join('')}
+    </ul>`;
+}
+
+function renderSlowestJob(data) {
+  const el = document.getElementById('tlm-slowest');
+  const sj = data.slowest_recent_job;
+  if (!sj) {
+    el.innerHTML = '<div class="p-4 text-slate-500 text-sm">No finished jobs in this window.</div>';
+    return;
+  }
+  // Build a vertical waterfall of stages relative to the slowest one.
+  const tl = (sj.timeline || []).filter(e => e.duration_ms);
+  const maxDur = Math.max(1, ...tl.map(e => e.duration_ms));
+  el.innerHTML = `
+    <div class="px-4 py-3 border-b border-slate-800">
+      <div class="text-sm">
+        <span class="font-mono text-slate-300">${escapeHtml(sj.niche || '?')}</span>
+        <span class="text-slate-500"> · job </span>
+        <span class="font-mono text-slate-400">${escapeHtml(sj.job_id || '?')}</span>
+        <span class="text-slate-500"> · </span>
+        <span class="font-mono ${sj.success ? 'text-emerald-400' : 'text-rose-400'}">
+          ${sj.success ? 'SUCCESS' : 'FAILED'}
+        </span>
+        <span class="text-slate-500"> · total </span>
+        <span class="font-mono text-slate-300">${fmtMs(sj.duration_ms)}</span>
+      </div>
+    </div>
+    <ul class="divide-y divide-slate-900/60 max-h-96 overflow-auto">
+      ${tl.map(e => {
+        const pct = Math.max(2, Math.round(e.duration_ms / maxDur * 100));
+        const md = e.metadata || {};
+        const label = md.stage || md.model || e.event;
+        const detail = [md.stage, md.beat, md.attempt, md.qc, md.model].filter(x => x !== undefined && x !== null).join(' · ');
+        return `<li class="px-4 py-1.5 text-xs">
+          <div class="flex items-center gap-2">
+            <span class="font-mono text-slate-500 w-32 shrink-0">${escapeHtml(e.event)}</span>
+            <span class="font-mono text-slate-300 w-32 shrink-0 truncate">${escapeHtml(label)}</span>
+            <div class="flex-1 h-1.5 rounded bg-slate-800 overflow-hidden">
+              <div class="h-full bg-gradient-to-r from-violet-500 to-rose-500" style="width:${pct}%"></div>
+            </div>
+            <span class="font-mono text-slate-400 w-16 text-right shrink-0">${fmtMs(e.duration_ms)}</span>
+          </div>
+          ${detail ? `<div class="ml-[16.5rem] text-[10px] text-slate-600 font-mono">${escapeHtml(detail)}</div>` : ''}
+        </li>`;
+      }).join('')}
+    </ul>`;
+}
+
+async function loadTelemetry() {
+  const hours = document.getElementById('tlm-window').value || '24';
+  const q = '?hours=' + encodeURIComponent(hours);
+  try {
+    const [overview, stages, llm, errors, latency] = await Promise.all([
+      fetch('/api/telemetry/overview' + q).then(r => r.json()),
+      fetch('/api/telemetry/stages'   + q).then(r => r.json()),
+      fetch('/api/telemetry/llm'      + q).then(r => r.json()),
+      fetch('/api/telemetry/errors'   + q).then(r => r.json()),
+      fetch('/api/telemetry/latency'  + q).then(r => r.json()),
+    ]);
+    renderOverview(overview);
+    renderHotspots(latency);
+    renderJobHealth(latency);
+    renderImageRetries(latency);
+    renderErrorGroups(latency);
+    renderSlowestJob(latency);
+    renderStages(stages);
+    renderLLM(llm);
+    renderErrors(errors);
+  } catch (e) {
+    console.error('telemetry load failed', e);
+  }
+}
+
+document.getElementById('telemetry-btn').addEventListener('click', () => {
+  showSection('telemetry');
+  loadTelemetry();
+});
+document.getElementById('tlm-refresh').addEventListener('click', loadTelemetry);
+document.getElementById('tlm-window').addEventListener('change', loadTelemetry);
+
+// ====================================================================
+//   RESEARCH
+// ====================================================================
+
+const research = {
+  videos: [],
+  channels: [],
+  learnings: [],
+  loaded: false,
+};
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d)) return '—';
+  return d.toISOString().slice(0, 10);
+}
+function fmtBytes(n) {
+  if (!n && n !== 0) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024*1024) return `${(n/1024).toFixed(0)} KB`;
+  return `${(n/1024/1024).toFixed(1)} MB`;
+}
+
+function renderResearchKpis() {
+  const v = research.videos;
+  const withLocal = v.filter(x => x.local).length;
+  const orphans = v.length - withLocal;
+  const critiqued = v.filter(x => x.critique).length;
+  const scores = v.map(x => x.critique?.score).filter(s => typeof s === 'number');
+  const avg = scores.length ? (scores.reduce((a,b)=>a+b,0)/scores.length).toFixed(2) : '—';
+  const totalViews = v.reduce((s, x) => s + (x.stats?.view_count || 0), 0);
+  const totalSubs = research.channels.reduce((s, c) => s + (c.subscriber_count || 0), 0);
+  const refreshable = research.channels.filter(c => c.youtube_fetched_at).length;
+  const cards = [
+    ['Videos on YouTube', v.length, `${withLocal} with local · ${orphans} orphan`],
+    ['Total views', totalViews.toLocaleString(), `${totalSubs.toLocaleString()} subs across ${refreshable} channels`],
+    ['Avg critique score', avg, `${scores.length} scored · ${v.length - critiqued} need critique`],
+    ['Channels', research.channels.length, `${refreshable} have YouTube cache`],
+    ['Learnings', research.learnings.length, `${research.learnings.filter(l=>l.source==='memory').length} memory · ${research.learnings.filter(l=>l.source==='critique').length} critique`],
+  ];
+  document.getElementById('rsr-kpis').innerHTML = cards.map(([label, big, sub]) => `
+    <div class="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
+      <div class="text-[11px] uppercase tracking-wider text-slate-500">${label}</div>
+      <div class="text-2xl font-bold mt-1">${big}</div>
+      <div class="text-xs text-slate-400 mt-0.5">${sub}</div>
+    </div>`).join('');
+}
+
+function videoMatchesFilters(v) {
+  const q = (document.getElementById('rsr-v-search').value || '').toLowerCase().trim();
+  const ch = document.getElementById('rsr-v-channel').value;
+  const status = document.getElementById('rsr-v-status').value;
+  if (ch && v.account !== ch) return false;
+  if (status === 'local' && !v.local) return false;
+  if (status === 'orphan' && v.local) return false;
+  if (status === 'critiqued' && !v.critique) return false;
+  if (status === 'no_critique' && v.critique) return false;
+  if (q) {
+    const hay = [v.slug, v.account, v.channel, v.title, v.script?.hook, v.script?.source].filter(Boolean).join(' ').toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+function scoreColor(s) {
+  if (s == null) return 'text-slate-500';
+  if (s >= 7) return 'text-emerald-400';
+  if (s >= 5) return 'text-amber-400';
+  return 'text-rose-400';
+}
+
+function renderVideosTable() {
+  const rows = research.videos.filter(videoMatchesFilters).sort((a,b) => (b.published_at||'').localeCompare(a.published_at||''));
+  document.getElementById('rsr-v-count').textContent = `${rows.length} of ${research.videos.length}`;
+  if (!rows.length) {
+    document.getElementById('rsr-v-table').innerHTML = `<div class="p-6 text-sm text-slate-500">No videos match these filters.</div>`;
+    return;
+  }
+  const html = `
+    <table class="w-full text-sm">
+      <thead class="bg-slate-900/60 text-[11px] uppercase tracking-wider text-slate-500">
+        <tr>
+          <th class="text-left px-3 py-2">Title</th>
+          <th class="text-left px-3 py-2">Channel</th>
+          <th class="text-left px-3 py-2">Slug</th>
+          <th class="text-left px-3 py-2">Published</th>
+          <th class="text-right px-3 py-2">Views</th>
+          <th class="text-right px-3 py-2">Likes</th>
+          <th class="text-right px-3 py-2">Comments</th>
+          <th class="text-center px-3 py-2">Score</th>
+          <th class="text-left px-3 py-2">Link</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(v => `
+          <tr class="border-t border-slate-800/60 hover:bg-slate-900/30">
+            <td class="px-3 py-2 text-slate-200 max-w-md truncate" title="${escapeHtml(v.title || '')}">${escapeHtml(v.title || '—')}</td>
+            <td class="px-3 py-2 text-xs text-slate-300">${escapeHtml(v.account || '—')}</td>
+            <td class="px-3 py-2 font-mono text-xs whitespace-nowrap ${v.slug ? 'text-slate-300' : 'text-slate-600'}">${escapeHtml(v.slug || 'orphan')}</td>
+            <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">${fmtDate(v.published_at)}</td>
+            <td class="px-3 py-2 text-right text-xs text-slate-200 whitespace-nowrap" title="${v.stats?.fetched_at ? 'as of ' + fmtDate(v.stats.fetched_at) : ''}">${v.stats?.view_count != null ? v.stats.view_count.toLocaleString() : '—'}</td>
+            <td class="px-3 py-2 text-right text-xs text-slate-400 whitespace-nowrap">${v.stats?.like_count != null ? v.stats.like_count.toLocaleString() : '—'}</td>
+            <td class="px-3 py-2 text-right text-xs text-slate-400 whitespace-nowrap">${v.stats?.comment_count != null ? v.stats.comment_count.toLocaleString() : '—'}</td>
+            <td class="px-3 py-2 text-center font-bold ${scoreColor(v.critique?.score)}">${v.critique?.score ?? '—'}</td>
+            <td class="px-3 py-2 text-xs">${v.url ? `<a href="${escapeHtml(v.url)}" target="_blank" class="text-violet-300 hover:text-violet-200">${escapeHtml(v.video_id)}</a>` : '—'}</td>
+          </tr>
+          ${(v.critique?.one_line_take || v.script?.hook) ? `
+          <tr class="border-t border-slate-900/40">
+            <td colspan="9" class="px-3 pb-2 text-xs italic text-slate-400">↳ ${escapeHtml(v.critique?.one_line_take || v.script?.hook || '')}</td>
+          </tr>` : ''}
+        `).join('')}
+      </tbody>
+    </table>`;
+  document.getElementById('rsr-v-table').innerHTML = html;
+}
+
+function renderChannelsTable() {
+  const rows = research.channels.slice().sort((a, b) => {
+    if (a.production !== b.production) return a.production ? -1 : 1;
+    return (b.subscriber_count || 0) - (a.subscriber_count || 0);
+  });
+  const html = `
+    <table class="w-full text-sm">
+      <thead class="bg-slate-900/60 text-[11px] uppercase tracking-wider text-slate-500">
+        <tr>
+          <th class="text-left px-3 py-2">Channel</th>
+          <th class="text-left px-3 py-2">Account</th>
+          <th class="text-right px-3 py-2">Subs</th>
+          <th class="text-right px-3 py-2">Total views</th>
+          <th class="text-right px-3 py-2">Videos (YT)</th>
+          <th class="text-right px-3 py-2">Local</th>
+          <th class="text-right px-3 py-2">Avg score</th>
+          <th class="text-left px-3 py-2">Last published</th>
+          <th class="text-left px-3 py-2">Cache</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(c => `
+          <tr class="border-t border-slate-800/60 hover:bg-slate-900/30">
+            <td class="px-3 py-2 font-mono text-xs">
+              ${escapeHtml(c.channel)}
+              ${c.production ? '<span class="chip ml-1" style="background:rgb(6 78 59 / .35); color:rgb(110 231 183)">PROD</span>' : ''}
+            </td>
+            <td class="px-3 py-2 text-xs text-slate-400">${escapeHtml(c.account || '—')}</td>
+            <td class="px-3 py-2 text-right text-slate-200 whitespace-nowrap">${c.subscriber_count != null ? c.subscriber_count.toLocaleString() : '—'}</td>
+            <td class="px-3 py-2 text-right text-slate-200 whitespace-nowrap">${c.youtube_view_count != null ? c.youtube_view_count.toLocaleString() : '—'}</td>
+            <td class="px-3 py-2 text-right text-slate-300 whitespace-nowrap">${c.youtube_video_count ?? '—'}</td>
+            <td class="px-3 py-2 text-right text-slate-400 whitespace-nowrap" title="locally rendered / joined to upload record">${c.locally_rendered_count}/${c.video_count_local}</td>
+            <td class="px-3 py-2 text-right font-bold ${scoreColor(c.avg_score)}">${c.avg_score ?? '—'}</td>
+            <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">${fmtDate(c.last_published_at)}</td>
+            <td class="px-3 py-2 text-xs text-slate-500 whitespace-nowrap" title="${c.youtube_fetched_at || 'no cache'}">${c.youtube_fetched_at ? fmtDate(c.youtube_fetched_at) : '<span class="text-amber-400">none — Refresh stats</span>'}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>`;
+  document.getElementById('rsr-c-table').innerHTML = html;
+}
+
+function learningMatchesFilters(l) {
+  const q = (document.getElementById('rsr-l-search').value || '').toLowerCase().trim();
+  const src = document.getElementById('rsr-l-source').value;
+  const typ = document.getElementById('rsr-l-type').value;
+  if (src && l.source !== src) return false;
+  if (typ && l.type !== typ) return false;
+  if (q) {
+    const hay = [l.title, l.description, l.body_excerpt, l.channel].filter(Boolean).join(' ').toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+function renderLearnings() {
+  const rows = research.learnings.filter(learningMatchesFilters);
+  document.getElementById('rsr-l-count').textContent = `${rows.length} of ${research.learnings.length}`;
+  if (!rows.length) {
+    document.getElementById('rsr-l-list').innerHTML = `<div class="p-6 text-sm text-slate-500 bg-slate-900/40 border border-slate-800 rounded-xl">No learnings match these filters.</div>`;
+    return;
+  }
+  document.getElementById('rsr-l-list').innerHTML = rows.map(l => {
+    const srcChip = l.source === 'memory'
+      ? '<span class="chip" style="background:rgb(76 29 149 / .35); color:rgb(196 181 253)">memory</span>'
+      : '<span class="chip" style="background:rgb(127 29 29 / .35); color:rgb(252 165 165)">critique</span>';
+    const typChip = `<span class="chip">${escapeHtml(l.type)}</span>`;
+    const slugs = (l.related_slugs || []).map(s => `<span class="chip">${escapeHtml(s)}</span>`).join('');
+    return `
+      <div class="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
+        <div class="flex items-baseline justify-between gap-3">
+          <div class="font-medium text-slate-100">${escapeHtml(l.title)}</div>
+          <div class="text-[11px] text-slate-500 font-mono whitespace-nowrap">${escapeHtml(l.source_path || '')}</div>
+        </div>
+        <div class="mt-1">${srcChip}${typChip}${l.channel ? `<span class="chip">${escapeHtml(l.channel)}</span>` : ''}${slugs}</div>
+        ${l.description ? `<div class="text-sm text-slate-300 mt-2">${escapeHtml(l.description)}</div>` : ''}
+        ${l.body_excerpt ? `<div class="text-xs text-slate-400 mt-2 whitespace-pre-line">${escapeHtml(l.body_excerpt)}</div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+async function loadResearch(force) {
+  if (research.loaded && !force) return;
+  try {
+    const [v, c, l] = await Promise.all([
+      fetch('/api/research/videos').then(r => r.json()),
+      fetch('/api/research/channels').then(r => r.json()),
+      fetch('/api/research/learnings').then(r => r.json()),
+    ]);
+    research.videos = v.videos || [];
+    research.channels = c.channels || [];
+    research.learnings = l.learnings || [];
+    research.loaded = true;
+    // Populate channel filter dropdown — keyed by account (the YouTube
+    // upload destination) since orphan rows have no local channel dir.
+    const accounts = Array.from(new Set(research.videos.map(v => v.account).filter(Boolean))).sort();
+    const sel = document.getElementById('rsr-v-channel');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">all channels</option>' + accounts.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+    sel.value = cur;
+    renderResearchKpis();
+    renderVideosTable();
+    renderChannelsTable();
+    renderLearnings();
+  } catch (e) {
+    console.error('research load failed', e);
+  }
+}
+
+function switchResearchTab(name) {
+  document.querySelectorAll('.rsr-tab').forEach(b => {
+    const active = b.dataset.tab === name;
+    b.classList.toggle('border-violet-500', active);
+    b.classList.toggle('border-transparent', !active);
+    b.classList.toggle('text-slate-100', active);
+    b.classList.toggle('text-slate-400', !active);
+  });
+  ['videos', 'channels', 'learnings'].forEach(t => {
+    document.getElementById(`rsr-tab-${t}`).classList.toggle('hidden', t !== name);
+  });
+}
+
+document.getElementById('research-btn').addEventListener('click', () => {
+  showSection('research');
+  loadResearch(false);
+});
+async function rebuildIndex(refreshAnalytics) {
+  const url = '/api/research/rebuild' + (refreshAnalytics ? '?refresh_analytics=1' : '');
+  const r = await fetch(url, { method: 'POST' }).then(r => r.json());
+  const parts = [`Built ${fmtDate(r.built_at)}`, `${r.videos} videos`, `${r.channels} channels`, `${r.learnings} learnings`];
+  if (r.analytics) parts.push(`YT: ${r.analytics.fetched}/${r.analytics.channels} channels · ${r.analytics.videos} videos${r.analytics.missing_auth ? ` (${r.analytics.missing_auth} no-auth)` : ''}`);
+  document.getElementById('rsr-built-at').textContent = parts.join(' · ');
+  await loadResearch(true);
+}
+document.getElementById('rsr-rebuild').addEventListener('click', async (e) => {
+  e.target.disabled = true;
+  e.target.textContent = 'Rebuilding…';
+  try { await rebuildIndex(false); }
+  finally { e.target.disabled = false; e.target.textContent = 'Rebuild index'; }
+});
+document.getElementById('rsr-refresh-stats').addEventListener('click', async (e) => {
+  e.target.disabled = true;
+  e.target.textContent = 'Fetching…';
+  try { await rebuildIndex(true); }
+  finally { e.target.disabled = false; e.target.textContent = 'Refresh stats'; }
+});
+document.querySelectorAll('.rsr-tab').forEach(b => b.addEventListener('click', () => switchResearchTab(b.dataset.tab)));
+['rsr-v-search', 'rsr-v-channel', 'rsr-v-status'].forEach(id => {
+  document.getElementById(id).addEventListener('input', renderVideosTable);
+  document.getElementById(id).addEventListener('change', renderVideosTable);
+});
+['rsr-l-search', 'rsr-l-source', 'rsr-l-type'].forEach(id => {
+  document.getElementById(id).addEventListener('input', renderLearnings);
+  document.getElementById(id).addEventListener('change', renderLearnings);
+});
+
+loadNiches();
+loadVoices();
+wireCloneForm();
+showSection('picker');
+</script>
+</body>
+</html>

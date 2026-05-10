@@ -1,0 +1,67 @@
+[
+  {
+    "profile": "Profile 1",
+    "accounts": [],
+    "active_idx": null,
+    "error": "avatar/menu click failed: Locator.click: Target page, context or browser has been closed\nCall log:\n  - waiting for locator(\"button#avatar-btn\").first\n"
+  },
+  {
+    "profile": "Profile 3",
+    "accounts": [
+      {
+        "text": "SportsRecapped @sportsrecapped0 10 subscribers",
+        "active": false
+      },
+      {
+        "text": "sd @fds-l5p 1 subscriber",
+        "active": true
+      }
+    ],
+    "active_idx": 1,
+    "error": null
+  },
+  {
+    "profile": "Profile 4",
+    "accounts": [
+      {
+        "text": "SportsRecapped @sportsrecapped0 10 subscribers",
+        "active": true
+      },
+      {
+        "text": "sd @fds-l5p 1 subscriber",
+        "active": false
+      },
+      {
+        "text": "HindutavaJourney 7 subscribers",
+        "active": false
+      }
+    ],
+    "active_idx": 0,
+    "error": null
+  },
+  {
+    "profile": "Profile 5",
+    "accounts": [],
+    "active_idx": null,
+    "error": null
+  },
+  {
+    "profile": "Profile 8",
+    "accounts": [
+      {
+        "text": "Cosmos Decoded @cosmosdecoded0 5 subscribers",
+        "active": true
+      },
+      {
+        "text": "App_rezension @app_rezension530 No subscribers",
+        "active": false
+      },
+      {
+        "text": "App_rezension @app_rezension2247 No subscribers",
+        "active": false
+      }
+    ],
+    "active_idx": 0,
+    "error": null
+  }
+]

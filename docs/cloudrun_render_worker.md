@@ -1,0 +1,186 @@
+# Cloud Run render worker (Layer 2)
+
+> **Status:** scaffolded 2026-05-09. Real-mode handlers wired
+> 2026-05-09. **Default LLM backend = Azure OpenAI** (reuses your
+> existing chat-assistant deployment — no separate spend). Anthropic
+> SDK is the optional alternative.
+
+This is the cloud-native replacement for the laptop agent. The product
+no longer depends on a Mac being awake.
+
+## What it is
+
+A Cloud Run **Job** (not a Service — Jobs run-to-completion) deployed
+as `ytfactory-render-worker-v2` in `asia-southeast1`. The control plane
+triggers one execution per render via the `google-cloud-run` SDK.
+
+```
+   user clicks Render
+        │
+        ▼
+   POST /api/render  (control plane)
+        │
+        │  jobs/<job_id> created in Firestore
+        │  YTFACTORY_RENDER_BACKEND=cloudrun → control/cloud_run.trigger_render_job()
+        ▼
+   Cloud Run Job execution
+        │
+        │  reads jobs/<job_id> from Firestore
+        │  walks 7 stages (rewrite → cast → images → tts → asr → compose → upload)
+        │  writes timeline events back to jobs/<job_id> per stage
+        │  uploads mp4 + thumb to gs://ytfactory-prod-v2-artifacts/jobs/<job_id>/
+        ▼
+   UI poll loop (/api/jobs/<job_id>) sees live progress
+```
+
+## LLM backends — three choices
+
+| Backend | When | Cost story |
+|---|---|---|
+| `cli` | Laptop dev (`claude` binary on PATH) | Flat-rate via Pro/Max OAuth plan. Free per call. |
+| **`azure_openai`** (cloud default) | Cloud Run JOB | Reuses your existing `AZURE_OPENAI_*` deployment — same one the chat assistant already uses. **No new bill.** |
+| `anthropic_sdk` | Cloud Run JOB (alternative) | Pay-per-token Anthropic API. Opens a separate billing line. |
+
+Selection order:
+
+1. `YTFACTORY_LLM_BACKEND` env (`cli` / `anthropic_sdk` / `azure_openai`)
+2. Auto: prefer `cli` if binary present, else Azure if its env is
+   set, else Anthropic SDK if its env is set.
+
+### Azure OpenAI tier mapping
+
+The pipeline calls each stage with a tier alias (`haiku`/`sonnet`/`opus`).
+On Azure, those map to deployment names — overridable per-tier:
+
+```bash
+# Per-tier overrides (default: gpt-4o-mini for haiku/sonnet, gpt-4o for opus)
+AZURE_OPENAI_MODEL_HAIKU=gpt-4o-mini    # cheap fast (rewrite, cast)
+AZURE_OPENAI_MODEL_SONNET=gpt-4o-mini   # mid (prompts)
+AZURE_OPENAI_MODEL_OPUS=gpt-4o          # premium (critic)
+
+# Or one-size-fits-all override
+AZURE_OPENAI_MODEL=gpt-4o-mini
+```
+
+If your Azure project has a `gpt-5.3-chat` deployment (per
+`README.md`), point the right tier at it:
+`AZURE_OPENAI_MODEL_OPUS=gpt-5-3-chat`.
+
+## Render modes
+
+| Mode | What runs |
+|---|---|
+| **`real`** (default) | rewrite → Azure OpenAI; cast+images+tts+asr+compose → `pipeline.render.shorts` subprocess against cloud TTS + image services; upload → GCS. |
+| `stub` | Each stage sleeps ~2s; the upload stage drops a placeholder mp4. Useful when LLM keys aren't wired yet. |
+
+Flip via `YTFACTORY_RENDER_MODE` on the JOB.
+
+## Cloud-native pipeline ports (delivered 2026-05-09)
+
+| Stage | Today (laptop) | Cloud port |
+|---|---|---|
+| rewrite | `claude` CLI | **Azure OpenAI** (default) or Anthropic SDK; gated by `YTFACTORY_LLM_BACKEND` |
+| cast | (renderer-internal) | unchanged — uses the same backend selector |
+| images | `cloudrun_flux2_klein` | already cloud-native |
+| tts | `cloudrun_chatterbox` / `cloudrun_indicparler` | already cloud-native |
+| asr | `whisper-mlx` (Apple-only) | **`faster-whisper`** (CPU) |
+| compose | `ffmpeg` | already CPU-friendly |
+| upload | local disk → GCS | direct GCS upload |
+
+All adapters are gated by env so **laptop** behaviour is unchanged.
+
+## Deploy
+
+```bash
+cd /Users/rohit/ytFactory
+./cloud/render-worker-v2/deploy.sh
+```
+
+Builds the image (~5 min) and creates/updates the Job in `asia-southeast1`
+with `YTFACTORY_LLM_BACKEND=azure_openai` baked in.
+
+**Pre-flight: wire the Azure OpenAI secrets.** Default mode needs
+the same `AZURE_OPENAI_*` triple your chat assistant already uses.
+
+```bash
+# Create the API key secret (one-time)
+echo -n "<your-azure-openai-key>" | gcloud secrets create azure-openai-key \
+    --project=ytfactory-prod-v2 --replication-policy=automatic --data-file=-
+
+# Mount onto the JOB + set the endpoint
+gcloud run jobs update ytfactory-render-worker-v2 \
+    --project=ytfactory-prod-v2 --region=asia-southeast1 \
+    --update-secrets=AZURE_OPENAI_API_KEY=azure-openai-key:latest \
+    --update-env-vars="^|^AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com/|AZURE_OPENAI_MODEL=gpt-4o-mini|AZURE_OPENAI_API_VERSION=2025-04-01-preview"
+```
+
+Without these, the JOB will fail at the rewrite stage. Flip to stub
+mode if you want to demo wiring without an LLM key.
+
+### Optional: Anthropic SDK as the LLM backend
+
+```bash
+echo "sk-ant-..." | gcloud secrets create ytfactory-anthropic-key \
+    --project=ytfactory-prod-v2 --replication-policy=automatic --data-file=-
+
+gcloud run jobs update ytfactory-render-worker-v2 \
+    --project=ytfactory-prod-v2 --region=asia-southeast1 \
+    --update-env-vars=YTFACTORY_LLM_BACKEND=anthropic_sdk \
+    --update-secrets=ANTHROPIC_API_KEY=ytfactory-anthropic-key:latest
+```
+
+## Activate from the control plane
+
+```bash
+export YTFACTORY_RENDER_BACKEND=cloudrun
+export YTFACTORY_CLOUDRUN_JOB=ytfactory-render-worker-v2
+export YTFACTORY_CLOUDRUN_REGION=asia-southeast1
+export GOOGLE_CLOUD_PROJECT=ytfactory-prod-v2
+```
+
+`POST /api/render` triggers a Cloud Run Job execution; the UI sees
+live progress via `/api/jobs/{id}`.
+
+To switch back to dev: `unset YTFACTORY_RENDER_BACKEND` (defaults to
+`sim`, in-process simulated worker).
+
+## Trigger one execution manually (smoke test)
+
+```bash
+gcloud run jobs execute ytfactory-render-worker-v2 \
+    --project=ytfactory-prod-v2 \
+    --region=asia-southeast1 \
+    --update-env-vars='YTFACTORY_JOB_ID=<some-job-id>'
+```
+
+## Cost (per render)
+
+- **Azure OpenAI (default)** — covered by your existing chat-assistant
+  Azure spend cap (`control/rate_limit.daily_cap_usd`). Current
+  pipeline call mix at `gpt-4o-mini` defaults: **~$0.02-0.05/render**.
+  At `gpt-4o` for the heavier stages: ~$0.10-0.20/render.
+- **Anthropic SDK** — ~$0.05 (all Haiku) → ~$1.00 (all Opus) per render.
+- **Stub mode** — $0.
+- **Job CPU + GCS** — ~$0.02/render (unchanged across modes).
+- **TTS + image GPU services** — per-call billing on existing services.
+
+## Rollback
+
+The laptop agent path still works as a fallback:
+
+```bash
+unset YTFACTORY_RENDER_BACKEND  # default = sim
+# Or:
+export YTFACTORY_RENDER_BACKEND=laptop
+.venv/bin/python -m workers.agent.main
+```
+
+## Files
+
+- `cloud/render-worker-v2/Dockerfile` — image
+- `cloud/render-worker-v2/requirements.txt` — CPU-only deps + openai SDK + anthropic SDK
+- `cloud/render-worker-v2/entrypoint.py` — Firestore-driven main loop with stub + real mode handlers
+- `cloud/render-worker-v2/deploy.sh` — Cloud Build + Job deploy
+- `control/cloud_run.py` — control-plane trigger
+- `pipeline/llm/cli.py` — three-backend selector + Azure adapter + Anthropic adapter
+- `pipeline/asr.py` — `faster_whisper` backend

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ytFactory · Access pending</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen grid place-items-center font-sans">
+  <main class="max-w-md w-full p-8 bg-slate-900/60 border border-slate-800 rounded-2xl">
+    <h1 class="text-2xl font-semibold tracking-tight">Access pending</h1>
+    <p class="text-slate-400 text-sm mt-3">
+      We've received your request from
+      <span id="email" class="text-slate-100 font-medium">your account</span>.
+      An admin will review and approve. This page checks every 30 seconds —
+      you'll be redirected automatically once you're approved.
+    </p>
+
+    <div class="mt-8 text-xs text-slate-500" id="status">checking…</div>
+
+    <form action="/api/auth/logout" method="post" class="mt-8">
+      <button type="submit"
+              class="text-xs text-slate-400 hover:text-slate-200">Sign out</button>
+    </form>
+  </main>
+  <script>
+    async function check() {
+      try {
+        const r = await fetch('/api/auth/whoami', { cache: 'no-store' });
+        const j = await r.json();
+        if (j.signed_in) {
+          document.getElementById('email').textContent = j.email;
+          if (j.status === 'approved') {
+            document.getElementById('status').textContent = 'approved — redirecting…';
+            location.href = '/';
+            return;
+          }
+          if (j.status === 'denied') {
+            location.href = '/login?error=denied';
+            return;
+          }
+          document.getElementById('status').textContent =
+            'last checked ' + new Date().toLocaleTimeString();
+        } else {
+          location.href = '/login';
+        }
+      } catch (e) {
+        document.getElementById('status').textContent = 'check failed: ' + e;
+      }
+    }
+    check();
+    setInterval(check, 30_000);
+  </script>
+</body>
+</html>
