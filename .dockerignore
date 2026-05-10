@@ -10,16 +10,33 @@ __pycache__/
 .claude/
 .playwright-mcp/
 
-# Heavy data — never ship to Cloud Run
-data/
-pipeline/
+# Heavy data — never ship to Cloud Run (with surgical re-includes below).
+# pipeline/ + control/ + scripts/ + web/ are intentionally INCLUDED in
+# the build context here because the FastAPI image's Dockerfile COPYs
+# them. (`data/*` rather than `data/` so the !exceptions further down
+# can re-include the small mirrored-asset subdirs.)
+data/*
 workers/
 sources/
 agent/
 shared/
-scripts/
 tests/
 docs/
+
+# Re-include the mirrored channel-asset + cached-YouTube + analytics
+# subdirs (~2 MB total) so /api/channels surfaces real avatars, banners,
+# subscriber/view stats. cloud/web-server/Dockerfile COPYs each of these
+# explicitly. data/* (with wildcard) above keeps the parent dir visible
+# so these re-includes work — gitignore semantics forbid re-including
+# children of an excluded dir.
+!data/research/
+data/research/*
+!data/research/channel_assets/
+!data/research/channel_assets/**
+!data/research/youtube/
+!data/research/youtube/**
+!data/research/analytics/
+!data/research/analytics/**
 
 # Per-channel folders: cloud control plane needs config.yaml + variants/
 # + uploads/ + raw/ + narrations/ (the last two so the round-robin

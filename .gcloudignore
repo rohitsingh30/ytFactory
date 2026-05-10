@@ -71,7 +71,17 @@ data/telemetry/
 data/cache/
 data/scratch/
 data/intermediate/
-data/research/youtube/
+# Wildcard children of data/research/ (NOT the dir itself) so the
+# !exceptions below can re-include the small mirrored-asset subdirs.
+# Plain `data/research/` would mark the parent excluded — gitignore
+# semantics forbid re-including children of an excluded dir.
+data/research/*
+!data/research/channel_assets/
+!data/research/channel_assets/**
+!data/research/youtube/
+!data/research/youtube/**
+!data/research/analytics/
+!data/research/analytics/**
 
 # === Logs / temp ===
 *.log

@@ -63,11 +63,19 @@ async def render(
         topic=req.topic.strip(),
         source_kind=req.source_kind,
         source_ref=(req.source_ref or None),
-        length_s=max(20, min(120, int(req.length_s))),
+        length_s=_clamp_length(req.length_s),
         notes=(req.notes or "").strip(),
         channel_overrides=req.channel_overrides or {},
     )
     return _enqueue_render_job(proposal)
+
+
+def _clamp_length(raw: int) -> int:
+    """Short = 20–120s; long-form = 121–7200s (≤ 2hr)."""
+    n = int(raw)
+    if n > 120:
+        return max(121, min(7200, n))
+    return max(20, min(120, n))
 
 
 class JobView(BaseModel):
