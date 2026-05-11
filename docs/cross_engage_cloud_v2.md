@@ -296,7 +296,12 @@ or (b) fix the Shorts-player Like/Subscribe selectors.
 After any change to the cloud cross-engage path:
 
 ```bash
-# 1. Reload laptop agent so it picks up code changes
+# 1. Reload laptop agent so it picks up code changes.
+#    NB: this is the RESTART recipe. To permanently STOP the agent
+#    (e.g. it's spawning Chrome during unrelated work), see
+#    docs/laptop_agent_cloud_contract.md § "Operator kill-switch —
+#    how to stop the agent" — that path uses `launchctl disable`
+#    so login/reboot doesn't reload it.
 launchctl unload ~/Library/LaunchAgents/com.ytfactory.laptop-agent.plist
 launchctl load   ~/Library/LaunchAgents/com.ytfactory.laptop-agent.plist
 sleep 8

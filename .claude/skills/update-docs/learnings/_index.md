@@ -87,6 +87,31 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
 
 ## ONE-OFFs noted (no project-doc needed)
 
+- 2026-05-12 — **Operator kill-switch ritual was incomplete in the
+  one place it was documented.** `docs/burner_channels.md` Failure
+  Modes table row (added 2026-05-10) listed `launchctl unload` only
+  as the way to stop the agent that spawns burner Chrome. Without
+  `launchctl disable gui/$UID/...`, the next login reloads the
+  KeepAlive plist and the user re-experiences the same "Chrome
+  windows opening unexpectedly" bug. Fixed inline in that table cell
+  AND co-located the full kill-switch runbook in
+  `docs/laptop_agent_cloud_contract.md` (where every drift-flavour
+  debug session ends up). Sweep recipe to catch sibling stale
+  "stop the agent" guidance:
+  `grep -rn "launchctl unload" docs/ */learnings/ .claude/skills/*/SKILL.md` —
+  every hit on a `com.ytfactory.*` plist should pair `unload` with
+  `disable gui/$(id -u)/<label>` if the goal is "stop across login
+  too", not just "stop this session". Audit found 5 hits on
+  2026-05-12: 3 for `com.ytfactory.laptop-agent` (two updated, one
+  is a smoke-test restart recipe in `cross_engage_cloud_v2.md` that
+  ALSO calls `launchctl load` so the recipe is complete by intent —
+  added a sidebar pointing at the kill-switch runbook); 2 for
+  `com.ytfactory.upload-next` in older docs which is already disabled
+  and renamed `.disabled-2026-05-09` per the nuclear-cleanup doc.
+  No new project doc — covered in
+  `docs/laptop_agent_cloud_contract.md` § "Operator kill-switch".
+  Memory: `feedback_laptop_agent_cloud_contract.md` (2026-05-12 ext
+  block).
 - 2026-05-11 — **Stale "Pending" claim audit while fixing
   `/api/queue` silent-empty.** During the related-doc sweep for the
   composite-index fix, `docs/full_cloud_cutover_2026_05_09.md:224`

@@ -392,6 +392,109 @@ returns it to QUEUED on its next tick. Don't run this dozens of
 times in a row during a real burst — each call costs one task ~5
 minutes of unavailability.
 
+## Operator kill-switch — how to stop the agent (2026-05-12)
+
+The agent is a `KeepAlive=true` LaunchAgent. **Killing the parent
+PID alone does nothing** — launchd respawns it within `ThrottleInterval`
+(10 s) and you watch the burner_engage children come back. The only
+way to actually quiet the laptop is the two-step
+`unload + disable` ritual; without `disable` the agent comes back at
+the next login even if you reboot or close the terminal.
+
+### Stop the agent now AND across reboots
+
+```bash
+# 1. Unload the live job (stops the parent, sends SIGTERM to children).
+launchctl unload ~/Library/LaunchAgents/com.ytfactory.laptop-agent.plist
+
+# 2. Persistently disable so login/reboot doesn't reload it.
+launchctl disable gui/$(id -u)/com.ytfactory.laptop-agent
+
+# 3. Verify both: the job is gone from the user-domain list, AND the
+#    persistent state shows "disabled".
+launchctl list | grep ytfactory                          # expect: only com.ytfactory.cloud-snapshot
+launchctl print-disabled gui/$(id -u) | grep ytfactory   # expect: "com.ytfactory.laptop-agent" => disabled
+
+# 4. Sweep any orphan children that survived the unload SIGTERM. Per
+#    CLAUDE.md don't pkill/killall — find PIDs and `kill <PID>` them.
+ps -ef | grep -E "pipeline\.(laptop_agent|cross_engage\.(burner_engage|create_burner_channel))" | grep -v grep
+ps -ef | grep "playwright/driver/node" | grep -v grep
+# Then: kill <PID> <PID> ...
+
+# 5. Final sanity: nothing burner-related left.
+ps -ef | grep -E "burner_engage|create_burner_channel|laptop_agent|playwright" | grep -v grep
+```
+
+### Re-enable later
+
+```bash
+launchctl enable gui/$(id -u)/com.ytfactory.laptop-agent
+launchctl load   ~/Library/LaunchAgents/com.ytfactory.laptop-agent.plist
+```
+
+### Why both `unload` AND `disable`
+
+`unload` is **session-scoped** — it removes the running job from
+launchd's in-memory job table. The persistent `Disabled` plist key
+still says `false`, so the next time the user-domain launchd seeds
+itself (login, reboot) it re-loads the job and KeepAlive resumes.
+
+`disable` writes the persistent override
+(`~/Library/LaunchAgents/disabled.plist` under the hood). After it
+runs, `launchctl print-disabled gui/$UID` shows the label as
+`disabled` and launchd won't reload the agent on next session even
+though the plist file still sits in `~/Library/LaunchAgents/`.
+
+The `launchctl unload -w …` flag from older docs (e.g.
+`docs/cloudrun_admin_panel.md` for the cloud-snapshot agent) is the
+deprecated combined form — it does both in one call but only on
+older macOS. Modern macOS (Catalina+) wants the explicit `enable` /
+`disable` subcommands.
+
+### What this DOESN'T do
+
+- **Doesn't delete the plist file.** To fully remove:
+  `rm ~/Library/LaunchAgents/com.ytfactory.laptop-agent.plist` after
+  the disable. Most users want the disable-not-delete state because
+  re-enabling later is one command, vs. re-installing the plist.
+- **Doesn't touch the cloud-side queue.** Tasks already in Firestore
+  with `status=queued, kind=burner_engage` will stay queued. They
+  re-lease on `_periodic_queue_reaper` ticks (5 min) and pile attempts
+  but never run because no agent has the cap. Drain via the recipe in
+  Drift flavour 5 if the queue is already deep when you stop the
+  agent.
+- **Doesn't stop `com.ytfactory.cloud-snapshot`** (daily 02:00 cloud
+  cost snapshot). Benign. If you want it gone:
+  `launchctl disable gui/$(id -u)/com.ytfactory.cloud-snapshot`.
+
+### Why this is in the contract doc, not just the runbook
+
+The contract doc holds the seven drift flavours. The kill-switch
+ritual belongs here too because every drift-flavour debug session
+ends with "and to make it stop respawning while I investigate, do
+THIS." Burying the unload/disable pair in only `docs/burner_channels.md`
+(as it was pre-2026-05-12 — see "Doc sweep" at the bottom of this
+doc) means anyone landing here for contract drift had to find the
+stop ritual elsewhere. Co-locating cuts that hop.
+
+### Cross-references — every doc that names "stop the agent"
+
+This is the canonical kill-switch recipe. Every other doc that
+mentions stopping the laptop agent should link here, not duplicate.
+Audited 2026-05-12:
+
+- `docs/burner_channels.md` § Failure modes table — "Chrome windows
+  opening unexpectedly" row. Updated to include `launchctl disable`
+  and to point at this section.
+- `docs/cross_engage_cloud_v2.md` § Smoke test recipe — was the
+  *restart* recipe (`unload + load`); kept as-is for restart, with a
+  sidebar note pointing at this section for permanent-stop.
+- `docs/cloudrun_admin_panel.md` § cloud-snapshot — different agent,
+  uses the Apple-deprecated `launchctl unload -w` shorthand. Left
+  unchanged; flagged here as something the next /update-docs run
+  could modernise to `unload` + `disable gui/$UID/...` for
+  consistency.
+
 ## Where each finding lives
 
 | flavour                         | doc                                          | memory                                          | code                                                  |
@@ -403,6 +506,7 @@ minutes of unavailability.
 | TaskKind zombie tasks           | this doc                                     | `feedback_taskkind_rename_queue_zombies.md`     | one-shot Firestore script (no permanent code)         |
 | No periodic reaper              | this doc                                     | `feedback_laptop_agent_cloud_contract.md`       | `web/server.py::_periodic_queue_reaper`               |
 | Aspirational doc claims (META)  | this doc + `.claude/skills/update-docs/SKILL.md` | `feedback_doc_aspirational_claims.md`           | (none — process change)                               |
+| Operator kill-switch (2026-05-12) | this doc § "Operator kill-switch"          | `feedback_laptop_agent_cloud_contract.md` (2026-05-12 ext) | (none — operator runbook only) |
 
 ## See also
 
