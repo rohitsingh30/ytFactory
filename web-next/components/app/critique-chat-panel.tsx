@@ -281,11 +281,11 @@ export function CritiqueChatPanel({ jobId }: Props) {
 
   // Active session UI.
   return (
-    <Section>
+    <Section className="flex flex-col lg:h-[calc(100vh-3rem)]">
       <SectionHeader doc={doc} />
       <div
         ref={messageListRef}
-        className="flex max-h-[420px] flex-col gap-3 overflow-y-auto px-5 py-4"
+        className="flex flex-1 min-h-[280px] flex-col gap-3 overflow-y-auto px-5 py-4"
       >
         {messages.length === 0 && (
           <div className="text-center text-[12px] text-muted-foreground">
@@ -295,6 +295,10 @@ export function CritiqueChatPanel({ jobId }: Props) {
         {messages.map((m) => (
           <MessageRow key={m.message_id} message={m} />
         ))}
+        {messages.length > 0 &&
+          doc?.status === "queued" && (
+            <RunnerHint />
+          )}
       </div>
       <div className="border-t border-border px-5 py-3">
         <div className="flex items-end gap-2">
@@ -335,18 +339,49 @@ export function CritiqueChatPanel({ jobId }: Props) {
 function Section({
   children,
   tone = "default",
+  className,
 }: {
   children: React.ReactNode;
   tone?: "default" | "error";
+  className?: string;
 }) {
   return (
     <div
       className={cn(
         "rounded-xl border bg-surface",
         tone === "error" ? "border-rose-500/30 bg-rose-500/5" : "border-border",
+        className,
       )}
     >
       {children}
+    </div>
+  );
+}
+
+function RunnerHint() {
+  // Surfaces the most common "stuck" cause: the user sent a message
+  // but the laptop runner isn't subscribed (not started, ADC expired,
+  // network drop, …). Without this the chat just sits on `queued`
+  // forever with no indication of WHY.
+  return (
+    <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11.5px] leading-relaxed text-amber-200">
+      <div className="font-mono text-[10px] uppercase tracking-[0.14em]">
+        runner not picking up
+      </div>
+      <p className="mt-1">
+        Your message landed in Firestore but the laptop hasn't claimed it yet.
+        On your laptop, run:
+      </p>
+      <pre className="mt-1 rounded bg-black/30 px-2 py-1 font-mono text-[10.5px] text-amber-100/90">
+        cd /Users/rohit/ytFactory && make critique-runner
+      </pre>
+      <p className="mt-1 text-[11px] text-amber-200/70">
+        First-time setup may also need{" "}
+        <code className="rounded bg-black/30 px-1 font-mono text-[10.5px]">
+          gcloud auth application-default login
+        </code>
+        .
+      </p>
     </div>
   );
 }

@@ -13,7 +13,6 @@ import {
   Loader2,
   Play,
   Send,
-  Sparkles,
   Timer,
   Wand2,
   X,
@@ -44,6 +43,7 @@ import {
 import { PageHeader } from "@/components/app/page-header";
 import { ChannelIcon, channelLabel } from "@/components/app/channel-icon";
 import { StatusPill } from "@/components/app/status-pill";
+import { CritiqueChatPanel } from "@/components/app/critique-chat-panel";
 import { jobsApi, pollJob } from "@/lib/api";
 import type { Job, TimelineEntry } from "@/lib/types";
 import { cn, relativeTime } from "@/lib/utils";
@@ -142,7 +142,7 @@ export default function RenderDetailPage() {
       )}
 
       {!error && (
-        <div className="grid flex-1 gap-6 px-6 py-6 md:px-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
+        <div className="grid flex-1 gap-6 px-6 py-6 md:px-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)_minmax(380px,440px)]">
           {/* Left — player + meta */}
           <div className="flex flex-col gap-5">
             <PlayerCard job={job} src={previewSrc} />
@@ -150,11 +150,14 @@ export default function RenderDetailPage() {
             <MetaCard job={job} />
           </div>
 
-          {/* Right — timeline + critique + script */}
+          {/* Middle — timeline */}
           <div className="flex flex-col gap-5">
             <StageTimeline job={job} />
-            <CritiqueCard job={job} />
-            <ScriptCard job={job} />
+          </div>
+
+          {/* Right rail — pipeline-fix chat */}
+          <div className="flex flex-col gap-5 lg:sticky lg:top-6 lg:self-start lg:max-h-[calc(100vh-3rem)]">
+            {job && <CritiqueChatPanel jobId={jobId} channel={job.channel as string | undefined} />}
           </div>
         </div>
       )}
@@ -375,61 +378,6 @@ function TimelineRow({ entry }: { entry: TimelineEntry }) {
         </span>
       )}
     </li>
-  );
-}
-
-function CritiqueCard({ job }: { job: Job | null }) {
-  if (!job?.critique) return null;
-  const v = job.critique;
-  const tone =
-    v.verdict === "SHIP"
-      ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-200"
-      : v.verdict === "FIX"
-        ? "border-amber-500/30 bg-amber-500/5 text-amber-200"
-        : "border-rose-500/30 bg-rose-500/5 text-rose-200";
-  return (
-    <div className={cn("rounded-xl border bg-surface p-5", tone)}>
-      <div className="flex items-center gap-2">
-        <Sparkles className="h-3.5 w-3.5" />
-        <div className="font-mono text-[10px] uppercase tracking-[0.18em]">Critic</div>
-        <span className="ml-auto rounded-md border border-current/30 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.14em]">
-          {v.verdict}
-        </span>
-      </div>
-      {v.weakest_param && (
-        <div className="mt-3 text-[12.5px] tracking-tight text-foreground">
-          weakest param ·{" "}
-          <span className="font-mono text-[12px] text-muted-foreground">{v.weakest_param}</span>
-        </div>
-      )}
-      {v.notes && <p className="mt-2 text-[12.5px] leading-relaxed">{v.notes}</p>}
-    </div>
-  );
-}
-
-function ScriptCard({ job }: { job: Job | null }) {
-  const proposal = job?.proposal as Record<string, unknown> | undefined;
-  if (!proposal) return null;
-  const topic = proposal.topic as string | undefined;
-  const notes = proposal.notes as string | undefined;
-  return (
-    <div className="rounded-xl border border-border bg-surface p-5">
-      <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-        Proposal
-      </div>
-      {topic && (
-        <div className="mt-3">
-          <div className="font-mono text-[10px] uppercase tracking-[0.15em] text-muted-foreground">Topic</div>
-          <p className="mt-1 text-[13px] leading-relaxed text-foreground">{topic}</p>
-        </div>
-      )}
-      {notes && (
-        <div className="mt-4">
-          <div className="font-mono text-[10px] uppercase tracking-[0.15em] text-muted-foreground">Notes</div>
-          <p className="mt-1 text-[12.5px] leading-relaxed text-muted-foreground">{notes}</p>
-        </div>
-      )}
-    </div>
   );
 }
 
