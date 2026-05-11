@@ -987,9 +987,10 @@ function NicheBubbleRow({
   );
 }
 
-/* Render all variants as a flat 2-col bubble grid. Family-grouping
- * with title rows + count badges was removed 2026-05-11 — it made the
- * niche picker read like a tier list instead of a flat option set. */
+/* Render all variants as compact chip pills (flex-wrap row). Single-line
+ * label, description hover-tooltipped via the native title attribute —
+ * the previous big two-line VariantCard layout was rejected as too heavy
+ * for what is effectively a tag picker. 2026-05-11. */
 function VariantList({
   variants,
   picked,
@@ -1000,7 +1001,7 @@ function VariantList({
   onPick: (v: string) => void;
 }) {
   return (
-    <div className="grid gap-1.5 sm:grid-cols-2">
+    <div className="flex flex-wrap gap-1.5">
       {variants.map((v) => (
         <VariantCard key={v.value} v={v} sel={v.value === picked} onPick={onPick} />
       ))}
@@ -1021,43 +1022,17 @@ function VariantCard({
     <button
       type="button"
       onClick={() => onPick(v.value)}
+      title={v.description ?? v.value}
+      aria-pressed={sel}
       className={cn(
-        "group relative flex h-full flex-col gap-1 rounded-md border px-2.5 py-2 text-left transition-colors",
+        "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[12px] font-medium tracking-tight transition-colors",
         sel
-          ? "border-foreground/45 bg-foreground/10 text-foreground"
-          : "border-border bg-surface hover:border-border-strong",
+          ? "border-foreground/55 bg-foreground/10 text-foreground"
+          : "border-border bg-surface text-foreground/85 hover:border-border-strong hover:text-foreground",
       )}
     >
-      <div className="flex items-start gap-2">
-        <span
-          className={cn(
-            "mt-[3px] grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full border transition-colors",
-            sel
-              ? "border-foreground bg-foreground text-background"
-              : "border-border bg-surface text-transparent group-hover:border-border-strong",
-          )}
-          aria-hidden
-        >
-          <Check className="h-2.5 w-2.5" />
-        </span>
-        <span
-          className={cn(
-            "min-w-0 flex-1 truncate text-[12px] font-medium tracking-tight",
-            sel ? "text-foreground" : "text-foreground/90",
-          )}
-        >
-          {v.label}
-        </span>
-      </div>
-      {v.description ? (
-        <p className="line-clamp-2 pl-[22px] text-[11px] leading-snug text-muted-foreground">
-          {v.description}
-        </p>
-      ) : (
-        <p className="pl-[22px] font-mono text-[9.5px] uppercase tracking-[0.14em] text-muted-foreground/70">
-          {v.value}
-        </p>
-      )}
+      {sel && <Check className="h-3 w-3" aria-hidden />}
+      <span className="truncate">{v.label}</span>
     </button>
   );
 }
@@ -1130,13 +1105,6 @@ function CustomizeReviewStep({
     <div className="min-w-0">
       {/* Single-column knob deck — right-side review panel removed */}
       <div className="space-y-5 min-w-0">
-        <NicheBubbleRow
-          niches={niches}
-          schemaVariants={schema.variants}
-          variant={variant}
-          onPick={onVariantChange}
-          lengthKind={(values.length_kind ?? "short") === "long" ? "long" : "short"}
-        />
         <div className="grid gap-5">
           <CardShell label="Form" hint="Short = ≤90s vertical · Long = multi-min horizontal">
             <div className="grid grid-cols-2 gap-2">
@@ -1198,6 +1166,14 @@ function CustomizeReviewStep({
             )}
           </CardShell>
         </div>
+
+        <NicheBubbleRow
+          niches={niches}
+          schemaVariants={schema.variants}
+          variant={variant}
+          onPick={onVariantChange}
+          lengthKind={(values.length_kind ?? "short") === "long" ? "long" : "short"}
+        />
 
         {topicField && (
           <TopicCard
