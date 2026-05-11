@@ -1716,8 +1716,42 @@ def make_short(
         # elephant. Recording it as `cold_load_s` on the FIRST
         # image_attempt makes the dashboard's image-retry rollup
         # surface cold-load tax explicitly per render.
-        _first_image_pending = True
-        for i, b in enumerate(beat_list):
+        #
+        # 2026-05-11: mutable single-element container + lock so the
+        # nested per-beat function can atomically check-and-clear from
+        # multiple ThreadPool workers when image fan-out is enabled
+        # (cloud providers, see dispatcher below). Pre-fix the bare
+        # ``_first_image_pending = True`` rebind worked fine for the
+        # serial loop but broke under fan-out — multiple beat threads
+        # could each see ``True`` before any of them set it ``False``,
+        # causing N parallel renders to all stamp ``cold_load_s`` and
+        # poison the dashboard's per-render cold-load tax view.
+        import threading as _threading  # noqa: PLC0415
+        from concurrent.futures import (  # noqa: PLC0415
+            ThreadPoolExecutor, as_completed,
+        )
+        _first_image_pending = [True]
+        _first_image_lock = _threading.Lock()
+
+        def _render_one_beat(i: int, b) -> Path:
+            """Render the image for beat ``i``. Pure-ish closure: reads
+            from the enclosing render scope (cfg, image_provider,
+            char_ref_path, supporting_chars, custom_prompts, …),
+            writes to disk (img_NN.png + img_NN.prompt.sha256
+            sidecar) and to the telemetry stream. Returns the image
+            path on disk.
+
+            Designed to be called either sequentially (beat 0 — IP-
+            Adapter bootstrap + cold-load priming, see dispatcher
+            below) OR from a ThreadPoolExecutor worker (beats 1..N
+            when ``image_provider`` is ``cloudrun_*``). Per-beat state
+            (key_visual, scene, routed_desc, base_seed, hash) is
+            fully local; the only mutable shared state read/written
+            is ``_first_image_pending`` (atomic via
+            ``_first_image_lock``) and the cloud circuit breaker
+            inside ``pipeline.images.images_cloudrun`` (already
+            ``_BREAKER_LOCK``-protected).
+            """
             p = cache / f"img_{i:02d}.png"
             hash_path = cache / f"img_{i:02d}.prompt.sha256"
 
@@ -1729,9 +1763,8 @@ def make_short(
             # trip the existence check.
             if b.kind == "footage":
                 print(f"     [{i+1}/{len(beat_list)}] footage beat — skip image gen")
-                image_paths.append(p)
                 print(f"[image-done] beat {i} of {len(beat_list)}")
-                continue
+                return p
 
             # Decide IP-Adapter reference for THIS beat.
             if not use_ip:
@@ -1743,6 +1776,8 @@ def make_short(
                 ip_ref = None
             else:
                 # Reuse the first generated image to lock the character.
+                # This is why beat 0 must run sequentially BEFORE any
+                # beat with i > 0 is dispatched (see dispatcher below).
                 bootstrap = cache / "img_00.png"
                 ip_ref = bootstrap if bootstrap.exists() else None
 
@@ -1809,7 +1844,7 @@ def make_short(
                 # the narrator's. Without this, the narrator is the only
                 # body that ever appears on screen even when the narration
                 # is about someone else.
-                from pipeline.llm.cast_router import (
+                from pipeline.llm.cast_router import (  # noqa: PLC0415
                     route_character_description, is_object_only_beat,
                 )
                 routed_desc, matched = route_character_description(
@@ -1848,7 +1883,7 @@ def make_short(
                 # Quality-gate retries: if Flux/SDXL produces an obviously
                 # broken image (all-black, low edge density), bump the
                 # seed and regenerate up to MAX_QC_RETRIES times.
-                from pipeline.llm import quality_gate
+                from pipeline.llm import quality_gate  # noqa: PLC0415
                 # Bumped 2 → 3 in 2026-05 alongside the tightened
                 # luminance gate in quality_gate.py. The new mean/P75
                 # luminance checks reject more images (the dark-frame
@@ -1922,6 +1957,17 @@ def make_short(
                         f"{MAX_QC_RETRIES + 1} dt={attempt_dt:.1f}s "
                         f"qc={qc_tag}{qc_reason}"
                     )
+                    # Atomic check-and-clear under lock so exactly ONE
+                    # image_attempt event records cold_load_s when image
+                    # fan-out runs across multiple beat workers. The
+                    # captured `_was_first` is then used inline below to
+                    # decide whether to inject the cold_load_s field —
+                    # check + emit happen as one atomic step from the
+                    # caller's perspective.
+                    with _first_image_lock:
+                        _was_first = _first_image_pending[0]
+                        if _was_first:
+                            _first_image_pending[0] = False
                     # Structured per-attempt event for the latency dashboard.
                     # The stdout line above is for humans tailing logs; this
                     # one feeds /api/telemetry/latency's image-retry rollup.
@@ -1947,17 +1993,16 @@ def make_short(
                             # b4: only the FIRST image_attempt of the
                             # render carries cold_load_s = wall-clock
                             # delta from render start to this attempt's
-                            # completion. After we emit it once we set
-                            # _first_image_pending = False so subsequent
-                            # attempts don't re-record it.
+                            # completion. The atomic check-and-clear
+                            # under _first_image_lock above guarantees
+                            # exactly one beat (in either serial OR
+                            # parallel mode) gets _was_first == True.
                             **(
                                 {"cold_load_s": round(time.time() - _render_t0, 2)}
-                                if _first_image_pending else {}
+                                if _was_first else {}
                             ),
                         },
                     )
-                    if _first_image_pending:
-                        _first_image_pending = False
                     if ok:
                         break
                     print(
@@ -1990,7 +2035,77 @@ def make_short(
             # both fresh-rendered AND cache-hit beats — so the slideshow
             # populates immediately on a re-run with cached images.
             print(f"[image-done] beat {i} of {len(beat_list)}")
-            image_paths.append(p)
+            return p
+
+        # 2026-05-11 image fan-out dispatcher.
+        #
+        # Run beat 0 sequentially first. Two reasons:
+        #   1. **IP-Adapter bootstrap dependency.** When ``use_ip`` is
+        #      True and ``char_ref_path`` is None, every beat with
+        #      ``i > 0`` reads ``img_00.png`` as its reference (see
+        #      _render_one_beat above). Beat 0 must finish writing
+        #      its file before parallel workers start, otherwise
+        #      beats 1..N race with an empty disk and lose the
+        #      character lock.
+        #   2. **Cold-load priming.** The first /generate against a
+        #      cold ``cloudrun_flux2_klein`` triggers ~5-7 min of
+        #      model-load. Doing this on a single worker first means
+        #      parallel containers each pay their cold-load only
+        #      ONCE — beat 0 hits the warmest container, then later
+        #      beats hit the second/third instance as they spin up.
+        #      Without sequential beat 0, all N workers race against
+        #      the same cold container and the breaker can trip on
+        #      transient 503s before the first warm response lands.
+        if beat_list:
+            results: dict[int, Path] = {0: _render_one_beat(0, beat_list[0])}
+        else:
+            results = {}
+
+        # Beats 1..N-1: fan out on cloud providers, serial otherwise.
+        # Local providers (mflux, sdxl_lightning, z_image_turbo on the
+        # laptop path) share a single Apple GPU; threading them only
+        # adds GIL contention with zero compute win.
+        remaining = list(enumerate(beat_list))[1:]
+        _is_cloud_image = image_provider.startswith("cloudrun_")
+        # Default 2 = leaves 1 slot of the cloud service's
+        # ``--max-instances=3`` ceiling free for cross-render bulk
+        # overlap (scripts/ops/bulk_render_queue.py). Bump via the
+        # ``YTFACTORY_IMAGE_WORKERS`` env to test wider fan-out, but
+        # remember to verify the L4 GPU quota in asia-southeast1 has
+        # headroom — see cloud/image-flux2-klein/deploy.sh comment
+        # block + docs/cloud_cost_2026_05_11.md watch-list.
+        _image_workers = int(os.environ.get("YTFACTORY_IMAGE_WORKERS", "2"))
+        if remaining and _is_cloud_image and _image_workers > 1:
+            print(
+                f"[image] cloud fan-out: {len(remaining)} beats × "
+                f"{_image_workers} workers (provider={image_provider})"
+            )
+            with ThreadPoolExecutor(
+                max_workers=_image_workers,
+                thread_name_prefix="image",
+            ) as pool:
+                futures = {pool.submit(_render_one_beat, i, b): i
+                           for i, b in remaining}
+                # ``as_completed`` re-raises the first exception when
+                # ``fut.result()`` is called. Pending workers continue
+                # to completion — same semantics as the long_form TTS
+                # fan-out (pipeline/render/long_form.py:362). The
+                # missing-files preflight below catches any beat that
+                # didn't produce a file with a structured RuntimeError.
+                for fut in as_completed(futures):
+                    i = futures[fut]
+                    results[i] = fut.result()
+        else:
+            for i, b in remaining:
+                results[i] = _render_one_beat(i, b)
+
+        # Reassemble in beat order so compose sees ``image_paths[i]``
+        # for beat ``i``. Parallel completion order doesn't matter
+        # to compose (which iterates by index), but the missing-files
+        # preflight below and the downstream slideshow code assume
+        # positional alignment with ``beat_list``.
+        image_paths = [results[i] for i in range(len(beat_list))]
+
         print(f"     done in {time.time() - t0:.1f}s")
         _record_stage_done(
             "image_gen", t0, slug=slug, channel=channel_path.stem,

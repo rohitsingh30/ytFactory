@@ -13,9 +13,12 @@ Every production render path in 2026-05-07 reality is cloud-based:
   `cloudrun_higgs` / `cloudrun_cosyvoice` / `cloudrun_indicparler`)
   — `--max-instances=2`, `concurrency=1`. Two simultaneous synth
   requests fan out to two warm instances.
-- Image service (`cloudrun_flux2_klein`) — `--min-instances=1`
-  always-warm, `--max-instances=2`. First parallel image request
-  reuses the warm instance; second triggers an autoscale-up.
+- Image service (`cloudrun_flux2_klein`) — `--min-instances=0`
+  (scale to zero), **`--max-instances=3` (bumped 2026-05-11 from
+  2)**. First image hits the warm instance; subsequent in-render
+  images fan out to instances 2-3 via the per-render ThreadPool
+  in `pipeline/render/shorts.py::_render_one_beat` (workers=2 by
+  default — leaves 1 reserve slot for cross-render bulk overlap).
 
 For 2 parallel TIFU renders, the cloud briefly queues at the
 bottleneck stage but total wall-time becomes `max(per_render_time)`
@@ -34,12 +37,26 @@ unified memory and crash with `kIOGPUCommandBufferCallbackErrorTimeout`
 (observed 2026-05-07 during TIFU 4-way parallel test).
 
 **Rule:** parallel render count ≤ `cloudrun_flux2_klein
---max-instances`. Today that's 2. To run 4-way parallel, redeploy
-the image service first:
+--max-instances`. Today that's 3 (bumped 2026-05-11 from 2).
+With per-render image fan-out also using 2 workers, the safe
+math is:
+
+```
+outer (renders in parallel) × inner (workers per render) ≤ max-instances
+```
+
+So **2 renders × 2 workers = 4 concurrent /generate calls** brushes
+the ceiling — keep bulk at 1 outer when per-render fan-out is on,
+or set `YTFACTORY_IMAGE_WORKERS=1` to disable per-render fan-out
+for bulk runs. To run 4-way bulk × 2-way per-render = 8 in-flight
+calls, file a quota request first
+(g.co/cloudrun/gpu-quota → asia-southeast1 →
+NvidiaL4GpuAllocNoZonalRedundancyPerProjectRegion 3 → 6+) and
+THEN bump max-instances in the deploy script:
 
 ```bash
-# bump max-instances in cloud/image-flux2-klein/deploy.sh,
-# then redeploy
+# After quota grant, bump max-instances in
+# cloud/image-flux2-klein/deploy.sh, then redeploy
 ./cloud/image-flux2-klein/deploy.sh ytfactory-image-flux2-klein
 ```
 

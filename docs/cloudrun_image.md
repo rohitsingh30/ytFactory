@@ -4,15 +4,21 @@
 > web-next (sidebar → Cloud) — populated by the daily snapshot in
 > `docs/cloudrun_admin_panel.md`.
 
-> **Status (2026-05-10):** `ytfactory-image-flux2-klein` is LIVE in
-> `asia-southeast1` on NVIDIA L4 with **`--min-instances=1`,
-> `--max-instances=2`, `--concurrency=2`**. Cold-load is hidden via
-> the pre-warmup script `cloud/warm_image_services.sh` (run before
+> **Status (2026-05-11):** `ytfactory-image-flux2-klein` is LIVE in
+> `asia-southeast1` on NVIDIA L4 with **`--min-instances=0` (scale-to-
+> zero), `--max-instances=2`, `--concurrency=2`**. Cold-load is hidden
+> via the pre-warmup script `cloud/warm_image_services.sh` (run before
 > render windows) plus the in-pipeline `images.warmup()` background
 > thread. 16 channel/variant YAMLs flipped from
 > `image_provider: z_image_turbo` (local mflux) to
 > `image_provider: cloudrun_flux2_klein`. Local mflux stays as
 > automatic render-level circuit-breaker fallback.
+>
+> **2026-05-11 cost incident:** the service had been silently flipped
+> to `--min-instances=1` since 2026-05-08, burning ~$22/day (~₹1,800/
+> day) of GCP credit on an idle L4. Reverted to `--min-instances=0`.
+> See `docs/cloud_cost_2026_05_11.md` for the full incident + fix +
+> follow-up watch list.
 >
 > **2026-05-10 fix — `enable_model_cpu_offload()`.** The pre-2026-05-10
 > server.py used `pipe.to("cuda")` which OOM'd on the very first
@@ -51,16 +57,21 @@ service is unhealthy.
 | | Local M2 Max (Z-Image-Turbo via mflux) | Cloud Run L4 (FLUX.2 klein 4B via diffusers) |
 |---|---:|---:|
 | Per-image warm time (1024² 4-step) | ~12-15 s | **~3.86 s server / ~5 s e2e** |
-| Stage 3 total for 7-image AITA Short | ~85-105 s | **33.4 s** (canary 2026-05-07) |
-| Multiple Shorts in parallel | impossible (1 GPU) | up to 2 (max-instances=2 per L4) |
+| Stage 3 total for 7-image AITA Short (serial) | ~85-105 s | **33.4 s** (canary 2026-05-07) |
+| Stage 3 total for 7-image AITA Short (2-way fan-out, 2026-05-11) | impossible (1 GPU) | **~17 s** (per-render ThreadPool, see `pipeline/render/shorts.py::_render_one_beat`) |
+| Multiple Shorts in parallel | impossible (1 GPU) | up to 3 (max-instances=3 per L4, 2026-05-11) |
 | Visual quality vs prior local output | baseline | **indistinguishable** (FLUX.2 klein > Z-Image-Turbo on most prompts; same channel aesthetic) |
 | Cost at full throttle | $0 + electricity + GPU contention | **~$30-100/mo** at our Shorts volume (`min-instances=0` + pre-warm script; cold-load amortized over ~5-15 renders/day). See `docs/cloudrun_image.md` "Cost analysis" for the always-on alternative (~$700-815/mo per service). |
 | Cold-load tax on first image | 0 (mflux warm in laptop venv) | ~5-7 min — hidden behind `min-instances=1` and `images.warmup()` |
 | FLUX.2 klein bonus capability | n/a | T2I + image-to-image + multi-reference editing in one model |
 
-The cost is higher than TTS (~$6/mo) because image gen needs an
-always-warm GPU container — without `min-instances=1`, every render
-pays the 5-7 min cold-load. See "Cost analysis" below.
+The cost is higher than TTS (~$6/mo) because image gen needs a
+fast-loading GPU container. Production runs `--min-instances=0`
+with the in-pipeline `images.warmup()` ping firing on render entry —
+each cron-triggered render pays a one-time ~5-7 min cold-load tax,
+but the L4 is idle (free) the other 25+ minutes between cron ticks.
+The `--min-instances=1` always-warm config burns ~$650/mo per service
+and was reverted on 2026-05-11 — see "Cost analysis" below.
 
 ---
 
@@ -92,7 +103,12 @@ laptop / cloud worker  ─┬─ pipeline/images.py::generate(provider="cloudrun
         │              returns inline base64 PNG (<5 MB) or GCS URI
         │
         │   --min-instances=0  → scale to zero when idle (cost)
-        │   --max-instances=2  → up to 2 concurrent /generate
+        │   --max-instances=3  → up to 3 concurrent /generate (2026-05-11
+        │                        bump from 2; matches asia-southeast1
+        │                        L4 quota ceiling. Per-render ThreadPool
+        │                        defaults to 2 workers + 1 reserve slot
+        │                        for cross-render bulk overlap; tune via
+        │                        YTFACTORY_IMAGE_WORKERS env)
         │   --concurrency=1    → one /generate per container at a time
         │   pre-warm via cloud/warm_image_services.sh before render windows
         │
@@ -151,7 +167,7 @@ cd cloud/image-flux2-klein
 2. `gcloud run deploy ytfactory-image-flux2-klein …` with:
    - `--gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy`
    - `--cpu=8 --cpu-boost --memory=24Gi`
-   - `--concurrency=1 --max-instances=2 --min-instances=1`
+   - `--concurrency=1 --max-instances=3 --min-instances=0`
    - `--add-volume=name=weights,type=cloud-storage,bucket=ytfactory-model-weights`
    - `--add-volume-mount=volume=weights,mount-path=/models/hf`
    - `--set-env-vars=GCS_BUCKET=ytfactory-tts-io,LOG_LEVEL=INFO`
@@ -191,20 +207,24 @@ catches conflicts cheaper than re-iterating the full GPU image. See
 
 ---
 
-## Per-call timings (canary 2026-05-07)
+## Per-call timings (canary 2026-05-07; per-render fan-out 2026-05-11)
 
 | Stage | Time |
 |---|---|
 | Cold-load (one-time, on `min-instances=1` boot) | 5-7 min (24 GB through GCS Fuse + bf16 materialization + .to("cuda")) |
 | Warm /generate (4-step, 768×1344 vertical) | **3.86 s server-side** (1.1 s/step) |
 | End-to-end client wall (incl. network + base64 decode) | ~5 s |
-| Stage 3 for 7-image AITA Short | 33.4 s (~5 s/image, sequential) |
+| Stage 3 for 7-image AITA Short, **serial** (pre-2026-05-11) | 33.4 s (~5 s/image) |
+| Stage 3 for 7-image AITA Short, **2-way fan-out** (post-2026-05-11) | **~17 s** (beat 0 sequential, beats 1-6 over 2 workers) |
 
 Compare to local mflux Z-Image-Turbo on M2 Max:
 - Per-image warm: 12-15 s (8 NFE × ~1.5-1.8 s/step)
 - Stage 3 for 7 images: 85-105 s
 
-**Measured speedup: ~3-4× per image.**
+**Measured speedup: ~3-4× per image (cloud vs local).
+Additional ~2× wall-clock win on stage 3 from per-render fan-out
+(2026-05-11) at zero extra cloud cost — same total GPU-seconds,
+just split across two containers.**
 
 ---
 

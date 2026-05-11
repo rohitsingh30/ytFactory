@@ -29,7 +29,32 @@ gcloud builds submit . \
 echo "==> Deploying ${SERVICE} to Cloud Run (L4 GPU, ${REGION})"
 # Same shape as cloud/tts-chatterbox/deploy.sh — proven on the L4
 # fleet. Concurrency=1 (one /generate per container at a time);
-# max-instances=2 caps total GPU spend across the service.
+# max-instances=3 caps total GPU spend across the service.
+#
+# Why 3 (bumped 2026-05-11 from 2): unlocks 2-way per-render image
+# fan-out (pipeline/render/shorts.py per-beat ThreadPool over beats
+# 1..N) AND leaves 1 slot for cross-render bulk overlap (scripts/ops/
+# bulk_render_queue.py). Per docs/cloudrun_image.md "Cost analysis":
+# marginal $/mo of bumping max-instances is dominated by cold-load
+# amplification (each cold container = ~5 min × $0.90/hr ≈ $0.075).
+# Compute itself is unchanged (same total GPU-seconds, just split
+# across containers). With Cloud Scheduler prewarm one wave/day this
+# adds ~$5-10/mo for the ~50% wall-clock win on every Short.
+#
+# **3 is today's hard ceiling.** Project ytfactory-prod-v2 has L4
+# quota = 3 in asia-southeast1 (NvidiaL4GpuAllocNoZonalRedundancyPerProjectRegion).
+# Total existing GPU service ceiling = FLUX(this:3) + chatterbox(2)
+# + indicf5(1) = 6 capacity but only 3 can ever run concurrently
+# during a render burst — TTS + image services contend for the same
+# 3-GPU pool. To push higher (e.g. 2-way render × 2-way bulk = 4
+# slots needed) requires:
+#   1. Quota request: g.co/cloudrun/gpu-quota → asia-southeast1
+#      → NvidiaL4GpuAllocNoZonalRedundancyPerProjectRegion 3 → 6+
+#   2. Written cost justification (see docs/cloud_cost_2026_05_11.md
+#      watch-list item #1; an always-warm L4 ≈ $650/mo, but
+#      scale-to-zero with prewarm keeps the bill <$30/mo).
+# DO NOT bump higher without both.
+#
 # --add-volume mounts the persistent weights bucket at HF_HOME,
 # so the server can `from_pretrained("/models/hf/flat/<repo>",
 # local_files_only=True)`.
@@ -46,7 +71,7 @@ gcloud run deploy "${SERVICE}" \
   --cpu=8 \
   --cpu-boost \
   --concurrency=1 \
-  --max-instances=2 \
+  --max-instances=3 \
   --min-instances=0 \
   --timeout=3600 \
   --no-allow-unauthenticated \

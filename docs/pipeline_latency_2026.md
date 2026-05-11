@@ -163,7 +163,7 @@ voice + branding.
 **Paired short:** 50-60 s vertical, isolates the act-2
 "measurement" moment. Same render shape as mystoriesanimated Shorts.
 
-### 4.5 sportstoriesanimated (ranked countdowns + sports docs)
+### 4.5 sportsrecapped (ranked countdowns + sports docs)
 
 **Ranked countdowns:** 50-60 s vertical, FLUX.2 klein cartoon-style
 faces of athletes/clubs.
@@ -220,16 +220,20 @@ Top 5 contributors to wall-clock latency on a typical Shorts render
    Largest single line item; roughly half the pipeline's wall-clock.
    Could be parallelized but currently sequential per browser
    profile. **Improvement candidate.**
-2. **Image gen: 33-60 s** — already cloud, already 3-4× faster than
-   local. Hard to improve without different model or batch /
-   parallel calls (max-instances=2 caps parallelism at 2).
+2. **Image gen: ~17-30 s (post-2026-05-11 fan-out)** — was 33-60 s
+   sequential. Per-render ThreadPool over beats 1..N (workers=2,
+   `pipeline/render/shorts.py::_render_one_beat`) halved stage 6 at
+   zero extra cloud cost. Can halve again to ~10-15 s if GPU quota
+   bumps from 3 → 6+ in asia-southeast1 (gates `workers=4`).
 3. **ffmpeg compose: 25-60 s** — local CPU + libx264. Could be
    GPU-accelerated via VideoToolbox but quality regression risk.
 4. **TTS synth: 25-50 s** — cloud chatterbox is already at RTF
    0.21-0.24. Lower bound is the WAV duration itself.
-5. **Beat-prompt authoring: 30-90 s** — Claude CLI sequential
-   per-prompt calls. Could be parallelized; currently bounded by
-   Claude CLI's own latency.
+5. **Beat-prompt authoring: 30-90 s** — Claude CLI **batched** call
+   (`pipeline/llm/prompts.py::author_beat_prompts` returns ALL
+   beat prompts in one shot, contrary to the pre-2026-05-11
+   pareto). Bottleneck is Claude CLI's own latency; parallelizing
+   would split the batch and lose cross-beat coherence.
 
 Bottom 5 (already negligible):
 - Caption pre-render: 1-2 s
@@ -286,14 +290,23 @@ Or set up Cloud Scheduler crons (free tier covers 3 jobs/mo) — see
 
 ## 9. Future improvements (not committed)
 
-- **Render-level concurrency = 2** — dispatch 2 image-gen calls in
-  parallel within a single render to use both `max-instances=2`
-  containers. Halves stage-6 wall-clock at no extra cost.
-  *Status 2026-05-10: deferred. Per-beat loop in
-  `pipeline.render.shorts:1597` is 200+ lines of tightly-coupled
-  state (cast routing, IP-Adapter bootstrap with `i==0` dependency,
-  per-beat hash caching, QC retry budget). Revisit after the loop
-  body has been extracted into a pure `_render_one_beat()` function.*
+- **Render-level concurrency = 2 — SHIPPED 2026-05-11.** Per-beat
+  ThreadPool fan-out now runs beats 1..N in parallel after beat 0
+  (sequential for IP-Adapter bootstrap + cold-load priming).
+  `pipeline/render/shorts.py::_render_one_beat` extracted from the
+  200-line loop body; dispatcher gates on
+  `image_provider.startswith("cloudrun_")` (local providers stay
+  serial — single Apple GPU). `--max-instances=2 → 3` on
+  `cloud/image-flux2-klein/deploy.sh` to leave 1 reserve slot for
+  cross-render bulk overlap. Default workers=2; tune via
+  `YTFACTORY_IMAGE_WORKERS` env. **Stage 3 wall-clock for a 7-image
+  Short: 33.4 s → ~17 s** at zero extra compute cost. See
+  `docs/cloudrun_image.md` "Per-call timings" table.
+- **Bump max-instances=3 → 6+** to enable 4-way bulk × 2-way per-
+  render. Blocked on GPU quota request to Google
+  (NvidiaL4GpuAllocNoZonalRedundancyPerProjectRegion in
+  asia-southeast1, currently 3). File at g.co/cloudrun/gpu-quota
+  with cost justification (per `docs/cloud_cost_2026_05_11.md`).
 - **Z-Image cloud cold-load fix (P3.5)** — FastAPI lifespan load so
   the request path never blocks on cold-load. Then we can A/B
   Z-Image vs FLUX.2 klein per channel.
