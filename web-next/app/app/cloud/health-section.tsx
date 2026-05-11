@@ -12,7 +12,8 @@ import type {
   HealthRow,
   HealthStatus,
 } from "@/lib/cloud-types";
-import { useVisiblePoll } from "@/lib/use-visible-poll";
+import { useStaleWhileRevalidate } from "@/lib/use-swr-cache";
+import { CK } from "@/lib/cache-keys";
 import { cn, relativeTime } from "@/lib/utils";
 
 const STATUS_TONES: Record<HealthStatus, string> = {
@@ -38,25 +39,27 @@ const KIND_LABEL: Record<CloudServiceKind, string> = {
 };
 
 export function CloudHealthSection({ refreshKey }: { refreshKey: number }) {
-  const [data, setData] = useState<HealthResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Stale-while-revalidate keeps the health table painted from cache
+  // every navigation. The 30 s poll cadence is preserved from the
+  // legacy raw useVisiblePoll(load, 30_000).
+  const { data, error: fetchError, refresh } = useStaleWhileRevalidate<HealthResponse>(
+    CK.cloudHealth,
+    () => api.get<HealthResponse>("/api/cloud/health"),
+    30_000,
+  );
+  const error = fetchError
+    ? fetchError instanceof ApiError
+      ? `${fetchError.status}: ${fetchError.message}`
+      : fetchError.message
+    : null;
   const [filter, setFilter] = useState<CloudServiceKind | "all">("all");
 
-  async function load() {
-    try {
-      const res = await api.get<HealthResponse>("/api/cloud/health");
-      setData(res);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof ApiError ? `${e.status}: ${e.message}` : String(e));
-    }
-  }
-
+  // External refresh (e.g. parent's Refresh button bumping refreshKey)
+  // — re-trigger the SWR fetcher.
   useEffect(() => {
-    load();
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
-
-  useVisiblePoll(load, 30_000, []);
 
   const rowsByKind = useMemo(() => {
     if (!data) return null;

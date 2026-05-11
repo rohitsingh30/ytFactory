@@ -1,15 +1,7 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useMemo, useState } from "react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import {
   AlertTriangle,
   BadgeDollarSign,
@@ -23,6 +15,17 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api, ApiError } from "@/lib/api";
 import type { CostPoint, CostResponse } from "@/lib/cloud-types";
 import { cn } from "@/lib/utils";
+
+// Lazy-load the chart wrapper so the recharts dep (~50 KB gz) is split
+// out of the /app/cloud first-load bundle. Skeleton loading state has
+// the same height as the chart so there's no layout shift.
+const CostBarChart = dynamic(
+  () => import("./cost-bar-chart").then((m) => m.CostBarChart),
+  {
+    ssr: false,
+    loading: () => <Skeleton className="h-64 w-full" />,
+  },
+);
 
 const PALETTE = [
   "#a78bfa",
@@ -158,38 +161,7 @@ export function CloudCostSection({ refreshKey }: { refreshKey: number }) {
               </span>
             </div>
             <div className="h-64 w-full">
-              <ResponsiveContainer>
-                <BarChart data={chart} margin={{ left: 0, right: 4, top: 4, bottom: 0 }}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
-                  <XAxis
-                    dataKey="day"
-                    tick={{ fontSize: 10, fill: "rgba(255,255,255,0.5)" }}
-                    axisLine={false}
-                    tickLine={false}
-                    tickFormatter={(d) => (typeof d === "string" ? d.slice(5) : d)}
-                  />
-                  <YAxis
-                    tick={{ fontSize: 10, fill: "rgba(255,255,255,0.5)" }}
-                    axisLine={false}
-                    tickLine={false}
-                    width={44}
-                    tickFormatter={(v) => `$${v}`}
-                  />
-                  <Tooltip
-                    cursor={{ fill: "rgba(255,255,255,0.04)" }}
-                    contentStyle={{
-                      background: "rgba(15,15,17,0.95)",
-                      border: "1px solid rgba(255,255,255,0.1)",
-                      borderRadius: 8,
-                      fontSize: 11,
-                    }}
-                    formatter={(v: number, name: string) => [USD(v), name]}
-                  />
-                  {services.map((s, i) => (
-                    <Bar key={s} dataKey={s} stackId="cost" fill={PALETTE[i % PALETTE.length]} />
-                  ))}
-                </BarChart>
-              </ResponsiveContainer>
+              <CostBarChart chart={chart} services={services} palette={PALETTE} />
             </div>
           </div>
 

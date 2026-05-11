@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { AlertCircle, AlertOctagon } from "lucide-react";
 
 import { EmptyState } from "@/components/app/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, ApiError } from "@/lib/api";
-import { useVisiblePoll } from "@/lib/use-visible-poll";
+import { useStaleWhileRevalidate } from "@/lib/use-swr-cache";
+import { CK } from "@/lib/cache-keys";
 
 interface ErrorRow {
   ts: number;
@@ -23,26 +24,21 @@ interface ErrorsResponse {
 }
 
 export function TelemetryErrorsSection({ refreshKey }: { refreshKey: number }) {
-  const [data, setData] = useState<ErrorsResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  async function load() {
-    try {
-      const r = await api.get<ErrorsResponse>(
-        "/api/telemetry/errors?hours=24&limit=20",
-      );
-      setData(r);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof ApiError ? `${e.status}: ${e.message}` : String(e));
-    }
-  }
+  const { data, error: fetchError, refresh } = useStaleWhileRevalidate<ErrorsResponse>(
+    CK.telemetryErrors(24),
+    () => api.get<ErrorsResponse>("/api/telemetry/errors?hours=24&limit=20"),
+    60_000,
+  );
+  const error = fetchError
+    ? fetchError instanceof ApiError
+      ? `${fetchError.status}: ${fetchError.message}`
+      : fetchError.message
+    : null;
 
   useEffect(() => {
-    load();
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
-
-  useVisiblePoll(load, 60_000, []);
 
   return (
     <section className="flex flex-col gap-3">

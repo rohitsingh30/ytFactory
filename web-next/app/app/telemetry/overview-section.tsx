@@ -6,7 +6,8 @@ import { Activity, AlertOctagon, CheckCircle2, Clock, Layers } from "lucide-reac
 import { EmptyState } from "@/components/app/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, ApiError } from "@/lib/api";
-import { useVisiblePoll } from "@/lib/use-visible-poll";
+import { useStaleWhileRevalidate } from "@/lib/use-swr-cache";
+import { CK } from "@/lib/cache-keys";
 import { cn } from "@/lib/utils";
 
 interface OverviewResponse {
@@ -36,30 +37,36 @@ const HOURS_OPTIONS = [
 ];
 
 export function TelemetryOverviewSection({ refreshKey }: { refreshKey: number }) {
-  const [data, setData] = useState<OverviewResponse | null>(null);
-  const [status, setStatus] = useState<InitStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [hours, setHours] = useState<number>(24);
 
-  async function load() {
-    try {
-      const [ov, st] = await Promise.all([
-        api.get<OverviewResponse>(`/api/telemetry/overview?hours=${hours}`),
-        api.get<InitStatus>("/api/telemetry/init_status"),
-      ]);
-      setData(ov);
-      setStatus(st);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof ApiError ? `${e.status}: ${e.message}` : String(e));
-    }
-  }
+  // Per-hours cache key — switching window paints from that window's
+  // cached payload instantly; first visit to a new window pays one
+  // network call. 30 s poll cadence preserved from the legacy raw
+  // useVisiblePoll(load, 30_000, [hours]).
+  const { data, error: ovError, refresh: refreshOverview } =
+    useStaleWhileRevalidate<OverviewResponse>(
+      CK.telemetryOverview(hours),
+      () => api.get<OverviewResponse>(`/api/telemetry/overview?hours=${hours}`),
+      30_000,
+    );
+  const { data: status, refresh: refreshStatus } = useStaleWhileRevalidate<InitStatus>(
+    CK.telemetryInitStatus,
+    () => api.get<InitStatus>("/api/telemetry/init_status"),
+    60_000,
+  );
 
+  const error = ovError
+    ? ovError instanceof ApiError
+      ? `${ovError.status}: ${ovError.message}`
+      : ovError.message
+    : null;
+
+  // External refresh from parent (e.g. page-level Refresh button).
   useEffect(() => {
-    load();
-  }, [refreshKey, hours]);
-
-  useVisiblePoll(load, 30_000, [hours]);
+    refreshOverview();
+    refreshStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
 
   return (
     <section className="flex flex-col gap-4">
