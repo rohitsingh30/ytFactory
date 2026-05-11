@@ -2,7 +2,7 @@
 # Build + push + deploy the weights-staging Cloud Run Job.
 # After deploy, kick off with:
 #   gcloud run jobs execute ytfactory-weights-staging \
-#     --project=ytfactory-prod --region=asia-southeast1 --wait
+#     --project=ytfactory-prod-v2 --region=asia-southeast1 --wait
 set -euo pipefail
 
 PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
@@ -11,7 +11,7 @@ REPO="ytfactory-tts"
 SERVICE="ytfactory-weights-staging"
 TAG="${1:-$(date +%Y%m%d-%H%M%S)}"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE}:${TAG}"
-BUCKET="ytfactory-model-weights"
+BUCKET="ytfactory-model-weights-v2"
 
 cd "$(dirname "$0")"
 

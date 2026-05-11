@@ -385,3 +385,69 @@ the block and adapt the import chain to that model.
 ### CosyVoice 2 — Hindi gotcha
 
 - **CosyVoice 2 0.5B does NOT support Hindi.** Trained on CN/EN/JP/KR + some EU languages. Feeding Hindi text → produces gibberish that Whisper detects as Korean. Skip CosyVoice for Hindi entirely. Use Indic Parler or Higgs for Hindi.
+
+---
+
+## Auto-patch scripts must detect each Dockerfile's build context (2026-05-11)
+
+`cloud/_shared/add_otel_copy.sh` blindly emitted
+`COPY otel_init.py ./` into every `cloud/<svc>/Dockerfile`. That
+worked for 12 of 14 services but silently failed for the 2
+services whose Dockerfile expects build context = repo root
+(`editing-agent`, `render-worker-v2`). The error:
+
+```
+COPY failed: file not found in build context: stat otel_init.py:
+file does not exist
+```
+
+### Two valid build-context conventions in this repo
+
+| Style | Build invocation | Top-of-Dockerfile clue | OTel COPY line |
+|---|---|---|---|
+| **per-service-dir** (12 services) | `cd cloud/<svc>/ && gcloud builds submit .` | `COPY server.py ./` / `COPY requirements.txt .` | `COPY otel_init.py ./` |
+| **repo-root** (editing-agent, render-worker-v2) | `gcloud builds submit . --config=cloud/<svc>/cloudbuild.yaml` (from repo root) | `COPY pipeline/...`, `COPY cloud/<svc>/server.py ...` | `COPY cloud/<svc>/otel_init.py /workspace/otel_init.py` |
+
+Repo-root context is needed when the Dockerfile must COPY shared
+modules like `pipeline/editing/` or `pipeline/cloud/` — these live
+outside the per-service directory, so per-service-dir context can't
+reach them.
+
+### Audit recipe
+
+```bash
+for df in cloud/*/Dockerfile; do
+  echo "=== $df ==="
+  if grep -qE '^COPY (pipeline|scripts|control|cloud)/' "$df"; then
+    echo "  context: repo-root"
+  else
+    echo "  context: per-service-dir"
+  fi
+  grep -nE '^COPY .*otel_init' "$df" || echo "  no OTel COPY"
+done
+```
+
+### Rule for any new auto-patch script
+
+Auto-patch scripts that touch Dockerfiles MUST detect each
+service's build context before emitting COPY lines. The detector
+heuristic: scan for any `^COPY (pipeline|scripts|control|cloud)/`
+line — if any are present, build context is repo-root. The patcher
+in `cloud/_shared/add_otel_copy.sh` is now context-aware; copy its
+detector pattern when adding new auto-patch scripts.
+
+### Why this is a class-of-bug (not a one-off)
+
+Every shared-template auto-patch (OTel today; tomorrow whatever
+cross-cutting concern needs to land in N services) is subject to
+the same trap. Build-context divergence between services is a real
+constraint we can't unify (repo-root context is needed for shared
+modules), so the fix is per-script awareness, not template
+unification.
+
+### See also
+
+- Memory: `feedback_otel_init_copy_path_per_context.md`
+- Implementation: `cloud/_shared/add_otel_copy.sh` (context-aware)
+- Commit: `ffafae4` (the editing-agent Dockerfile fix); follow-up
+  patches the script + this playbook.

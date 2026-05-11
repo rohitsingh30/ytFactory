@@ -116,7 +116,7 @@ laptop / cloud worker  ─┬─ pipeline/images.py::generate(provider="cloudrun
         │
         │   HF_HOME=/models/hf  ← GCS Fuse mount (read-write for HF locks)
         ▼
-  gs://ytfactory-model-weights/flat/black-forest-labs/FLUX.2-klein-4B/
+  gs://ytfactory-model-weights-v2/flat/black-forest-labs/FLUX.2-klein-4B/
         (24 GB / 52 files, FLAT layout for diffusers local_files_only)
 ```
 
@@ -132,8 +132,8 @@ under `_stage_one_flat`.
 
 ## One-time setup (already done)
 
-- Bucket: `gs://ytfactory-model-weights` (asia-southeast1, versioning ON)
-- Service account: `tts-runner@ytfactory-prod.iam.gserviceaccount.com`
+- Bucket: `gs://ytfactory-model-weights-v2` (asia-southeast1, versioning ON)
+- Service account: `tts-runner@ytfactory-prod-v2.iam.gserviceaccount.com`
   with `roles/storage.objectViewer` on the bucket
 - Weights staged via `cloud/weights-staging/stage.py` Cloud Run Job
   (with `HF_HUB_DISABLE_XET=1` — see
@@ -143,7 +143,7 @@ To re-stage weights after a model upgrade:
 
 ```bash
 gcloud run jobs execute ytfactory-weights-staging \
-  --project=ytfactory-prod --region=asia-southeast1 \
+  --project=ytfactory-prod-v2 --region=asia-southeast1 \
   --args="black-forest-labs/FLUX.2-klein-4B" --async
 ```
 
@@ -170,7 +170,7 @@ cd cloud/image-flux2-klein
    - `--gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy`
    - `--cpu=8 --cpu-boost --memory=24Gi`
    - `--concurrency=1 --max-instances=3 --min-instances=0`
-   - `--add-volume=name=weights,type=cloud-storage,bucket=ytfactory-model-weights`
+   - `--add-volume=name=weights,type=cloud-storage,bucket=ytfactory-model-weights-v2`
    - `--add-volume-mount=volume=weights,mount-path=/models/hf`
    - `--set-env-vars=GCS_BUCKET=ytfactory-tts-io,LOG_LEVEL=INFO`
 
@@ -265,11 +265,11 @@ Cold-load tax (5-7 min FLUX, 15-25 min Z-Image) is hidden via:
    # Pre-warm at 09:55 IST every weekday, 5 min before our 10:00 IST
    # batch-render slot
    gcloud scheduler jobs create http warm-flux-pre-batch \
-     --project=ytfactory-prod --location=asia-southeast1 \
+     --project=ytfactory-prod-v2 --location=asia-southeast1 \
      --schedule="55 9 * * 1-5" --time-zone="Asia/Kolkata" \
      --uri="https://ytfactory-image-flux2-klein-767262167641.asia-southeast1.run.app/readyz" \
      --http-method=GET \
-     --oidc-service-account-email=tts-runner@ytfactory-prod.iam.gserviceaccount.com \
+     --oidc-service-account-email=tts-runner@ytfactory-prod-v2.iam.gserviceaccount.com \
      --oidc-token-audience="https://ytfactory-image-flux2-klein-767262167641.asia-southeast1.run.app"
    ```
    Cloud Scheduler is free (3 jobs/mo), and a /readyz that times out
@@ -353,7 +353,7 @@ single sed. No service redeploy needed.
 ## Z-Image follow-up (P3.5)
 
 `ytfactory-image-z-image-turbo` service exists at
-`gs://ytfactory-model-weights/flat/Tongyi-MAI/Z-Image-Turbo/` (32 GB
+`gs://ytfactory-model-weights-v2/flat/Tongyi-MAI/Z-Image-Turbo/` (32 GB
 weights staged) but cold-load through GCS Fuse keeps stalling —
 Cloud Run replaces the container 3× in 17 min during the
 transformer's 25 GB shard reads.

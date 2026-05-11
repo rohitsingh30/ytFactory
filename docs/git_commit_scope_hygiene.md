@@ -182,3 +182,57 @@ any destructive operation (`git checkout HEAD --`, `git restore --`,
 - `.claude/skills/update-docs/learnings/_index.md` § 2026-05-10
   late "Stash-pop after parallel-agent commit" — sibling
   observation that escalated this update to a documented rule.
+
+## 2026-05-11 update — `.gitignore` audit before declaring scope
+
+Sub-rule of the scope-clarification flow. When `git status` shows
+≫ session-touched count (e.g. 273 unstaged files when you only
+worked on 6), don't just clarify scope — **also audit `.gitignore`
+for runtime-output dirs that were never excluded**.
+
+Today's catch: 110 transient files (97 `data/burner_engage/<slug>.json`
+worker-state files + 13 `cloud/deploy_logs/*.{log,rc}` build logs)
+were tracked-as-untracked because `.gitignore` had no rules for
+them. They're regenerable, mirrored to GCS in prod, and pure
+runtime noise. Adding two `.gitignore` lines (`data/burner_engage/`
+and `cloud/deploy_logs/`) reduced the unstaged count by 108 — about
+40% of the total — without committing anything.
+
+### Audit recipe
+
+```bash
+# 1. After noticing >50 untracked files, group by top-level dir:
+git ls-files --others --exclude-standard \
+  | awk -F/ '{if (NF>=2) print $1"/"$2; else print $1}' \
+  | sort | uniq -c | sort -rn | head -20
+
+# 2. For each cluster ≥10 files, decide:
+#    - Pure runtime / regenerable / mirrored elsewhere → add to .gitignore
+#    - Genuine source code that should ship → commit it (separate scope)
+
+# 3. Confirm the gitignore additions worked:
+git status --short --untracked-files=all | wc -l
+# Should drop by the size of the gitignored cluster.
+```
+
+### Common candidates for `.gitignore` (caught so far)
+
+| dir | rationale | added |
+|---|---|---|
+| `data/burner_engage/` | per-slug worker state, mirrored to GCS via `pipeline/cross_engage/burner_engage.py` | 2026-05-11 |
+| `cloud/deploy_logs/` | per-service Cloud Build/Run output captured by `cloud/<svc>/deploy.sh` wrappers | 2026-05-11 |
+| `data/research/youtube/` + `data/research/analytics/` | YouTube stats cache; refresh via Cloud Scheduler JOB | 2026-05-10 |
+
+### Why this rule lives next to "ask scope first"
+
+The original 2026-05-10 lesson was "don't `git add .` on a multi-
+session dirty tree". The 2026-05-11 corollary is **"if a single
+runtime tool generates 50+ files in a single dir, that dir
+probably belongs in `.gitignore` regardless of session scope"** —
+otherwise every future scope-clarification conversation re-asks
+whether to commit those files.
+
+### See also
+
+- `feedback_commit_scope_clarification.md` (parent memory entry)
+- Today's `.gitignore` diff in commit `689c23d`

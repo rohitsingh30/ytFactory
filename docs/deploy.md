@@ -154,3 +154,64 @@ open "$WEB"
 - `cloud/control-plane/Dockerfile` + `requirements.txt` + `deploy.sh`
   — FastAPI control plane production image
 - `cloud/render-worker-v2/*` — render JOB (per docs/cloudrun_render_worker.md)
+
+---
+
+## 2026-05-11 — Verify deploy actually fired
+
+`cloud/<svc>/deploy.sh` is `gcloud builds submit ... && gcloud run
+deploy ...` in series. If the wrapper calling the script loses its
+stdout (background job that detaches, async shell that disconnects
+its tee, parent shell that exits and SIGHUPs), **the build
+completes successfully on Cloud Build's side but the local script
+never reaches `gcloud run deploy`**. Build SUCCESS ≠ service
+updated.
+
+### How to detect this
+
+```bash
+# Right after a deploy.sh wrapper exits, confirm BOTH steps fired:
+serving=$(gcloud run services describe "<svc>" \
+            --region=asia-southeast1 --project=ytfactory-prod-v2 \
+            --format='value(status.traffic[0].revisionName)')
+latest=$(gcloud run services describe "<svc>" \
+            --region=asia-southeast1 --project=ytfactory-prod-v2 \
+            --format='value(status.latestReadyRevisionName)')
+
+if [[ "$serving" != "$latest" ]]; then
+  echo "DEPLOY DID NOT FIRE — serving=$serving latestReady=$latest"
+fi
+```
+
+### Recovery
+
+If only the build fired, run the deploy step manually using the
+image tag from the SUCCESS build:
+
+```bash
+IMAGE=$(gcloud builds describe "${BUILD_ID}" --format='value(images[0])')
+gcloud run deploy "${SERVICE}" --image="${IMAGE}" \
+  --project=ytfactory-prod-v2 --region=asia-southeast1 \
+  [...all the flags from the original deploy.sh...]
+```
+
+Save the original deploy.sh's flag list to `cloud/<svc>/deploy.sh`
+itself — that's the deploy contract; matching it manually is
+mechanical.
+
+### Better fix (TODO)
+
+Refactor every `cloud/<svc>/deploy.sh` to either:
+- (a) split into `build.sh` + `deploy.sh` so each is independently
+  re-runnable from a build artifact tag, OR
+- (b) at the bottom of `deploy.sh`, ALWAYS print
+  `==> Deployed: <url>` with the deploy step's exit code; if the
+  wrapper sees only `==> Built:` with no `==> Deployed:`, the
+  deploy step was skipped.
+
+### See also
+
+- Memory: `feedback_deploy_wrapper_lost_stdout_silent.md`
+- `feedback_post_deploy_live_smoke_m2m.md` — what to run AFTER
+  confirming the deploy fired (this rule is about confirming the
+  deploy fired in the first place).

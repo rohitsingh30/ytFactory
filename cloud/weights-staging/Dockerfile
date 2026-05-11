@@ -1,6 +1,6 @@
 # ytFactory — one-shot Cloud Run Job that pulls model snapshots from
 # Hugging Face Hub directly into a GCS-Fuse-mounted bucket. Used to
-# pre-populate gs://ytfactory-model-weights so every TTS / image
+# pre-populate gs://ytfactory-model-weights-v2 so every TTS / image
 # Cloud Run service can mount the bucket at HF_HOME=/models/hf and
 # skip its 5-8 min cold-start download. See docs/cloudrun_persistent_weights.md.
 

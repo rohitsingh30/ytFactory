@@ -162,3 +162,60 @@ asserts every pattern resolves to the same channel root.
    niche's source adapter, TTS provider, visual style, etc.
 4. Multiple variant YAMLs can map to the same niche dir if they share
    content (style overlays). Different content → different niche.
+
+## Cloud-canonical writes never re-create laptop channel folders (2026-05-11)
+
+Any module whose canonical store is GCS (gated on `YTFACTORY_STATE_BUCKET`)
+MUST NOT silently re-materialise the laptop's `<channel>/` folder as
+part of a write. Disk-mirror is **opt-in** behind a per-module env
+var, not the default.
+
+### Pattern
+
+```python
+_DISK_MIRROR_ENV = "YTFACTORY_<MODULE>_DISK_MIRROR"
+
+def _should_disk_mirror() -> bool:
+    if _state_bucket() is None:
+        return True   # disk IS canonical when no bucket configured
+    val = os.environ.get(_DISK_MIRROR_ENV, "").strip().lower()
+    return val in {"1", "true", "yes", "on"}
+
+def save_xxx(channel_key, doc):
+    _gcs_save(channel_key, doc)
+    if not _should_disk_mirror():
+        return doc
+    # ... existing mkdir + atomic write ...
+```
+
+### Why
+
+The user repeatedly cleans the laptop with `rm -rf
+<channel>/` for a clean state. Pre-2026-05-11, every save path
+(seeder, dashboard `POST/PUT /api/channels/<ch>/niches`, AI-draft
+endpoint) silently re-created `<channel>/niches/` as a side effect
+of writing the JSON. The cleaned laptop never stayed clean.
+
+### Tests
+
+- Test `setUp` MUST clear the mirror env so the test outcome doesn't
+  depend on whatever the dev's shell has set.
+- A regression test MUST assert the laptop `<channel>/` folder is
+  **not** created when the bucket is configured + opt-in is unset.
+  See `tests/test_niche_specs.py::TestNicheSpecsGcsBackend.test_save_writes_to_gcs_only_by_default_when_bucket_set`
+  for the canonical example.
+
+### Currently in scope
+
+`pipeline/niche_specs.py` is the only GCS-canonical helper that
+writes inside a channel folder today. `burner_engage` and
+`research/youtube` write under `data/`, not `<channel>/`, so they
+don't trigger this rule. Any future `<channel>/<thing>/`
+GCS-canonical helper must opt the mirror behind its own env var.
+
+### See also
+
+- CLAUDE.md §"Cloud-canonical writes never re-create laptop channel folders (2026-05-11)"
+- Memory: `feedback_cloud_canonical_no_laptop_mirror.md`
+- Implementation: `pipeline/niche_specs.py:save_niche()`
+- Commit: `689c23d`

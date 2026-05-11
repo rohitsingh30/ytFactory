@@ -10,6 +10,19 @@
 > project name. The mechanic (read-write Fuse mount, lock-dir
 > requirement, per-service mount path) is unchanged.
 
+> **2026-05-11 — Phase 4 catch-up.** All 8 production GPU-service
+> `cloud/<svc>/deploy.sh` scripts were still hard-coding the dead
+> `ytfactory-model-weights` bucket name despite the 2026-05-10
+> migration. Discovered when today's OTel rollout forced fresh
+> revisions on every service — every cold-start failed with
+> `PermissionDenied: billing account ... is disabled in state
+> closed`. **Why it stayed invisible:** existing service revisions
+> kept warm GCSFuse mount handles to the old bucket; Cloud Run
+> kept routing traffic to the stale-but-working revision. See
+> §"Failure mode: warm revisions mask mount failures" below + the
+> permanent rule in [`docs/phase_migration_grep_recipe.md`](./phase_migration_grep_recipe.md).
+> Fixed in commit `ffafae4`.
+
 > **Original status (2026-05-06):** ENABLED for all 6 TTS services.
 > Bucket was `gs://ytfactory-model-weights` (asia-southeast1,
 > versioning ON). Mount is **read-write** — see "Why writable" below
@@ -310,6 +323,52 @@ fast path for the existing 6 TTS services).
 - **Different Cloud Run region than the bucket.** Cross-region GCS
   egress is $0.02-0.12 per GB; would dominate the savings. Keep
   bucket in the same region as the services.
+
+---
+
+## Failure mode: warm revisions mask mount failures (2026-05-11)
+
+If the source bucket disappears (project retired, billing closed,
+IAM revoked, bucket deleted), **existing warm revisions keep
+serving** because their GCSFuse mount handles persisted from a
+healthier moment. Cloud Run never tries to re-mount on a warm
+container, so the only signal that something is wrong is the next
+forced cold-start — which might be days away.
+
+This bit Phase 4 (2026-05-09 → 2026-05-11): the `ytfactory-prod`
+project's billing went into closed state when we retired it, but
+every GPU service kept serving against the old `ytfactory-model-weights`
+bucket via warm GCSFuse handles. The 8 production deploy.sh files
+(separate from the `_bench/` copies that had been updated) still
+pointed at the dead bucket. Latent breakage was invisible until
+today's OTel rollout forced fresh revisions on every service —
+**every cold-start failed simultaneously**.
+
+### Mitigation
+
+After ANY infra change that would affect cold-start (billing
+move, IAM revocation, secret rotation, bucket rename, runtime SA
+change), force a cold-start probe before declaring the migration
+complete:
+
+```bash
+# Force a fresh revision via a no-op label change.
+gcloud run services update <svc> \
+  --region=asia-southeast1 --project=ytfactory-prod-v2 \
+  --update-labels=cold-start-probe=$(date +%s)
+
+# Wait ~3 min, then verify latestReady == latestCreated == serving:
+gcloud run services describe <svc> \
+  --region=asia-southeast1 --project=ytfactory-prod-v2 \
+  --format='value(status.traffic[0].revisionName,
+                  status.latestCreatedRevisionName,
+                  status.latestReadyRevisionName)'
+```
+
+If `latestCreated != latestReady` after 5 min, the cold-start
+failed silently — the migration is incomplete. Debug before
+declaring done. Full recipe + retired-name grep gates in
+[`docs/phase_migration_grep_recipe.md`](./phase_migration_grep_recipe.md).
 
 ---
 

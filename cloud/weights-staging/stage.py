@@ -2,7 +2,7 @@
 
 Architecture (after 2026-05-06 GCS-Fuse-write thrash):
   download → /tmp/hf-stage (in-memory tmpfs, fast, no Fuse latency)
-  upload   → gs://ytfactory-model-weights via google-cloud-storage SDK
+  upload   → gs://ytfactory-model-weights-v2 via google-cloud-storage SDK
              (transfer_manager parallel workers, multipart-friendly)
   free /tmp between repos so Qwen-Image (20 GB) fits in 32 GiB Job memory
 
@@ -69,7 +69,7 @@ FLAT_LAYOUT_REPOS: set[str] = {
 }
 
 STAGE_ROOT = Path(os.environ.get("STAGE_ROOT", "/tmp/hf-stage"))
-BUCKET_NAME = os.environ.get("BUCKET_NAME", "ytfactory-model-weights")
+BUCKET_NAME = os.environ.get("BUCKET_NAME", "ytfactory-model-weights-v2")
 UPLOAD_WORKERS = int(os.environ.get("UPLOAD_WORKERS", "16"))
 
 

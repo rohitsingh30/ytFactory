@@ -10,7 +10,7 @@
 This research was commissioned to find a FREE, fast, high-quality
 text-to-image model to **replace `z_image_turbo` (mflux/MLX local)**
 as the default for every channel and run on our existing Cloud Run
-infra (`asia-southeast1`, NVIDIA L4, `gs://ytfactory-model-weights`
+infra (`asia-southeast1`, NVIDIA L4, `gs://ytfactory-model-weights-v2`
 bucket mounted at `/models/hf` via GCS Fuse — same pattern as the 6
 TTS services).
 
@@ -284,7 +284,7 @@ Sample artifacts saved to `data/research/cloud_image/canary4/`
 Same Cloud Run + GCS-Fuse pattern as TTS:
 
 1. Stage `black-forest-labs/FLUX.2-klein-4B` to
-   `gs://ytfactory-model-weights/hub/models--black-forest-labs--FLUX.2-klein-4B/`
+   `gs://ytfactory-model-weights-v2/hub/models--black-forest-labs--FLUX.2-klein-4B/`
    via the existing `cloud/weights-staging/stage.py` job.
 2. **(BLOCKING)** validate that
    `Flux2KleinPipeline.from_pretrained(..., local_files_only=True)`

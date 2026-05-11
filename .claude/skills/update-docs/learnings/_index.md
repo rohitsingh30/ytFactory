@@ -5,6 +5,19 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
 
 ## CLASS-OF-BUG (rule changes to SKILL.md)
 
+- 2026-05-11 — **SW helper extraction loses `event` scope** (caught
+  by user report `Uncaught (in promise) ReferenceError: event is not
+  defined at staleWhileRevalidate (sw.js:118:7)`). Every `/api/*`
+  GET broke with `ERR_FAILED` in any tab that had registered the
+  SW. Rule now lives in `docs/service_worker_handler_scope.md` +
+  memory `feedback_sw_handler_scope.md`. Sweep recipe:
+  `grep -nE "event\.(waitUntil|respondWith|request|data|clientId)"
+  web-next/public/sw.js` — every match must be inside an
+  `addEventListener` callback OR a helper that takes `event` as a
+  named parameter. Corollary: bump `CACHE_VERSION` on every SW
+  change so the activate handler drops poisoned cache. Stale claim
+  edited inline: `docs/web_perf_pass_2026_05_11.md` line 61
+  (`ytfactory-api-v1` → `v2`).
 - 2026-05-10 — **doc-sweep rule.** Dual-save (memory + one project
   doc) wasn't enough — findings live across many docs. SKILL.md now
   has Section 4D ("Sweep related docs") + Quality gate 8 that blocks
@@ -403,3 +416,17 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
   Don't trust a `0` from the verifier without a second method when the
   needle has shell metachars.
 
+
+- 2026-05-11 — **Auto-invocation missed across an entire session
+  with 6+ durable corrections.** Today's session had 6 trigger
+  conditions fire (2 user-flagged regressions, 2 explicit
+  durable rules, 1 manual git/deploy debrief, 1 user request to
+  finally clean things up — none of these auto-invoked the
+  skill). User had to explicitly run `/update-docs` 12+ hours
+  into the session. Suspected cause: each fix landed inside a
+  larger flow ("fix → commit → deploy → fix something else") so
+  no single moment felt like an end-of-unit. **Discipline:** if
+  ≥3 durable rules / surprises accumulate without a save, the
+  skill must auto-invoke. Don't wait for the user. Future audit:
+  `grep -nE "from now on|always|never|the rule is" <recent
+  conversation>` — every match is a missed trigger candidate.
