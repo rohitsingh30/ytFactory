@@ -35,6 +35,8 @@ import {
   ENGAGE_MODE_DESCRIPTIONS,
   type EngageMode,
 } from "@/lib/api";
+import { useStaleWhileRevalidate } from "@/lib/use-swr-cache";
+import { CK } from "@/lib/cache-keys";
 import { useVisiblePoll } from "@/lib/use-visible-poll";
 import type {
   BurnerChannel,
@@ -44,24 +46,24 @@ import type {
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+interface BurnerListResp {
+  burners: BurnerChannel[];
+  catalog_size: number;
+}
+
 export default function BurnerChannelsPage() {
-  const [burners, setBurners] = useState<BurnerChannel[] | null>(null);
-  const [catalogSize, setCatalogSize] = useState<number>(0);
+  // Stale-while-revalidate: paint cached burner list instantly on
+  // mount + every navigation. 5 s poll cadence preserved from the
+  // legacy raw useVisiblePoll for live engage state.
+  const { data: list, error: listError, refresh } = useStaleWhileRevalidate<BurnerListResp>(
+    CK.burnerList,
+    () => burnerApi.list(),
+    5_000,
+  );
+  const burners: BurnerChannel[] | null = list?.burners ?? null;
+  const catalogSize = list?.catalog_size ?? 0;
   const [drawerSlug, setDrawerSlug] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  async function refresh() {
-    try {
-      const r = await burnerApi.list();
-      setBurners(r.burners);
-      setCatalogSize(r.catalog_size);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  useVisiblePoll(refresh, 5000);
+  const error = listError?.message ?? null;
 
   return (
     <div className="flex min-h-full flex-col">
@@ -161,6 +163,11 @@ function BurnerRow({
       onOpen();
       onAfterAction();
     } catch (e) {
+      // Even on error, surface the drawer so the operator can see the
+      // last known engage state (often the failure happened *because*
+      // a previous run is stuck/queued, and the drawer's the only
+      // place that view exists).
+      onOpen();
       toast.error("Couldn't start", {
         description: e instanceof Error ? e.message : String(e),
       });
@@ -171,6 +178,11 @@ function BurnerRow({
 
   async function stop() {
     setBusy(true);
+    // Pop the drawer immediately so the operator can watch the worker
+    // wind down (phase → "stopped", tabs closing, etc.) instead of
+    // staring at the row with no feedback. Matches every other action
+    // button on this row.
+    onOpen();
     try {
       await burnerApi.stop(burner.slug);
       toast.message(`Stop requested for ${burner.slug}`);
@@ -185,8 +197,27 @@ function BurnerRow({
   }
 
   return (
-    <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-5 md:flex-row md:items-center">
-      <div className="flex items-center gap-3 md:flex-1">
+    <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-5 transition-colors hover:border-border-strong md:flex-row md:items-center">
+      {/* Row body opens the drawer when clicked — matches the old
+          behavior where clicking anywhere on a row (not just an action
+          button) surfaced the engage panel. Implemented as a div (not
+          button) so the YouTube link can stay nested as a real <a>;
+          the link's stopPropagation keeps clicks on it from also
+          opening the drawer. The action buttons on the right have
+          their own handlers and aren't inside this clickable area. */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onOpen}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpen();
+          }
+        }}
+        className="flex cursor-pointer items-center gap-3 text-left md:flex-1"
+        aria-label={`Open engage panel for ${burner.title}`}
+      >
         <div className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-border bg-surface-2 font-mono text-[12px] uppercase tracking-tight text-foreground">
           {burner.slug.slice(0, 2)}
         </div>
@@ -206,6 +237,7 @@ function BurnerRow({
                   href={`https://youtube.com/channel/${burner.channel_id}`}
                   target="_blank"
                   rel="noreferrer"
+                  onClick={(e) => e.stopPropagation()}
                   className="inline-flex items-center gap-1 hover:text-foreground"
                 >
                   YouTube <ExternalLink className="h-3 w-3" />

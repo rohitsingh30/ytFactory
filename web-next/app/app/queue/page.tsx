@@ -45,28 +45,24 @@ import type {
   ResolveHoldResponse,
 } from "@/lib/types";
 import { relativeTime } from "@/lib/utils";
-import { useVisiblePoll } from "@/lib/use-visible-poll";
+import { useStaleWhileRevalidate } from "@/lib/use-swr-cache";
+import { CK } from "@/lib/cache-keys";
 
 export default function QueuePage() {
-  const [queue, setQueue] = useState<QueueState | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
-
-  async function refresh() {
-    setRefreshing(true);
-    try {
-      const q = await queueApi.get();
-      setQueue(q);
-    } catch (e) {
-      // Transient backend hiccup (server restart, brief 500/502 from the
-      // dev rewrite-proxy). Keep current data so the UI doesn't flash
-      // empty between polls; the next 2s tick will recover.
-      console.warn("queue refresh failed", e);
-    } finally {
-      setRefreshing(false);
-    }
-  }
-
-  useVisiblePoll(refresh, 2000);
+  // Stale-while-revalidate: paint the previously-cached queue payload
+  // instantly on mount (from in-memory + localStorage), then refresh
+  // every 2 s. The new poll cadence is unchanged from the legacy raw
+  // useVisiblePoll(refresh, 2000) but every NAVIGATION to /app/queue
+  // now repaints from cache instead of flashing skeletons.
+  const { data: queue, refresh, isLoading } = useStaleWhileRevalidate<QueueState>(
+    CK.queueState,
+    () => queueApi.get(),
+    2000,
+    // 2 s poll is intentionally tight for a live queue. Disable the
+    // stale-fresh skip-on-mount gate so every poll really does fire.
+    { freshForMs: 0 },
+  );
+  const refreshing = isLoading;
 
   return (
     <div className="flex min-h-full flex-col">

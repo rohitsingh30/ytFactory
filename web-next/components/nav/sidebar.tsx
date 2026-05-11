@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { PrefetchLink } from "@/components/app/prefetch-link";
 import {
+  Activity,
   Cloud,
   LayoutDashboard,
   ListChecks,
@@ -33,6 +35,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/app/channels", label: "Channels", icon: Tv2, shortcut: "G C" },
   { href: "/app/burner-channels", label: "Burner Channels", icon: ToggleRight, shortcut: "G B" },
   { href: "/app/cloud", label: "Cloud", icon: Cloud, shortcut: "G I", adminOnly: true },
+  { href: "/app/telemetry", label: "Telemetry", icon: Activity, shortcut: "G T", adminOnly: true },
   { href: "/app/admin", label: "Admin", icon: Shield, shortcut: "G A", adminOnly: true },
   { href: "/app/settings", label: "Settings", icon: SettingsIcon, shortcut: "G S" },
 ];
@@ -96,7 +99,7 @@ export function Sidebar({ className }: { className?: string }) {
               ? pathname === "/app"
               : pathname === item.href || pathname.startsWith(item.href + "/");
           return (
-            <Link
+            <PrefetchLink
               key={item.href}
               href={item.href}
               className={cn(
@@ -118,7 +121,7 @@ export function Sidebar({ className }: { className?: string }) {
                   {item.shortcut}
                 </span>
               )}
-            </Link>
+            </PrefetchLink>
           );
         })}
       </nav>

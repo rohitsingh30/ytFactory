@@ -9,7 +9,8 @@ import { EmptyState } from "@/components/app/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, ApiError } from "@/lib/api";
 import { cn, relativeTime } from "@/lib/utils";
-import { useVisiblePoll } from "@/lib/use-visible-poll";
+import { useStaleWhileRevalidate } from "@/lib/use-swr-cache";
+import { CK } from "@/lib/cache-keys";
 
 interface AuthUser {
   email: string;
@@ -33,59 +34,50 @@ interface WhoAmI {
 }
 
 export default function AdminPage() {
-  const [me, setMe] = useState<WhoAmI | null>(null);
-  const [pending, setPending] = useState<AuthUser[] | null>(null);
-  const [users, setUsers] = useState<AuthUser[] | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  // Whoami first — primed by the app-shell warmer, so the cached value
+  // is usually already there. SWR with a 60 s poll keeps admin status
+  // current without per-page noise.
+  const { data: me } = useStaleWhileRevalidate<WhoAmI>(
+    CK.whoami,
+    () => api.get<WhoAmI>("/api/auth/whoami"),
+    60_000,
+  );
+  const isAdmin = !!me?.is_admin;
+
+  // Admin endpoints — gated by enabled: isAdmin so non-admins don't
+  // hammer protected URLs. Cached payload still hydrates instantly on
+  // every navigation.
+  const { data: pendingResp, refresh: refreshPending, isLoading: pendingLoading } =
+    useStaleWhileRevalidate<{ pending: AuthUser[] }>(
+      CK.adminRequests,
+      () => api.get<{ pending: AuthUser[] }>("/api/admin/requests"),
+      30_000,
+      { enabled: isAdmin },
+    );
+  const { data: usersResp, refresh: refreshUsers, isLoading: usersLoading } =
+    useStaleWhileRevalidate<{ users: AuthUser[] }>(
+      CK.adminUsers,
+      () => api.get<{ users: AuthUser[] }>("/api/admin/users"),
+      30_000,
+      { enabled: isAdmin },
+    );
+
+  const pending = pendingResp?.pending ?? null;
+  const users = usersResp?.users ?? null;
+  const refreshing = pendingLoading || usersLoading;
   const [actingOn, setActingOn] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const [pendingRes, usersRes] = await Promise.all([
-        api.get<{ pending: AuthUser[] }>("/api/admin/requests"),
-        api.get<{ users: AuthUser[] }>("/api/admin/users"),
-      ]);
-      setPending(pendingRes.pending ?? []);
-      setUsers(usersRes.users ?? []);
-    } catch (e) {
-      const msg = e instanceof ApiError ? `${e.status}: ${(e.body as any)?.error ?? e.message}` : String(e);
-      toast.error("Failed to load access data", { description: msg });
-    } finally {
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .get<WhoAmI>("/api/auth/whoami")
-      .then((res) => {
-        if (cancelled) return;
-        setMe(res);
-        if (res.is_admin) refresh();
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [refresh]);
-
-  useVisiblePoll(
-    () => {
-      if (!me?.is_admin) return;
-      return refresh();
-    },
-    30_000,
-    [me?.is_admin],
-  );
+  const refresh = useCallback(() => {
+    refreshPending();
+    refreshUsers();
+  }, [refreshPending, refreshUsers]);
 
   async function decide(email: string, action: "approve" | "deny") {
     setActingOn(email);
     try {
       await api.post(`/api/admin/requests/${encodeURIComponent(email)}/${action}`);
       toast.success(`${action === "approve" ? "Approved" : "Denied"} ${email}`);
-      await refresh();
+      refresh();
     } catch (e) {
       const msg = e instanceof ApiError ? `${e.status}: ${(e.body as any)?.detail ?? e.message}` : String(e);
       toast.error(`Failed to ${action}`, { description: msg });
