@@ -46,6 +46,19 @@ data/_bench/
 data/research/youtube/
 data/research/analytics/
 
+# Burner-channel cross-engage worker state — one JSON per burner slug
+# (write via pipeline/cross_engage/burner_engage.py). Pure runtime
+# state, mirrored to GCS in prod (see docs/cross_engage_cloud_v2.md).
+# Pre-2026-05-11 these accumulated freely on disk; ignoring them keeps
+# `git status` from drowning under ~100 transient files.
+data/burner_engage/
+
+# Cloud Build / Cloud Run deploy logs — captured by deploy.sh wrappers
+# under cloud/<service>/deploy.sh. Already covered by the *.log rule
+# below for the .log files but the .rc exit-code sidecars also leak;
+# ignore the whole dir.
+cloud/deploy_logs/
+
 # Per-channel runtime artifacts (apply across every <channel>/ folder)
 # Cache — per-slug intermediate render artifacts (regenerable via re-render)
 **/cache/

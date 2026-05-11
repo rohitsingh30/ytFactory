@@ -13,17 +13,31 @@ Two storage backends, picked transparently per call:
 * **GCS** (production / Cloud Run) — when ``YTFACTORY_STATE_BUCKET``
   is set the canonical store is ``gs://<bucket>/<channel>/niches/<key>.json``.
   Reads try GCS first; on miss, fall back to local disk so a partially-
-  synced bucket still serves whatever the laptop has on disk. Writes
-  go to GCS first, then a best-effort write-through to local disk so
-  ``git`` history of niche specs continues to work in dev.
+  synced bucket still serves whatever the laptop has on disk. **Writes
+  go to GCS only by default** — the laptop's ``<channel>/`` folder is
+  no longer silently re-materialized. Set
+  ``YTFACTORY_NICHE_DISK_MIRROR=1`` to opt back in to the legacy
+  write-through (e.g. when a dev wants to inspect / diff freshly-seeded
+  JSONs locally).
 * **Local disk only** (laptop dev without the bucket env) — pure
   ``PROJECT_ROOT/<channel>/niches/<key>.json`` semantics, identical
-  to the pre-cutover behaviour. This keeps ``test_niche_specs.py``'s
-  ``patch.object(niche_specs, "PROJECT_ROOT", …)`` pattern working.
+  to the pre-cutover behaviour. Disk IS canonical here, so writes
+  always land on disk regardless of the mirror env. This keeps
+  ``test_niche_specs.py``'s ``patch.object(niche_specs, "PROJECT_ROOT",
+  …)`` pattern working.
 
 If GCS is configured but unreachable (no ADC / network down / bucket
 gone), each call logs once and falls through to the disk path so the
 dev workflow degrades gracefully rather than 500-ing.
+
+Why the mirror is opt-in (2026-05-11):
+  Before this cutover, every ``save_niche`` call (seeder, dashboard
+  POST/PUT, AI-draft endpoint) unconditionally re-created
+  ``<channel>/niches/`` on the laptop, even when GCS was canonical.
+  The user removed all seven channel folders for a clean laptop;
+  re-running the seeder against prod GCS silently materialised them
+  again. The opt-in mirror keeps a clean laptop clean while letting
+  GCS be the one source of truth.
 
 This is intentionally additive — the renderer still reads variant YAMLs
 as the source of truth for now. Niche JSONs are a description /
@@ -129,12 +143,29 @@ def _niche_path(channel_key: str, key: str) -> Path:
 
 
 _BUCKET_ENV = "YTFACTORY_STATE_BUCKET"
+_DISK_MIRROR_ENV = "YTFACTORY_NICHE_DISK_MIRROR"
 
 
 def _state_bucket() -> Optional[str]:
     """Bucket name from env, or ``None`` for laptop-only operation."""
     name = os.environ.get(_BUCKET_ENV, "").strip()
     return name or None
+
+
+def _should_disk_mirror() -> bool:
+    """Whether ``save_niche`` should write a copy to local disk.
+
+    * No bucket configured → disk IS the canonical store, always write.
+    * Bucket configured (cloud-canonical) → only mirror if
+      ``YTFACTORY_NICHE_DISK_MIRROR`` is set to a truthy value
+      (``1`` / ``true`` / ``yes`` / ``on``). This keeps a freshly
+      cleaned laptop from being silently re-populated whenever the
+      dashboard, seeder, or AI-draft endpoint runs against prod.
+    """
+    if _state_bucket() is None:
+        return True
+    val = os.environ.get(_DISK_MIRROR_ENV, "").strip().lower()
+    return val in {"1", "true", "yes", "on"}
 
 
 def _gcs_blob_path(channel_key: str, key: str) -> str:
@@ -280,13 +311,24 @@ def get_niche(channel_key: str, key: str) -> Optional[NicheDoc]:
 
 
 def save_niche(channel_key: str, doc: NicheDoc) -> NicheDoc:
-    """Persist ``doc``. Writes to GCS when configured AND to local disk
-    (best-effort) so dev workflows that still read from disk see the
-    latest doc.
+    """Persist ``doc``.
+
+    Routing:
+
+    * Always attempt the GCS write (no-op when no bucket is configured).
+    * Mirror to local disk **only when** ``_should_disk_mirror()``
+      returns True — i.e. either no bucket is set (disk IS canonical)
+      or the explicit ``YTFACTORY_NICHE_DISK_MIRROR`` opt-in is on.
+      Without the opt-in, a cloud-canonical save NEVER re-creates the
+      laptop's ``<channel>/niches/`` folder, so a deliberately-cleaned
+      laptop stays clean.
 
     Overwrites if present. Returns the doc as written (round-tripped).
     """
     _gcs_save(channel_key, doc)
+
+    if not _should_disk_mirror():
+        return doc
 
     nd = _niches_dir(channel_key)
     try:

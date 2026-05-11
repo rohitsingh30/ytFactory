@@ -282,10 +282,17 @@ class TestNicheSpecsGcsBackend(unittest.TestCase):
         self._root = Path(self._td.name)
         self._root_patch = patch.object(niche_specs, "PROJECT_ROOT", self._root)
         self._root_patch.start()
+        # Clear the disk-mirror opt-in so tests aren't sensitive to
+        # whatever the dev's shell happens to have set.
+        self._mirror_env_patch = patch.dict(
+            niche_specs.os.environ, {niche_specs._DISK_MIRROR_ENV: ""}, clear=False,
+        )
+        self._mirror_env_patch.start()
         self.gcs = _FakeGcsBackend().install(niche_specs)
 
     def tearDown(self):
         self.gcs.uninstall()
+        self._mirror_env_patch.stop()
         self._root_patch.stop()
         self._td.cleanup()
 
@@ -344,28 +351,50 @@ class TestNicheSpecsGcsBackend(unittest.TestCase):
 
     # --- save ----------------------------------------------------------------
 
-    def test_save_writes_through_to_both_backends(self):
-        doc = NicheDoc(key="new_niche", label="New")
+    def test_save_writes_to_gcs_only_by_default_when_bucket_set(self):
+        """Default mirror policy: cloud-canonical save MUST NOT touch
+        the laptop's <channel>/niches/ folder. Regression test for the
+        2026-05-11 cleanup where ``rm -rf <channel>/`` kept being
+        silently undone by every save."""
+        doc = NicheDoc(key="cloud_only", label="Cloud Only")
         save_niche("ch", doc)
         # GCS got it
+        self.assertIn(("ch", "cloud_only"), self.gcs.store)
+        # Disk DID NOT — the channel folder must not be re-materialised
+        on_disk = self._root / "ch" / "niches" / "cloud_only.json"
+        self.assertFalse(on_disk.exists())
+        # And the parent <channel>/ dir wasn't created either
+        self.assertFalse((self._root / "ch").exists())
+
+    def test_save_writes_through_when_disk_mirror_opt_in(self):
+        """``YTFACTORY_NICHE_DISK_MIRROR=1`` brings back the legacy
+        write-through, useful for devs who want JSONs reviewed locally."""
+        doc = NicheDoc(key="new_niche", label="New")
+        with patch.dict(niche_specs.os.environ, {niche_specs._DISK_MIRROR_ENV: "1"}, clear=False):
+            save_niche("ch", doc)
         self.assertIn(("ch", "new_niche"), self.gcs.store)
-        # Disk got it
         on_disk = self._root / "ch" / "niches" / "new_niche.json"
         self.assertTrue(on_disk.exists())
 
     def test_save_disk_failure_does_not_blow_up_in_cloud_mode(self):
-        # Simulate read-only FS: replace _niches_dir's mkdir with one that
-        # raises. With a bucket configured, save should swallow the OSError.
+        # Simulate read-only FS while mirror is opted in: replace
+        # _niches_dir's mkdir with one that raises. With a bucket
+        # configured, save should swallow the OSError.
         doc = NicheDoc(key="cloud_only", label="Cloud Only")
-        with patch.object(niche_specs.Path, "mkdir", side_effect=OSError("read-only")):
+        with patch.dict(niche_specs.os.environ, {niche_specs._DISK_MIRROR_ENV: "1"}, clear=False), \
+             patch.object(niche_specs.Path, "mkdir", side_effect=OSError("read-only")):
             save_niche("ch", doc)  # must not raise
         self.assertIn(("ch", "cloud_only"), self.gcs.store)
 
     # --- delete --------------------------------------------------------------
 
     def test_delete_removes_from_both(self):
+        # Set up a doc that exists in BOTH backends (use the helper to
+        # write the disk side directly — save_niche is now GCS-only by
+        # default so we can't rely on it to populate disk).
         doc = NicheDoc(key="bye", label="Goodbye")
-        save_niche("ch", doc)
+        self.gcs.store[("ch", "bye")] = doc
+        self._disk_write("ch", doc)
         self.assertTrue(delete_niche("ch", "bye"))
         self.assertNotIn(("ch", "bye"), self.gcs.store)
         self.assertFalse((self._root / "ch" / "niches" / "bye.json").exists())

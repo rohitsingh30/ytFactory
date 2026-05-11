@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
@@ -36,8 +37,7 @@ import { PageHeader } from "@/components/app/page-header";
 import { ChannelHeroCard } from "@/components/app/channel-hero-card";
 import { AudioSampleButton } from "@/components/app/audio-sample-button";
 import { PreviewableTile } from "@/components/app/previewable-tile";
-import { CloneVoiceDialog } from "@/components/app/clone-voice-dialog";
-import { SongPicker, type SongPickerValues } from "@/components/app/song-picker";
+import type { SongPickerValues } from "@/components/app/song-picker";
 import { ChannelAvatar } from "@/components/app/channel-avatar";
 import { channelLabel, CHANNEL_TONE } from "@/components/app/channel-meta";
 import {
@@ -54,6 +54,20 @@ import {
 } from "@/lib/api";
 import type { ChannelSummary, CustomizationField, CustomizationSchema, NicheDoc } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+// Lazy-loaded heavy panels — only fetched when the user actually opens
+// the corresponding affordance. CloneVoiceDialog is 590 LOC and only
+// renders when `cloneOpen` flips true. SongPicker is only mounted when
+// the channel offers a song variant. Both are dropped from the initial
+// /app/create JS bundle — measurable First-Load shrink.
+const CloneVoiceDialog = dynamic(
+  () => import("@/components/app/clone-voice-dialog").then((m) => m.CloneVoiceDialog),
+  { ssr: false },
+);
+const SongPicker = dynamic(
+  () => import("@/components/app/song-picker").then((m) => m.SongPicker),
+  { ssr: false, loading: () => <Skeleton className="h-32 w-full" /> },
+);
 
 const AUTO_PULL_CHANNELS = new Set([
   "mystoriesanimated",
@@ -92,6 +106,7 @@ export default function CreatePage() {
   const [picked, setPicked] = useState<string | null>(presetChannel);
   const [variant, setVariant] = useState<string | null>(null);
   const [schema, setSchema] = useState<CustomizationSchema | null>(null);
+  const [niches, setNiches] = useState<NicheDoc[] | null>(null);
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [submitting, setSubmitting] = useState(false);
 
@@ -145,25 +160,27 @@ export default function CreatePage() {
   // from it. Best-effort — fails silently if the niche JSON doesn't
   // exist (channel hasn't been backfilled).
   //
-  // Implementation: list-then-find rather than get-by-key. This avoids
-  // the 404 console noise the dashboard was throwing every time the
-  // user landed on /create with a variant whose niche JSON hadn't been
-  // authored yet (which is most variants for non-mystoriesanimated
-  // channels). list() always returns 200 with whatever's there, so the
-  // network tab stays clean.
+  // Implementation: list-once-per-channel into module state, then
+  // derive seed values by looking up the variant key. This avoids the
+  // re-fetch every variant change AND lets the NicheBubbleRow render
+  // from the same `niches` state without firing duplicate requests.
+  // list() always returns 200 with whatever's there, so the network
+  // tab stays clean even on un-backfilled channels.
   useEffect(() => {
-    if (!picked || !variant) return;
+    if (!picked) return;
+    setNiches(null);
     nichesApi
       .list(picked)
-      .then((r: { niches: NicheDoc[] }) => {
-        const n = r.niches.find((d) => d.key === variant);
-        if (!n) return;
-        setValues((prev) => ({ ...prev, length_kind: n.length_kind }));
-      })
-      .catch(() => {
-        // No niches at all — leave the user's current length_kind alone.
-      });
-  }, [picked, variant]);
+      .then((r: { niches: NicheDoc[] }) => setNiches(r.niches))
+      .catch(() => setNiches([]));
+  }, [picked]);
+
+  useEffect(() => {
+    if (!variant || !niches) return;
+    const n = niches.find((d) => d.key === variant);
+    if (!n) return;
+    setValues((prev) => ({ ...prev, length_kind: n.length_kind }));
+  }, [variant, niches]);
 
   // Pre-jump to customize when arriving with ?channel=…
   useEffect(() => {
@@ -302,6 +319,8 @@ export default function CreatePage() {
                 <CustomizeReviewStep
                   channel={selectedChannel}
                   variant={variant}
+                  onVariantChange={setVariant}
+                  niches={niches}
                   schema={schema}
                   values={values}
                   onChange={(k, v) => setValues((p) => ({ ...p, [k]: v }))}
@@ -886,41 +905,85 @@ function ChannelStep({
   );
 }
 
-function VariantPicker({
-  schema,
-  channelKey,
-  picked,
+/* ----------------------------- Niche bubble row -----------------------------
+ *
+ * Spec: docs/channel_niche_pool.md → "the /create wizard's Niche bubble
+ * row (per-channel pills like r/AmItheAsshole · r/tifu · …)".
+ *
+ * Data source preference:
+ *   1. NicheDocs from `nichesApi.list(channel)` — gives label,
+ *      description, length_kind. We filter by the current Form
+ *      length_kind so the pool stays focused.
+ *   2. `schema.variants` (legacy CustomizationSchema) — fallback for
+ *      channels that haven't been backfilled with NicheDocs yet, so the
+ *      picker still works pre-backfill.
+ *
+ * The currently-picked variant stays visible even if its length_kind no
+ * longer matches the filter (e.g. user toggled Form back to short while
+ * a long niche is still selected) — losing the selection visually would
+ * be a worse UX than showing one off-filter pill.
+ */
+function NicheBubbleRow({
+  niches,
+  schemaVariants,
+  variant,
   onPick,
+  lengthKind,
 }: {
-  schema: CustomizationSchema | null;
-  channelKey: string;
-  picked: string | null;
+  niches: NicheDoc[] | null;
+  schemaVariants: { value: string; label: string; description?: string | null }[];
+  variant: string | null;
   onPick: (v: string) => void;
+  lengthKind: "short" | "long";
 }) {
-  if (!schema) {
-    return (
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        {[0, 1].map((i) => (
-          <Skeleton key={i} className="h-9" />
-        ))}
-      </div>
-    );
-  }
-  if (schema.variants.length === 0) return null;
+  // Build the displayable pool. NicheDocs win when present; fall back
+  // to schema variants when the channel has zero niches authored.
+  const pool: { value: string; label: string; description?: string | null }[] = (() => {
+    if (niches === null) return []; // loading — skeleton handled below
+    if (niches.length === 0) return schemaVariants;
+    const filtered = niches
+      .filter((n) => n.length_kind === lengthKind || n.key === variant)
+      .map((n) => ({
+        value: n.key,
+        label: n.label,
+        description: n.description || null,
+      }));
+    // Defensive fallback: if filtering somehow leaves us empty (e.g.
+    // every niche is the opposite length_kind and nothing is selected),
+    // show all niches rather than an empty card.
+    return filtered.length > 0
+      ? filtered
+      : niches.map((n) => ({
+          value: n.key,
+          label: n.label,
+          description: n.description || null,
+        }));
+  })();
+
+  const loading = niches === null;
+  const empty = !loading && pool.length === 0;
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: -4 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.18 }}
-      className="mt-3 rounded-xl border border-border bg-surface-2/60 p-3"
+    <CardShell
+      label="Niche"
+      hint={`Pick the kind of video to author — filtered by ${lengthKind === "short" ? "Short" : "Long"} form. Toggling Form re-filters this row.`}
     >
-      <div className="mb-2 flex items-center gap-2 font-mono text-[9.5px] uppercase tracking-[0.18em] text-muted-foreground">
-        <Sparkles className="h-3 w-3" />
-        Pick a variant for {channelLabel(channelKey)}
-      </div>
-      <VariantList variants={schema.variants} picked={picked} onPick={onPick} />
-    </motion.div>
+      {loading ? (
+        <div className="grid gap-1.5 sm:grid-cols-2">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-12" />
+          ))}
+        </div>
+      ) : empty ? (
+        <div className="rounded-md border border-dashed border-border bg-surface-2/40 px-3 py-4 text-[12px] text-muted-foreground">
+          No niches available for this channel yet. Add one from the
+          channel page or run{" "}
+          <code className="font-mono text-[11px]">scripts/seed_channel_niches.py</code>.
+        </div>
+      ) : (
+        <VariantList variants={pool} picked={variant} onPick={onPick} />
+      )}
+    </CardShell>
   );
 }
 
@@ -1059,12 +1122,16 @@ function groupVariants(
 function CustomizeReviewStep({
   channel,
   variant,
+  onVariantChange,
+  niches,
   schema,
   values,
   onChange,
 }: {
   channel: ChannelSummary | null;
   variant: string | null;
+  onVariantChange: (v: string) => void;
+  niches: NicheDoc[] | null;
   schema: CustomizationSchema | null;
   values: Record<string, unknown>;
   onChange: (k: string, v: unknown) => void;
@@ -1117,6 +1184,13 @@ function CustomizeReviewStep({
     <div className="min-w-0">
       {/* Single-column knob deck — right-side review panel removed */}
       <div className="space-y-5 min-w-0">
+        <NicheBubbleRow
+          niches={niches}
+          schemaVariants={schema.variants}
+          variant={variant}
+          onPick={onVariantChange}
+          lengthKind={(values.length_kind ?? "short") === "long" ? "long" : "short"}
+        />
         <div className="grid gap-5 md:grid-cols-2">
           <CardShell label="Form" hint="Short = ≤90s vertical · Long = multi-min horizontal">
             <div className="grid grid-cols-2 gap-2">
