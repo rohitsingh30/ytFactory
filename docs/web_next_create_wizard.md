@@ -35,22 +35,18 @@ specific Reddit URL), add it as a collapsed inline control inside
 `TopicCard` (next to the Auto-generate button), not as a top-level
 peer card.
 
-### 2. Niche bubble row is always a flat 2-col grid
+### 2. Niche row renders AFTER Form, as compact chips
 
-`VariantList` renders the niche pool as a single `grid sm:grid-cols-2`
-of `<VariantCard>` buttons. **Never** auto-group by family, never
-render group titles + count badges.
+The bubble row sits **below** the Form CardShell — never above. The
+user picks Short/Long first, the row re-filters, then they pick a
+niche from the now-correctly-scoped pool.
 
-Why: family-grouping (the `groupVariants` + `FAMILIES` heuristic that
-was deleted in commit `bb87749`) made the picker read like a tier
-list — sections labelled "AITA Cliffhanger / 1", "AITA / 1", "Other /
-9" — which obscured the fact that every bubble is a peer option. The
-length-kind filter on `NicheBubbleRow` (Short vs Long) plus the
-existing card hint already supply all the structure the user needs.
-
-If the authored pool genuinely grows past comfortable scroll length,
-the fix is to author tighter `NicheDoc`s via
-`scripts/seed_channel_niches.py` — not to add visual grouping.
+`VariantList` renders a `flex flex-wrap gap-1.5` row of `<VariantCard>`
+chips (`rounded-full` border, single-line label, optional ✓ icon when
+selected, native `title=description` for hover-explainer). **Never**
+revert to the two-line tile layout (checkmark + bold label + description
+subtitle) — the user explicitly asked for "proper chips, not big rows".
+**Never** auto-group by family, never render group titles + count badges.
 
 ## Plumbing that must stay intact
 
@@ -92,6 +88,10 @@ to `schema.variants` so un-backfilled channels still render. See
 
 ## Change log
 
+- **2026-05-11 (`531dd2e`)** — moved `NicheBubbleRow` below the Form
+  CardShell, converted `VariantCard` to a chip pill (rounded-full,
+  single-line, hover-tooltip for description). User asked for the
+  niche row to come after Form and for "proper chips, not big rows".
 - **2026-05-11 (`bb87749`)** — removed manual Source CardShell, removed
   family-grouping in `VariantList`. Form now spans full row. User had
   asked three times for the Source card to go.
