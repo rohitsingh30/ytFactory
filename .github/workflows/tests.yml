@@ -44,6 +44,18 @@ jobs:
           pip install Pillow requests sse-starlette
           pip install numpy 'playwright>=1.40' pytest coverage yt-dlp google-cloud-run soundfile
 
+      - name: Configure git identity
+        # tests/test_critique_runner.test_happy_path_commits_and_pushes
+        # invokes a real `git commit` inside a temp repo via
+        # pipeline.critique.runner._stage_and_commit. Without a global
+        # git identity on the runner, the commit fails with "Author
+        # identity unknown" and surfaces as the only non-skip ERROR
+        # from the critique-runner suite. Local devs already have
+        # ~/.gitconfig so this is purely a CI shim.
+        run: |
+          git config --global user.email "tests@ci.invalid"
+          git config --global user.name "ytFactory CI"
+
       - name: Run unit tests (excluding heavy-ML tests)
         # tests/test_audio_tts_providers.py is the only file that
         # transitively imports kokoro_onnx + soundfile at module load,
