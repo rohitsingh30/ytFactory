@@ -228,10 +228,17 @@ Run BEFORE printing the summary. Block on hit:
 7. **No new memory file when an existing one covers ≥80% of the
    topic** — defer to update-in-place.
 8. **Related-doc sweep verifier** — for every finding, the report
-   (Section 8) MUST list every related doc updated/created OR
+   (Section 9) MUST list every related doc updated/created OR
    explicitly state "no related docs touched — finding is
    self-contained because <reason>". The grep recipe used must be
    shown so the next session can re-run it. Block on missing.
+9. **Clean-tree verifier** — after the commit step (Section 8) runs,
+   `git status --porcelain` MUST return empty (or only files the run
+   intentionally deferred per Section 8's auto-skip rules, called out
+   in the report). A non-empty working tree at end-of-run means
+   either the commit failed or something got written after the
+   commit — both are bugs that will strand findings on the agent's
+   laptop. Block on hit and surface to the user.
 
 ### 7. Skill self-update (if applicable)
 
@@ -247,7 +254,98 @@ context), add a bullet to that SKILL.md's "Important rules" or
 "Learnings from prior runs" section so the next invocation
 internalizes it.
 
-### 8. Report back
+### 8. Commit + push (mandatory — established 2026-05-12)
+
+Every `/update-docs` run **MUST** end with a single `git add -A && git commit`
+that lands BOTH this run's edits AND any pre-existing unstaged work
+the run found lying around. Stranded unstaged changes are a recurring
+bug class — multiple prior runs persisted findings to disk but never
+committed them, so the docs were "saved" only on the agent's laptop
+and the source of truth never moved. The 2026-05-12 audit found 16
+stranded files (a full prior `/update-docs` run's output of operator-
+QoL fixes + composite-index findings) sitting unstaged for hours.
+
+**Concrete recipe:**
+
+```bash
+# 1. Sanity-check what we're about to commit (do NOT skip this read).
+git status --porcelain
+git --no-pager diff --stat HEAD
+
+# 2. If the diff includes code (not just docs), run the relevant
+#    quick-check (typecheck / unit tests on touched modules). If
+#    anything fails, STOP and surface to the user — do not commit
+#    broken code under a /update-docs commit.
+#
+#      *.py modified  → PYTHONPATH=. .venv/bin/python -m pytest \
+#                         <touched test files> -x -q
+#      web-next/**    → (cd web-next && npm run typecheck)
+#
+# 3. Stage everything and write ONE descriptive commit. Do NOT split
+#    into per-file commits — the whole point is that /update-docs
+#    runs are one atomic persistence step.
+
+git add -A
+git commit -m "$(cat <<EOF
+docs(/update-docs): persist N findings from <session-summary>
+
+<one paragraph per finding, classification + topic + save targets>
+
+If the diff also includes code (e.g. an inline fix the docs
+reference), name it explicitly so the commit isn't mis-classified
+as docs-only:
+
+CODE: <module> — <one-line what changed>
+DOCS: <file> — <what was added>
+SKILL: .claude/skills/<x>/SKILL.md — <what changed>
+
+Validation: <tests run> <typecheck status>
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+EOF
+)"
+
+# 4. Push if the branch tracks a remote and we're on main/a feature
+#    branch the user expects to share. Skip the push if we're on a
+#    detached HEAD or a checkpoint branch that shouldn't be pushed.
+git push 2>&1 || echo "(push skipped — no upstream or push blocked)"
+```
+
+**Commit-grouping policy:**
+
+- **One commit per run** is the default. The findings cohere by virtue
+  of being captured in the same conversation; splitting them adds noise.
+- **Two commits IS allowed** when the run's diff cleanly bisects into
+  (a) durable docs/learnings (`docs(/update-docs): …`) and
+  (b) a tightly-scoped code fix that's already tested (`fix(<scope>): …`).
+  Use this when the code fix would survive on its own (e.g. it would
+  pass code review without the docs context).
+- **Never** leave the working tree dirty at the end of `/update-docs`.
+  If something is intentionally NOT being committed (e.g. a render
+  artifact, a local debug file), call it out explicitly in the report
+  AND `git stash` or `git checkout --` it so the next run sees a
+  clean slate.
+
+**Trailer rule:** the commit MUST include the
+`Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
+trailer (CLAUDE.md "git_commit_trailer" requires it for every agent-
+authored commit; `/update-docs` is no exception).
+
+**Auto-skip cases (still report):**
+
+- `git status --porcelain` returns empty → "no changes to commit —
+  prior run already pushed". Report and exit cleanly.
+- The only diff is in untracked files matching a `.gitignore` pattern
+  → ignore them, but mention in the report so the user notices if
+  something was accidentally gitignored.
+- The user is on a branch with uncommitted state from THEIR own
+  manual edits (i.e. not from this `/update-docs` run) → ask before
+  committing. Use `ask_user` with explicit choices: "Commit your
+  unstaged changes too" / "Commit only what /update-docs wrote" /
+  "Skip commit, leave unstaged". Default safe choice is to ask, NOT
+  to silently bundle the user's work into a docs commit.
+
+### 9. Report back
 
 Print a compact summary:
 
@@ -285,13 +383,16 @@ related-doc sweep  (per Section 4D + Quality gate 8)
 
 MEMORY.md size: <N>KB / 24KB limit  [PASS|TRIAGE-NEEDED]
 
+commit: <short-sha> "<commit-subject>" (or: "no commit — empty diff")
+push:   <pushed | skipped because <reason>>
+
 next: <suggested follow-up if any> | nothing — clean slate
 ```
 
 If TRIAGE-NEEDED, list the top-5 longest entries and ask whether to
 collapse them.
 
-### 9. Self-learning hook (recursive — yes, this skill watches itself)
+### 10. Self-learning hook (recursive — yes, this skill watches itself)
 
 If the user later corrects how `/update-docs` itself classified a
 finding ("that was actually a class-of-bug, not a one-off") OR points
@@ -330,6 +431,10 @@ for the same topic"):
 - Use `.venv/bin/python` for any helper commands (consistency with
   other ytFactory skills).
 - Never invoke pipeline render code from this skill — it's docs-only.
+- **Always end with a `git add -A && git commit` (Section 8).** Stranded
+  unstaged work is a CLASS-OF-BUG that bit `/update-docs` itself in
+  May 2026. The skill's value is "the docs and the tree both reflect
+  the new rule" — only the latter without the former is half a fix.
 
 ## Auto-invocation rule (mirror in CLAUDE.md)
 

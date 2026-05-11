@@ -5,6 +5,18 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
 
 ## CLASS-OF-BUG (rule changes to SKILL.md)
 
+- 2026-05-12 — **`/update-docs` runs were stranding their own output
+  unstaged.** Audit caught 16 modified + 1 new file (full prior run's
+  output: composite-index findings, action-cardinality fixes, slim-
+  image runtime-deps contract) sitting unstaged for hours because
+  the SKILL.md never required a commit step. Persistence isn't done
+  until git history on origin reflects it. New SKILL.md Section 8
+  ("Commit + push") + Quality gate 9 ("Clean-tree verifier"). Memory:
+  `feedback_update_docs_auto_commit.md`. Sweep recipe to catch
+  similar laptop-vs-origin drift on other skills:
+  `for d in .claude/skills/*/; do echo "=== $d"; grep -l "git add\|git commit" "$d"SKILL.md 2>/dev/null || echo "(no commit step)"; done` —
+  every "(no commit step)" hit on a skill that writes files is a
+  candidate for the same patch.
 - 2026-05-11 — **Firestore `where + order_by` queries silently 400
   on missing composite index, and a too-broad try/except hides it
   from the UI.** Studio Queue page's Completed column showed "Empty"
