@@ -209,6 +209,52 @@ path. Click into any → "Delete account" to nuke (irreversible).
 > use the new cycle pattern via
 > `pipeline.cross_engage.burner_engage.run`.
 
+### Page-level dashboard actions (2026-05-11)
+
+Above the per-burner row list, the `/app/burner-channels` page
+exposes two **page-level** fan-out buttons:
+
+* **"Subscribe All <N>"** — fans `subscribe_only` engage to every
+  *eligible* burner. Eligible = `profile_known: true` AND not
+  currently `running`. The badge shows live eligible count; the
+  button disables when 0. Backend route:
+  `POST /api/burner_channels/subscribe_all_burners`. Each eligible
+  burner gets its own `BURNER_ENGAGE` task (cloud) or detached
+  `subprocess.Popen` (laptop dev) with `mode=subscribe_only`.
+  Per-burner skip reasons are reported in the response toast
+  (`already_running`, `no_profile_mapping`, `enqueue_failed`).
+
+* **"Create 50 channels"** — prompts for count (default 50, hard-cap
+  100), then enqueues N `CREATE_BURNER` tasks for the laptop agent
+  (cloud) or fires N detached `create_burner_channel` subprocesses
+  (laptop dev). Backend route:
+  `POST /api/burner_channels/create_bulk` with body
+  `{count, email?, oauth?}`. The hard cap exists because Google
+  rate-limits brand-account creation at ~5-10 successful creates /
+  24h / host email (see "Refusal" block above) — accepting more
+  than 100 would just stack failed `CREATE_BURNER` tasks in the
+  queue. The expected operating outcome is "head succeeds, tail
+  fails until tomorrow"; that's normal.
+
+Both routes are idempotent at the per-burner level (a burner that's
+already running is reported under `skipped` instead of getting a
+duplicate task). Subscribe-All composes with the per-row Subscribe
+button — clicking either path while the other is in flight is a no-op
+for the already-running burners.
+
+`CREATE_BURNER` is a new `TaskKind` (Chrome-bound, laptop-only —
+never migrated to Cloud Run because `pipeline.cross_engage.create_burner_channel`
+needs a real desktop Chrome with the host Google account signed in).
+The laptop-side handler lives at
+`pipeline/laptop_agent.py::_exec_create_burner` and threads payload
+keys (`email`, `display_name`, `slug`, `oauth=False`) through to the
+CLI flags.
+
+**Promotion gap still open** — see the warning earlier: a freshly
+created burner won't appear in the dashboard until somebody hand-edits
+`pipeline/burners.yaml`. The bulk-create button doesn't fix that gap;
+it just spins channels up faster.
+
 [`pipeline/cross_engage_burner_attached.py`](../pipeline/cross_engage_burner_attached.py)
 drives a burner brand-account through the production catalog —
 `like` + `subscribe to source channel` per video — with the same
@@ -381,6 +427,26 @@ videos = 12 engagement attempts; 4/4 burners completed switch + engage
 clean. The unauth'd burners (no OAuth token, only created via
 `pipeline.create_burner_channel`) work too — pure-UI engagement is
 token-free.
+
+### Subscribe-only fast path (`--no-like`, 2026-05-11)
+
+When `--no-like` is set (and `--no-subscribe` is not), the cycle
+auto-takes a fast path that skips the per-video `/watch` round-trip
+entirely and visits each unique source channel's
+`https://www.youtube.com/channel/<UC>` page directly. ~5-8× faster
+per burner because channel pages are far lighter than watch pages
+(no embedded player, no related-videos hydration). Same
+`_probe_subscribe` selector lane works on both. Channel-id lookup
+uses `~/.config/ytfactory/channel_ids.json`; channels missing from
+that registry are warned + skipped.
+
+See [`docs/cross_channel_engagement.md` § Subscribe-only fast path](cross_channel_engagement.md#subscribe-only-fast-path---no-like-2026-05-11)
+for the full design + the table comparing old per-video vs new
+fast-path wall time. The cloud-side worker
+(`pipeline.cross_engage.burner_engage.MODE_SUBSCRIBE_ONLY`) already
+does the dedupe half (one watch URL per channel instead of per video,
+2026-05-11) — adopting the channel-direct trick there is a
+non-blocking follow-up.
 
 ---
 

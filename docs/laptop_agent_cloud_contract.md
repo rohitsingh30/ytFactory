@@ -30,6 +30,15 @@ Pydantic rejected the entire lease request body — even though the
 other two caps (`playwright_upload`, `burner_engage`) were valid.
 Pydantic enum validation is all-or-nothing on a list field.
 
+> **2026-05-11 ext.** This in-flight cap landed as `create_burner`
+> (renamed from the hypothetical `burner_create`). The
+> `BulkActions` UI on `/app/burner-channels` enqueues `CREATE_BURNER`
+> tasks via `POST /api/burner_channels/create_bulk` (commit
+> `e4bcaae`). The pre-deploy ritual below was followed: `TaskKind`
+> bump shipped in `ytfactory-web` first, then the `CAPS` extension
+> in the laptop_agent commit. Current cap roster:
+> `["playwright_upload", "burner_engage", "create_burner"]`.
+
 **Fix:** `_claim_task` now parses the 422 body, finds the offending
 cap (`detail[*].loc == ["body","caps",N]`, `detail[*].input ==
 "<cap>"`), removes it from the in-process `CAPS` list, and retries

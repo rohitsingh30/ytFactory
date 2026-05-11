@@ -80,6 +80,30 @@ When the user reports a UI bug or asks for a UI change:
 | `web/server.py`                 | `./cloud/web-server/deploy.sh`. Both frontends consume the API the same way.        |
 | `pipeline/**` (libs)            | redeploys whichever service uses them; usually `ytfactory-web`.                     |
 | GCS state (e.g. niches/* JSON)  | **no redeploy** — re-run the seeder, then hard-reload `/app/create`.                |
+| **NEW `/api/*` route + UI button calling it** (`control/routes/<x>.py` + `web-next/lib/api.ts` + `web-next/app/<page>/page.tsx`) | **BOTH** `./cloud/web-server/deploy.sh` AND `./cloud/web-next/deploy.sh`. Backend first (so the route is live before the button reaches it); frontend second. Skipping either = a button that 404s on click. |
+
+### New-route deploy verification (401 vs 404)
+
+After deploying both services, smoke-test the new endpoint without
+auth — the *expected* response code matters:
+
+```bash
+curl -sS -o /dev/null -w "HTTP %{http_code}\n" \
+     -X POST https://ytfactory-web-7hwnzw7lya-as.a.run.app/api/<your_new_path>
+```
+
+| code      | meaning                                                           |
+|-----------|--------------------------------------------------------------------|
+| **401**   | Route is registered, auth wall caught the unauth'd probe → ✅ deploy hit |
+| **403**   | Same as 401 in spirit (different auth middleware variant)          |
+| **404**   | Route NOT registered. Backend deploy missed (or the path is wrong) |
+| **502/503** | Container startup failure — see [`feedback_post_deploy_live_smoke_m2m.md`](../../.claude/projects/-Users-rohit-ytFactory/memory/feedback_post_deploy_live_smoke_m2m.md) "Container-startup gate" |
+
+Composes with the M2M-bearer adapter smoke
+([`feedback_post_deploy_live_smoke_m2m.md`](../../.claude/projects/-Users-rohit-ytFactory/memory/feedback_post_deploy_live_smoke_m2m.md))
+which actually exercises the handler — this 401-vs-404 check is the
+*cheaper preceding gate* that confirms the backend deploy registered
+the route at all.
 
 ## Symptoms of wrong-frontend edits
 

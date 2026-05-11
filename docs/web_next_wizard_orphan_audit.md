@@ -147,6 +147,78 @@ the canonical layout rules and rationale.
   ... in step Y` is added or modified.
 - After every rebase/merge that touches `web-next/app/app/<wizard>/page.tsx`.
 
+## Sibling pattern: API client orphans (2026-05-11)
+
+The same anti-pattern hit `web-next/lib/api.ts` for the burner-channels
+page. `burnerApi.subscribeAllBurners()` was added to the API client
+in commit `d1f592b` (2026-05-11) — a stray addition inside a discover-
+feed commit that bore no relation to burners. **No UI button ever
+called it. No backend route ever served it.** The user thought the
+"Subscribe All" + "Create 50 channels" buttons were on the page
+because the API helper existed; they were not.
+
+This is the same shape as the wizard-orphan bug, one layer deeper:
+
+| layer            | wizard-orphan         | API-client orphan                                    |
+|------------------|-----------------------|------------------------------------------------------|
+| where defined    | page.tsx              | lib/api.ts                                           |
+| how it's silent  | tsc/eslint don't flag | tsc/eslint don't flag; helper has a real type        |
+| what's missing   | JSX call site         | JSX call site **AND** backend route handler         |
+
+### Audit recipe — API helpers
+
+After any `web-next/lib/api.ts` edit (and as a periodic full-file
+sweep — the helper file gets stray additions during cross-cutting
+commits), run:
+
+```bash
+# 1. List every helper exported by api.ts
+grep -nE '^[[:space:]]+[a-z][A-Za-z0-9]*:[[:space:]]*\(' web-next/lib/api.ts
+
+# 2. For each helper name, check it's actually called from a page/component
+for fn in $(grep -oE '^[[:space:]]+[a-z][A-Za-z0-9]*:' web-next/lib/api.ts | tr -d ' :'); do
+  count=$(grep -rEc "\\b${fn}\\(" web-next/app/ web-next/components/ 2>/dev/null \
+            | awk -F: '{s+=$2} END {print s+0}')
+  if [[ "$count" -eq 0 ]]; then
+    echo "ORPHAN api helper: ${fn}"
+  fi
+done
+
+# 3. For each helper that POSTs/GETs a path, verify the backend route exists
+#    Extract the URL literal from the helper, then grep control/routes/ for it.
+grep -nE '`/api/[^`]+`' web-next/lib/api.ts | while IFS=: read -r line _ url_line; do
+  path=$(echo "$url_line" | grep -oE '/api/[a-z_/{}-]+' | head -1)
+  prefix=$(echo "$path" | awk -F/ '{print "/"$2"/"$3}')   # e.g. /api/burner_channels
+  if ! grep -rq "prefix=\"${prefix}\"" control/routes/ 2>/dev/null; then
+    echo "api.ts L${line}: POSTs ${path} — no router with prefix ${prefix} in control/routes/"
+  fi
+done
+```
+
+### When the audit fires
+
+* Right before committing any change to `web-next/lib/api.ts`
+  (especially when the change rides along inside a commit that's
+  about something else — those are the 99% of orphans).
+* As a quarterly hygiene sweep regardless of commits.
+* Whenever the user says "where's the X button?" and it sounds
+  feature-shaped — most of the time the helper was added but the
+  button + route never followed.
+
+### Today's instance
+
+`subscribeAllBurners` shipped as a stray addition in `d1f592b`
+(2026-05-11 02:18) — a commit titled `feat(discover): every channel
+auto-generate w/ form-context-aware LLM blend`. Zero callers anywhere
+in `web-next/app/`. Zero handlers in `control/routes/burner_routes.py`.
+Closed in commit `e4bcaae` by adding the `BulkActions` component +
+`subscribe_all_burners` route + corresponding `create_bulk` companion.
+
+The lesson is the same as the wizard-orphan one: **stray scaffolding
+in a polyglot frontend/backend repo only leaks when somebody asks
+about the feature it implies.** Every orphan in `lib/api.ts` is a
+ghost feature waiting to confuse the user.
+
 ## Related
 
 - **Memory:** `feedback_wizard_step_orphans.md`
