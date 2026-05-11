@@ -239,6 +239,22 @@ Run BEFORE printing the summary. Block on hit:
    either the commit failed or something got written after the
    commit — both are bugs that will strand findings on the agent's
    laptop. Block on hit and surface to the user.
+10. **Fix-claim verifier** — for every "Fix:" / "Mitigation:" / "Now
+    does X:" line written into a project doc this run, two checks:
+    - The claim cites a **commit SHA** (`commit abc1234 (2026-MM-DD)`).
+      "Now does X" without a SHA is ambiguous between intended and
+      shipped — block, replace with "Planned (PR/branch-name):" if
+      the fix isn't actually in the tree yet.
+    - If the doc names a **specific test** as pinning the fix
+      (`Test: tests/foo.py::Bar::baz`), spot-check it: read the test,
+      verify it would fail on the buggy state. If the test asserts
+      the BUGGY behaviour (e.g. `assertEqual(status, "failed")` when
+      the bug is sending "failed"), the test green-lights the bug
+      rather than catching it — block, fix the test before the doc
+      claim ships. Memory: `feedback_doc_aspirational_claims.md`.
+      Origin: 2026-05-12 audit found `_ack` "failed→error" doc-claim
+      that hadn't shipped to code OR test for 24 h, accruing 158
+      zombie LEASED tasks.
 
 ### 7. Skill self-update (if applicable)
 

@@ -580,3 +580,80 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
   # timestamps — any FE commit older than the latest revision is
   # un-deployed.
   ```
+
+## 2026-05-12 — Quality gate 10: fix-claim verifier + stale-Cloud-Run-URL grep recipe
+
+### CLASS-OF-BUG: aspirational doc claims (Quality gate 10)
+
+`docs/laptop_agent_cloud_contract.md` Drift flavour 2 said the `_ack`
+"failed"→"error" fix shipped on 2026-05-11. Audit on 2026-05-12 found
+the actual code in `pipeline/laptop_agent.py::_ack` was still sending
+`"failed"`. The pinned regression test
+(`tests/test_laptop_agent.py::TestAck::test_ack_failed`) asserted
+`args[1]["status"] == "failed"` — it passed because the test agreed
+with the buggy code. **158 stuck-LEASED `burner_engage` tasks
+accrued in 24 h post-claim** before being noticed.
+
+The doc was written by a prior `/update-docs` run (commit `4a31e85`,
+docs-only). The fix it claimed was *intended* but nobody verified
+either the code or the test before the doc shipped.
+
+**New rule (now Quality gate 10 in SKILL.md § Section 6):** every
+"Fix:" / "Mitigation:" / "Now does X:" line in a project doc this
+run MUST:
+
+1. Cite a commit SHA (`commit abc1234 (2026-MM-DD)`). "Now does X"
+   without a SHA is ambiguous between intended and shipped — block,
+   replace with "Planned (PR/branch-name):" if not in the tree.
+2. If the doc names a specific test as pinning the fix, spot-check
+   it: read the test, verify it would fail on the buggy state. A
+   test that asserts the BUGGY behaviour is the canonical failure
+   mode here.
+
+Memory: `feedback_doc_aspirational_claims.md`.
+Project doc: `docs/laptop_agent_cloud_contract.md` § Drift flavour 7.
+
+### ONE-OFF: stale Cloud Run URL `ytfactory-control-7hwnzw7lya...` (404)
+
+The agent source default + the source-of-truth plist
+`control/com.ytfactory.laptop-agent.plist` referenced
+`https://ytfactory-control-7hwnzw7lya-as.a.run.app` — a Cloud Run
+service that no longer exists (returns 404). The installed plist at
+`~/Library/LaunchAgents/com.ytfactory.laptop-agent.plist` had been
+manually patched to `ytfactory-web-7hwnzw7lya-as.a.run.app`, which
+masked the bug from the running agent but left the source of truth
+broken for any future fresh install. Fixed inline in commit `610461a`.
+
+**Sweep grep recipe** (run on every `/update-docs` invocation that
+touches Cloud Run URLs):
+
+```bash
+# Find any reference to a defunct service name
+grep -rln --include='*.py' --include='*.md' --include='*.plist' \
+  --include='*.yaml' --include='*.sh' \
+  "ytfactory-control-7hwnzw7lya\|ytfactory-control-as\|ytfactory-prod[^-]" \
+  /Users/rohit/ytFactory 2>/dev/null
+
+# Cross-check live services
+gcloud run services list --project=ytfactory-prod-v2 --region=asia-southeast1 \
+  --format='value(name,URL)'
+```
+
+Any source/doc reference that doesn't appear in `gcloud run services list`
+is stale. Add to inline edit OR (if the meta-pattern recurs across
+many docs) a dedicated `docs/cloud_run_url_audit.md` to log the next
+audit's coverage.
+
+### WORKFLOW-IMPROVEMENT: diagnose-slow-queue-via-Firestore-direct
+
+When `/update-docs` is invoked because "the queue is slow", the
+investigative recipe should be: query Firestore directly for
+`(status, kind)` counts FIRST (zombies, kind mismatches, ratios),
+then read the agent log SECOND. Recipe captured in
+`docs/laptop_agent_cloud_contract.md` § Diagnostic recipes.
+
+This was a 2026-05-12 root-cause: "Subscribe All takes hours" felt
+like a backend latency issue (which is what the agent log suggested)
+when it was actually three stacked bugs (single-threaded agent +
+50 wrong-kind zombies + 158 stuck-LEASED zombies). One Firestore
+query revealed the entire shape in 2 s.

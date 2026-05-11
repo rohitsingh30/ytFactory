@@ -242,6 +242,18 @@ duplicate task). Subscribe-All composes with the per-row Subscribe
 button — clicking either path while the other is in flight is a no-op
 for the already-running burners.
 
+> **2026-05-12 — bulk-fan-out throughput.** The laptop agent now
+> processes `BURNER_ENGAGE` and `CREATE_BURNER` tasks via N worker
+> threads (default 5) with per-kind `BoundedSemaphore` caps
+> (`burner_engage`=4, `create_burner`=1). A 49-burner Subscribe-All
+> burst drains in ~minutes instead of the prior ~10 hours of strictly-
+> serial leasing. Caps are tunable via
+> `YTFACTORY_AGENT_WORKERS` / `YTFACTORY_AGENT_CAP_<KIND>`. Background:
+> [`docs/laptop_agent_cloud_contract.md` § Drift flavour 4](./laptop_agent_cloud_contract.md#drift-flavour-4--single-threaded-agent--bulk-fan-out-is-hours-not-seconds-2026-05-12).
+> If the queue ever feels stuck, the diagnostic recipe lives in that
+> same doc's "Diagnostic recipes" section — query Firestore directly
+> for `(status, kind)` counts before reading the agent log.
+
 `CREATE_BURNER` is a new `TaskKind` (Chrome-bound, laptop-only —
 never migrated to Cloud Run because `pipeline.cross_engage.create_burner_channel`
 needs a real desktop Chrome with the host Google account signed in).

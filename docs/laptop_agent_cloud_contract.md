@@ -83,6 +83,21 @@ the ACK being broken.
 **Fix:** `_ack` now sends `"ok"` or `"error"`. Test pinned in
 `tests/test_laptop_agent.py::TestAck::test_ack_failed`.
 
+> **2026-05-12 correction.** The "Fix" block above was aspirational
+> when first written on 2026-05-11 — the actual code in
+> `pipeline/laptop_agent.py::_ack` still sent `"failed"` until commit
+> `610461a` on 2026-05-12. The pinned test
+> (`TestAck::test_ack_failed`) was *also* still asserting
+> `args[1]["status"] == "failed"`, so it green-lit the bug rather than
+> catching it. By the time we noticed, **158 stuck-LEASED
+> `burner_engage` tasks had piled up** (every failure ack 422-d → task
+> leaked LEASED, no ack arrived → no `failed` status set → task lingered
+> until lease_expires_at then re-leased and re-failed). One-shot
+> Firestore script reaped them; permanent fix is the periodic reaper
+> below + the actual code/test landing in `610461a`. **Lesson** about
+> "doc claims fix that isn't in code" lives in its own subsection
+> below — see "Drift flavour 7 — aspirational doc claims".
+
 **Detection on prod:**
 
 ```bash
@@ -140,13 +155,254 @@ if rc != 0:
 return True, None, None  # rare clean fast-exit; warn-log it
 ```
 
+## Drift flavour 4 — Single-threaded agent → bulk fan-out is hours not seconds (2026-05-12)
+
+**Symptom:** the user clicks `/app/burner-channels` "Subscribe All",
+49 burners enqueue, and the dashboard shows them draining at **~1
+task per 13 minutes** instead of the seconds-per-task the fire-and-
+forget Popen path implies. Bulk-create has the same shape (10
+`create_burner` queued, draining one per ~13-15 min).
+
+**Root cause (2026-05-12):** the agent's `run()` loop was strictly
+serial — `lease → execute → ack → sleep`, one at a time. Each
+iteration could absorb a 30-35 s lease long-poll plus a 5 s back-off
+on every read timeout (frequent: 35 s urllib timeout sat right on
+the cloud's 30 s long-poll deadline + Cloud Run cold-start variance).
+A 49-task burst extrapolates to **~10 hours**.
+
+**Fix:** `run()` now spawns `NUM_WORKERS` (default `5`) worker
+threads, each running its own `lease → execute → ack → wait-on-child`
+loop. Per-kind `BoundedSemaphore`s enforce real concurrency caps so
+the parallelism doesn't burst-spawn 168 Chrome instances when the
+queue is deep. Worker holds its slot for the FULL spawned-subprocess
+lifetime — `proc.wait()` after the ack — which is what bounds Chrome
+instance count, not just the lease-call rate. (The rubber-duck pass
+caught this: parallelizing leases without holding the slot would have
+drained the queue into hundreds of concurrent Chrome workers and
+torched the laptop.)
+
+Default caps:
+
+| kind             | cap | rationale                                         |
+|------------------|-----|---------------------------------------------------|
+| `burner_engage`  | 4   | subscribe_only mode is ~1-3 min/burner; 4× M2 Max Chrome instances comfortable |
+| `create_burner`  | 1   | parallel attaches against same Google account confuse the create flow (refusal screens, OTP prompts) |
+
+Tunable via env (set in launchd plist or shell):
+
+- `YTFACTORY_AGENT_WORKERS` (default 5)
+- `YTFACTORY_AGENT_CAP_BURNER_ENGAGE` (default 4)
+- `YTFACTORY_AGENT_CAP_CREATE_BURNER` (default 1)
+
+**Verified live (2026-05-12 01:26:35):** restarted agent spawned 4
+`burner_engage` workers + 1 `create_burner` concurrently within 7 s
+(= caps), processed 6 `burner_engage` tasks in the first ~3 min vs
+the prior steady state of 1 task per 13 min.
+
+**Code:**
+- `pipeline/laptop_agent.py::_worker_loop` (per-kind semaphore acquire-before-lease)
+- `pipeline/laptop_agent.py::_exec_burner_engage`/`_exec_create_burner` (return `Popen` so worker can `proc.wait()`)
+- `pipeline/laptop_agent.py::run` (thread launcher + heartbeat-only main thread + SIGTERM `_SHUTDOWN`)
+- Tests: `tests/test_laptop_agent.py::TestWorkerLoop::*`
+
+## Drift flavour 5 — TaskKind rename leaves zombie tasks in the queue (2026-05-12)
+
+**Symptom:** Firestore `tasks` collection accumulated **50 queued
+`burner_create` tasks** that no agent ever picked up. The agent's
+caps list was `["burner_engage", "create_burner"]` (the new name);
+the old `burner_create` tasks matched no agent → dead in the queue
+forever, taking up `attempts` budget when re-leased by humans, and
+making queue-status counts misleading.
+
+**Root cause:** `TaskKind` was renamed (`burner_create` →
+`create_burner`) on the cloud schema side, and the `BulkActions` UI
++ `/api/burner_channels/create_bulk` route were updated. But there
+was no **queue migration** — the 50 in-flight `burner_create` tasks
+that had been enqueued from the old code path stayed with their old
+kind name. They sat in `status=queued, kind=burner_create` for
+days.
+
+**Fix on 2026-05-12:** one-shot Firestore script deleted the 50
+zombies. `pipeline/laptop_agent.py::CAPS` was already on the new
+name — no code change needed.
+
+**Generalisation (rule for next rename):** when renaming any
+`TaskKind` value, ALSO drain the queue:
+
+```python
+# After the rename ships:
+from google.cloud import firestore
+db = firestore.Client(project='ytfactory-prod-v2')
+col = db.collection('tasks')
+n = 0
+for snap in col.where("kind", "==", "<old_name>").where("status", "==", "queued").stream():
+    snap.reference.update({"kind": "<new_name>", "updated_at": _now_iso()})
+    n += 1
+print(f"migrated {n}")
+```
+
+(or `delete()` if the old tasks are no longer wanted). Pattern is the
+same for ANY enum-typed field stored in Firestore where rename
+happens on one side but live data isn't reshaped.
+
+**Detection on prod:**
+
+```bash
+.venv/bin/python -c "
+from google.cloud import firestore
+from collections import Counter
+db = firestore.Client(project='ytfactory-prod-v2')
+sk = Counter()
+for snap in db.collection('tasks').stream():
+    d = snap.to_dict()
+    sk[(d.get('status'), d.get('kind'))] += 1
+for k, v in sorted(sk.items()): print(' ', k, v)
+"
+```
+
+Any `(queued, <kind>)` whose `<kind>` doesn't match the live
+`TaskKind` enum is a zombie.
+
+## Drift flavour 6 — No periodic reap_expired() → leases pile up forever (2026-05-12)
+
+**Symptom:** 158 stuck-LEASED `burner_engage` tasks at audit time on
+2026-05-12. Each one held a lease that had long since expired
+(`lease_expires_at < now`) but no caller had reset them back to
+`queued` or marked them `done`.
+
+**Root cause:** `Queue.reap_expired()` exists in
+`control/core/queue.py` but **nothing called it on a schedule**. It
+was wired into the test path and a manual scripts dir, but no
+cron/scheduled task ran it against prod. Combined with the Drift
+flavour 2 ack bug, every failure ack 422-d → no status change → task
+sat in LEASED forever.
+
+**Fix:** added `web/server.py::_periodic_queue_reaper` to the FastAPI
+lifespan. Runs every `YTFACTORY_QUEUE_REAPER_INTERVAL_S` seconds
+(default `300` = 5 min), calls `q.reap_expired()` via
+`asyncio.to_thread` so a slow Firestore scan can't stall request
+handling. Belt-and-braces guard against future agent crashes.
+
+**Code:**
+- `web/server.py::_periodic_queue_reaper` (the loop)
+- `web/server.py::lifespan` (`asyncio.create_task(_periodic_queue_reaper())` + `cancel()` on shutdown)
+- `control/core/queue.py::FirestoreQueue.reap_expired` (no change — was already correct)
+
+**Detection on prod:**
+
+```bash
+gcloud run services logs read ytfactory-web \
+  --project=ytfactory-prod-v2 --region=asia-southeast1 --limit=200 \
+  | grep "queue-reaper"
+```
+
+A non-zero `reset N stuck-LEASED tasks back to QUEUED` line every
+5 min is the canonical signature when the queue is healthy. If you
+see it firing with N>0 every cycle, agents are crashing mid-task —
+investigate further.
+
+## Drift flavour 7 — Aspirational doc claims (META, 2026-05-12)
+
+**Symptom:** `docs/laptop_agent_cloud_contract.md` (this doc) said
+"Drift flavour 2 — Fix: `_ack` now sends `"ok"` or `"error"`. Test
+pinned in `tests/test_laptop_agent.py::TestAck::test_ack_failed`."
+Both claims were false:
+
+1. The actual code in `pipeline/laptop_agent.py::_ack` still sent
+   `"failed"` on 2026-05-12 (commit `610461a` is the real fix).
+2. The pinned test asserted `args[1]["status"] == "failed"` — it
+   *passed* because the test agreed with the buggy code, not because
+   the bug was caught.
+
+The doc was written as part of `/update-docs` commit `4a31e85`
+on 2026-05-11. The fix it claimed was *intended* but was never
+actually shipped to code or test.
+
+**Why this is CLASS-OF-BUG, not ONE-OFF:** `/update-docs` runs are
+the only durable record of "what we learned and shipped". A doc
+that says "Fix: code now does X" creates the illusion of safety —
+the next reader trusts it, doesn't verify, and the bug ships another
+quarter. In this case the bug spent **24 hours** post-claim accruing
+zombies before being noticed.
+
+**Generalised rule (added to `.claude/skills/update-docs/SKILL.md`
+self-learnings):** when a `/update-docs` finding documents a fix:
+
+1. The save-doc MUST cite the **commit SHA** that landed the fix
+   (`commit abc1234 (2026-MM-DD)`), not just "now does X".
+2. The mentioned **test MUST actually fail on the buggy state**.
+   Verify by reverting the production code change locally and
+   running the test once — it should go red. If the test passes
+   against the bug, the test asserts the bug, not the fix.
+3. If the run is documenting an *intended* fix that hasn't landed
+   yet (e.g. write-up before code review), explicitly use the word
+   **"Planned"** instead of "Fix" so the next reader doesn't trust
+   it as shipped.
+
+**Mitigations in this commit:** Quality gate 10 added to
+`.claude/skills/update-docs/SKILL.md` — "Fix-claim verifier".
+Memory entry: `feedback_doc_aspirational_claims.md`.
+
+## Diagnostic recipes
+
+When the bulk-subscribe / bulk-create queue feels slow, **don't
+read the agent log first** — query Firestore directly. The agent log
+shows what the agent did; Firestore shows what the queue *contains*
+(zombies, kind mismatches, ratios), which is the actually useful
+signal.
+
+```bash
+.venv/bin/python -c "
+import os
+os.environ.setdefault('GOOGLE_CLOUD_PROJECT', 'ytfactory-prod-v2')
+from google.cloud import firestore
+from collections import Counter
+db = firestore.Client(project='ytfactory-prod-v2')
+sk = Counter()
+for snap in db.collection('tasks').stream():
+    d = snap.to_dict()
+    sk[(d.get('status'), d.get('kind'))] += 1
+for k, v in sorted(sk.items()): print(' ', k, v)
+"
+```
+
+Read the output as:
+
+| pattern                                   | meaning                                        | next step                                      |
+|-------------------------------------------|------------------------------------------------|------------------------------------------------|
+| `(queued, <unknown_kind>)` >> 0           | TaskKind rename without queue migration        | drain or rewrite — see Drift flavour 5         |
+| `(leased, <kind>)` >> # of running agents | zombie LEASED — agents acked-error 422'd or crashed | reaper should clear; see Drift flavour 6       |
+| `(queued, <known_kind>)` deep but agent log shows lease cycle ~13 min | agent serial bottleneck                        | parallelize — see Drift flavour 4              |
+| `(done, ...)` count steady, queued not draining | agent isn't running OR auth broken             | `launchctl list \| grep ytfactory`; `gcloud auth print-identity-token` |
+
+**Direct curl as a control-plane health probe** (verifies the cloud
+isn't the bottleneck — if curl returns in <2 s, the bottleneck is
+the laptop):
+
+```bash
+TOK=$(gcloud auth print-identity-token)
+time curl -sS -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" --max-time 60 \
+  -d '{"agent_id":"diag","caps":["burner_engage"],"lease_ttl_s":60}' \
+  https://ytfactory-web-7hwnzw7lya-as.a.run.app/agent/lease
+```
+
+**Caveat:** this leases a real task to `agent_id=diag`. The lease
+expires after 60 s (the `lease_ttl_s` you set) and `_periodic_queue_reaper`
+returns it to QUEUED on its next tick. Don't run this dozens of
+times in a row during a real burst — each call costs one task ~5
+minutes of unavailability.
+
 ## Where each finding lives
 
-| flavour              | doc                                  | memory                                      | code                                    |
-|----------------------|--------------------------------------|---------------------------------------------|-----------------------------------------|
-| TaskKind cap drift   | this doc                             | `feedback_laptop_agent_cloud_contract.md`   | `pipeline/laptop_agent.py::_claim_task` |
-| AckRequest enum      | this doc                             | `feedback_laptop_agent_cloud_contract.md`   | `pipeline/laptop_agent.py::_ack`        |
-| Subprocess liveness  | this doc + `docs/burner_channels.md` | `feedback_laptop_agent_cloud_contract.md`   | `pipeline/laptop_agent.py::_exec_burner_engage` |
+| flavour                         | doc                                          | memory                                          | code                                                  |
+|---------------------------------|----------------------------------------------|-------------------------------------------------|-------------------------------------------------------|
+| TaskKind cap drift              | this doc                                     | `feedback_laptop_agent_cloud_contract.md`       | `pipeline/laptop_agent.py::_claim_task`               |
+| AckRequest enum                 | this doc                                     | `feedback_laptop_agent_cloud_contract.md`       | `pipeline/laptop_agent.py::_ack` (real fix `610461a`) |
+| Subprocess liveness             | this doc + `docs/burner_channels.md`         | `feedback_laptop_agent_cloud_contract.md`       | `pipeline/laptop_agent.py::_exec_burner_engage`       |
+| Single-threaded bottleneck      | this doc                                     | `feedback_laptop_agent_cloud_contract.md`       | `pipeline/laptop_agent.py::_worker_loop` + `run`      |
+| TaskKind zombie tasks           | this doc                                     | `feedback_taskkind_rename_queue_zombies.md`     | one-shot Firestore script (no permanent code)         |
+| No periodic reaper              | this doc                                     | `feedback_laptop_agent_cloud_contract.md`       | `web/server.py::_periodic_queue_reaper`               |
+| Aspirational doc claims (META)  | this doc + `.claude/skills/update-docs/SKILL.md` | `feedback_doc_aspirational_claims.md`           | (none — process change)                               |
 
 ## See also
 
