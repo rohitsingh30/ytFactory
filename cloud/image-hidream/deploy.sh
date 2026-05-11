@@ -22,7 +22,7 @@ gcloud run deploy "${SERVICE}" \
   --region="${REGION}" \
   --service-account="tts-runner@${PROJECT}.iam.gserviceaccount.com" \
   --gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy \
-  --no-cpu-throttling --memory=24Gi --cpu=4 \
+  --no-cpu-throttling --memory=24Gi --cpu=8 \
   --concurrency=1 --max-instances=2 --min-instances=0 \
   --timeout=3600 --no-allow-unauthenticated \
   --set-env-vars="GCS_BUCKET=ytfactory-tts-io,LOG_LEVEL=INFO" \

@@ -16,7 +16,7 @@ PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE}:${TAG}"
-BUCKET="ytfactory-model-weights"
+BUCKET="ytfactory-model-weights-v2"
 
 cd "$(dirname "$0")"
 

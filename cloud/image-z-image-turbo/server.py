@@ -6,7 +6,7 @@ checkpoint we ship today via mflux on the laptop, so the
 `force_positive` prompting trick + style range transfer byte-stably
 between the two paths.
 
-Loads weights from `gs://ytfactory-model-weights/flat/Tongyi-MAI/
+Loads weights from `gs://ytfactory-model-weights-v2/flat/Tongyi-MAI/
 Z-Image-Turbo/` mounted at `/models/hf/flat/...` via GCS Fuse.
 
 API: POST /generate {prompt, ...} → JSON with PNG inline-base64
@@ -62,7 +62,7 @@ def _pipe():
             raise RuntimeError(
                 f"weights dir {WEIGHTS_DIR} not found — bucket mount "
                 f"misconfigured? Expected GCS Fuse to mount "
-                f"gs://ytfactory-model-weights at /models/hf"
+                f"gs://ytfactory-model-weights-v2 at /models/hf"
             )
         logger.info("loading ZImagePipeline from %s …", WEIGHTS_DIR)
         # low_cpu_mem_usage=True: stream each tensor's bytes from disk

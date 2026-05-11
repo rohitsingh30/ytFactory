@@ -3,7 +3,7 @@
 # Model: Tongyi-MAI/Z-Image-Turbo (Apache 2.0, Nov 2025)
 # 6 B Single-Stream Diffusion Transformer, distilled to 8 NFEs.
 # RL-tuned for aesthetic quality. ~12 GB VRAM at bf16.
-# Repo: 32.9 GB / 32 files staged to gs://ytfactory-model-weights/flat/.
+# Repo: 32.9 GB / 32 files staged to gs://ytfactory-model-weights-v2/flat/.
 # Cold-start expected ~60-120 s (32 GB to read from GCS Fuse mount,
 # load bf16, push 12 GB to CUDA). Warm /generate ~2-3 s at 1024² with
 # 8 NFEs (= 9 inference steps in the diffusers pipeline).

@@ -57,4 +57,4 @@ WORKDIR /workspace
 # uvicorn binds to PORT (Cloud Run injects 8080).
 CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1 --timeout-keep-alive 120"]
 
-COPY otel_init.py ./
+COPY cloud/editing-agent/otel_init.py /workspace/otel_init.py

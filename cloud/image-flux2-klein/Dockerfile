@@ -10,7 +10,7 @@
 # Peak VRAM ~12-14 GB, comfortable on L4 24 GB. Per-call latency
 # +1-2 s vs full-GPU resident.
 #
-# Repo: 24 GB / 52 files staged to gs://ytfactory-model-weights/flat/.
+# Repo: 24 GB / 52 files staged to gs://ytfactory-model-weights-v2/flat/.
 # Cold-start expected ~30-60 s (read 24 GB from GCS Fuse mount, load
 # bf16 to CPU, hooks installed). Warm /generate ~1.5-2.5 s at 1024²
 # with 4 steps (was 0.5-0.8 s pre-offload, but pre-offload OOM'd).

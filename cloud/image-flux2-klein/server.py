@@ -4,7 +4,7 @@ Apache 2.0. New default for stylized + photoreal Shorts (2026-05-07
 research, see docs/research/image_gen_2026.md). Sub-second warm
 inference at 1024x1024 with 4 steps on L4 bf16.
 
-Loads weights from `gs://ytfactory-model-weights/flat/black-forest-labs/
+Loads weights from `gs://ytfactory-model-weights-v2/flat/black-forest-labs/
 FLUX.2-klein-4B/` mounted at `/models/hf/flat/...` via GCS Fuse. The
 flat layout (one real file per repo entry, no symlinks) is required
 for `from_pretrained(local_files_only=True)` to work — see
@@ -106,7 +106,7 @@ def _pipe():
             raise RuntimeError(
                 f"weights dir {WEIGHTS_DIR} not found — bucket mount "
                 f"misconfigured? Expected GCS Fuse to mount "
-                f"gs://ytfactory-model-weights at /models/hf"
+                f"gs://ytfactory-model-weights-v2 at /models/hf"
             )
         logger.info("loading Flux2KleinPipeline from %s …", WEIGHTS_DIR)
         pipe = Flux2KleinPipeline.from_pretrained(
