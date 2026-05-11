@@ -115,13 +115,27 @@ def _require_auth_email(request: Request) -> str:
     """The OAuth middleware sets ``request.state.user_email`` after a
     successful session check. Fall back to a clear 401 when missing
     so the browser knows to retry the sign-in flow rather than
-    show a generic error."""
+    show a generic error.
+
+    M2M callers (Cloud Scheduler, the laptop runner itself, smoke
+    tests with the YTFACTORY_AGENT_TOKEN bearer) bypass the OAuth
+    middleware entirely — request.state.user_email is never set on
+    that path. Treat them as a sentinel ``agent@m2m`` actor so they
+    can create + own critiques for ops work without needing a
+    Google OAuth session. The runtime SA on cloud (K_SERVICE) is
+    handled the same way.
+    """
     email = getattr(request.state, "user_email", None)
-    if not email:
-        # Sign-in middleware should have caught this; return 401 in case
-        # the caller bypassed it (e.g. local dev with auth disabled).
-        raise HTTPException(status_code=401, detail="sign-in required")
-    return email
+    if email:
+        return email
+    # M2M / cloud-runtime path: middleware accepted the bearer (or
+    # the K_SERVICE bypass) but didn't populate user_email. Use a
+    # stable sentinel so created_by_uid is deterministic and the
+    # doc still has an owner Firebase rules can match against.
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer ") or os.environ.get("K_SERVICE"):
+        return "agent@m2m.ytfactory"
+    raise HTTPException(status_code=401, detail="sign-in required")
 
 
 # ---------------------------------------------------------------------------

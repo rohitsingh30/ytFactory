@@ -39,6 +39,17 @@ fi
 # Linux builds of this app produce broken HTML (missing doctype/html/body
 # opening tags). The host build is the source of truth.
 echo "==> Pre-building .next/ on host"
+# Firebase config — public values, baked into the JS bundle so the
+# critique-chat panel can sign in via Firebase Auth + subscribe to
+# Firestore directly. Public Firebase apiKeys are NOT secrets; real
+# auth runs via the custom token minted by /api/jobs/<id>/critique/token
+# on the FastAPI backend + Firestore security rules. Provisioned
+# 2026-05-11 via `firebase apps:create WEB ytfactory-web-next` after
+# `firebase projects:addfirebase ytfactory-prod-v2`. Override via env
+# if you ever rotate the keys.
+export NEXT_PUBLIC_FIREBASE_API_KEY="${NEXT_PUBLIC_FIREBASE_API_KEY:-AIzaSyCF7aODvy0_ZsY9GTuucfKPq-6MyCmz9YU}"
+export NEXT_PUBLIC_FIREBASE_PROJECT_ID="${NEXT_PUBLIC_FIREBASE_PROJECT_ID:-ytfactory-prod-v2}"
+export NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN="${NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN:-ytfactory-prod-v2.firebaseapp.com}"
 (cd web-next && npm run build >/dev/null)
 
 # Sanity check: the home page prerender must include <!DOCTYPE html>.

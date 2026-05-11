@@ -120,15 +120,41 @@ class CritiqueStartTests(unittest.TestCase):
             r = self.client.post("/api/jobs/missing/critique/start", json={"agent": "claude"})
         self.assertEqual(r.status_code, 404)
 
-    def test_401_when_no_session(self):
+    def test_401_when_no_session_and_no_bearer(self):
         # Build a fresh app where the stub middleware does NOT set
-        # request.state.user_email — simulates unauthed bypass.
+        # request.state.user_email AND the request carries no Bearer
+        # header — only true anonymous calls return 401. M2M bearer
+        # callers and the cloud runtime (K_SERVICE) get a sentinel
+        # actor instead so ops scripts can drive the endpoint without
+        # a Google OAuth session.
         app = _build_app(fake_user_email=None)
         client = TestClient(app)
         with mock.patch.object(critique_routes.jobs_mod, "get_job",
                                return_value={"channel": "x"}):
             r = client.post("/api/jobs/j1/critique/start", json={"agent": "claude"})
         self.assertEqual(r.status_code, 401)
+
+    def test_accepts_bearer_token_with_sentinel_owner(self):
+        # M2M / smoke-test path: no session cookie, but the request
+        # carries a Bearer token (which the production middleware
+        # would have already validated). The endpoint accepts and
+        # mints the doc with `agent@m2m.ytfactory` as created_by so
+        # Firestore rules + ownership queries still see a real uid.
+        app = _build_app(fake_user_email=None)
+        client = TestClient(app)
+        with self._patch()[0], self._patch()[1], self._patch()[2]:
+            r = client.post(
+                "/api/jobs/j1/critique/start",
+                json={"agent": "claude"},
+                headers={"Authorization": "Bearer ops-token-xyz"},
+            )
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertTrue(body["created"])
+        # The committed doc carries the sentinel email + uid.
+        set_call = self.fake_collection.document.return_value.set
+        doc = set_call.call_args.args[0]
+        self.assertEqual(doc["created_by"], "agent@m2m.ytfactory")
 
 
 # ---------------------------------------------------------------------------

@@ -27,3 +27,31 @@ sse-starlette>=2.1
 # Multipart form parsing — used by /api/uploads/* and a few admin
 # endpoints to accept file uploads.
 python-multipart>=0.0.9
+
+# firebase-admin: Firebase Auth custom-token mint for the critique-chat
+# real-time path. Browser hits POST /api/jobs/<id>/critique/token, server
+# delegates signBlob to the runtime SA via IAM (same plumbing as the
+# preview-mp4 signed_url IAM fallback), browser uses the token with
+# signInWithCustomToken so its direct Firestore reads are auth'd as the
+# uid the security rules check on `created_by_uid`. See
+# docs/critique_chat.md.
+firebase-admin>=6.5
+
+# OpenTelemetry — pipeline.observability is imported unconditionally
+# at the top of web/server.py. Without these the cloud container
+# crashes at startup with `ModuleNotFoundError: No module named
+# 'opentelemetry'` BEFORE the TCP probe ever passes, so Cloud Run
+# rolls back the deploy and the new image never serves traffic.
+# Mirror the pinned set in the laptop requirements.txt so cloud +
+# laptop see the same observability surface.
+opentelemetry-api>=1.27
+opentelemetry-sdk>=1.27
+opentelemetry-exporter-gcp-trace>=1.7.0
+opentelemetry-exporter-gcp-monitoring>=1.7.0a0
+opentelemetry-exporter-otlp-proto-http>=1.27
+opentelemetry-instrumentation-fastapi>=0.48b0
+opentelemetry-instrumentation-requests>=0.48b0
+opentelemetry-instrumentation-httpx>=0.48b0
+opentelemetry-instrumentation-aiohttp-client>=0.48b0
+opentelemetry-resourcedetector-gcp>=1.7.0a0
+opentelemetry-propagator-gcp>=1.7.0
