@@ -1,0 +1,59 @@
+rules_version = '2';
+// Firestore security rules for ytfactory-prod-v2 (2026-05-11).
+//
+// Critique-chat collections are the only ones the BROWSER touches via
+// the Firebase JS SDK; everything else (jobs, channels, uploads,
+// research caches, …) is server-side only and stays implicit-deny.
+//
+// Auth model: the browser holds a Firebase Auth custom token minted
+// by `POST /api/jobs/<id>/critique/token`. The token's uid is
+// `yt_<sha256-of-email-prefix>` (see control/routes/critique_routes.py
+// `_email_to_uid`). The same uid is written to the critique doc as
+// `created_by_uid` at /critique/start time, so the rule below cleanly
+// enforces "doc owner is the only client writer/reader".
+//
+// Phase 1 deliberately does NOT lock down anything else — implicit
+// deny on every other collection keeps the existing server-side flows
+// (which use Application Default Credentials and bypass rules) safe
+// while shutting the browser out of everything except its own chats.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- Critique chat ---------------------------------------------------
+    //
+    // Parent doc: read+write requires the requesting uid to match
+    // `created_by_uid`. Browser tabs from the same Google account land
+    // on the same uid (deterministic SHA-256 of the email), so two tabs
+    // sharing one critique still both see + write the same doc.
+    //
+    // create() carves out the create case so the browser CAN mint a
+    // doc whose created_by_uid matches its own uid. The server-side
+    // `/api/jobs/<id>/critique/start` typically does this, but we keep
+    // the rule symmetric so a future "create from browser only" mode
+    // works without a rules change.
+    match /critiques/{critiqueId} {
+      allow read, update, delete: if request.auth != null
+        && resource.data.created_by_uid == request.auth.uid;
+      allow create: if request.auth != null
+        && request.resource.data.created_by_uid == request.auth.uid;
+
+      // Messages subcollection — same ownership check, but consulted
+      // against the PARENT doc so we don't have to duplicate
+      // `created_by_uid` onto every message.
+      match /messages/{messageId} {
+        allow read, write: if request.auth != null
+          && get(/databases/$(database)/documents/critiques/$(critiqueId))
+               .data.created_by_uid == request.auth.uid;
+      }
+    }
+
+    // --- Implicit-deny everything else ----------------------------------
+    //
+    // No `match /{document=**}` allow rule. Every collection the
+    // browser doesn't need (jobs, channels, uploads, research caches,
+    // upload-records, …) stays read-deny + write-deny for client SDK
+    // callers. Server-side code (control plane, render workers, laptop
+    // runner) uses ADC / runtime SA credentials which bypass rules
+    // entirely, so this restricts only the browser.
+  }
+}
