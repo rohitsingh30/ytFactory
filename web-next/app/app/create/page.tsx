@@ -987,7 +987,9 @@ function NicheBubbleRow({
   );
 }
 
-/* Render all variants. Auto-grouped by family when count > 5; flat 2-col grid otherwise. */
+/* Render all variants as a flat 2-col bubble grid. Family-grouping
+ * with title rows + count badges was removed 2026-05-11 — it made the
+ * niche picker read like a tier list instead of a flat option set. */
 function VariantList({
   variants,
   picked,
@@ -997,32 +999,10 @@ function VariantList({
   picked: string | null;
   onPick: (v: string) => void;
 }) {
-  if (variants.length <= 5) {
-    return (
-      <div className="grid gap-1.5 sm:grid-cols-2">
-        {variants.map((v) => (
-          <VariantCard key={v.value} v={v} sel={v.value === picked} onPick={onPick} />
-        ))}
-      </div>
-    );
-  }
-  const groups = groupVariants(variants);
   return (
-    <div className="space-y-3">
-      {groups.map((g) => (
-        <div key={g.title}>
-          <div className="mb-1.5 flex items-baseline justify-between px-0.5">
-            <div className="text-[11px] font-medium tracking-tight text-foreground/85">{g.title}</div>
-            <div className="font-mono text-[9.5px] tracking-[0.14em] text-muted-foreground/70">
-              {g.items.length}
-            </div>
-          </div>
-          <div className="grid gap-1.5 sm:grid-cols-2">
-            {g.items.map((v) => (
-              <VariantCard key={v.value} v={v} sel={v.value === picked} onPick={onPick} />
-            ))}
-          </div>
-        </div>
+    <div className="grid gap-1.5 sm:grid-cols-2">
+      {variants.map((v) => (
+        <VariantCard key={v.value} v={v} sel={v.value === picked} onPick={onPick} />
       ))}
     </div>
   );
@@ -1082,41 +1062,6 @@ function VariantCard({
   );
 }
 
-/* Auto-derive families from labels. Heuristic — falls back gracefully
- * when labels don't follow a known prefix. The order of FAMILIES drives
- * display order; "Other" catches the rest.
- */
-const FAMILIES: { title: string; match: (label: string) => boolean }[] = [
-  { title: "AITA Cliffhanger — Part 2", match: (l) => /aita.*cliffhanger.*part\s*2/i.test(l) },
-  { title: "AITA Cliffhanger", match: (l) => /aita.*cliffhanger/i.test(l) },
-  { title: "AITA", match: (l) => /^aita\b/i.test(l) },
-  { title: "TIFU", match: (l) => /^tifu\b/i.test(l) },
-];
-
-function groupVariants(
-  variants: { value: string; label: string; description?: string | null }[],
-): { title: string; items: typeof variants }[] {
-  const buckets = new Map<string, typeof variants>();
-  const order: string[] = [];
-  function push(title: string, v: typeof variants[number]) {
-    if (!buckets.has(title)) {
-      buckets.set(title, []);
-      order.push(title);
-    }
-    buckets.get(title)!.push(v);
-  }
-  for (const v of variants) {
-    const fam = FAMILIES.find((f) => f.match(v.label));
-    push(fam ? fam.title : "Other", v);
-  }
-  // Move "Other" to the end if present, regardless of insertion order.
-  const ordered = [
-    ...order.filter((t) => t !== "Other"),
-    ...(order.includes("Other") ? ["Other"] : []),
-  ];
-  return ordered.map((title) => ({ title, items: buckets.get(title)! }));
-}
-
 /* ----------------------------- Step 2: Customize + Review ----------------------------- */
 
 function CustomizeReviewStep({
@@ -1156,8 +1101,9 @@ function CustomizeReviewStep({
 
   const byKey = (k: string) => schema.fields.find((f) => f.key === k);
   const topicField = byKey("topic");
-  const sourceKindField = byKey("source_kind");
-  const sourceRefField = byKey("source_ref");
+  // Source kind / source ref are no longer rendered as a manual card —
+  // the auto-generate Topic flow now sets them. We still keep the keys
+  // in `handled` below so they don't leak into the advanced grid.
   const voiceField = byKey("voice");
   const audioModeField = byKey("audio_mode");
   const songStyleField = byKey("song_style");
@@ -1191,7 +1137,7 @@ function CustomizeReviewStep({
           onPick={onVariantChange}
           lengthKind={(values.length_kind ?? "short") === "long" ? "long" : "short"}
         />
-        <div className="grid gap-5 md:grid-cols-2">
+        <div className="grid gap-5">
           <CardShell label="Form" hint="Short = ≤90s vertical · Long = multi-min horizontal">
             <div className="grid grid-cols-2 gap-2">
               {(["short", "long"] as const).map((kind) => {
@@ -1251,41 +1197,6 @@ function CustomizeReviewStep({
               </div>
             )}
           </CardShell>
-
-          {sourceKindField && (
-            <CardShell label="Source" hint={sourceKindField.help ?? undefined}>
-              <Select
-                value={
-                  typeof values.source_kind === "string"
-                    ? (values.source_kind as string)
-                    : (sourceKindField.default as string | undefined)
-                }
-                onValueChange={(v) => onChange("source_kind", v)}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Auto" />
-                </SelectTrigger>
-                <SelectContent>
-                  {(sourceKindField.options ?? []).map((o) => (
-                    <SelectItem key={o.value} value={o.value}>
-                      {o.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {(values.source_kind === "reddit_url" ||
-                values.source_kind === "wikipedia_topic" ||
-                values.source_kind === "youtube_video") &&
-                sourceRefField && (
-                  <Input
-                    className="mt-2 bg-surface-2"
-                    placeholder={sourceRefField.placeholder}
-                    value={typeof values.source_ref === "string" ? (values.source_ref as string) : ""}
-                    onChange={(e) => onChange("source_ref", e.target.value)}
-                  />
-                )}
-            </CardShell>
-          )}
         </div>
 
         {topicField && (
