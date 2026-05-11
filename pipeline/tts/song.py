@@ -21,6 +21,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from pipeline import observability as _obs
+
 
 def _detect_leading_silence_s(
     in_path: Path, threshold_db: float = -28.0, min_silence_s: float = 0.3
@@ -209,6 +211,35 @@ def synth_via_sunoapi(
     callback (callbacks need a public-internet URL the laptop agent
     doesn't have).
     """
+    metadata = {
+        "provider": "sunoapi",
+        "model": model,
+        "vocal_gender": vocal_gender,
+        "lyrics_chars": len(lyrics or ""),
+        "style_chars": len(style or ""),
+        "title": (title or "")[:100],
+        "out_path": str(out_path),
+        "poll_timeout_s": poll_timeout_s,
+    }
+    with _obs.timed("song_synth", category="tts", metadata=metadata):
+        return _synth_via_sunoapi_impl(
+            lyrics, style, out_path,
+            title=title, model=model, vocal_gender=vocal_gender,
+            poll_timeout_s=poll_timeout_s, poll_interval_s=poll_interval_s,
+        )
+
+
+def _synth_via_sunoapi_impl(
+    lyrics: str,
+    style: str,
+    out_path: Path,
+    *,
+    title: str = "",
+    model: str = "V4_5",
+    vocal_gender: str = "f",
+    poll_timeout_s: int = 300,
+    poll_interval_s: int = 5,
+) -> Path:
     import json as _json
     import os as _os
     import time as _time
