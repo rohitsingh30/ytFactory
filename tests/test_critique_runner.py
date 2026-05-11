@@ -495,21 +495,70 @@ class ClaimCritiqueTests(unittest.TestCase):
         self.assertFalse(ok)
 
 
-class EnsureCleanRepoTests(unittest.TestCase):
-    def test_clean_repo_passes(self):
+class IsolatePreExistingDirtTests(unittest.TestCase):
+    """The runner stashes pre-existing dirty changes before claiming
+    a critique so the agent's diff is isolated from whatever the
+    user was hand-editing. The stash is restored in a try/finally so
+    the user's work always comes back regardless of how the critique
+    ends.
+    """
+
+    def test_clean_repo_returns_false(self):
         repo, _ = _make_clean_repo(with_remote=False)
         try:
-            runner_mod._ensure_clean_repo(repo)  # must not raise
+            stashed = runner_mod._isolate_pre_existing_dirt(
+                repo, stash_label="t/clean",
+            )
         finally:
             subprocess.run(["rm", "-rf", str(repo)], check=False)
+        self.assertFalse(stashed)
 
-    def test_dirty_repo_raises(self):
+    def test_dirty_repo_stashed_then_restored(self):
+        # End-to-end: dirty tree → isolate → tree is clean → restore →
+        # tree dirt is back exactly as it was.
         repo, _ = _make_clean_repo(with_remote=False)
         try:
             (repo / "stray.py").write_text("oops\n")
-            with self.assertRaises(RuntimeError) as ctx:
-                runner_mod._ensure_clean_repo(repo)
-            self.assertIn("uncommitted changes", str(ctx.exception))
+            (repo / "mod.py").write_text("def f():\n    return 999\n")  # modify tracked
+            before = subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=str(repo), text=True,
+            )
+            self.assertTrue(before.strip(),
+                            "test setup expected dirt before isolate")
+
+            stashed = runner_mod._isolate_pre_existing_dirt(
+                repo, stash_label="t/dirt-roundtrip",
+            )
+            self.assertTrue(stashed)
+
+            mid = subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=str(repo), text=True,
+            )
+            self.assertEqual(mid.strip(), "",
+                             "tree must be clean after isolate")
+
+            runner_mod._restore_pre_existing_dirt(
+                repo, stash_label="t/dirt-roundtrip",
+            )
+
+            after = subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=str(repo), text=True,
+            )
+            self.assertEqual(before.strip(), after.strip(),
+                             "tree state must be byte-identical after restore")
+        finally:
+            subprocess.run(["rm", "-rf", str(repo)], check=False)
+
+    def test_restore_handles_missing_stash_gracefully(self):
+        """If something else popped the stash, the restore is a no-op,
+        not a crash. The runner already isn't in a position to fix a
+        crashed laptop env, so we log + move on."""
+        repo, _ = _make_clean_repo(with_remote=False)
+        try:
+            # Don't stash anything — restore should just log "no stash".
+            runner_mod._restore_pre_existing_dirt(
+                repo, stash_label="t/nonexistent",
+            )  # must not raise
         finally:
             subprocess.run(["rm", "-rf", str(repo)], check=False)
 

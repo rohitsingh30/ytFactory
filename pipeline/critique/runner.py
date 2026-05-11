@@ -138,12 +138,18 @@ def _set_critique_status(
 # ---------------------------------------------------------------------------
 
 
-def _ensure_clean_repo(repo_root: Path) -> None:
-    """Refuse to start a critique loop if the repo has uncommitted
-    changes. Otherwise the agent's diff would mix with whatever the
-    user was hand-editing, the gate harness would see both as one
-    diff, and we'd push your half-finished work to main on green
-    gates.
+def _isolate_pre_existing_dirt(repo_root: Path, *, stash_label: str) -> bool:
+    """Stash any pre-existing dirty changes so the agent's diff is
+    isolated from whatever the user was hand-editing. Returns True if
+    a stash was created (caller must call :func:`_restore_pre_existing_dirt`
+    in a try/finally), False if the tree was already clean.
+
+    Pre-2026-05-11-evening the runner had `_ensure_clean_repo` which
+    *refused to start* on a dirty tree. That was too strict — the
+    repo regularly carries hundreds of small uncommitted edits across
+    `.claude/skills/`, `docs/`, channel learnings, etc. The agent's
+    fix only needs to be isolated FOR THE DURATION of one critique;
+    we can restore the user's dirt the moment we're done.
     """
     proc = subprocess.run(
         ["git", "status", "--porcelain"],
@@ -154,12 +160,70 @@ def _ensure_clean_repo(repo_root: Path) -> None:
     )
     if proc.returncode != 0:
         raise RuntimeError(f"git status failed: {proc.stderr.strip()}")
-    if proc.stdout.strip():
+    if not proc.stdout.strip():
+        return False  # tree was already clean
+
+    # --include-untracked stashes new files too (e.g. firebase-debug.log,
+    # local docs the user is drafting). Without it, untracked files
+    # would survive the stash and pollute the agent's diff.
+    stash = subprocess.run(
+        ["git", "stash", "push", "--include-untracked", "-m", stash_label],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if stash.returncode != 0:
         raise RuntimeError(
-            "repo has uncommitted changes; runner refuses to start. "
-            "Stash or commit them first so the agent's diff is isolated.\n"
-            f"{proc.stdout}"
+            f"git stash failed: {stash.stderr.strip()}; refusing to start"
         )
+    logger.info("[runner] stashed pre-existing dirt as %r", stash_label)
+    return True
+
+
+def _restore_pre_existing_dirt(repo_root: Path, *, stash_label: str) -> None:
+    """Counterpart to :func:`_isolate_pre_existing_dirt`. Best-effort —
+    if the pop conflicts (because the agent's commit touched a file
+    that was also dirty in the stash), we leave the stash on the
+    stack and log loudly so the user can recover manually with
+    ``git stash list`` + ``git stash pop``.
+    """
+    # First find the stash entry by label — `git stash pop` with no
+    # ref would pop the TOP of the stack, but if the user did their
+    # own stash since claim, popping the top would restore THEIR
+    # work, not ours. Look up the right entry instead.
+    list_proc = subprocess.run(
+        ["git", "stash", "list"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    target = None
+    for line in (list_proc.stdout or "").splitlines():
+        if stash_label in line:
+            target = line.split(":", 1)[0]  # e.g. "stash@{0}"
+            break
+    if target is None:
+        logger.warning(
+            "[runner] no stash entry matching %r; nothing to restore", stash_label
+        )
+        return
+    pop = subprocess.run(
+        ["git", "stash", "pop", target],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if pop.returncode != 0:
+        logger.error(
+            "[runner] git stash pop %s FAILED — pre-existing dirt left on the stack. "
+            "Recover manually: `git stash list` + `git stash pop`. stderr: %s",
+            target, pop.stderr.strip(),
+        )
+        return
+    logger.info("[runner] restored pre-existing dirt from %s", target)
 
 
 def _stage_and_commit(repo_root: Path, message: str) -> str:
@@ -465,89 +529,100 @@ def process_one_critique(
     Subscribes to the messages subcollection and processes each
     ``role=user`` message in arrival order until the parent doc
     leaves an active status.
+
+    Auto-stashes any pre-existing dirty changes BEFORE the agent
+    runs so the diff the gates evaluate is purely the agent's work.
+    The stash is restored in a try/finally so the user's working
+    tree comes back intact regardless of whether the critique
+    succeeded, failed, or crashed.
     """
     if not claim_critique(client, critique_id, hostname=config.hostname):
         logger.info("critique %s already claimed by another runner", critique_id)
         return
 
+    stash_label = f"critique-runner/{critique_id}"
+    stashed = False
     try:
-        _ensure_clean_repo(config.repo_root)
+        stashed = _isolate_pre_existing_dirt(config.repo_root, stash_label=stash_label)
     except RuntimeError as exc:
         msg_mod.add_agent_message(
             client, critique_id,
             text=(
-                "Runner refused to start: "
-                f"{exc}. Please commit or stash your local changes and re-send "
-                "the critique."
+                f"Runner couldn't isolate pre-existing dirt: {exc}. "
+                "Recover manually with `git stash list` + `git stash pop`."
             ),
             action=msg_mod.ACTION_AGENT_FINISHED,
         )
         _set_critique_status(
             client, critique_id, STATUS_FAILED,
-            extra={"error": "repo_not_clean"},
+            extra={"error": "stash_failed"},
         )
         return
 
-    parent_ref = client.collection("critiques").document(critique_id)
-    parent_snap = parent_ref.get()
-    if not parent_snap.exists:
-        return
-    job_context = _critique_doc_to_context(critique_id, parent_snap.to_dict() or {})
-
-    failed_count = 0
-    seen_message_ids: set[str] = set()
-    # Pre-seed seen with any messages already on the doc so we don't
-    # re-process the user's bootstrapping message multiple times if
-    # the runner restarts mid-conversation.
-    existing = msg_mod.fetch_messages(client, critique_id)
-    for m in existing:
-        seen_message_ids.add(m.message_id)
-        # If the existing seed includes the user's first message and
-        # we have NO agent reply yet, treat it as a freshly-arrived
-        # user message so the agent gets to act on it.
-    has_user_seed = any(m.role == msg_mod.ROLE_USER for m in existing)
-    has_agent_reply = any(m.role == msg_mod.ROLE_AGENT for m in existing)
-    if has_user_seed and not has_agent_reply:
-        # Replay the LAST user message so the agent processes it.
-        last_user = [m for m in existing if m.role == msg_mod.ROLE_USER][-1]
-        seen_message_ids.discard(last_user.message_id)
-
-    while True:
-        # Re-read parent so a status flip from the browser (cancel)
-        # bails us out promptly.
+    try:
+        parent_ref = client.collection("critiques").document(critique_id)
         parent_snap = parent_ref.get()
         if not parent_snap.exists:
             return
-        cur_status = (parent_snap.to_dict() or {}).get("status")
-        if cur_status not in (STATUS_QUEUED, STATUS_IN_PROGRESS):
-            return
+        job_context = _critique_doc_to_context(critique_id, parent_snap.to_dict() or {})
 
-        # Find the OLDEST unseen role=user message.
-        msgs = msg_mod.fetch_messages(client, critique_id)
-        unseen_user = [
-            m for m in msgs
-            if m.role == msg_mod.ROLE_USER and m.message_id not in seen_message_ids
-        ]
-        if not unseen_user:
-            time.sleep(config.poll_interval_s)
-            continue
-        next_msg = unseen_user[0]
-        if on_message_seen is not None:
-            on_message_seen(next_msg.message_id)
+        failed_count = 0
+        seen_message_ids: set[str] = set()
+        # Pre-seed seen with any messages already on the doc so we don't
+        # re-process the user's bootstrapping message multiple times if
+        # the runner restarts mid-conversation.
+        existing = msg_mod.fetch_messages(client, critique_id)
+        for m in existing:
+            seen_message_ids.add(m.message_id)
+            # If the existing seed includes the user's first message and
+            # we have NO agent reply yet, treat it as a freshly-arrived
+            # user message so the agent gets to act on it.
+        has_user_seed = any(m.role == msg_mod.ROLE_USER for m in existing)
+        has_agent_reply = any(m.role == msg_mod.ROLE_AGENT for m in existing)
+        if has_user_seed and not has_agent_reply:
+            # Replay the LAST user message so the agent processes it.
+            last_user = [m for m in existing if m.role == msg_mod.ROLE_USER][-1]
+            seen_message_ids.discard(last_user.message_id)
 
-        next_status, extra, failed_count = process_user_message(
-            client, critique_id, job_context, next_msg.text,
-            config, failed_turns_so_far=failed_count,
-        )
-        seen_message_ids.add(next_msg.message_id)
+        while True:
+            # Re-read parent so a status flip from the browser (cancel)
+            # bails us out promptly.
+            parent_snap = parent_ref.get()
+            if not parent_snap.exists:
+                return
+            cur_status = (parent_snap.to_dict() or {}).get("status")
+            if cur_status not in (STATUS_QUEUED, STATUS_IN_PROGRESS):
+                return
 
-        if next_status in (STATUS_DONE, STATUS_FAILED):
-            _set_critique_status(client, critique_id, next_status, extra=extra)
-            return
+            # Find the OLDEST unseen role=user message.
+            msgs = msg_mod.fetch_messages(client, critique_id)
+            unseen_user = [
+                m for m in msgs
+                if m.role == msg_mod.ROLE_USER and m.message_id not in seen_message_ids
+            ]
+            if not unseen_user:
+                time.sleep(config.poll_interval_s)
+                continue
+            next_msg = unseen_user[0]
+            if on_message_seen is not None:
+                on_message_seen(next_msg.message_id)
 
-        # in_progress with extra=None → just keep listening for the
-        # next user follow-up (need_more_info path) or another
-        # iteration after a gate failure (already enqueued above).
+            next_status, extra, failed_count = process_user_message(
+                client, critique_id, job_context, next_msg.text,
+                config, failed_turns_so_far=failed_count,
+            )
+            seen_message_ids.add(next_msg.message_id)
+
+            if next_status in (STATUS_DONE, STATUS_FAILED):
+                _set_critique_status(client, critique_id, next_status, extra=extra)
+                return
+
+            # in_progress with extra=None → just keep listening for the
+            # next user follow-up (need_more_info path) or another
+            # iteration after a gate failure (already enqueued above).
+    finally:
+        if stashed:
+            _restore_pre_existing_dirt(config.repo_root, stash_label=stash_label)
 
 
 def run_forever(
