@@ -189,3 +189,63 @@ Hard rules:
   against `git diff --unified=0`.
 - Browser chat panel is on the render-detail page only; no global
   inbox view yet.
+
+## Deploying — one-time prerequisites (operator action)
+
+Phase 1b ships the **code** for the laptop runner + browser chat
+panel; the cloud + frontend deploy is gated on a one-time Firebase
+provisioning step. Two five-minute tasks:
+
+### 1. Add a Firebase web app to the GCP project
+
+The runtime SA already holds
+`roles/iam.serviceAccountTokenCreator` on itself (granted 2026-05-11
+for the preview-mp4 signing fix; the same grant powers Firebase
+Auth custom-token minting). What's missing is the Firebase project
+overlay + a "web app" registration so the JS SDK has an apiKey to
+authenticate browser reads.
+
+```
+1. Open https://console.firebase.google.com/
+2. "Add project" -> select existing GCP project: ytfactory-prod-v2
+3. Once it loads, gear icon -> Project settings
+4. "Your apps" panel -> Add app -> Web (the </> icon)
+5. App nickname: ytfactory-web-next   (skip Hosting toggle)
+6. Copy the firebaseConfig block — only apiKey + authDomain
+   + projectId are needed.
+```
+
+### 2. Enable Identity Toolkit + bake the public keys
+
+```bash
+gcloud services enable identitytoolkit.googleapis.com \
+  --project=ytfactory-prod-v2
+
+# Then, in cloud/web-next/deploy.sh, add to the `npm run build`
+# environment so they end up in the prerendered bundle:
+#
+#   export NEXT_PUBLIC_FIREBASE_API_KEY=<copied apiKey>
+#   export NEXT_PUBLIC_FIREBASE_PROJECT_ID=ytfactory-prod-v2
+#   export NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=ytfactory-prod-v2.firebaseapp.com
+```
+
+(The web app's `apiKey` is *not* a secret — Firebase API keys are
+public identifiers; real auth is enforced by Firestore security
+rules + the custom token's uid. We bake them into the JS bundle.)
+
+### 3. Deploy
+
+```bash
+bash cloud/web-server/deploy.sh   # picks up critique_routes + firebase-admin
+bash cloud/web-next/deploy.sh     # picks up CritiqueChatPanel + JS SDK
+```
+
+### 4. Run the laptop daemon
+
+```bash
+make critique-runner
+# leave it running in a tmux pane / Activity Monitor
+```
+
+That's it — open any finished render in the dashboard, type a
+critique, watch the agent fix it.
