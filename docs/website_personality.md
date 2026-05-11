@@ -69,6 +69,18 @@ Composable, reusable, all under `web-next/components/app/`:
 `ChannelIcon` is now a thin re-export of `ChannelAvatar` — every
 existing call-site picks up the personality treatment for free.
 
+### Layer 2.5 — interaction patterns
+
+- **Drawer-bearing list rows must be entirely clickable.** Any
+  `/app/<page>` that pairs a row list with a side drawer (today:
+  `/app/burner-channels` `EngageDrawer`) wires `onOpen()` from the
+  row body click + every action button (incl. Stop) + the catch
+  block of every mutation. See
+  [`docs/web_next_clickable_row_pattern.md`](web_next_clickable_row_pattern.md)
+  for the rule, the audit table of every list page, and the HTML
+  gotcha (`<div role="button">` not `<button>` when nested `<a>`
+  exists). Added 2026-05-11.
+
 ### Layer 3 — pages
 
 | Page | Change |

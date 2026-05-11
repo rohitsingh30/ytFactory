@@ -303,3 +303,103 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
   survived. Several files silently re-overwritten on the pop this
   session — no CLASS-OF-BUG yet (single observation), escalate if
   it repeats.
+
+## ONE-OFF (audit recipes for the next run)
+
+- 2026-05-11 — **Stale `--max-instances=2` banner survived
+  earlier doc-edit pass.** When my image-fan-out commit
+  (`a3c4e47`) updated 4 docs (cloudrun_image.md +
+  pipeline_latency_2026.md + parallel_bulk_renders.md +
+  cloud-flux deploy.sh) for the new max-instances=3 ceiling, the
+  banner block at `docs/cloudrun_image.md:9` AND the inline
+  comment at `pipeline/images/images_cloudrun.py:221` were both
+  missed (also the banner had `--concurrency=2` which has been
+  wrong since service inception — actual is concurrency=1).
+  Doc-edits that target deeper sections leave the banner / TL;DR
+  / file header lines stale; reader landing on the top sees
+  outdated state. **New discipline:** when a config knob changes
+  AND the doc opens with a "> **Status (date):** ..." banner,
+  ALWAYS edit the banner first (it's load-bearing for any reader
+  who skims). Sweep recipe to catch siblings before next change:
+  `grep -n "^>" docs/cloudrun_*.md docs/cloud_*.md docs/pipeline_*.md | grep -E "max-instances|--concurrency|--min-instances"`.
+  Fixed inline this run; both the banner + the inline comment
+  now reflect max-instances=3 + concurrency=1.
+
+- 2026-05-11 — **Stale GPU quota arithmetic across deploy.sh
+  comments.** Sweep `grep -rnE "5.{0,2}GPU.{0,8}quota|6.{0,2}GPU.{0,8}quota|3 services × 2|matches our 5-GPU" docs/ pipeline/ cloud/`
+  found 9 hits (TTS deploy.sh comments + tts-f5 banner). All
+  said "3 services × 2 = 6 GPUs" or "matches our 5-GPU quota".
+  Reality (deploy gate enforced 2026-05-11): **L4 quota in
+  asia-southeast1 is 3, not 5-6**. The wrong arithmetic was
+  speculative — sum of per-service max-instances, not the actual
+  project-region GPU quota. Left the TTS comments intact this
+  run (they describe **capacity**, not quota; and they're not
+  on the production hot-path that the user touches today). When
+  any of those TTS services next get redeployed, the comment at
+  the top of each `cloud/tts-*/deploy.sh` should add a banner
+  "Real GPU quota in asia-southeast1 = 3 (cross-service);
+  capacity sum is bookkeeping, not concurrency budget." Audit
+  recipe to flag siblings on the next change:
+  `grep -rnE "× 2 = [0-9]+ GPUs?|matches our [0-9]+-GPU quota|GPU.{0,3}quota.{0,5}=.{0,5}[0-9]+" docs/ pipeline/ cloud/ --include='*.md' --include='*.py' --include='*.sh'`.
+  Project doc updated this run with discovery story +
+  verification recipe: `docs/cloud_run_quota_self_service.md` §
+  "GPU quota in asia-southeast1 = 3".
+
+- 2026-05-11 — **Latency-pareto entries can claim falsehoods
+  about implementation.** `docs/pipeline_latency_2026.md` § 6 #5
+  (pre-fix) said "Beat-prompt authoring: 30-90 s — Claude CLI
+  sequential per-prompt calls. Could be parallelized." I almost
+  shipped a parallelization for it before grepping the actual
+  callsite. Reality: `pipeline/llm/prompts.py:700::author_beat_prompts`
+  already batches ALL beats into ONE Claude CLI call (a single
+  `call_claude_cli` site, returning a JSON array of N objects
+  in one prompt). The pareto was authored from speculation, not
+  by re-checking the code. **New discipline:** any "could be
+  parallelized" / "is sequential" / "is per-X" claim in a
+  latency doc MUST be paired with a `grep -n` recipe pointing to
+  the line proving it. Pre-fix the pareto cited no source.
+  Fixed inline 2026-05-11 (commit `a3c4e47`) — entry now reads
+  "Beat-prompt authoring: 30-90 s — Claude CLI **batched** call
+  (already returns ALL prompts in one shot) — bottleneck is
+  Claude CLI's own latency; parallelizing would split the batch
+  and lose cross-beat coherence." Future audit recipe to flag
+  unsourced pareto claims:
+  `grep -nE "sequential.*calls?|per-[a-z]+ call|could be parallelised?|could be parallelized" docs/pipeline_latency_*.md docs/cloudrun_*.md`
+  — every match should cite a `pipeline/<module>.py:<line>`
+  source or be rewritten.
+
+- 2026-05-11 — **Pre-existing voice-override test failures
+  surfaced (NOT mine).** `tests/test_render_shorts.py::TestPureHelpers::test_apply_form_overrides_voice_bare_name_on_kokoro_channel_flips`
+  + `..._voice_path_style_updates_voice` fail on pristine HEAD
+  (verified via stash round-trip in this session). They depend
+  on the `_apply_form_overrides` helper that exists in the
+  user's WIP version of shorts.py but NOT in HEAD. Will likely
+  auto-resolve when the WIP `_make_short_impl` extraction lands
+  (commit pending). Future test run after that lands should
+  re-verify. Audit recipe:
+  `python -m pytest tests/test_render_shorts.py::TestPureHelpers -k "voice" --tb=line 2>&1 | tail -5` —
+  if still failing once `_apply_form_overrides` is on HEAD, it's
+  a real regression worth a CLASS-OF-BUG entry.
+
+- 2026-05-11 — **Self-verifier grep failed when needle had backticks.**
+  This skill's Q1 dual-save verifier did `grep -c "Bulk-create from the
+  dashboard"` against `docs/burner_channels.md` and got `0` even though
+  the heading was clearly there. Root cause: the verifier shell-script
+  had the needle inside a heredoc/bash block that interpreted backticks
+  as command substitution before grep ran, so the actual pattern grep
+  saw was an empty / mangled string. Easy to misread as "the doc edit
+  didn't land" → re-edit → duplicate content.
+
+  **Fix recipe for future runs:** when the dual-save verifier needs to
+  check for a heading containing backticks / em-dashes / other shell
+  metachars:
+  - Use `grep -F` (fixed-string) AND quote the needle with single
+    quotes, OR
+  - Pipe through `LC_ALL=C cat | grep -F`, OR
+  - Use `awk '/Pattern/{print}'` which doesn't shell-expand the regex.
+
+  Verified in this session: `awk '/14a. Stderr-first/{print NR": "$0}'`
+  found my edit immediately after the backticked grep returned `0`.
+  Don't trust a `0` from the verifier without a second method when the
+  needle has shell metachars.
+

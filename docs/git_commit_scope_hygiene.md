@@ -86,6 +86,88 @@ When the user asks to commit:
 - The commit message should follow the project trailer rule
   (`Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`).
 
+## 2026-05-11 update — `git checkout HEAD -- <file>` LOSES uncommitted WIP
+
+**The hazard.** When you need to "reset" a file mid-workflow (e.g.
+to re-apply your edit on a clean base before committing),
+`git checkout HEAD -- pipeline/render/shorts.py` will overwrite
+the working tree with HEAD's version — including any uncommitted
+WIP from previous sessions or other agents. The user's
+`_make_short_impl` envelope-extraction WIP for shorts.py was
+silently wiped this way during the per-render image fan-out ship
+(commit `a3c4e47`), discovered only when a post-checkout
+`grep _make_short_impl` returned 0.
+
+**Don't do this in a dirty tree without a backup:**
+
+```bash
+# ❌ Destroys uncommitted WIP for the file
+git checkout HEAD -- pipeline/render/shorts.py
+```
+
+**Do this instead** — stash everything first, then surgically
+restore + commit only your isolated subset:
+
+```bash
+# 1. Snapshot everything (the user's WIP + your edits) into a stash.
+#    -u captures untracked files too.
+git stash push -u -m "WIP+ship-<topic>"
+
+# 2. Working tree is now clean (matches HEAD). Restore ONLY YOUR
+#    target files from the stash. `git checkout stash@{0} -- <files>`
+#    pulls those files' stash content into both index AND working tree.
+git checkout stash@{0} -- \
+  cloud/foo/bar.sh \
+  pipeline/your/module.py \
+  docs/your_doc.md
+
+# 3. Verify the stage looks correct (only YOUR diff vs HEAD).
+git diff --cached --stat
+
+# 4. Commit.
+git commit -m "your message" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+
+# 5. Pop the stash to restore the user's WIP back on top.
+#    Conflicts on YOUR files (since they're now committed) need a
+#    3-way merge — usually trivial because the changes overlap, but
+#    LOOK at the diff before declaring done.
+git stash pop
+```
+
+**If you DID accidentally lose WIP:** uncommitted changes that
+existed in the working tree are usually still in `.git/objects/`
+as dangling blobs (git auto-snapshots before destructive
+operations). Recovery recipe:
+
+```bash
+# 1. List dangling blobs by content shape (size range you expect).
+git fsck --lost-found 2>&1 | grep "dangling blob" | awk '{print $3}' > /tmp/blobs.txt
+
+# 2. For each, peek at line 1 to fingerprint which file it was.
+while read blob; do
+  if git cat-file -p $blob 2>/dev/null | head -1 | grep -q "End-to-end orchestrator"; then
+    impl=$(git cat-file -p $blob 2>/dev/null | grep -c "def _make_short_impl")
+    lines=$(git cat-file -p $blob 2>/dev/null | wc -l)
+    echo "$blob lines=$lines _make_short_impl=$impl"
+  fi
+done < /tmp/blobs.txt
+
+# 3. Restore the matching blob to disk.
+git cat-file -p <blob-sha> > pipeline/render/shorts.py
+```
+
+This recovered the lost `_make_short_impl` WIP in the 2026-05-11
+session (blob `46d4ef2313a5170b97e4ee41d169ac8f6fbc348f`,
+3128 lines, contained both the WIP and my refactor).
+
+**The wider rule:** When working in a tree with substantial
+pre-existing WIP AND another agent might be committing in
+parallel (notice: critique-runner committed `c105397`, `5fe93f0`,
+`857f2ba`, `b5ecf1f` mid-session 2026-05-11), assume your
+working-tree state is fragile. Snapshot via `git stash` BEFORE
+any destructive operation (`git checkout HEAD --`, `git restore --`,
+`git reset --hard`, `git clean`).
+
 ## Cross-references
 
 - `~/.claude/projects/.../memory/feedback_commit_scope_clarification.md`
@@ -93,5 +175,10 @@ When the user asks to commit:
 - `~/.claude/projects/.../memory/project_repo_hygiene_2026_05_10.md`
   — the broader repo-cleanup pass; this rule extends it to commit
   cadence specifically.
+- `~/.claude/projects/.../memory/feedback_git_checkout_head_loses_wip.md`
+  — terse memory pointer for the 2026-05-11 update.
 - `docs/admin_panel_first.md` — sibling cross-channel rule from the
   same 2026-05-10 cluster of "ask scope, don't assume".
+- `.claude/skills/update-docs/learnings/_index.md` § 2026-05-10
+  late "Stash-pop after parallel-agent commit" — sibling
+  observation that escalated this update to a documented rule.

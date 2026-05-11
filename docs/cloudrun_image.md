@@ -6,7 +6,9 @@
 
 > **Status (2026-05-11):** `ytfactory-image-flux2-klein` is LIVE in
 > `asia-southeast1` on NVIDIA L4 with **`--min-instances=0` (scale-to-
-> zero), `--max-instances=2`, `--concurrency=2`**. Cold-load is hidden
+> zero), `--max-instances=3` (bumped from 2 on 2026-05-11 to enable
+> per-render image fan-out — see `docs/parallel_per_beat_fanout.md`),
+> `--concurrency=1`**. Cold-load is hidden
 > via the pre-warmup script `cloud/warm_image_services.sh` (run before
 > render windows) plus the in-pipeline `images.warmup()` background
 > thread. 16 channel/variant YAMLs flipped from
