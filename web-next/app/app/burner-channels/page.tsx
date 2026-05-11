@@ -53,6 +53,34 @@ interface BurnerListResp {
   catalog_size: number;
 }
 
+// Shape returned by POST /api/burner_channels/subscribe_all_burners.
+// Mirrors the route's response (see control/routes/burner_routes.py).
+interface SubscribeAllResult {
+  enqueued_count: number;
+  skipped_count: number;
+  enqueued: { slug: string; task_id: string }[];
+  skipped: { slug: string; reason: string }[];
+  hint?: string;
+}
+
+// Drives the bulk drawer's lifecycle: "pending" while the POST is in
+// flight (so the drawer opens immediately and the operator gets visible
+// feedback that the click registered), then either the parsed result or
+// an error string. Without this, Subscribe All only surfaced a toast +
+// silently mutated server state — operators reasonably read that as
+// "did nothing".
+//
+// "result" carries a startedAt ISO timestamp captured AT POST time so
+// the drawer can distinguish "this burner has freshly-enqueued work
+// queued up" from "this burner finished a totally unrelated previous
+// run hours ago and still has stale phase=stopped on it" — without
+// that gate, the drawer would mislabel still-queued rows as Done the
+// moment the page-level poll surfaces the prior state.
+type BulkSubscribeState =
+  | { kind: "pending" }
+  | { kind: "result"; result: SubscribeAllResult; startedAt: string }
+  | { kind: "error"; message: string };
+
 export default function BurnerChannelsPage() {
   // Stale-while-revalidate: paint cached burner list instantly on
   // mount + every navigation. 5 s poll cadence preserved from the
@@ -65,6 +93,12 @@ export default function BurnerChannelsPage() {
   const burners: BurnerChannel[] | null = list?.burners ?? null;
   const catalogSize = list?.catalog_size ?? 0;
   const [drawerSlug, setDrawerSlug] = useState<string | null>(null);
+  // Bulk drawer is independent of the per-slug drawer. When both are
+  // requested at once (e.g. the operator clicks an enqueued row inside
+  // the bulk drawer), the per-slug drawer takes precedence — see the
+  // render order below where {drawerSlug && …} sits after the bulk
+  // drawer in the DOM and inherits the higher z-index.
+  const [bulkState, setBulkState] = useState<BulkSubscribeState | null>(null);
   const error = listError?.message ?? null;
 
   return (
@@ -95,6 +129,18 @@ export default function BurnerChannelsPage() {
                 burners?.filter((b) => b.profile_known && !b.running).length ?? 0
               }
               onAfterAction={refresh}
+              bulkInFlight={bulkState !== null}
+              onBulkSubscribeStart={() => setBulkState({ kind: "pending" })}
+              onBulkSubscribeResult={(result) =>
+                setBulkState({
+                  kind: "result",
+                  result,
+                  startedAt: new Date().toISOString(),
+                })
+              }
+              onBulkSubscribeError={(message) =>
+                setBulkState({ kind: "error", message })
+              }
             />
           </div>
         </div>
@@ -127,6 +173,16 @@ export default function BurnerChannelsPage() {
         )}
       </div>
 
+      {bulkState && (
+        <BulkSubscribeDrawer
+          state={bulkState}
+          burners={burners ?? []}
+          onClose={() => setBulkState(null)}
+          onOpenSlug={(slug) => setDrawerSlug(slug)}
+          onAfterAction={refresh}
+        />
+      )}
+
       {drawerSlug && (
         <EngageDrawer
           slug={drawerSlug}
@@ -141,16 +197,32 @@ export default function BurnerChannelsPage() {
 function BulkActions({
   eligibleCount,
   onAfterAction,
+  bulkInFlight,
+  onBulkSubscribeStart,
+  onBulkSubscribeResult,
+  onBulkSubscribeError,
 }: {
   eligibleCount: number;
   onAfterAction: () => void;
+  bulkInFlight: boolean;
+  onBulkSubscribeStart: () => void;
+  onBulkSubscribeResult: (result: SubscribeAllResult) => void;
+  onBulkSubscribeError: (message: string) => void;
 }) {
   const [busy, setBusy] = useState<"subscribe" | "create" | null>(null);
 
   async function subscribeAll() {
     setBusy("subscribe");
+    // Open the bulk drawer in "pending" state BEFORE the await so the
+    // operator gets immediate visual feedback that the click landed.
+    // Without this, the only signal during the request was the spinner
+    // on the button — easy to miss against a busy page header — and on
+    // a "Nothing to subscribe" outcome the only signal at all was a
+    // toast that auto-dismissed in a few seconds.
+    onBulkSubscribeStart();
     try {
       const r = await burnerApi.subscribeAllBurners();
+      onBulkSubscribeResult(r);
       if (r.enqueued_count > 0) {
         toast.success(
           `Subscribe-only kicked off for ${r.enqueued_count} burner${r.enqueued_count === 1 ? "" : "s"}`,
@@ -167,9 +239,9 @@ function BulkActions({
       }
       onAfterAction();
     } catch (e) {
-      toast.error("Subscribe-all failed", {
-        description: e instanceof Error ? e.message : String(e),
-      });
+      const message = e instanceof Error ? e.message : String(e);
+      onBulkSubscribeError(message);
+      toast.error("Subscribe-all failed", { description: message });
     } finally {
       setBusy(null);
     }
@@ -214,11 +286,26 @@ function BulkActions({
         variant="outline"
         size="sm"
         onClick={subscribeAll}
-        disabled={busy !== null || eligibleCount === 0}
+        // Disabled while:
+        //   - the local subprocess is busy with the POST itself, OR
+        //   - the bulk drawer is already open (prevents the operator
+        //     from impatiently re-firing while tasks are still queued
+        //     but not yet running — the eligibility filter on the
+        //     server only checks `is_running`, not "is queued", so a
+        //     second click WOULD pile on duplicate BURNER_ENGAGE
+        //     tasks for the same slugs).
+        // We INTENTIONALLY no longer gate on `eligibleCount === 0`:
+        // letting the operator click through to the drawer is itself
+        // the explanation ("0 enqueued, 49 skipped (already_running)")
+        // and matches the per-row Subscribe pattern. The previous
+        // disabled-with-tooltip variant was the "did nothing" complaint.
+        disabled={busy !== null || bulkInFlight}
         title={
-          eligibleCount === 0
-            ? "No burners are eligible (already running or missing profile mapping)"
-            : `Subscribe-only across ${eligibleCount} eligible burner${eligibleCount === 1 ? "" : "s"} — each will subscribe to every catalog channel once and exit.`
+          bulkInFlight
+            ? "A bulk subscribe-all is already open — close the drawer to fire a new one."
+            : eligibleCount === 0
+              ? "No burners look eligible right now — click to see why (already running, missing profile mapping, etc.)."
+              : `Subscribe-only across ${eligibleCount} eligible burner${eligibleCount === 1 ? "" : "s"} — each will subscribe to every catalog channel once and exit.`
         }
       >
         {busy === "subscribe" ? (
@@ -493,6 +580,297 @@ function PhaseBadge({ phase }: { phase: BurnerEngagePhase }) {
     <Badge variant="outline" className={cn("font-mono text-[10px] uppercase", t.cls)}>
       {t.label}
     </Badge>
+  );
+}
+
+// Right-side drawer that opens when "Subscribe All" is clicked. Fixes
+// two operator-visibility gaps in the original Subscribe All flow:
+//
+//   1. The button only fired a toast — easy to miss + auto-dismissed —
+//      with no per-burner status. Operators reasonably read that as
+//      "did nothing", especially because the laptop agent leases tasks
+//      one at a time so the first Chrome window can take 30-90 s to
+//      appear after the click.
+//   2. The per-row Subscribe button opens this same right panel; the
+//      page-level Subscribe All didn't, so the visual mental model
+//      (click an action → right panel opens) was inconsistent.
+//
+// The drawer renders three states:
+//   - "pending":  spinner while the POST is in flight (drawer opens
+//                 BEFORE the await so the click feels responsive even
+//                 on a slow Cloud Run hop).
+//   - "result":   summary header + Enqueued list (each row pulls live
+//                 phase from the page's burner list which is already
+//                 polled every 5 s) + Skipped list with reasons.
+//   - "error":    surfaces the failure inline so the operator doesn't
+//                 have to dig into the toast that may already be gone.
+function BulkSubscribeDrawer({
+  state,
+  burners,
+  onClose,
+  onOpenSlug,
+  onAfterAction,
+}: {
+  state: BulkSubscribeState;
+  burners: BurnerChannel[];
+  onClose: () => void;
+  onOpenSlug: (slug: string) => void;
+  onAfterAction: () => void;
+}) {
+  const result = state.kind === "result" ? state.result : null;
+  // Captured at POST time. Used to suppress stale phase data from a
+  // PRIOR engage run on the same burner — without this gate, a burner
+  // whose previous run finished hours ago would render with phase=
+  // "stopped" the moment the page-level poll surfaces it, and the
+  // operator would (rightly) assume the freshly-enqueued task already
+  // wrapped up. The convention: trust live phase only when the state
+  // file's last_action_at is at-or-after when we hit POST, OR when the
+  // burner is currently running (running=true is unambiguous fresh
+  // signal regardless of timestamp).
+  const startedAtMs = state.kind === "result" ? Date.parse(state.startedAt) : null;
+  const isFreshFor = (b: BurnerChannel | undefined) => {
+    if (!b) return false;
+    if (b.running) return true;
+    if (startedAtMs == null) return false;
+    if (!b.last_action_at) return false;
+    const ts = Date.parse(b.last_action_at);
+    return Number.isFinite(ts) && ts >= startedAtMs;
+  };
+
+  // Index burners by slug so each enqueued row can pick up its live
+  // phase / last_action_msg from the page-level poll without minting
+  // its own per-slug poller (49 burners × 2.5 s polls would saturate
+  // the control plane's lease backend).
+  const bySlug = useMemo(() => {
+    const m = new Map<string, BurnerChannel>();
+    for (const b of burners) m.set(b.slug, b);
+    return m;
+  }, [burners]);
+
+  // Aggregate "are any of the enqueued burners actually doing work
+  // right now?" for the summary bar. Counts a burner as "running" if
+  // the page-level list has flagged it as such — this is the same
+  // signal the per-row PhaseBadge renders. "Done" only counts burners
+  // whose terminal-phase signal is FRESH (i.e. arrived after we POSTed)
+  // so a stale "stopped" from yesterday doesn't inflate the Done tile.
+  const liveStats = useMemo(() => {
+    if (!result) return { running: 0, queued: 0, done: 0 };
+    let running = 0;
+    let queued = 0;
+    let done = 0;
+    for (const e of result.enqueued) {
+      const b = bySlug.get(e.slug);
+      if (b?.running) {
+        running++;
+      } else if (isFreshFor(b) && (b?.phase === "stopped" || b?.phase === "failed")) {
+        done++;
+      } else {
+        queued++;
+      }
+    }
+    return { running, queued, done };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result, bySlug, startedAtMs]);
+
+  return (
+    <div className="fixed inset-0 z-40 flex">
+      <button
+        type="button"
+        className="flex-1 bg-background/60 backdrop-blur-sm"
+        aria-label="Close"
+        onClick={onClose}
+      />
+      <aside className="flex h-full w-full max-w-2xl flex-col border-l border-border bg-background">
+        <div className="flex items-center justify-between border-b border-border px-5 py-3">
+          <div className="flex items-center gap-2">
+            <Users className="h-4 w-4 text-foreground/70" />
+            <span className="text-[13px] font-medium tracking-tight">Subscribe All · bulk</span>
+          </div>
+          <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close drawer">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+
+        {state.kind === "pending" && (
+          <div className="flex flex-1 items-center justify-center p-6">
+            <div className="flex flex-col items-center gap-3 text-center">
+              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+              <div className="text-[13px] font-medium tracking-tight">Enqueuing subscribe-only runs…</div>
+              <p className="max-w-sm text-[12px] text-muted-foreground">
+                Posting to the control plane. The laptop agent will lease the tasks
+                next and a Chrome window will pop for each burner in turn.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {state.kind === "error" && (
+          <div className="flex flex-1 items-center justify-center px-6 text-center">
+            <div>
+              <AlertTriangle className="mx-auto h-6 w-6 text-rose-300/80" />
+              <div className="mt-3 text-[13px] font-medium tracking-tight">Subscribe-all failed</div>
+              <p className="mx-auto mt-1.5 max-w-sm text-[12px] text-rose-200/85">{state.message}</p>
+            </div>
+          </div>
+        )}
+
+        {result && (
+          <>
+            <div className="grid grid-cols-4 gap-3 border-b border-border bg-surface px-5 py-4 text-[12px]">
+              <Stat label="Enqueued" value={result.enqueued_count} hint="burners" />
+              <Stat label="Running" value={liveStats.running} hint="now" />
+              <Stat
+                label="Queued"
+                value={liveStats.queued}
+                hint="waiting for agent"
+              />
+              <Stat label="Skipped" value={result.skipped_count} hint="see below" />
+            </div>
+
+            {result.hint && (
+              <div className="border-b border-border bg-amber-500/5 px-5 py-3 text-[12px] text-amber-100/85">
+                {result.hint}
+              </div>
+            )}
+
+            <div className="flex-1 overflow-y-auto">
+              {result.enqueued.length > 0 && (
+                <section>
+                  <h3 className="sticky top-0 border-b border-border bg-surface px-5 py-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                    Enqueued · {result.enqueued.length}
+                  </h3>
+                  <ul>
+                    {result.enqueued.map((e) => {
+                      const b = bySlug.get(e.slug);
+                      const running = Boolean(b?.running);
+                      // Suppress phase badges that pre-date this bulk
+                      // run — see isFreshFor / startedAtMs above for
+                      // why. Falling through to the "queued" badge is
+                      // the correct rendering for a row whose worker
+                      // hasn't been leased by the laptop agent yet.
+                      const showPhase = isFreshFor(b) && b?.phase;
+                      const showLastMsg = isFreshFor(b) && b?.last_action_msg;
+                      return (
+                        <li
+                          key={e.slug}
+                          className="flex items-center justify-between gap-3 border-b border-border/60 px-5 py-2.5 transition-colors hover:bg-surface/60"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => onOpenSlug(e.slug)}
+                            className="flex min-w-0 flex-1 cursor-pointer flex-col items-start text-left"
+                            aria-label={`Open engage panel for ${e.slug}`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-[12px] tracking-tight text-foreground">
+                                {b?.title ?? e.slug}
+                              </span>
+                              {showPhase ? (
+                                <PhaseBadge phase={b!.phase!} />
+                              ) : (
+                                <Badge
+                                  variant="outline"
+                                  className="font-mono text-[9px] uppercase border-border bg-surface-2 text-muted-foreground"
+                                >
+                                  queued
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
+                              <span className="font-mono">{e.slug}</span>
+                              {showLastMsg && (
+                                <>
+                                  <span>·</span>
+                                  <span className="truncate">{b!.last_action_msg}</span>
+                                </>
+                              )}
+                            </div>
+                          </button>
+                          {running && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={async (ev) => {
+                                ev.stopPropagation();
+                                try {
+                                  await burnerApi.stop(e.slug);
+                                  toast.message(`Stop requested for ${e.slug}`);
+                                  onAfterAction();
+                                } catch (err) {
+                                  toast.error("Couldn't stop", {
+                                    description: err instanceof Error ? err.message : String(err),
+                                  });
+                                }
+                              }}
+                            >
+                              <Square className="h-3.5 w-3.5" />
+                              Stop
+                            </Button>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </section>
+              )}
+
+              {result.skipped.length > 0 && (
+                <section>
+                  <h3 className="sticky top-0 border-b border-border bg-surface px-5 py-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                    Skipped · {result.skipped.length}
+                  </h3>
+                  <ul>
+                    {result.skipped.map((s) => {
+                      const b = bySlug.get(s.slug);
+                      return (
+                        <li
+                          key={s.slug}
+                          className="flex items-center justify-between gap-3 border-b border-border/60 px-5 py-2.5"
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-[12px] tracking-tight text-foreground/85">
+                                {b?.title ?? s.slug}
+                              </span>
+                              <Badge
+                                variant="outline"
+                                className="font-mono text-[9px] uppercase border-border bg-surface-2 text-muted-foreground"
+                              >
+                                {s.reason}
+                              </Badge>
+                            </div>
+                            <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
+                              {s.slug}
+                            </div>
+                          </div>
+                          {s.reason === "already_running" && (
+                            <Button variant="ghost" size="sm" onClick={() => onOpenSlug(s.slug)}>
+                              View live
+                            </Button>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </section>
+              )}
+
+              {result.enqueued.length === 0 && result.skipped.length === 0 && (
+                <div className="flex flex-1 items-center justify-center px-6 py-10 text-center">
+                  <div>
+                    <AlertTriangle className="mx-auto h-6 w-6 text-amber-300/70" />
+                    <div className="mt-3 text-[13px] font-medium tracking-tight">No burners affected</div>
+                    <p className="mx-auto mt-1.5 max-w-sm text-[12px] text-muted-foreground">
+                      {result.hint ?? "The control plane returned an empty enqueue and skip list. Check that pipeline/burners.yaml has at least one entry with a google_email mapping."}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </aside>
+    </div>
   );
 }
 
