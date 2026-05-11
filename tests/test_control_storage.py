@@ -345,3 +345,105 @@ class ListUploadRecordsMissingBranchesTest(unittest.TestCase):
                 with patch.object(storage, "download_bytes", side_effect=Exception("network error")):
                     result = list(storage.list_upload_records())
         self.assertEqual(result, [])
+
+
+class SignedUrlTest(unittest.TestCase):
+    """Coverage for the local-key vs IAM-delegated signing branches.
+
+    Pre-2026-05-11 ``signed_url`` only supported local-key signing,
+    which crashes on Cloud Run (compute_engine.Credentials carry an
+    OAuth token but NO private key). Every preview.mp4 request 502'd
+    with ``AttributeError: you need a private key to sign credentials``
+    so the user-visible render-detail page rendered a black <video>
+    tile for every successful Cloud Run render.
+    """
+
+    def test_local_key_signing_used_when_available(self):
+        """SDK-native signing path: blob.generate_signed_url returns
+        a URL → we forward it as-is, no IAM round-trip needed."""
+        blob = MagicMock()
+        blob.generate_signed_url.return_value = "https://signed.example/x"
+
+        with patch.object(storage, "_blob", return_value=blob):
+            url = storage.signed_url("gs://bkt/jobs/j1/short.mp4", ttl_s=600, method="GET")
+
+        self.assertEqual(url, "https://signed.example/x")
+        kwargs = blob.generate_signed_url.call_args.kwargs
+        self.assertEqual(kwargs["version"], "v4")
+        self.assertEqual(kwargs["method"], "GET")
+        # IAM-delegation kwargs must NOT be passed on the local-key
+        # path — those would force a needless IAM round-trip when a
+        # local key is available.
+        self.assertNotIn("service_account_email", kwargs)
+        self.assertNotIn("access_token", kwargs)
+
+    def test_iam_delegation_when_local_signing_unsupported(self):
+        """When generate_signed_url raises the well-known
+        ``AttributeError("you need a private key …")`` (Cloud Run /
+        GCE), we retry through the IAM signBlob path: refresh the
+        token and pass ``service_account_email`` + ``access_token``."""
+        blob = MagicMock()
+        blob.generate_signed_url.side_effect = [
+            AttributeError("you need a private key to sign credentials"),
+            "https://signed.example/iam",
+        ]
+
+        fake_creds = MagicMock()
+        fake_creds.service_account_email = "tts-runner@proj.iam.gserviceaccount.com"
+        fake_creds.token = "ya29.fake-token"
+
+        with patch.object(storage, "_blob", return_value=blob), \
+             patch("google.auth.default", return_value=(fake_creds, "proj")), \
+             patch("google.auth.transport.requests.Request", return_value=MagicMock()):
+            url = storage.signed_url("gs://bkt/jobs/j1/short.mp4", ttl_s=600, method="GET")
+
+        self.assertEqual(url, "https://signed.example/iam")
+        # Two attempts: local-key (raised) then IAM-delegated (returned).
+        self.assertEqual(blob.generate_signed_url.call_count, 2)
+        iam_kwargs = blob.generate_signed_url.call_args_list[1].kwargs
+        self.assertEqual(iam_kwargs["service_account_email"],
+                         "tts-runner@proj.iam.gserviceaccount.com")
+        self.assertEqual(iam_kwargs["access_token"], "ya29.fake-token")
+        self.assertEqual(iam_kwargs["version"], "v4")
+        self.assertEqual(iam_kwargs["method"], "GET")
+        # The fallback must refresh the credentials so the access
+        # token isn't an expired one cached at process start.
+        fake_creds.refresh.assert_called_once()
+
+    def test_unrelated_attribute_error_propagates(self):
+        """Only the ``"private key"`` AttributeError triggers the
+        IAM fallback. Any other AttributeError is a real bug and
+        must surface to the caller — silently swallowing them would
+        hide regressions in the storage layer."""
+        blob = MagicMock()
+        blob.generate_signed_url.side_effect = AttributeError("some other broken thing")
+
+        with patch.object(storage, "_blob", return_value=blob):
+            with self.assertRaises(AttributeError) as ctx:
+                storage.signed_url("gs://bkt/jobs/j1/short.mp4")
+
+        self.assertIn("some other broken thing", str(ctx.exception))
+        # Must NOT have retried — only one local-key attempt.
+        self.assertEqual(blob.generate_signed_url.call_count, 1)
+
+    def test_iam_fallback_errors_when_sa_email_unresolvable(self):
+        """If neither the credentials object nor the metadata server
+        can supply a service-account email, signing has nowhere to
+        delegate to — fail loudly with a clear message instead of
+        crashing inside the SDK."""
+        blob = MagicMock()
+        blob.generate_signed_url.side_effect = AttributeError(
+            "you need a private key to sign credentials"
+        )
+
+        # Simulate raw Credentials with no SA email attribute.
+        fake_creds = MagicMock(spec=[])  # no service_account_email
+        fake_creds.token = "ya29.x"
+
+        with patch.object(storage, "_blob", return_value=blob), \
+             patch("google.auth.default", return_value=(fake_creds, "proj")), \
+             patch("google.auth.transport.requests.Request", return_value=MagicMock()):
+            with self.assertRaises(RuntimeError) as ctx:
+                storage.signed_url("gs://bkt/jobs/j1/short.mp4")
+
+        self.assertIn("service-account email", str(ctx.exception))

@@ -104,11 +104,96 @@ def download_bytes(uri: str) -> bytes:
 
 
 def signed_url(uri: str, *, ttl_s: int = 600, method: str = "GET") -> str:
-    """Browser-usable URL. ttl_s capped at 7 days by GCS."""
-    return _blob(uri).generate_signed_url(
+    """Browser-usable URL. ttl_s capped at 7 days by GCS.
+
+    Two signing paths:
+
+    1. **Local-key signing** — when ADC carries a service-account JSON
+       (laptop dev / CI), the SDK signs the URL on-process. Cheap,
+       no extra round-trips, no extra IAM grants.
+
+    2. **IAM-API delegated signing** — when running on Cloud Run /
+       GKE / GCE, ADC resolves to ``compute_engine.Credentials`` —
+       a token blob, *no private key*. Local signing fails with
+       ``AttributeError: you need a private key to sign credentials``.
+       In that case we delegate to the IAM ``signBlob`` API by
+       passing ``service_account_email`` + ``access_token`` to
+       ``generate_signed_url``; the SDK then transparently calls
+       ``iam.serviceAccounts.signBlob`` on the runtime SA.
+
+       Required IAM grant (one-shot, on the SA itself):
+
+           gcloud iam service-accounts add-iam-policy-binding \\
+             <sa>@<project>.iam.gserviceaccount.com \\
+             --member="serviceAccount:<sa>@<project>.iam.gserviceaccount.com" \\
+             --role="roles/iam.serviceAccountTokenCreator" \\
+             --project=<project>
+
+       Without this, every preview.mp4 request 502s with the
+       "you need a private key" traceback (caught + logged in
+       ``control/routes/render_routes.py``). Pre-2026-05-11 the
+       cloud render-detail page rendered a black <video> tile for
+       every successful Cloud Run render because of this gap.
+    """
+    blob = _blob(uri)
+    expiration = timedelta(seconds=ttl_s)
+
+    try:
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=expiration,
+            method=method,
+        )
+    except AttributeError as e:
+        # The SDK raises AttributeError("you need a private key …")
+        # for token-only credential types — only on this branch do we
+        # spend the extra IAM round-trip. Any other AttributeError is
+        # a real bug, so re-raise.
+        if "private key" not in str(e):
+            raise
+        return _signed_url_via_iam(blob, expiration=expiration, method=method)
+
+
+def _signed_url_via_iam(blob, *, expiration: timedelta, method: str) -> str:
+    """Fallback path: delegate URL signing to the IAM signBlob API.
+
+    Used when the runtime credentials carry only an OAuth token
+    (Cloud Run / GCE / GKE) rather than a private key. The runtime
+    SA must hold ``roles/iam.serviceAccountTokenCreator`` on itself
+    so it can ``iam.signBlob`` on its own behalf — see :func:`signed_url`.
+    """
+    import google.auth  # noqa: PLC0415
+    import google.auth.transport.requests  # noqa: PLC0415
+
+    creds, _project = google.auth.default()
+    sa_email = getattr(creds, "service_account_email", None)
+    if not sa_email or sa_email == "default":
+        # Compute Engine returns "default" as a placeholder until you
+        # query the metadata server explicitly. Resolve it.
+        try:
+            from google.auth import compute_engine  # noqa: PLC0415
+            request = google.auth.transport.requests.Request()
+            sa_email = compute_engine._metadata.get_service_account_info(  # type: ignore[attr-defined]
+                request, service_account="default",
+            )["email"]
+        except Exception:  # noqa: BLE001
+            sa_email = None
+    if not sa_email:
+        raise RuntimeError(
+            "signed_url: cannot determine service-account email for IAM signing. "
+            "On Cloud Run set the runtime service account explicitly."
+        )
+
+    # The SDK needs a fresh access_token to call iam.signBlob.
+    auth_req = google.auth.transport.requests.Request()
+    creds.refresh(auth_req)
+
+    return blob.generate_signed_url(
         version="v4",
-        expiration=timedelta(seconds=ttl_s),
+        expiration=expiration,
         method=method,
+        service_account_email=sa_email,
+        access_token=creds.token,
     )
 
 
