@@ -78,6 +78,34 @@ For every match, verify the destination renders the moved
 component. If the comment is a lie, either fix the destination or
 remove the comment + the orphan.
 
+### Step 5 — After any "replace function" edit, scan for duplicate top-level symbols
+
+The `edit` tool is line-precise: it replaces the matched
+`old_str` and nothing else. When a refactor swaps "the second of
+two adjacent helpers" (e.g. replacing `VariantCard` with a combined
+`function VariantList { ... } function VariantCard { ... }` block),
+the **older** sibling above the matched region survives, silently
+producing a duplicate top-level declaration. TypeScript's compiler
+tolerates module-scope redeclaration (last definition wins) so
+`tsc --noEmit` won't catch it; ESLint also typically doesn't
+flag. Caught only by visual review or this audit.
+
+```bash
+# .ts / .tsx / .js / .jsx
+grep -nE '^function [A-Z][A-Za-z]+\(' web-next/app/app/create/page.tsx \
+  | awk -F'function ' '{print $2}' | awk '{print $1}' | sed 's/(//' \
+  | sort | uniq -c | awk '$1 > 1 {print "DUPLICATE: "$2" ("$1"x)"}'
+
+# Python (adjust the anchor)
+grep -nE '^def [a-z_][a-zA-Z0-9_]*\(' pipeline/<file>.py \
+  | awk -F'def ' '{print $2}' | awk '{print $1}' | sed 's/(//' \
+  | sort | uniq -c | awk '$1 > 1 {print "DUPLICATE: "$2" ("$1"x)"}'
+```
+
+Any non-empty output means a refactor edit created a redeclaration —
+delete the older copy. Run this AFTER every "replace `<Foo>` with
+new implementation" edit on a file with multiple top-level helpers.
+
 ## Today's instance
 
 Comment at `page.tsx:124-127` (added in `dcb6d07`):
@@ -97,9 +125,19 @@ was never written. User went 1 day without a niche picker.
 
 Fixed in commit `689c23d`: built `NicheBubbleRow` that reads
 `nichesApi.list(channel)`, filters by `length_kind`, and renders
-above the Form/Source 2-col grid. Reuses the existing
+inside `CustomizeReviewStep`. Reuses the existing
 `VariantList` + `VariantCard` so the visual language is
 consistent. Deleted the orphan `VariantPicker`.
+
+**2026-05-11 update (`531dd2e`):** the manual `Source` card was
+removed entirely (the auto-generate Topic flow owns
+`source_kind`/`source_ref` now), and the `NicheBubbleRow` was moved
+to render **after** the Form CardShell, not above it. `VariantCard`
+was also converted from a 2-line tile to a `rounded-full` chip pill
+(single-line label, hover-tooltip for description). The current
+order is: Form → Niche (chips) → Topic → Audio → Advanced. See
+[`docs/web_next_create_wizard.md`](./web_next_create_wizard.md) for
+the canonical layout rules and rationale.
 
 ## Auto-invoke this audit when
 

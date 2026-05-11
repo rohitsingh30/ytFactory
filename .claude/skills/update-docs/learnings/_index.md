@@ -430,3 +430,64 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
   skill must auto-invoke. Don't wait for the user. Future audit:
   `grep -nE "from now on|always|never|the rule is" <recent
   conversation>` — every match is a missed trigger candidate.
+
+- 2026-05-11 — **`edit` tool leaves duplicate top-level symbols
+  when a refactor replaces "the second of two adjacent functions".**
+  While converting `VariantCard` to a chip pill in
+  `web-next/app/app/create/page.tsx`, my edit replaced the
+  `VariantCard` body with a combined `function VariantList { ... }
+  function VariantCard { ... }` block — which silently created a
+  DUPLICATE top-level `function VariantList(...)` because the
+  original `VariantList` (above the matched `VariantCard`) was
+  untouched. TypeScript's compiler tolerates redeclaration in
+  module scope (last definition wins) so `tsc --noEmit` passed
+  clean; ESLint also did not flag. Caught by an immediate `view`
+  after the edit and fixed in the same turn (deleted the older
+  flat-grid `VariantList`).
+
+  **Audit recipe** — after any refactor that "replaces a function
+  via edit" inside a file with multiple sibling helpers, run:
+
+  ```bash
+  grep -nE '^function [A-Z][A-Za-z]+\(' web-next/app/app/<file>.tsx \
+    | awk -F'function ' '{print $2}' | awk '{print $1}' | sed 's/(//' \
+    | sort | uniq -c | awk '$1 > 1 {print "DUPLICATE: "$2" ("$1"x)"}'
+  ```
+
+  Any non-empty output means an edit refactor created a redeclaration.
+  Same recipe works for any `.ts` / `.tsx` / `.js` / `.py` (adjust the
+  regex anchor — `^def ` for Python). Add to the wizard-edit checklist
+  in `docs/web_next_wizard_orphan_audit.md` if this fires twice.
+
+- 2026-05-11 — **Frontend commits don't auto-deploy — user has to
+  ask "deployed?".** After landing `bb87749` (Source card removal +
+  flat niche grid) I reported "Done — committed" without running
+  `bash cloud/web-next/deploy.sh`. The user pinged "deployed?" 11
+  minutes later. The agent's mental model conflated `git commit` with
+  "shipped" because the wider repo includes some auto-deploy
+  workflows. For `web-next/`, deploy is always manual (the `.next/`
+  prebuild + Cloud Build + Cloud Run revision swap takes ~3 min and
+  has no GitHub Actions trigger today).
+
+  **Discipline:** when a commit changes any file under `web-next/`
+  AND the user's reported issue is something they'd visually verify
+  on the live site (vs a build/test fix), either:
+  1. Run `bash cloud/web-next/deploy.sh` in the same turn as the
+     commit and report both, OR
+  2. Explicitly state "committed locally; not deployed yet — run
+     `bash cloud/web-next/deploy.sh` to ship" so the user isn't left
+     hard-reloading a stale UI.
+
+  Same rule for `cloud/web-server/` (FastAPI backend) and
+  `cloud/<service>/` images — `git push` without a `bash
+  cloud/<service>/deploy.sh` ships nothing. Audit recipe to find
+  un-deployed FE commits between sessions:
+
+  ```bash
+  git log --since='1 day' --name-only -- web-next/ | head -40
+  gcloud run services describe ytfactory-web-next \
+    --region=asia-southeast1 --format='value(status.latestReadyRevisionName)'
+  # Cross-reference revision creation timestamp against the commit
+  # timestamps — any FE commit older than the latest revision is
+  # un-deployed.
+  ```
