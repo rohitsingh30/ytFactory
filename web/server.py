@@ -3839,6 +3839,41 @@ def _isoformat(epoch: float | None) -> str | None:
     )
 
 
+def _isoformat_value(value: Any) -> str | None:
+    """Normalize a wider set of timestamp inputs to the same ``…Z`` shape
+    ``_isoformat`` produces for epoch floats.
+
+    Handles:
+    - ``datetime`` (naive → assumed UTC; aware → converted to UTC)
+    - epoch ``int`` / ``float``
+    - already-formatted ``str`` (passed through; ``+00:00`` → ``Z``)
+    - ``None`` / falsy → ``None``
+
+    Used by the control-plane fall-through where ``created_at`` /
+    ``updated_at`` arrive as ``datetime`` objects (``control.core.jobs``
+    writes ``_utcnow()``) — passing those through ``_isoformat`` would
+    raise because it does ``float(epoch)``.
+    """
+    if value is None or value == "":
+        return None
+    import datetime as _dt
+    if isinstance(value, _dt.datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=_dt.timezone.utc)
+        else:
+            value = value.astimezone(_dt.timezone.utc)
+        return value.isoformat().replace("+00:00", "Z")
+    if isinstance(value, (int, float)):
+        return _isoformat(value)
+    if isinstance(value, str):
+        return value.replace("+00:00", "Z")
+    # Best-effort for unfamiliar types (e.g. google.cloud.firestore Timestamp).
+    try:
+        return _isoformat_value(value.isoformat())  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _channel_topic_from_cmd(cmd: list[str] | None) -> tuple[str | None, str | None]:
     """Best-effort extraction of channel + topic from the renderer cmd.
 
@@ -3961,6 +3996,92 @@ def _script_job_to_snapshot(rec: dict) -> dict:
         "thumb_uri": None,
     }
 
+
+# Status names from `control.core.jobs` are already in the JobView
+# vocabulary; no remap needed for `status`. We mirror them into the legacy
+# `state` slot so old UIs that still consume that key get a sensible value.
+_CONTROL_STATUS_TO_LEGACY_STATE = {
+    "pending": "queued",
+    "rendering": "running",
+    "uploading": "running",
+    "researching": "running",
+    "done": "done",
+    "failed": "failed",
+    "cancelled": "cancelled",
+}
+
+
+def _control_job_to_snapshot(job_id: str, doc: dict) -> dict:
+    """Adapt a ``control.core.jobs`` Firestore doc to the same JSON shape
+    ``/api/jobs/{id}`` returns for legacy ``JOBS`` and ``SCRIPT_JOBS``.
+
+    The control plane (``/api/render`` + chat → confirm) is the third
+    submission origin for the same endpoint — without this adapter, jobs
+    born there 404 because ``job_snapshot`` only checks the two legacy
+    stores. See tests/test_jobs_id_fallthrough.py for the contract.
+
+    Mirrors the ``preview_url`` gating from
+    ``control.routes.render_routes._doc_to_view`` (only set once a render
+    is past ``rendering`` / ``researching``, so the UI's ``<video>``
+    doesn't bind to a URL that's guaranteed to 404).
+    """
+    status = doc.get("status") or "pending"
+    legacy_state = _CONTROL_STATUS_TO_LEGACY_STATE.get(status, status)
+
+    short_uri = doc.get("short_uri")
+    thumb_uri = doc.get("thumb_uri")
+    preview_url: str | None = None
+    if status in ("done", "uploading"):
+        # Served by control.routes.render_routes.preview_mp4 — that route
+        # handles both sim:// (file response) and gs:// (302 to a signed
+        # URL), so a single URL covers every backend.
+        preview_url = f"/api/jobs/{job_id}/preview.mp4"
+
+    proposal = doc.get("proposal") or {}
+
+    return {
+        # ---- Legacy job_snapshot keys (web/static UIs) ----
+        "job_id": job_id,
+        "niche": doc.get("channel"),
+        "state": legacy_state,
+        "slug": doc.get("topic"),
+        "error": doc.get("error"),
+        "stage_started": {},
+        "stage_done": {},
+        "events": [],
+        "beat_prompts": [],
+        "mp4_url": preview_url,
+        "profile": {},
+        "seeds": [],
+        "seed_idx": 0,
+        "seed_total": 1,
+        "mp4s": [],
+        # ---- New JobView keys (web-next UI) ----
+        "status": status,
+        "stage": doc.get("stage"),
+        "channel": doc.get("channel"),
+        "topic": doc.get("topic"),
+        "short_uri": short_uri,
+        "preview_url": preview_url,
+        "created_at": _isoformat_value(doc.get("created_at")),
+        "updated_at": _isoformat_value(doc.get("updated_at")),
+        "log_tail": doc.get("log_tail"),
+        "proposal": proposal,
+        "timeline": doc.get("timeline") or [],
+        "critique": doc.get("critique"),
+        "youtube_url": doc.get("youtube_url"),
+        "thumb_uri": thumb_uri,
+    }
+
+
+# Job IDs born in `control.core.jobs._enqueue_render_job` are full
+# `uuid.uuid4().hex` (32 lowercase hex chars). Legacy IDs from
+# `web/server.py` and `script_jobs_routes.py` are always `…hex[:10]`
+# (10 chars). We use this shape to decide whether a control-plane lookup
+# failure should surface as 502 (the ID *should* have resolved but the
+# backing store hiccuped) vs the unconditional 404 we keep for shorter,
+# unknown IDs.
+_CONTROL_JOB_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 # ---- Server-side critique (P2 — 2026-05-09) ------------------------------
@@ -4438,6 +4559,29 @@ async def job_snapshot(job_id: str) -> dict:
         rec = SCRIPT_JOBS.get(job_id)
         if rec:
             return _script_job_to_snapshot(rec)
+        # Final fall through: control-plane jobs (`/api/render` and chat
+        # → confirm enqueue here). Without this tier, a chat-confirmed
+        # render is unreachable via GET /api/jobs/{id} even though the
+        # control router would have found it — the @app.get registration
+        # at this line shadows the control router for the same path.
+        # Wrap in try/except so a Firestore outage doesn't turn legacy
+        # 404s into 500s; only surface 502 for IDs that LOOK control-
+        # plane (32-hex), so a typo'd legacy ID still 404s cleanly.
+        try:
+            from control.core import jobs as control_jobs  # noqa: PLC0415
+            doc = control_jobs.get_job(job_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "control-plane job lookup failed for %s", job_id, exc_info=True
+            )
+            if _CONTROL_JOB_ID_RE.fullmatch(job_id):
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"control-plane job lookup failed: {e}",
+                )
+            doc = None
+        if doc:
+            return _control_job_to_snapshot(job_id, doc)
         raise HTTPException(404, "job not found")
     return {
         "job_id": job.job_id,

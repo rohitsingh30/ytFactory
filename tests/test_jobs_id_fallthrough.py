@@ -281,5 +281,227 @@ class ShortMp4FallthroughTests(unittest.TestCase):
         self.assertEqual(r.status_code, 404)
 
 
+class ControlPlaneFallthroughTests(unittest.TestCase):
+    """Third fall-through tier: ``control.core.jobs`` (Firestore).
+
+    /api/render and chat → confirm both call
+    ``control.core.jobs._enqueue_render_job``, which mints a 32-char
+    ``uuid.uuid4().hex`` job_id and writes to a separate jobs collection.
+    Pre-fix, ``GET /api/jobs/{32hex}`` 404'd because ``job_snapshot`` only
+    checked ``JOBS`` and ``SCRIPT_JOBS`` — this is the user-reported
+    failure mode (job_id ``2f049cd27b0446558a4bb641dfd498a2``).
+
+    These tests exercise the full route via TestClient so the routing
+    precedence (``@app.get`` shadowing ``include_router``) stays pinned.
+    """
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+        from control.core import jobs as control_jobs
+
+        self.client = TestClient(server.app)
+        self.control_jobs = control_jobs
+        # Force a fresh in-memory backend per test so cases don't bleed.
+        control_jobs.reset_jobs()
+        self.created: list[str] = []
+
+    def tearDown(self):
+        self.control_jobs.reset_jobs()
+        for jid in self.created:
+            server.JOBS.pop(jid, None)
+            server.SCRIPT_JOBS.pop(jid, None)
+
+    def _put_control_job(self, **fields):
+        """Insert a job into the control-plane store via the public API."""
+        import uuid
+        jid = uuid.uuid4().hex  # 32 lowercase hex — the real format.
+        proposal = fields.pop("proposal", {
+            "channel": "mystoriesanimated",
+            "format": "animated",
+            "topic": "demo topic",
+            "source_kind": "chat",
+            "length_s": 55,
+        })
+        self.control_jobs.create_job(
+            jid,
+            channel=fields.pop("channel", "mystoriesanimated"),
+            topic=fields.pop("topic", "demo topic"),
+            proposal=proposal,
+        )
+        if fields:
+            self.control_jobs.get_jobs().update(jid, **fields)
+        self.created.append(jid)
+        return jid
+
+    # ---- 200 / shape -------------------------------------------------------
+
+    def test_control_plane_pending_resolves(self):
+        """The user's reported failure — pre-fix this 404'd."""
+        jid = self._put_control_job()
+        r = self.client.get(f"/api/jobs/{jid}")
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["job_id"], jid)
+        # New JobView keys the web-next UI binds to.
+        self.assertEqual(body["status"], "pending")
+        self.assertEqual(body["channel"], "mystoriesanimated")
+        self.assertEqual(body["topic"], "demo topic")
+        # Legacy job_snapshot keys (same response — old UIs keep working).
+        self.assertEqual(body["niche"], "mystoriesanimated")
+        self.assertEqual(body["slug"], "demo topic")
+        self.assertEqual(body["state"], "queued")
+        # Stage was set by create_job().
+        self.assertEqual(body["stage"], "queued")
+        # Proposal carries the ShortProposal payload as-is (NOT
+        # synthesized as `from_script`).
+        self.assertEqual(body["proposal"]["channel"], "mystoriesanimated")
+        self.assertEqual(body["proposal"]["format"], "animated")
+
+    def test_status_rendering_no_preview_url_yet(self):
+        """Mirror control._doc_to_view: only set preview_url once the
+        render is past `done` / `uploading` — UI shouldn't bind a
+        <video> to a URL guaranteed to 404."""
+        jid = self._put_control_job()
+        self.control_jobs.mark_stage(jid, status="rendering", stage="images")
+        body = self.client.get(f"/api/jobs/{jid}").json()
+        self.assertEqual(body["status"], "rendering")
+        self.assertEqual(body["state"], "running")
+        self.assertEqual(body["stage"], "images")
+        self.assertIsNone(body["preview_url"])
+
+    def test_status_done_sets_preview_url_and_short_uri(self):
+        jid = self._put_control_job()
+        self.control_jobs.mark_done(
+            jid,
+            short_uri="gs://ytfactory-renders/jobs/x/out.mp4",
+            youtube_url="https://youtu.be/abcd",
+        )
+        body = self.client.get(f"/api/jobs/{jid}").json()
+        self.assertEqual(body["status"], "done")
+        self.assertEqual(body["state"], "done")
+        self.assertEqual(body["preview_url"], f"/api/jobs/{jid}/preview.mp4")
+        self.assertEqual(body["short_uri"], "gs://ytfactory-renders/jobs/x/out.mp4")
+        self.assertEqual(body["youtube_url"], "https://youtu.be/abcd")
+
+    def test_status_failed_carries_error(self):
+        jid = self._put_control_job()
+        self.control_jobs.mark_failed(jid, stage="render", error="boom")
+        body = self.client.get(f"/api/jobs/{jid}").json()
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["state"], "failed")
+        self.assertEqual(body["error"], "boom")
+        self.assertIsNone(body["preview_url"])
+
+    def test_iso_timestamps_from_datetimes(self):
+        """control.core.jobs writes ``datetime`` objects (not epoch
+        floats) — _isoformat_value must normalize them to the same
+        ``…Z`` shape the legacy SCRIPT_JOBS path returns."""
+        jid = self._put_control_job()
+        body = self.client.get(f"/api/jobs/{jid}").json()
+        self.assertIsNotNone(body["created_at"])
+        self.assertTrue(body["created_at"].endswith("Z"), body["created_at"])
+        self.assertTrue(body["updated_at"].endswith("Z"))
+
+    def test_timeline_passed_through(self):
+        """The render-detail page renders body.timeline directly."""
+        jid = self._put_control_job()
+        timeline = [
+            {"stage": "rewrite", "status": "done", "ts": 1700000000},
+            {"stage": "images", "status": "running"},
+        ]
+        self.control_jobs.mark_stage(
+            jid, status="rendering", stage="images", timeline=timeline
+        )
+        body = self.client.get(f"/api/jobs/{jid}").json()
+        self.assertEqual(body["timeline"], timeline)
+
+    # ---- 404 / 502 ---------------------------------------------------------
+
+    def test_unknown_short_id_still_404s(self):
+        """A typo'd legacy-shape ID (not 32-hex) keeps the cheap 404."""
+        r = self.client.get("/api/jobs/short_typo")
+        self.assertEqual(r.status_code, 404)
+
+    def test_unknown_control_shape_id_404s(self):
+        """An unknown but 32-hex ID also 404s when Firestore's healthy
+        — only Firestore *failures* surface as 502."""
+        import uuid
+        r = self.client.get(f"/api/jobs/{uuid.uuid4().hex}")
+        self.assertEqual(r.status_code, 404)
+
+    def test_control_lookup_failure_502s_for_control_shape_id(self):
+        """If the backing store throws (e.g. Firestore outage), surface
+        502 for IDs that LOOK control-plane so the operator can tell
+        the difference between "unknown job" and "lookup broken"."""
+        import uuid
+
+        class _BoomJobs:
+            def get(self, _job_id):
+                raise RuntimeError("firestore unavailable")
+
+            # The other methods aren't exercised by this code path.
+
+        original = self.control_jobs._BACKEND
+        self.control_jobs._BACKEND = _BoomJobs()
+        try:
+            r = self.client.get(f"/api/jobs/{uuid.uuid4().hex}")
+            self.assertEqual(r.status_code, 502)
+            self.assertIn("control-plane job lookup failed", r.text)
+        finally:
+            self.control_jobs._BACKEND = original
+
+    def test_control_lookup_failure_keeps_404_for_legacy_shape_id(self):
+        """A failing Firestore must NOT turn legacy 404s (typo'd short
+        IDs) into 500s — the existing contract for those IDs is 404."""
+
+        class _BoomJobs:
+            def get(self, _job_id):
+                raise RuntimeError("firestore unavailable")
+
+        original = self.control_jobs._BACKEND
+        self.control_jobs._BACKEND = _BoomJobs()
+        try:
+            r = self.client.get("/api/jobs/short_typo")
+            self.assertEqual(r.status_code, 404)
+        finally:
+            self.control_jobs._BACKEND = original
+
+
+class IsoformatValueTests(unittest.TestCase):
+    """Pin the timestamp-normalizer contract for the new fall-through."""
+
+    def test_none_passes_through(self):
+        self.assertIsNone(server._isoformat_value(None))
+
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(server._isoformat_value(""))
+
+    def test_naive_datetime_assumed_utc(self):
+        import datetime as dt
+        out = server._isoformat_value(dt.datetime(2026, 1, 2, 3, 4, 5))
+        self.assertEqual(out, "2026-01-02T03:04:05Z")
+
+    def test_aware_datetime_converted_to_utc(self):
+        import datetime as dt
+        ny = dt.timezone(dt.timedelta(hours=-5))
+        out = server._isoformat_value(dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=ny))
+        self.assertEqual(out, "2026-01-02T08:04:05Z")
+
+    def test_epoch_int_normalized(self):
+        out = server._isoformat_value(1700000000)
+        self.assertTrue(out.endswith("Z"))
+        # Sanity: same shape the legacy _isoformat returns for the same input.
+        self.assertEqual(out, server._isoformat(1700000000))
+
+    def test_epoch_float_normalized(self):
+        self.assertTrue(server._isoformat_value(1700000000.5).endswith("Z"))
+
+    def test_string_with_offset_swapped_to_z(self):
+        self.assertEqual(
+            server._isoformat_value("2026-01-02T03:04:05+00:00"),
+            "2026-01-02T03:04:05Z",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
