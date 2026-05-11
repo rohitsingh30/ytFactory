@@ -58,7 +58,11 @@ strictly opt-in for legacy callers (no API breaks).
 
 ### Network-layer SWR
 
-- **`web-next/public/sw.js`** — versioned cache (`ytfactory-api-v1`).
+- **`web-next/public/sw.js`** — versioned cache (`ytfactory-api-v2`,
+  bumped from v1 on 2026-05-11 to drop the cache populated by a
+  broken handler — see
+  [`docs/service_worker_handler_scope.md`](./service_worker_handler_scope.md)
+  for the rule on why every SW change must bump the version).
   Intercepts only same-origin `/api/*` GETs; skips
   `/api/auth/*`, `/api/admin/*`, `/api/oauth/*`, `/api/jobs/*`,
   `/api/critiques/*` (correctness > speed for those). Stale-while-

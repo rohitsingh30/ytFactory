@@ -22,7 +22,7 @@
 // the path /sw.js. It is loaded as a SW, NOT as a Next.js module —
 // it cannot import from anywhere. Keep it self-contained.
 
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const CACHE_NAME = `ytfactory-api-${CACHE_VERSION}`;
 const MAX_ENTRIES = 200;
 const MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
@@ -74,10 +74,10 @@ self.addEventListener("fetch", (event) => {
   // Skip explicit no-store hints (callers that mark themselves uncachable).
   if (req.headers.get("Cache-Control") === "no-store") return;
 
-  event.respondWith(staleWhileRevalidate(req));
+  event.respondWith(staleWhileRevalidate(event, req));
 });
 
-async function staleWhileRevalidate(req) {
+async function staleWhileRevalidate(event, req) {
   const cache = await caches.open(CACHE_NAME);
   const cached = await cache.match(req);
 
