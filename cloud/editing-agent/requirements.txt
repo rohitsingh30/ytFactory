@@ -1,0 +1,58 @@
+# Cloud Run editing-agent — runtime deps (CPU-only, no torch).
+#
+# Per docs/cloud_service_dep_playbook.md (mandatory pre-build checklist):
+#   1. Read upstream requirements (scenedetect, fastapi, google-cloud-*):
+#      all pip-installable, no system extras beyond ffmpeg (handled in
+#      the Dockerfile).
+#   2. Grep imports — only the seven pinned below are ACTUALLY imported by
+#      server.py + pipeline/editing/.
+#   3. No transitive conflicts with our cross-cutting pins (we don't pin
+#      torch / numpy here; scenedetect[opencv] pulls a CPU-friendly
+#      numpy itself).
+#   4-5. Local pip dry-run verified clean (2026-05-11) against:
+#        --python-version 3.12
+#        --platform manylinux_2_17_x86_64 / manylinux2014_x86_64
+#        --only-binary :all:
+#        Mirrors the python:3.12-slim cloud target.
+#   6. Build via cloud/editing-agent/deploy.sh (uses Cloud Build).
+#
+# REJECTED: auto-editor (any version). Its package metadata declares
+# `Requires-Dist: pyav==13.1.*` but PyAV is published on PyPI as `av`,
+# not `pyav` — pip's resolver doesn't bridge the alias and the install
+# fails. Since the LLM planner emits explicit trim filters per shot,
+# we don't need auto-editor's silence-cut heuristic. PySceneDetect
+# alone covers the scene-boundary half (assemble-clips mode).
+
+# --- web ---
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+requests==2.32.3
+
+# --- google-cloud (GCS for input/output staging, IAM auth) ---
+google-cloud-storage==2.18.2
+google-auth==2.35.0
+
+# --- scene detection (assemble-clips mode) ---
+scenedetect[opencv]==0.6.4
+
+# --- image probing for assemble-stills planner manifest ---
+Pillow==10.4.0
+
+# ---- OTEL_DEPS (managed by cloud/_shared/append_otel_deps.sh)
+# OTel dependencies appended to every cloud/*/requirements.txt by
+# cloud/_shared/append_otel_deps.sh.
+#
+# Pinned to >=1.27 / 0.48b0 to match the laptop venv (see top-level
+# requirements.txt). The cloud-monitoring exporter is alpha upstream
+# (1.12.0a0) — installs cleanly with --pre but downgrade-pin allowed.
+#
+# Required by cloud/_shared/otel_init.py.
+opentelemetry-api>=1.27
+opentelemetry-sdk>=1.27
+opentelemetry-exporter-gcp-trace>=1.7.0
+opentelemetry-exporter-gcp-monitoring>=1.7.0a0
+opentelemetry-instrumentation-fastapi>=0.48b0
+opentelemetry-instrumentation-requests>=0.48b0
+opentelemetry-instrumentation-httpx>=0.48b0
+opentelemetry-resourcedetector-gcp>=1.7.0a0
+opentelemetry-propagator-gcp>=1.7.0
