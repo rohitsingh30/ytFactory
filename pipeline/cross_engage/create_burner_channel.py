@@ -98,6 +98,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import random
 import re
@@ -154,6 +155,90 @@ def random_burner_name(*, length: int | None = None) -> str:
     if length is None:
         length = random.randint(6, 12)
     return "".join(random.choices(string.ascii_lowercase, k=length))
+
+
+# Wordlists for realistic_burner_name(). All entries are lowercase
+# alphanumeric only (no spaces, no hyphens, no underscores) so the
+# resulting display-name is also a valid slug AND a valid YouTube
+# handle. Curated to avoid loaded / brand / political terms — generic
+# nature/everyday words that look like a real person's screen name.
+_FIRST_NAMES = (
+    "mike", "leo", "sam", "alex", "ryan", "kai", "ben", "luke", "ethan",
+    "noah", "owen", "max", "jack", "finn", "theo", "miles", "felix", "dean",
+    "ivan", "milo", "drew", "cole", "reed", "rhys", "zane", "wade", "kyle",
+    "neil", "evan", "scott", "tyler", "blake", "jude", "jonah", "graham",
+    "henry", "asher", "elias", "rohan", "arjun", "vikram", "ravi", "neel",
+    "anya", "leah", "maya", "iris", "ruby", "ada", "elle", "chloe", "nora",
+    "ivy", "june", "lena", "mira", "naomi", "tess", "zoe", "freya", "stella",
+)
+_NOUNS = (
+    "draft", "harbor", "rider", "canyon", "drifter", "lantern", "nomad",
+    "ember", "ridge", "valley", "summit", "comet", "meadow", "haven",
+    "voyage", "compass", "echo", "current", "trail", "atlas", "horizon",
+    "bayou", "delta", "marsh", "creek", "dune", "fjord", "glade", "knoll",
+    "moor", "oasis", "shore", "tundra", "arc", "spire", "arrow", "raven",
+    "falcon", "owl", "wolf", "fox", "lynx", "otter", "heron", "swift",
+    "robin", "finch", "wren", "lark", "hawk", "studio", "lab", "press",
+)
+_ADJECTIVES = (
+    "blue", "red", "fast", "slow", "calm", "bright", "dark", "warm", "cool",
+    "wild", "tall", "swift", "quiet", "bold", "lone", "gold", "silver",
+    "north", "south", "east", "west", "high", "low", "open", "still", "raw",
+    "sharp", "soft", "deep", "wide", "long", "short", "fresh", "clear",
+    "amber", "indigo", "olive", "rust", "smoke", "ivory", "ash", "moss",
+)
+_NOUNS_SHORT = (
+    "pine", "owl", "fox", "bay", "moon", "sun", "lake", "hill", "river",
+    "wave", "cloud", "stone", "wood", "field", "mist", "frost", "rain",
+    "wind", "snow", "leaf", "rock", "ice", "sand", "fire", "salt", "trail",
+    "path", "road", "ridge", "peak", "cove", "reef", "vale", "glen",
+    "coast", "creek", "harbor", "haven", "isle", "marsh", "sky",
+)
+
+
+def realistic_burner_name(*, max_len: int = 18, attempts: int = 12) -> str:
+    """Generate a realistic-looking screen-name (NO spaces, lowercase
+    alphanumeric only, ≤ ``max_len`` chars).
+
+    Picks one of four styles uniformly, retrying on length overflow
+    or empty result. Falls back to ``random_burner_name`` if every
+    attempt overshoots — guarantees a non-empty return.
+
+    Styles:
+      1. firstname + noun           e.g. ``mikedraft``, ``leoharbor``
+      2. single noun                e.g. ``canyon``, ``drifter``
+      3. firstname + 2-3 digits     e.g. ``mike42``, ``leo07``
+      4. adjective + short noun     e.g. ``bluepine``, ``fastcoast``
+
+    Why these constraints:
+      * Display name **= handle = slug** in our flow; YouTube handles
+        require lowercase alphanumeric (handles do allow ``.`` and
+        ``_`` and ``-`` but our slug regex strips them, so easier to
+        avoid).
+      * No spaces — user explicit requirement.
+      * Length cap 18 — YouTube handles cap at 30, but anything past
+        ~18 starts looking spammy / random-string-ish.
+      * Length floor 4 — handles must be ≥ 3 chars; we add a buffer
+        for collision-suggestion suffixes.
+    """
+    for _ in range(attempts):
+        style = random.choice((1, 2, 3, 4))
+        if style == 1:
+            name = random.choice(_FIRST_NAMES) + random.choice(_NOUNS)
+        elif style == 2:
+            name = random.choice(_NOUNS)
+        elif style == 3:
+            name = random.choice(_FIRST_NAMES) + str(random.randint(0, 99)).zfill(2)
+        else:
+            name = random.choice(_ADJECTIVES) + random.choice(_NOUNS_SHORT)
+        # Defensive: belt-and-suspenders strip — wordlists are already
+        # clean but a future edit might slip a hyphen / space in.
+        name = re.sub(r"[^a-z0-9]+", "", name.lower())
+        if 4 <= len(name) <= max_len:
+            return name
+    # All attempts overshot or undershot; fall back to the original
+    # gibberish generator so we always return SOMETHING usable.
+    return random_burner_name()
 
 
 def derive_slug(display_name: str) -> str:
@@ -272,12 +357,31 @@ def find_running_chrome_debug(profile: str, user_data_dir: str | None = None) ->
 
 
 def _cdp_alive(port: int, *, timeout: float = 2.0) -> bool:
-    """Probe ``http://127.0.0.1:<port>/json/version`` to confirm CDP is live."""
+    """Probe ``http://127.0.0.1:<port>/json/version`` to confirm CDP is live
+    AND served by Chrome (not by some other CDP-speaking host).
+
+    Filters out two classes of laptop false positive:
+      1. Non-CDP localhost listeners (HTTP 200 check).
+      2. node.js / Electron app debuggers (VS Code, Slack, …) that
+         ALSO answer ``/json/version`` because V8's inspector
+         implements the same endpoint. They list as
+         ``"Browser": "node.js/vXX"``; Chrome lists as
+         ``"Browser": "Chrome/XX"``. Without this guard, Playwright's
+         ``connect_over_cdp`` would attach to a node.js V8 inspector
+         and fail with ``Invalid URL: undefined`` on the next /json
+         enumeration call. Validated bug 2026-05-11.
+    """
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=timeout) as r:
-            return r.status == 200
-    except (urllib.error.URLError, OSError, TimeoutError):
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version", timeout=timeout,
+        ) as r:
+            if r.status != 200:
+                return False
+            payload = json.loads(r.read())
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
         return False
+    browser = str(payload.get("Browser", ""))
+    return browser.startswith("Chrome/") or browser.startswith("Edge/")
 
 
 # ── pre-flight ─────────────────────────────────────────────────────────────
@@ -720,11 +824,39 @@ def _drive_oauth_consent(page, work_dir: pathlib.Path, *, host_email: str, max_s
                     time.sleep(0.5)
             except Exception as e:
                 print(f"  ⚠ Select-all tick failed (may already be checked): {e}", flush=True)
-            cont = page.get_by_role("button", name=re.compile(r"^continue$", re.I)).first
-            if cont.count():
-                print("  → click Continue (consent summary)", flush=True)
-                cont.click(timeout=8000)
-                clicked = True
+            # Google's consent-summary "grant" button has been a moving
+            # target — historically Continue, sometimes Allow, sometimes
+            # rendered as a div with role=button and an aria-label rather
+            # than text content. Try every shape we've seen, in order of
+            # how recently we last saw each one win.
+            consent_selectors = [
+                # Role + accessible-name (Continue / Allow). Most stable
+                # when present.
+                lambda: page.get_by_role("button", name=re.compile(r"^continue$", re.I)).first,
+                lambda: page.get_by_role("button", name=re.compile(r"^allow$", re.I)).first,
+                # 2026-05-11: consentsummary now ships an "Update" CTA on
+                # the new "additional permissions" UI variant. Same
+                # role=button, different label.
+                lambda: page.get_by_role("button", name=re.compile(r"^update$", re.I)).first,
+                # Last-resort: text-content match on the visible button —
+                # picks up div-styled "buttons" that don't carry role.
+                lambda: page.locator("button:has-text('Continue'), [role='button']:has-text('Continue')").first,
+                lambda: page.locator("button:has-text('Allow'), [role='button']:has-text('Allow')").first,
+                # Older variant: `submit` input with value="Continue".
+                lambda: page.locator("input[type='submit'][value='Continue']").first,
+            ]
+            for build in consent_selectors:
+                try:
+                    cand = build()
+                    if cand.count() and cand.is_visible(timeout=1500):
+                        label = (cand.get_attribute("aria-label") or
+                                 cand.text_content() or "consent CTA").strip()[:40]
+                        print(f"  → click consent CTA: {label!r}", flush=True)
+                        cand.click(timeout=8000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
 
         # 3. Generic Continue / Allow / Accept fallback (warning, recovery)
         if not clicked:
@@ -778,8 +910,79 @@ def oauth_in_attached_chrome(slug: str, page, work_dir: pathlib.Path, *, host_em
     """
     print(f"\n[create-burner] starting OAuth for slug={slug!r} in attached Chrome…", flush=True)
 
+    # Park the attached Chrome on about:blank BEFORE the subprocess
+    # binds localhost:8089. Critical when --keep-open or a previous
+    # OAuth attempt left a stale ``localhost:8089/?state=OLD&code=OLD``
+    # tab open: the moment the new subprocess opens port 8089, Chrome's
+    # network layer auto-refetches the stale URL → server gets the OLD
+    # state → ``MismatchingStateError: CSRF Warning! State not equal in
+    # request and response`` → subprocess exits rc=1 → token never
+    # written. Hard to debug because the auto-driver also reports
+    # "stuck on consent summary" misleadingly. Validated 2026-05-11:
+    # the second create_burner run on the same Chrome failed exactly
+    # this way; clearing the page makes the subprocess see only the
+    # new state.
+    #
+    # We do this in TWO places:
+    #   (1) Park OUR page on about:blank (no-op if it's already blank).
+    #   (2) Walk EVERY page in EVERY context and either close or
+    #       redirect any tab still on a localhost:8089/* URL — those
+    #       are leftovers from a prior OAuth attempt and chrome will
+    #       refetch them when our new server binds the port.
+    try:
+        page.goto("about:blank", wait_until="commit", timeout=8000)
+        time.sleep(0.5)
+    except Exception as e:
+        print(f"  ⚠ couldn't park page on about:blank ({type(e).__name__}: {e})", flush=True)
+    try:
+        browser = page.context.browser
+        ctxs = browser.contexts if browser is not None else [page.context]
+        cleared = 0
+        for ctx in ctxs:
+            for stale in list(ctx.pages):
+                if stale is page:
+                    continue
+                try:
+                    surl = stale.url or ""
+                except Exception:
+                    surl = ""
+                if "localhost:8089" in surl or "127.0.0.1:8089" in surl:
+                    try:
+                        # Navigate to about:blank first so closing
+                        # doesn't leave a queued reload, then close.
+                        stale.goto("about:blank", wait_until="commit", timeout=4000)
+                    except Exception:
+                        pass
+                    try:
+                        stale.close(run_before_unload=False)
+                        cleared += 1
+                    except Exception:
+                        pass
+        if cleared:
+            print(f"  → closed {cleared} stale localhost:8089 tab(s) "
+                  "to prevent CSRF state mismatch", flush=True)
+    except Exception as e:
+        print(f"  ⚠ stale-tab sweep failed ({type(e).__name__}: {e}) — proceeding", flush=True)
+
     auth_log = work_dir / "oauth.log"
     auth_log_fh = auth_log.open("w")
+    # IMPORTANT: pass YTFACTORY_OAUTH_OPEN_BROWSER=0 so the subprocess'
+    # ``flow.run_local_server`` does NOT also open the auth URL in the
+    # system default browser. We're going to ``page.goto(auth_url)`` it
+    # in the attached Chrome ourselves a moment later — without this
+    # gate, macOS LaunchServices opens the URL in whatever's pinned as
+    # default (Edge, Safari, Firefox, …) and the user gets a confusing
+    # split flow where the consent screen is in one browser and our
+    # auto-driver is poking at a separate Chrome window. Validated
+    # 2026-05-11: the dashboard's bulk-create flow opened OAuth in
+    # Edge for a user whose default wasn't Chrome.
+    sub_env = os.environ.copy()
+    sub_env["YTFACTORY_OAUTH_OPEN_BROWSER"] = "0"
+    # Belt-and-suspenders: also clear YTFACTORY_CHROME_PROFILE_DIR so
+    # the subprocess can't accidentally take the "pre-launch a Chrome
+    # against this udd" path either — we already HAVE the right Chrome
+    # attached and pointed at the URL.
+    sub_env.pop("YTFACTORY_CHROME_PROFILE_DIR", None)
     proc = subprocess.Popen(
         [
             ".venv/bin/python", "-u",
@@ -791,6 +994,7 @@ def oauth_in_attached_chrome(slug: str, page, work_dir: pathlib.Path, *, host_em
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=sub_env,
     )
     auth_url: str | None = None
     deadline = time.time() + 60.0  # only wait for URL line
@@ -987,7 +1191,12 @@ def register_burner(slug: str, *, channel_id: str, title: str, email: str) -> No
 # ── entry point ───────────────────────────────────────────────────────────
 
 def run(args: argparse.Namespace) -> dict:
-    display_name = args.display_name or random_burner_name()
+    if args.display_name:
+        display_name = args.display_name
+    elif args.name_style == "realistic":
+        display_name = realistic_burner_name()
+    else:
+        display_name = random_burner_name()
     slug = args.slug or derive_slug(display_name)
     if not slug:
         raise SystemExit(
@@ -1045,6 +1254,10 @@ def run(args: argparse.Namespace) -> dict:
 
     from playwright.sync_api import sync_playwright
     result: dict = {"profile": profile, "email": args.email, "slug": slug, "errors": []}
+    # Track whether OAuth ran INSIDE the lifecycle below — used by the
+    # post-loop reporting so we don't double-fire it.
+    oauth_ok: bool | None = None
+    oauth_ran_inline = False
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
@@ -1067,20 +1280,74 @@ def run(args: argparse.Namespace) -> dict:
                 _shoot(page, work_dir, "99-error")
                 _dump_snapshot(page, work_dir, "99-error")
                 raise
-            finally:
-                if attached:
-                    # We didn't launch this Chrome — leave it alone.
-                    print(f"[create-burner] leaving attached Chrome running (we didn't launch it).", flush=True)
-                    proc = None
-                elif args.keep_open:
-                    # Chrome was launched with start_new_session=True
-                    # (per launch_chrome_for) so it's already in its own
-                    # POSIX session and survives our exit. Stash the CDP
-                    # port so a follow-up run with --attach <port> can
-                    # re-grab the same session.
-                    print(f"[create-burner] --keep-open: detached Chrome PID {proc.pid} CDP=ws://127.0.0.1:{port}", flush=True)
-                    (work_dir / "cdp_port.txt").write_text(str(port))
-                    proc = None
+
+            # ── Inline OAuth (Chrome is still alive here) ──────────────
+            # Run OAuth INSIDE the same playwright session as the wizard
+            # so it works even on --force-fresh without --keep-open
+            # (which is exactly what the dashboard's bulk-create flow
+            # uses to avoid stale-localhost:8089 tab pollution between
+            # tasks). Pre-2026-05-11 OAuth was deferred to a SECOND
+            # ``with sync_playwright()`` block AFTER the chrome teardown
+            # finally; that path required ``attached or args.keep_open``
+            # because otherwise the chrome was already dead by then.
+            # Bulk-create can't use either of those: attaching to the
+            # user's interactive Chrome accumulates stale OAuth tabs
+            # across runs (CSRF state mismatch on task N), and
+            # --keep-open leaves the udd locked so task N+1's
+            # bridge_cookies fails. The fix: run OAuth here while we
+            # still own the chrome.
+            if (result.get("channel_id") and not args.no_oauth
+                    and not args.dry_run):
+                # Register first so the burner is discoverable even if
+                # OAuth fails halfway (we can re-OAuth manually later).
+                if not args.no_register:
+                    register_burner(
+                        slug,
+                        channel_id=result["channel_id"],
+                        title=display_name,
+                        email=args.email,
+                    )
+                    print(
+                        f"[create-burner] registered in "
+                        f"{CHANNEL_IDS_PATH.name} + {PROFILE_MAP_PATH.name}",
+                        flush=True,
+                    )
+                oauth_ran_inline = True
+                page2 = ctx.new_page()
+                page2.set_default_timeout(15000)
+                try:
+                    oauth_ok = oauth_in_attached_chrome(
+                        slug, page2, work_dir, host_email=args.email,
+                    )
+                    result["oauth_complete"] = bool(oauth_ok)
+                except Exception as e:
+                    print(
+                        f"[create-burner] ⚠ OAuth failed: "
+                        f"{type(e).__name__}: {e}",
+                        flush=True,
+                    )
+                    result["oauth_complete"] = False
+                    oauth_ok = False
+                finally:
+                    try:
+                        page2.close()
+                    except Exception:
+                        pass
+
+            # ── Chrome teardown bookkeeping (post-OAuth) ───────────────
+            if attached:
+                # We didn't launch this Chrome — leave it alone.
+                print(f"[create-burner] leaving attached Chrome running (we didn't launch it).", flush=True)
+                proc = None
+            elif args.keep_open:
+                # Chrome was launched with start_new_session=True
+                # (per launch_chrome_for) so it's already in its own
+                # POSIX session and survives our exit. Stash the CDP
+                # port so a follow-up run with --attach <port> can
+                # re-grab the same session.
+                print(f"[create-burner] --keep-open: detached Chrome PID {proc.pid} CDP=ws://127.0.0.1:{port}", flush=True)
+                (work_dir / "cdp_port.txt").write_text(str(port))
+                proc = None
     finally:
         if proc is not None:
             time.sleep(1.0)
@@ -1095,7 +1362,10 @@ def run(args: argparse.Namespace) -> dict:
     summary_path.write_text(json.dumps(result, indent=2))
     print(f"[create-burner] result:  {summary_path}", flush=True)
 
-    if result.get("channel_id") and not args.no_register:
+    # Register if not already done inline (covers the OAuth-skipped
+    # path: --no-oauth, --dry-run, no channel_id).
+    if (result.get("channel_id") and not args.no_register
+            and not oauth_ran_inline):
         register_burner(
             slug,
             channel_id=result["channel_id"],
@@ -1103,20 +1373,19 @@ def run(args: argparse.Namespace) -> dict:
             email=args.email,
         )
         print(f"[create-burner] registered in {CHANNEL_IDS_PATH.name} + {PROFILE_MAP_PATH.name}", flush=True)
-    elif result.get("channel_id"):
+    elif result.get("channel_id") and args.no_register:
         print("[create-burner] --no-register: skipped channel_ids.json + profile_map.json updates.")
 
-    # ── OAuth in the same attached Chrome ───────────────────────────────
-    # Default ON: the user wanted "complete sign in for Studio API as
-    # well so that you complete the sign in as well". Only fires if the
-    # channel was actually created AND the attached Chrome is still alive.
-    oauth_ok: bool | None = None
-    if result.get("channel_id") and not args.no_oauth:
+    # ── Legacy post-teardown OAuth path ─────────────────────────────────
+    # Only fires when the inline OAuth above DIDN'T run AND we still
+    # have a Chrome to talk to (attached / --keep-open). Kept for the
+    # case where someone passes --keep-open and wants the OAuth to
+    # happen against the still-alive chrome window.
+    if (result.get("channel_id") and not args.no_oauth
+            and not oauth_ran_inline):
         if attached or args.keep_open:
             try:
                 from playwright.sync_api import sync_playwright as _sp
-                # Re-attach a fresh Playwright session — the previous
-                # ``with sync_playwright()`` block has closed by now.
                 with _sp() as pw2:
                     browser2 = pw2.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
                     ctx2 = browser2.contexts[0]
@@ -1160,6 +1429,16 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--display-name", default=None, help="Channel display name as shown on YouTube (≤50 chars). Random no-space name auto-generated when omitted (matches existing burner aesthetic).")
+    ap.add_argument(
+        "--name-style", default="random", choices=("random", "realistic"),
+        help=(
+            "Name generator when --display-name is omitted. "
+            "'random' (default): gibberish lowercase letters matching the "
+            "existing burner aesthetic. 'realistic': real-sounding screen "
+            "names like mikedraft / canyon / leo07 / bluepine — used by "
+            "the dashboard's bulk-create button."
+        ),
+    )
     ap.add_argument("--slug", default=None, help="Local identifier (lowercase alphanumeric). Derived from --display-name if omitted.")
     ap.add_argument("--handle", default=None, help="Initial @handle to try (no leading @). Defaults to slug. YouTube will suggest an alt if taken.")
     ap.add_argument("--email", default=DEFAULT_EMAIL, help=f"Google account that hosts the new brand-account channel (default: {DEFAULT_EMAIL}).")

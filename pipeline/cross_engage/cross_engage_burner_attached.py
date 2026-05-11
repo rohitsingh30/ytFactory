@@ -207,23 +207,206 @@ def resolve_burner(slug: str | None) -> dict:
 
 # ── account switching in attached Chrome ──────────────────────────────────
 
-def _open_avatar_menu(page) -> None:
-    avatar = page.locator("button#avatar-btn, button[aria-label*='Account menu' i]").first
-    avatar.wait_for(state="visible", timeout=10000)
-    avatar.click(timeout=5000)
-    time.sleep(1.0)
+# YouTube has shipped at least three avatar-button DOM shapes in the past 18
+# months. Pre-2025 polymer markup was ``button#avatar-btn``; the
+# 2025 redesign moved to a ``yt-icon-button`` wrapper with the
+# Account-menu aria-label; the late-2025 lit refresh added a
+# ``tp-yt-paper-icon-button`` wrapper. We try them all in priority
+# order and accept whichever surfaces first.
+_AVATAR_SELECTORS = (
+    "button#avatar-btn",
+    "tp-yt-paper-icon-button#avatar-btn",
+    "yt-icon-button#avatar-btn",
+    "ytd-topbar-menu-button-renderer button",
+    "button[aria-label*='Account menu' i]",
+    "button[aria-label*='Google Account' i]",
+    "#avatar-btn",
+)
+
+# Consent / cookie modals YouTube occasionally injects that hide the
+# masthead. Dismiss before searching for the avatar so it isn't
+# clobbered by the overlay.
+_CONSENT_DISMISS_SELECTORS = (
+    "button:has-text('Accept all')",
+    "button:has-text('I agree')",
+    "button:has-text('Reject all')",
+    "tp-yt-paper-button:has-text('Accept all')",
+    "ytd-button-renderer:has-text('Accept all')",
+)
+
+
+def _dismiss_consent(page) -> None:
+    """Best-effort: click YouTube's consent banner if present so it
+    doesn't cover the masthead. Never raises — absence of the banner
+    is the common case."""
+    for sel in _CONSENT_DISMISS_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=500):
+                loc.click(timeout=2000)
+                time.sleep(0.4)
+                return
+        except Exception:
+            continue
+
+
+def _open_avatar_menu(page, *, work_dir: pathlib.Path | None = None) -> None:
+    """Open the YouTube top-right avatar menu.
+
+    Robust against the three DOM shapes YouTube has shipped recently
+    (see ``_AVATAR_SELECTORS``) and against the consent banner that
+    sometimes covers the masthead. Strategy:
+
+      1. Wait for the masthead container to render. Without this gate,
+         the page can be ``domcontentloaded`` but the polymer header
+         hasn't hydrated yet — every avatar selector below races and
+         times out for no reason. Validated bug 2026-05-10.
+      2. Dismiss any consent modal that's covering the header.
+      3. Walk every known avatar selector with a short per-selector
+         timeout; first hit wins. The combined timeout (~25s) is
+         comfortably longer than the worst-case YouTube hydration on a
+         loaded laptop.
+      4. On total failure save a debug screenshot to
+         ``<work_dir>/avatar-not-found.png`` so the next pass through
+         these logs has something to look at.
+    """
+    # Step 1 — wait for the topbar shell. ytd-masthead is the polymer
+    # element that wraps the entire header; it surfaces well before
+    # the avatar button is wired up.
+    try:
+        page.locator("ytd-masthead, #masthead-container").first.wait_for(
+            state="visible", timeout=15000,
+        )
+    except Exception:
+        pass  # fall through — selectors below will time out cleanly
+
+    # Step 2 — clear any consent overlay.
+    _dismiss_consent(page)
+
+    # Step 3 — try each selector in priority order with a short timeout.
+    last_err: Exception | None = None
+    for sel in _AVATAR_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            loc.wait_for(state="visible", timeout=3500)
+            loc.scroll_into_view_if_needed(timeout=2000)
+            loc.click(timeout=4000)
+            time.sleep(1.0)
+            return
+        except Exception as e:
+            last_err = e
+            continue
+
+    # Step 4 — total failure. Save a screenshot for the next debug pass
+    # and re-raise the most recent timeout so the worker's
+    # ``brand-switch crashed`` message preserves the proximate cause.
+    if work_dir is not None:
+        try:
+            page.screenshot(path=str(work_dir / "avatar-not-found.png"))
+        except Exception:
+            pass
+    raise RuntimeError(
+        "avatar menu not visible after all selector attempts: "
+        f"tried {len(_AVATAR_SELECTORS)} selectors over ~25s; "
+        f"last error: {last_err!r}"
+    )
+
+
+_CHANNEL_SWITCHER_URL = "https://www.youtube.com/channel_switcher"
+
+
+def _try_channel_switcher(page, work_dir: pathlib.Path, *, burner: dict) -> bool:
+    """Direct-link path: navigate to YouTube's channel-switcher page
+    and click the burner's row. Returns True if a row was clicked
+    (caller still verifies via ``_read_active_uc``); False if the row
+    couldn't be found and the caller should fall back to the avatar
+    dance.
+
+    YouTube exposes ``/channel_switcher`` as the canonical "pick a
+    brand identity" page. It lists every brand on the signed-in Google
+    account with each row anchored to ``href=/channel/UC...``. Using
+    this URL skips the masthead → avatar → "Switch account" →
+    submenu chain entirely — three layers of polymer that YouTube
+    keeps reshuffling and that fail under load.
+
+    Errors are caught and logged; we never raise from here so the
+    caller can fall through to the legacy path on a bad day.
+    """
+    target_uc = burner["channel_id"]
+    target_text = burner["title"]
+    try:
+        page.goto(
+            _CHANNEL_SWITCHER_URL,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+        time.sleep(2.0)
+
+        # Primary match: anchor whose href encodes the target UC.
+        # Most stable signal — the title text varies (brand renames,
+        # truncation), the UC doesn't.
+        link = page.locator(f"a[href*='/channel/{target_uc}']").first
+        if link.count() and link.is_visible(timeout=4000):
+            link.click(timeout=5000)
+        else:
+            # Fallback: row matched by visible title text. Wraps the
+            # legacy ``ytd-account-item-renderer`` selector since the
+            # switcher page sometimes ships the same component.
+            for sel in (
+                f"ytd-account-item-renderer:has-text({json.dumps(target_text)})",
+                f"a:has-text({json.dumps(target_text)})",
+                f"div[role='button']:has-text({json.dumps(target_text)})",
+            ):
+                row = page.locator(sel).first
+                if row.count() and row.is_visible(timeout=2500):
+                    row.click(timeout=5000)
+                    break
+            else:
+                page.screenshot(path=str(work_dir / "10-switcher-no-row.png"))
+                print(
+                    f"  ! channel_switcher page loaded but no row matched "
+                    f"UC={target_uc!r} or title={target_text!r}; falling back",
+                    flush=True,
+                )
+                return False
+
+        print(f"  → clicked '{target_text}' on channel_switcher", flush=True)
+        time.sleep(4.0)
+        try:
+            page.wait_for_load_state("networkidle", timeout=12000)
+        except Exception:
+            pass
+        return True
+    except Exception as e:  # noqa: BLE001
+        try:
+            page.screenshot(path=str(work_dir / "10-switcher-error.png"))
+        except Exception:
+            pass
+        print(f"  ! channel_switcher path raised {e!r}; falling back", flush=True)
+        return False
 
 
 def switch_to_burner_brand(page, work_dir: pathlib.Path, *, burner: dict) -> bool:
-    """Click avatar → "Switch account" → row matching the burner.
+    """Switch the signed-in YouTube context to ``burner``'s brand account.
 
-    Idempotent: probes which channel is currently active first via
-    ``studio.youtube.com/`` redirect (it lands on
-    ``studio.youtube.com/channel/<active_UC>``). If that's already the
-    burner, short-circuits.
+    Strategy (newest → oldest):
 
-    Returns True if the burner is now (or was already) the active
-    YouTube context.
+      1. Probe the currently-active brand UC via ``_read_active_uc``.
+         If we're already on it, short-circuit.
+      2. Try the **direct channel-switcher URL** (``/channel_switcher``)
+         which lists every brand on this Google account. One page goto
+         + one click — no masthead/avatar/submenu chain. This is the
+         most reliable path and skips the entire fragile dropdown that
+         was failing under load (avatar selector timing out at 10s with
+         a desktop full of windows).
+      3. Fall back to the legacy avatar → "Switch account" → submenu
+         dance if the switcher page fails (returned False or threw).
+         Kept as a safety net because YouTube occasionally A/B-tests
+         the URL.
+
+    Returns True if the burner is the active YouTube context after the
+    function returns; False if the switch failed (the caller logs
+    ``brand-switch failed`` and refuses to engage on the wrong identity).
     """
     target_uc = burner["channel_id"]
     ctx = page.context
@@ -298,15 +481,20 @@ def switch_to_burner_brand(page, work_dir: pathlib.Path, *, burner: dict) -> boo
         return True
     print(f"  → active is {active_uc!r}; need to switch to {target_uc!r}", flush=True)
 
-    active_uc = _read_active_uc()
-    if active_uc == target_uc:
-        print(f"  → already active as burner {burner['slug']!r} ({target_uc})", flush=True)
-        return True
-    print(f"  → active is {active_uc!r}; need to switch to {target_uc!r}", flush=True)
+    # ── Step 2: direct channel-switcher URL (preferred path) ──────────
+    if _try_channel_switcher(page, work_dir, burner=burner):
+        active_uc = _read_active_uc()
+        if active_uc == target_uc:
+            print(f"  ✓ switched to {burner['slug']} ({target_uc}) via channel_switcher",
+                  flush=True)
+            return True
+        print(f"  ! channel_switcher click registered but verify still shows "
+              f"{active_uc!r}; trying avatar dropdown fallback", flush=True)
 
+    # ── Step 3: legacy avatar-dropdown dance (fallback) ───────────────
     page.goto("https://www.youtube.com/", wait_until="domcontentloaded", timeout=30000)
     time.sleep(2.0)
-    _open_avatar_menu(page)
+    _open_avatar_menu(page, work_dir=work_dir)
     page.screenshot(path=str(work_dir / "10-avatar-menu.png"))
 
     switch = page.locator("text=Switch account").first
@@ -350,7 +538,8 @@ def switch_to_burner_brand(page, work_dir: pathlib.Path, *, burner: dict) -> boo
         page.screenshot(path=str(work_dir / "12-switch-failed.png"))
         print(f"  ⚠ switch verification failed; studio shows {active_uc!r}", flush=True)
         return False
-    print(f"  ✓ switched to {burner['slug']} ({target_uc})", flush=True)
+    print(f"  ✓ switched to {burner['slug']} ({target_uc}) via avatar dropdown",
+          flush=True)
     return True
 
 

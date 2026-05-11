@@ -347,6 +347,15 @@ server still validates it — the UI just filters it out of the
 DropdownMenu items via
 `ENGAGE_MODES.filter((m) => m !== "subscribe_only").map(...)`.
 
+> **Drawer-row interaction (2026-05-11):** Subscribe, every
+> Cross-engage option, View live, Last run, **Stop**, AND clicking
+> the row body all open the right-rail engage drawer via the
+> parent's `onOpen()` callback. See
+> [`docs/web_next_clickable_row_pattern.md`](web_next_clickable_row_pattern.md)
+> for the rule + the HTML gotcha (`<div role="button">` not
+> `<button>` because the row body has a nested `<a>` to the YouTube
+> channel).
+
 The mode is selected in three layers — make sure each stays in lock-step:
 
 1. **UI** ([`web-next/app/app/burner-channels/page.tsx`](../web-next/app/app/burner-channels/page.tsx) +

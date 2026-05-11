@@ -48,6 +48,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from pipeline import observability as _obs
+
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -74,6 +76,67 @@ _GCS_CACHE_TTL_S = 2.0
 _GCS_CLIENT = None  # lazy-init; module-global to amortise the auth
 _GCS_STATE_CACHE: dict[str, tuple[float, dict | None]] = {}
 _GCS_STOP_CACHE: dict[str, tuple[float, bool]] = {}
+
+
+# ---------------------------------------------------------------------------
+# Control-plane HTTP fallback for GCS operations (added 2026-05-11)
+# ---------------------------------------------------------------------------
+# When the worker runs as a laptop subprocess spawned by the agent, GCS
+# direct access requires Application Default Credentials. ADC tokens
+# expire and force interactive ``gcloud auth application-default
+# login`` re-auth, which silently breaks every GCS call from the
+# worker even though the rest of the agent → control-plane chain
+# (which uses long-lived identity tokens) keeps working. Solution:
+# every GCS call here tries direct first, then falls back to the
+# control plane's M2M-authed endpoints (``/agent/burner_*``) which
+# perform the GCS op server-side using its stable Cloud Run service
+# account. Effects: dashboard ``phase`` / ``last_action_at`` updates
+# during a cloud-launched run; the Stop button reaches the laptop
+# worker through the cloud sentinel; the agent never has to ship its
+# ID token to a separate process.
+#
+# Env contract — set by ``pipeline.laptop_agent._exec_burner_engage``:
+#   YTFACTORY_CONTROL_URL    cloud control-plane base URL
+#   YTFACTORY_CONTROL_TOKEN  identity token (gcloud-issued, ~1h TTL).
+#                            A burner run is well under 1h so a
+#                            snapshot at spawn is fine.
+#
+# When EITHER env var is missing (direct-CLI invocation; laptop dev
+# without cloud), the helpers no-op and the original GCS-direct path
+# is the only one tried.
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+
+_CONTROL_URL = (os.environ.get("YTFACTORY_CONTROL_URL", "").rstrip("/")
+                or None)
+_CONTROL_TOKEN = os.environ.get("YTFACTORY_CONTROL_TOKEN") or None
+
+
+def _control_call(method: str, path: str, *,
+                  body: dict | None = None,
+                  timeout: float = 10) -> dict | None:
+    """Hit the cloud control plane. Returns None when not configured.
+
+    Raises on HTTP / transport failure so callers can decide to log
+    and continue (we never want a flaky network to crash the worker).
+    """
+    if not _CONTROL_URL or not _CONTROL_TOKEN:
+        return None
+    url = _CONTROL_URL + path
+    headers = {"Authorization": f"Bearer {_CONTROL_TOKEN}"}
+    data = None
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
 
 
 def _state_bucket() -> str | None:
@@ -108,14 +171,22 @@ def _gcs_stop_blob_name(slug: str) -> str:
 
 
 def _push_state_gcs(slug: str, payload: dict) -> None:
-    """Best-effort upload of the JSON state to GCS. Never raises."""
+    """Best-effort upload of the JSON state to GCS. Never raises.
+
+    Tries direct GCS first (laptop with valid ADC, or cloud SA); on
+    failure (typically expired ADC on a laptop subprocess), falls
+    through to the control-plane HTTP path which writes the same blob
+    server-side using the cloud SA. See module-level "Control-plane
+    HTTP fallback" comment for why.
+    """
     bucket_name = _state_bucket()
     if not bucket_name:
         return
+    gcs_err: Exception | None = None
     try:
         cli = _gcs_client()
         if cli is None:
-            return
+            raise RuntimeError("no GCS client (extras not installed)")
         bucket = cli.bucket(bucket_name)
         blob = bucket.blob(_gcs_state_blob_name(slug))
         blob.upload_from_string(
@@ -124,8 +195,23 @@ def _push_state_gcs(slug: str, payload: dict) -> None:
         )
         # Invalidate the cache so the next read returns the fresh data.
         _GCS_STATE_CACHE.pop(slug, None)
+        return
     except Exception as e:  # noqa: BLE001
-        logger.warning("burner_engage[%s]: GCS state push failed: %s", slug, e)
+        gcs_err = e
+
+    try:
+        if _control_call(
+            "PUT", f"/agent/burner_state/{slug}",
+            body=payload, timeout=10,
+        ) is None:
+            raise RuntimeError("control-plane fallback not configured")
+        _GCS_STATE_CACHE.pop(slug, None)
+        return
+    except Exception as ctrl_err:  # noqa: BLE001
+        logger.warning(
+            "burner_engage[%s]: GCS state push failed (gcs=%s; control=%s)",
+            slug, gcs_err, ctrl_err,
+        )
 
 
 def _read_state_gcs(slug: str) -> dict | None:
@@ -243,7 +329,12 @@ def _write_stop_sentinel_gcs(slug: str) -> bool:
 
 def _read_stop_sentinel_gcs(slug: str) -> bool:
     """Cheap (cached) check for the GCS stop sentinel. Used by the
-    laptop worker each tick — must not be expensive."""
+    laptop worker each tick — must not be expensive.
+
+    Tries direct GCS first; on failure, falls through to the
+    control-plane endpoint. Result is cached for ``_GCS_CACHE_TTL_S``
+    so the watch-loop doesn't fan out an HTTP call every tick.
+    """
     bucket_name = _state_bucket()
     if not bucket_name:
         return False
@@ -251,17 +342,34 @@ def _read_stop_sentinel_gcs(slug: str) -> bool:
     cached = _GCS_STOP_CACHE.get(slug)
     if cached and cached[0] > now:
         return cached[1]
+    gcs_err: Exception | None = None
+    present: bool | None = None
     try:
         cli = _gcs_client()
         if cli is None:
-            _GCS_STOP_CACHE[slug] = (now + _GCS_CACHE_TTL_S, False)
-            return False
+            raise RuntimeError("no GCS client (extras not installed)")
         bucket = cli.bucket(bucket_name)
         blob = bucket.blob(_gcs_stop_blob_name(slug))
         present = bool(blob.exists())
     except Exception as e:  # noqa: BLE001
-        logger.warning("burner_engage[%s]: GCS stop sentinel check failed: %s", slug, e)
-        present = False
+        gcs_err = e
+
+    if present is None:
+        try:
+            resp = _control_call(
+                "GET", f"/agent/burner_stop/{slug}", timeout=5,
+            )
+            if resp is None:
+                raise RuntimeError("control-plane fallback not configured")
+            present = bool(resp.get("stop"))
+        except Exception as ctrl_err:  # noqa: BLE001
+            logger.warning(
+                "burner_engage[%s]: GCS stop sentinel check failed "
+                "(gcs=%s; control=%s)",
+                slug, gcs_err, ctrl_err,
+            )
+            present = False
+
     _GCS_STOP_CACHE[slug] = (now + _GCS_CACHE_TTL_S, present)
     return present
 
@@ -270,21 +378,42 @@ def clear_stop_sentinel(slug: str) -> None:
     """Delete the GCS stop sentinel (if any). Called by the cloud
     POST endpoint right before enqueueing a fresh BURNER_ENGAGE task —
     otherwise a stale sentinel from a previous run would make the new
-    worker self-terminate on its first tick."""
+    worker self-terminate on its first tick.
+
+    Tries direct GCS first; on failure (typically expired ADC on a
+    laptop subprocess), falls through to the control-plane endpoint
+    which performs the same delete server-side using the cloud SA.
+    """
     bucket_name = _state_bucket()
     if not bucket_name:
         return
+    gcs_err: Exception | None = None
     try:
         cli = _gcs_client()
         if cli is None:
-            return
+            raise RuntimeError("no GCS client (extras not installed)")
         bucket = cli.bucket(bucket_name)
         blob = bucket.blob(_gcs_stop_blob_name(slug))
         if blob.exists():
             blob.delete()
         _GCS_STOP_CACHE.pop(slug, None)
+        return
     except Exception as e:  # noqa: BLE001
-        logger.warning("burner_engage[%s]: GCS stop sentinel clear failed: %s", slug, e)
+        gcs_err = e
+
+    try:
+        if _control_call(
+            "DELETE", f"/agent/burner_stop/{slug}", timeout=5,
+        ) is None:
+            raise RuntimeError("control-plane fallback not configured")
+        _GCS_STOP_CACHE.pop(slug, None)
+        return
+    except Exception as ctrl_err:  # noqa: BLE001
+        logger.warning(
+            "burner_engage[%s]: GCS stop sentinel clear failed "
+            "(gcs=%s; control=%s)",
+            slug, gcs_err, ctrl_err,
+        )
 
 
 def _secret_value(name: str) -> Path:
@@ -889,7 +1018,15 @@ def _try_comment(pg, vs: VideoState, state: EngageState) -> bool:
     return True
 
 
-def run(slug: str, *, headless: bool = False, mode: str = DEFAULT_MODE) -> int:
+@_obs.traced("cross_engage.burner_engage.run", category="cron",
+             capture=["slug", "headless", "mode"])
+def run(
+    slug: str,
+    *,
+    headless: bool = False,
+    mode: str = DEFAULT_MODE,
+    catalog_file: str | Path | None = None,
+) -> int:
     """Run the burner-engage worker for a slug. Blocks until stopped.
 
     ``mode`` selects the engagement intensity (one of ``ALL_MODES``):
@@ -901,6 +1038,19 @@ def run(slug: str, *, headless: bool = False, mode: str = DEFAULT_MODE) -> int:
     * ``MODE_COMPLETE`` — like + sub + watch loop + LLM-generated
       comments on a random 30% subset (capped at
       ``MAX_COMMENTS_PER_RUN``).
+
+    ``catalog_file`` (optional, post 2026-05-11): path to a JSON file
+    containing the cross-engagement catalog as a list of dicts with the
+    same keys as ``CatalogEntry`` (``video_id``, ``channel``,
+    ``channel_label``, ``slug``, ``title``, ``url``, ``uploaded_at``).
+    When provided, the worker uses this catalog directly and SKIPS
+    ``list_catalog()`` entirely — i.e. no GCS read, no ADC token
+    requirement on the laptop. The laptop agent ships this file from
+    the cloud control plane (where the catalog is read with the stable
+    Cloud Run service-account creds, not the laptop's user-OAuth ADC
+    that periodically forces re-auth). Falls back to ``list_catalog()``
+    when the file is missing/unparseable so direct-CLI invocation
+    keeps working unchanged.
     """
     if mode not in ALL_MODES:
         print(
@@ -977,13 +1127,86 @@ def run(slug: str, *, headless: bool = False, mode: str = DEFAULT_MODE) -> int:
     clear_stop_sentinel(slug)
 
     # Build the catalog — frozen at run start so deletions/additions
-    # mid-run don't surprise us
-    from pipeline.utils.catalog import list_catalog
+    # mid-run don't surprise us. Prefer the agent-supplied
+    # ``--catalog-file`` (cloud control plane already has the catalog
+    # in its SA-backed cache) so the laptop never needs ADC for this
+    # workflow; fall back to ``list_catalog()`` for direct-CLI
+    # invocation that doesn't have a file handy.
+    from pipeline.utils.catalog import CatalogEntry, list_catalog
 
-    catalog = list_catalog()
+    catalog: list[CatalogEntry] | None = None
+    catalog_source = "list_catalog()"
+    if catalog_file is not None:
+        cf_path = Path(catalog_file)
+        try:
+            data = json.loads(cf_path.read_text())
+            if not isinstance(data, list):
+                raise ValueError(f"expected list, got {type(data).__name__}")
+            # Tolerant of extra/missing keys: build CatalogEntry with
+            # `.get` so a future schema bump on the producer side
+            # doesn't crash older workers.
+            catalog = [
+                CatalogEntry(
+                    video_id=row["video_id"],
+                    channel=row["channel"],
+                    channel_label=row.get("channel_label", row["channel"]),
+                    slug=row.get("slug", row["video_id"]),
+                    title=row.get("title", ""),
+                    url=row.get("url") or f"https://youtube.com/watch?v={row['video_id']}",
+                    uploaded_at=row.get("uploaded_at", ""),
+                )
+                for row in data
+            ]
+            catalog_source = f"catalog_file={cf_path}"
+            print(
+                f"[burner:{slug}] loaded {len(catalog)} catalog rows "
+                f"from {cf_path}",
+                file=sys.stderr,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"[burner:{slug}] WARN: failed to load --catalog-file "
+                f"{cf_path}: {e}; falling back to list_catalog()",
+                file=sys.stderr,
+            )
+            catalog = None
+
+    if catalog is None:
+        catalog = list_catalog()
+
     if not catalog:
-        print("error: catalog empty (no shipped videos to engage with).", file=sys.stderr)
+        print(
+            "error: catalog empty (no shipped videos to engage with). "
+            f"Source: {catalog_source}. If running on the laptop "
+            "without --catalog-file, this most often means "
+            "Application Default Credentials expired and GCS reads "
+            "401'd silently — re-trigger from the dashboard so the "
+            "laptop agent ships the catalog in --catalog-file (no "
+            "ADC needed), or run `gcloud auth application-default "
+            "login`.",
+            file=sys.stderr,
+        )
         return 2
+
+    # subscribe_only: dedupe to ONE video per source channel. The
+    # Subscribe button is per-channel, so visiting 8 cosmosdecoded
+    # videos triggers the same single Subscribe action — opening all
+    # 58 catalog tabs is pure waste (saturates Chrome with 58 Shorts
+    # auto-loops, slows the brand-switch flow that has to coexist
+    # with them, and runs ~5× longer than it needs to). Modes that
+    # need per-video work (Like / Watch / Comment) keep the full
+    # catalog. Picks the FIRST video per channel from the catalog
+    # (which is sorted newest-first by upload date, so we engage on
+    # each channel's freshest content).
+    if mode == MODE_SUBSCRIBE_ONLY:
+        seen: set[str] = set()
+        deduped = []
+        for e in catalog:
+            if e.channel in seen:
+                continue
+            seen.add(e.channel)
+            deduped.append(e)
+        catalog = deduped
 
     state = EngageState(
         slug=slug,
@@ -1026,44 +1249,74 @@ def run(slug: str, *, headless: bool = False, mode: str = DEFAULT_MODE) -> int:
 
     _bump_action(state, f"initializing (mode={mode}, catalog={len(state.videos)} videos)")
 
-    # Pre-check: if real Chrome is running we SKIP the cookie bridge
-    # (SQLite locks would corrupt the copy). Chrome-Debug coexists fine
-    # — different --user-data-dir, different process group. Worker uses
-    # whatever cookies Chrome-Debug already has.
-    chrome_pids = _real_chrome_is_running()
-    if chrome_pids:
-        _bump_action(
-            state,
-            f"real Chrome is running (PIDs: {chrome_pids}); "
-            f"skipping cookie bridge — using existing Chrome-Debug cookies",
-        )
-
-    # Bridge cookies real Chrome → Chrome-Debug for this profile, idempotent.
-    # Skip when real Chrome is up (SQLite-lock corruption risk).
-    if not chrome_pids:
-        _bump_action(state, f"bridging cookies for {profile_dir}…")
-        try:
-            bridge_cookies(profile_dir)
-        except Exception as e:  # noqa: BLE001
-            state.phase = "failed"
-            _bump_action(state, f"cookie bridge failed: {e}")
-            return 1
-
-    # Launch Chrome-Debug with this profile + remote-debugging-port=0,
-    # parse the CDP port from stderr.
+    # ── Chrome attach-or-launch decision ─────────────────────────────
+    # Check FIRST whether a Chrome-Debug instance is already running on
+    # this profile. If yes, we'll attach instead of spawning — and
+    # we MUST skip the cookie bridge (the running Chrome's cookies are
+    # live; bridging would overwrite them with the on-disk snapshot
+    # from real Chrome and likely break the session). If no existing
+    # Chrome found, fall through to the bridge + spawn path below.
     work_dir = Path(f"/tmp/burner_engage_work_{slug}")
     work_dir.mkdir(parents=True, exist_ok=True)
-    _clear_singleton()
 
-    _bump_action(state, f"launching Chrome (profile={profile_dir}, headless={headless})…")
+    chrome_proc = None
+    cdp_port: str | int | None = None
     try:
-        chrome_proc, cdp_port = launch_chrome_for(
-            profile_dir, work_dir=work_dir, headless=headless,
+        from pipeline.cross_engage.create_burner_channel import (  # noqa: PLC0415
+            find_running_chrome_debug,
         )
+        existing = find_running_chrome_debug(profile_dir)
+        if existing is not None:
+            attach_pid, attach_port = existing
+            _bump_action(
+                state,
+                f"attaching to running Chrome-Debug PID={attach_pid} "
+                f"CDP=ws://127.0.0.1:{attach_port} (profile={profile_dir}) — "
+                f"skipping spawn AND cookie bridge",
+            )
+            cdp_port = attach_port
     except Exception as e:  # noqa: BLE001
-        state.phase = "failed"
-        _bump_action(state, f"chrome launch failed: {e}")
-        return 1
+        # find_running_chrome_debug failures are non-fatal; fall
+        # through to launch path.
+        logger.warning(
+            "burner_engage[%s]: find_running_chrome_debug failed: %s — "
+            "falling back to launch", slug, e,
+        )
+
+    if cdp_port is None:
+        # No live Chrome to attach to — bridge cookies (skipping if
+        # real Chrome is running, which would lock the cookie SQLite),
+        # then launch a fresh Chrome-Debug.
+        chrome_pids = _real_chrome_is_running()
+        if chrome_pids:
+            _bump_action(
+                state,
+                f"real Chrome is running (PIDs: {chrome_pids}); "
+                f"skipping cookie bridge — using existing Chrome-Debug cookies",
+            )
+        else:
+            _bump_action(state, f"bridging cookies for {profile_dir}…")
+            try:
+                bridge_cookies(profile_dir)
+            except Exception as e:  # noqa: BLE001
+                state.phase = "failed"
+                _bump_action(state, f"cookie bridge failed: {e}")
+                return 1
+
+        _clear_singleton()
+        _bump_action(
+            state,
+            f"no running Chrome-Debug on profile={profile_dir} — launching "
+            f"fresh (headless={headless})",
+        )
+        try:
+            chrome_proc, cdp_port = launch_chrome_for(
+                profile_dir, work_dir=work_dir, headless=headless,
+            )
+        except Exception as e:  # noqa: BLE001
+            state.phase = "failed"
+            _bump_action(state, f"chrome launch failed: {e}")
+            return 1
 
     # Per-channel "already subscribed" memo so we don't re-click
     subscribed_channels: set[str] = set()
@@ -1456,17 +1709,26 @@ def run(slug: str, *, headless: bool = False, mode: str = DEFAULT_MODE) -> int:
         _bump_action(state, f"worker crashed: {e}")
         return 1
     finally:
-        # Always tear Chrome down — leaving a Chrome-Debug instance
-        # blocks the next run because of the singleton lock.
+        # Tear Chrome down ONLY if WE launched it. When we attached to
+        # an existing Chrome-Debug (chrome_proc is None), leave it
+        # running so the next attach can find it and the user's
+        # interactive Chrome window isn't ripped out from under them.
         time.sleep(2)
-        try:
-            chrome_proc.terminate()
-            chrome_proc.wait(timeout=5)
-        except Exception:  # noqa: BLE001
+        if chrome_proc is not None:
             try:
-                chrome_proc.kill()
-            except Exception:
-                pass
+                chrome_proc.terminate()
+                chrome_proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                try:
+                    chrome_proc.kill()
+                except Exception:
+                    pass
+        else:
+            _bump_action(
+                state,
+                "Chrome left running (we attached to an existing instance) — "
+                "next worker can attach to it directly",
+            )
 
     if state.phase != "failed":
         state.phase = "stopped"
@@ -1498,6 +1760,18 @@ def _cli() -> int:
         default=DEFAULT_MODE,
         help=f"Engagement intensity (default {DEFAULT_MODE}).",
     )
+    rp.add_argument(
+        "--catalog-file",
+        default=None,
+        help=(
+            "Path to a JSON list of CatalogEntry dicts (video_id, "
+            "channel, channel_label, slug, title, url, uploaded_at). "
+            "When provided, the worker uses this catalog directly "
+            "and skips list_catalog()/GCS — used by the laptop agent "
+            "to ship the cloud-side catalog into laptop-spawned "
+            "workers without requiring ADC."
+        ),
+    )
     sp = sub.add_parser("stop", help="Stop a running engage worker")
     sp.add_argument("slug")
     stp = sub.add_parser("status", help="Print live status JSON for a burner")
@@ -1511,7 +1785,12 @@ def _cli() -> int:
         return 0
     if args.cmd == "run":
         logging.basicConfig(level=logging.INFO, format="%(message)s")
-        return run(args.slug, headless=args.headless, mode=args.mode)
+        return run(
+            args.slug,
+            headless=args.headless,
+            mode=args.mode,
+            catalog_file=args.catalog_file,
+        )
     if args.cmd == "stop":
         request_stop(args.slug)
         print(f"stop requested for {args.slug}")

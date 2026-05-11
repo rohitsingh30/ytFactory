@@ -24,7 +24,53 @@ Used by the `/upload-via-playwright` skill's Stage 6.
 """
 from __future__ import annotations
 import json, pathlib, re, subprocess, time
+import urllib.error
+import urllib.request
 from typing import Iterable
+
+
+def _cdp_alive(port: int, *, timeout: float = 2.0) -> bool:
+    """Probe ``http://127.0.0.1:<port>/json/version`` to confirm CDP is live
+    AND served by Chrome (not by some other CDP-speaking host).
+
+    Used by ``launch_chrome_for`` to filter out the lsof-discovered
+    candidate ports that aren't actually Chrome's CDP. There are two
+    classes of false positive on a developer laptop:
+
+    1. Non-CDP localhost listeners — e.g. mongod on :27017, postgres
+       on :5432. Filtered by the HTTP 200 check.
+    2. **Other CDP-speaking processes** — node.js / Electron app
+       debuggers (VS Code, Slack, Discord, …) ALSO answer
+       ``/json/version`` with a 200 because the V8 inspector implements
+       the same endpoint. They list themselves as
+       ``"Browser": "node.js/vXX"`` instead of
+       ``"Browser": "Chrome/XX"``. Without checking the Browser field,
+       Playwright's ``connect_over_cdp`` connects to node.js and
+       fails with ``Invalid URL: undefined`` because node's ``/json``
+       returns Electron targets, not Chrome browser targets. Validated
+       bug 2026-05-11.
+
+    Defined locally rather than imported from
+    ``create_burner_channel`` because that module pulls in playwright
+    + the upload chain on import — too heavy for the worker's launch
+    path. Tiny duplication, big import-graph win.
+    """
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version", timeout=timeout,
+        ) as r:
+            if r.status != 200:
+                return False
+            payload = json.loads(r.read())
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return False
+    browser = str(payload.get("Browser", ""))
+    # Chrome's Browser string is "Chrome/<version>" (e.g.
+    # "Chrome/147.0.7727.139"). Edge ships "Edge/<version>" and shares
+    # the chromium CDP — accept it too in case someone runs the worker
+    # with --chrome-bin pointing at an Edge install. Anything else
+    # (node.js, electron, headless_shell stripped builds) is rejected.
+    return browser.startswith("Chrome/") or browser.startswith("Edge/")
 
 HOME = pathlib.Path.home()
 REAL_CHROME = HOME / "Library/Application Support/Google/Chrome"
@@ -218,15 +264,84 @@ def launch_chrome_for(
         stderr=open(stderr_path, "w"),
         start_new_session=True,
     )
+    # CDP-port discovery — prefer the stderr-text scrape because it's
+    # the ONLY method that's guaranteed to return THIS chrome process'
+    # port. The lsof fallback was added for a launchd context where
+    # stderr was lost, but on a multi-Chrome laptop it can return a
+    # SIBLING chrome's port (validated bug 2026-05-11: a fresh chrome
+    # with --user-data-dir=Chrome-Debug-profile_1 reported port 54888
+    # via lsof, which actually belonged to the canonical Chrome-Debug
+    # PID 86647 — Playwright then connect_over_cdp'd to the WRONG
+    # browser, hung 180 s on the busy canonical's CDP target list,
+    # and aborted. Chrome.app on macOS appears to leak file descriptors
+    # across sibling browser PIDs in some boot races, so lsof on a
+    # fresh PID can surface a sibling's listener.)
+    #
+    # New strategy:
+    #   - Wait UP TO 30 s for the stderr-text scrape (chrome usually
+    #     prints "DevTools listening on ws://..." within 1-3 s; 30 s
+    #     covers ridiculously loaded laptops).
+    #   - Only fall back to lsof if stderr is STILL empty after that
+    #     deadline. The lsof candidate must (a) respond to /json/version
+    #     AND (b) be different from any port already discovered for a
+    #     DIFFERENT chrome PID — the latter check is approximate (we
+    #     don't track sibling chromes here) but the long stderr wait
+    #     should make the fallback fire only in the launchd-stderr-
+    #     missing edge case, where there's no sibling to confuse it
+    #     with.
     cdp_port = None
-    for _ in range(40):
+    stderr_deadline = time.time() + 30.0
+    while time.time() < stderr_deadline:
         time.sleep(0.3)
-        m = re.search(r"ws://127\.0\.0\.1:(\d+)", stderr_path.read_text())
+        try:
+            stderr_text = stderr_path.read_text()
+        except OSError:
+            stderr_text = ""
+        m = re.search(r"ws://127\.0\.0\.1:(\d+)", stderr_text)
         if m:
-            cdp_port = m.group(1); break
+            cdp_port = m.group(1)
+            break
+    if not cdp_port:
+        # Stderr genuinely empty — last-ditch lsof fallback. Same as
+        # before but with the explicit caveat that it may pick a
+        # sibling chrome's port on this laptop.
+        for _ in range(10):
+            time.sleep(0.3)
+            try:
+                ls = subprocess.run(
+                    ["lsof", "-p", str(proc.pid), "-iTCP", "-sTCP:LISTEN", "-n"],
+                    capture_output=True, text=True, timeout=2,
+                )
+                for line in ls.stdout.splitlines():
+                    if "LISTEN" not in line or "127.0.0.1" not in line:
+                        continue
+                    pm = re.search(r"127\.0\.0\.1:(\d+)", line)
+                    if not pm:
+                        continue
+                    candidate = pm.group(1)
+                    if _cdp_alive(int(candidate), timeout=1.5):
+                        cdp_port = candidate
+                        break
+                if cdp_port:
+                    break
+            except Exception:  # noqa: BLE001
+                pass
     if not cdp_port:
         proc.kill()
         raise RuntimeError(f"no CDP port for {profile}\n{stderr_path.read_text()}")
+    # Final safety: even when the stderr scrape wins, double-check the
+    # port is alive. A printed-but-not-yet-listening port is a known
+    # Chrome startup race (rare, but stalls Playwright's connect for
+    # the full timeout).
+    deadline = time.time() + 8.0
+    while time.time() < deadline and not _cdp_alive(int(cdp_port), timeout=0.5):
+        time.sleep(0.2)
+    if not _cdp_alive(int(cdp_port), timeout=1.5):
+        proc.kill()
+        raise RuntimeError(
+            f"chrome announced CDP on port {cdp_port} but /json/version "
+            f"never responded; stderr:\n{stderr_path.read_text()}"
+        )
     return proc, cdp_port
 
 

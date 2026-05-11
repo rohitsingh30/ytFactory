@@ -200,6 +200,7 @@ path. Click into any → "Delete account" to nuke (irreversible).
 > - [`docs/all_tabs_cycle_pattern.md`](all_tabs_cycle_pattern.md) — the architecture.
 > - [`docs/many_chrome_tabs.md`](many_chrome_tabs.md) — Chrome flags + goto policy needed for 50+ simultaneous tabs.
 > - [`docs/cross_engage_cloud_v2.md`](cross_engage_cloud_v2.md) § Engagement modes — the four backend modes + the split UI surface (Subscribe button + 3-option dropdown).
+> - [`docs/web_next_clickable_row_pattern.md`](web_next_clickable_row_pattern.md) — every interaction on a burner row (body click, Subscribe, Cross-engage, View live, Last run, Stop, AND the error path of any action) opens the right-rail engage drawer. Added 2026-05-11 after Stop + row-body were inert.
 >
 > The text below documents the older single-burner-attached script
 > (`pipeline.cross_engage_burner_attached`) which is still the
