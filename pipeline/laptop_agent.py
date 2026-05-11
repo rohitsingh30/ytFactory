@@ -8,6 +8,7 @@ the task locally, ACKs back.
 Two task kinds it claims:
   - PLAYWRIGHT_UPLOAD  — drives Chrome to upload an mp4 via studio.youtube.com
   - BURNER_ENGAGE      — drives Chrome to like/sub via burner profiles
+  - CREATE_BURNER      — drives Chrome to spin up a new YouTube brand account
 
 Run manually:
     .venv/bin/python -m pipeline.laptop_agent
@@ -47,7 +48,7 @@ CONTROL_URL = os.environ.get(
 TOKEN_FILE = Path.home() / ".config" / "ytfactory" / "agent_token"
 AGENT_ID = os.environ.get("YTFACTORY_AGENT_ID") or f"laptop-{socket.gethostname()}"
 
-CAPS = ["playwright_upload", "burner_engage"]
+CAPS = ["playwright_upload", "burner_engage", "create_burner"]
 LEASE_TTL_S = 600  # 10 min — enough for a YT upload + post-publish steps
 HEARTBEAT_INTERVAL_S = 60
 
@@ -180,6 +181,8 @@ def _execute(task: dict) -> tuple[bool, str | None, str | None]:
             return _exec_playwright_upload(payload)
         if kind == "burner_engage":
             return _exec_burner_engage(payload)
+        if kind == "create_burner":
+            return _exec_create_burner(payload)
         return False, None, f"unsupported task kind on laptop: {kind}"
     except Exception as e:
         logger.exception("task %s failed", task.get("task_id"))
@@ -291,6 +294,78 @@ def _exec_burner_engage(p: dict) -> tuple[bool, str | None, str | None]:
     logger.info(
         "laptop_agent: spawned burner_engage worker pid=%s slug=%s mode=%s log=%s",
         proc.pid, slug, mode, log_path,
+    )
+    return True, None, None
+
+
+def _exec_create_burner(p: dict) -> tuple[bool, str | None, str | None]:
+    """Spawn one ``pipeline.cross_engage.create_burner_channel`` invocation.
+
+    Optional payload keys:
+      email:        host Google account that hosts the new brand-account
+                    channel. Defaults to the CLI's DEFAULT_EMAIL.
+      display_name: explicit display name. Default is a random
+                    realistic-looking burner name (matches the existing
+                    burner aesthetic — see random_burner_name in the CLI).
+      slug:         explicit local identifier. Derived from display_name
+                    if omitted.
+      oauth:        bool, default True. False appends --no-oauth so the
+                    channel is created but not OAuth'd.
+
+    Fire-and-forget: the channel-create flow is multi-minute (Playwright
+    boot + form fill + handle resolution + create-button + UC-id wait +
+    optional OAuth), and the lease lifecycle is decoupled from the worker's
+    lifecycle (same trade-off as ``burner_engage`` above). We ack ok as
+    soon as the subprocess is spawned; per-create success/failure surfaces
+    in the per-task log file under ``data/burner_engage/logs/``.
+    """
+    import subprocess  # noqa: PLC0415
+
+    repo_root = Path(__file__).resolve().parent.parent
+    log_dir = repo_root / "data" / "burner_engage" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "create_burner.log"
+    log_fp = log_path.open("a", buffering=1)
+    log_fp.write(
+        f"\n\n=== laptop-agent create_burner spawn @ "
+        f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} payload={p} ===\n"
+    )
+    log_fp.flush()
+
+    cmd = [sys.executable, "-m", "pipeline.cross_engage.create_burner_channel"]
+    email = (p.get("email") or "").strip()
+    if email:
+        cmd += ["--email", email]
+    display_name = (p.get("display_name") or "").strip()
+    if display_name:
+        cmd += ["--display-name", display_name]
+    slug = (p.get("slug") or "").strip()
+    if slug:
+        cmd += ["--slug", slug]
+    if not p.get("oauth", True):
+        cmd.append("--no-oauth")
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+    env.setdefault("YTFACTORY_STATE_BUCKET", "ytfactory-prod-v2-state")
+    env.setdefault("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(repo_root),
+            stdin=subprocess.DEVNULL,
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        return False, None, f"failed to spawn create_burner_channel: {e}"
+
+    logger.info(
+        "laptop_agent: spawned create_burner_channel pid=%s payload=%s log=%s",
+        proc.pid, p, log_path,
     )
     return True, None, None
 

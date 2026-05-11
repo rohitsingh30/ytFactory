@@ -186,6 +186,17 @@ export const burnerApi = {
       skipped: { slug: string; reason: string }[];
       hint?: string;
     }>(`/api/burner_channels/subscribe_all_burners`, {}),
+  createBulk: (count: number, opts?: { email?: string; oauth?: boolean }) =>
+    api.post<{
+      enqueued_count: number;
+      enqueued: { task_id: string }[];
+      cap_applied: boolean;
+      hint?: string;
+    }>(`/api/burner_channels/create_bulk`, {
+      count,
+      ...(opts?.email ? { email: opts.email } : {}),
+      ...(opts?.oauth === false ? { oauth: false } : {}),
+    }),
 };
 
 export const nichesApi = {

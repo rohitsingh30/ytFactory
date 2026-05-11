@@ -314,6 +314,73 @@ class TestExecute(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("RuntimeError", err)  # type: ignore[operator]
 
+    def test_create_burner_success_default_payload(self):
+        """Empty payload → CLI invoked with no extra flags (random name, default email, OAuth on)."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 5555
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "open", return_value=MagicMock()):
+            ok, out_uri, err = agent._execute({
+                "task_id": "t1",
+                "kind": "create_burner",
+                "payload": {},
+            })
+        self.assertTrue(ok)
+        self.assertIsNone(out_uri)
+        self.assertIsNone(err)
+        # Detached so it outlives the agent (channel-create can take minutes).
+        self.assertTrue(mock_popen.call_args.kwargs.get("start_new_session"))
+        cmd = mock_popen.call_args.args[0]
+        self.assertIn("pipeline.cross_engage.create_burner_channel", cmd)
+        # No --no-oauth → OAuth is on by default (matches CLI default).
+        self.assertNotIn("--no-oauth", cmd)
+        # No explicit --email / --display-name / --slug.
+        self.assertNotIn("--email", cmd)
+        self.assertNotIn("--display-name", cmd)
+        self.assertNotIn("--slug", cmd)
+
+    def test_create_burner_threads_payload_to_cli(self):
+        """email / display_name / slug / oauth=False all surface as CLI flags."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 5556
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "open", return_value=MagicMock()):
+            ok, _out_uri, _err = agent._execute({
+                "task_id": "t2",
+                "kind": "create_burner",
+                "payload": {
+                    "email": "rs54@gmail.com",
+                    "display_name": "cosmicdrift",
+                    "slug": "cosmicdrift",
+                    "oauth": False,
+                },
+            })
+        self.assertTrue(ok)
+        cmd = mock_popen.call_args.args[0]
+        self.assertIn("--email", cmd)
+        self.assertEqual(cmd[cmd.index("--email") + 1], "rs54@gmail.com")
+        self.assertIn("--display-name", cmd)
+        self.assertEqual(cmd[cmd.index("--display-name") + 1], "cosmicdrift")
+        self.assertIn("--slug", cmd)
+        self.assertEqual(cmd[cmd.index("--slug") + 1], "cosmicdrift")
+        self.assertIn("--no-oauth", cmd)
+
+    def test_create_burner_spawn_failure(self):
+        """If Popen raises, the task is acked failed with the cause."""
+        with patch("subprocess.Popen", side_effect=OSError("chrome missing")), \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "open", return_value=MagicMock()):
+            ok, _out_uri, err = agent._execute({
+                "task_id": "t3",
+                "kind": "create_burner",
+                "payload": {},
+            })
+        self.assertFalse(ok)
+        self.assertIn("failed to spawn create_burner_channel", err)  # type: ignore[operator]
+        self.assertIn("chrome missing", err)  # type: ignore[operator]
+
 
 # ── run() main loop ───────────────────────────────────────────────────────
 

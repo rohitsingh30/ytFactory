@@ -9,9 +9,11 @@ import {
   ExternalLink,
   Loader2,
   Play,
+  Plus,
   Square,
   Sparkles,
   UserPlus,
+  Users,
   X,
   Youtube,
 } from "lucide-react";
@@ -75,17 +77,25 @@ export default function BurnerChannelsPage() {
 
       <div className="space-y-8 p-6 md:p-8">
         <div className="rounded-xl border border-border bg-surface px-5 py-4">
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-[12.5px]">
-            <div className="flex items-center gap-1.5 text-muted-foreground">
-              <Sparkles className="h-3.5 w-3.5 text-foreground/70" />
-              <span className="text-foreground/85">{burners?.length ?? "…"}</span>
-              <span>burner{burners?.length === 1 ? "" : "s"}</span>
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-[12.5px]">
+              <div className="flex items-center gap-1.5 text-muted-foreground">
+                <Sparkles className="h-3.5 w-3.5 text-foreground/70" />
+                <span className="text-foreground/85">{burners?.length ?? "…"}</span>
+                <span>burner{burners?.length === 1 ? "" : "s"}</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-muted-foreground">
+                <Youtube className="h-3.5 w-3.5 text-foreground/70" />
+                <span className="text-foreground/85">{catalogSize}</span>
+                <span>videos in production catalog</span>
+              </div>
             </div>
-            <div className="flex items-center gap-1.5 text-muted-foreground">
-              <Youtube className="h-3.5 w-3.5 text-foreground/70" />
-              <span className="text-foreground/85">{catalogSize}</span>
-              <span>videos in production catalog</span>
-            </div>
+            <BulkActions
+              eligibleCount={
+                burners?.filter((b) => b.profile_known && !b.running).length ?? 0
+              }
+              onAfterAction={refresh}
+            />
           </div>
         </div>
 
@@ -124,6 +134,121 @@ export default function BurnerChannelsPage() {
           onAfterAction={refresh}
         />
       )}
+    </div>
+  );
+}
+
+function BulkActions({
+  eligibleCount,
+  onAfterAction,
+}: {
+  eligibleCount: number;
+  onAfterAction: () => void;
+}) {
+  const [busy, setBusy] = useState<"subscribe" | "create" | null>(null);
+
+  async function subscribeAll() {
+    setBusy("subscribe");
+    try {
+      const r = await burnerApi.subscribeAllBurners();
+      if (r.enqueued_count > 0) {
+        toast.success(
+          `Subscribe-only kicked off for ${r.enqueued_count} burner${r.enqueued_count === 1 ? "" : "s"}`,
+          {
+            description: r.skipped_count
+              ? `${r.skipped_count} skipped (already running or no profile mapping). ${r.hint ?? ""}`
+              : r.hint ?? "Each burner will subscribe to every catalog channel once and exit.",
+          },
+        );
+      } else {
+        toast.message("Nothing to subscribe", {
+          description: r.hint ?? `Skipped ${r.skipped_count} burner${r.skipped_count === 1 ? "" : "s"}.`,
+        });
+      }
+      onAfterAction();
+    } catch (e) {
+      toast.error("Subscribe-all failed", {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function createBulk() {
+    const raw = window.prompt(
+      "How many new burner channels should the laptop agent create?\n\n" +
+        "Default 50. Hard cap 100. Per-account Google rate-limit is ~5-10 successful creates / 24h, so the tail will fail until tomorrow — that's expected.",
+      "50",
+    );
+    if (raw === null) return;
+    const count = parseInt(raw, 10);
+    if (!Number.isFinite(count) || count < 1) {
+      toast.error("Bad count", { description: `'${raw}' isn't a positive integer.` });
+      return;
+    }
+    setBusy("create");
+    try {
+      const r = await burnerApi.createBulk(count);
+      toast.success(
+        `Queued ${r.enqueued_count} create-burner task${r.enqueued_count === 1 ? "" : "s"}`,
+        {
+          description:
+            (r.cap_applied ? `(capped from ${count}) ` : "") +
+            (r.hint ?? "Laptop agent will pick them up shortly."),
+        },
+      );
+      onAfterAction();
+    } catch (e) {
+      toast.error("Bulk create failed", {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={subscribeAll}
+        disabled={busy !== null || eligibleCount === 0}
+        title={
+          eligibleCount === 0
+            ? "No burners are eligible (already running or missing profile mapping)"
+            : `Subscribe-only across ${eligibleCount} eligible burner${eligibleCount === 1 ? "" : "s"} — each will subscribe to every catalog channel once and exit.`
+        }
+      >
+        {busy === "subscribe" ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <Users className="h-3.5 w-3.5" />
+        )}
+        Subscribe All
+        {eligibleCount > 0 && (
+          <Badge
+            variant="outline"
+            className="ml-1 px-1.5 py-0 font-mono text-[9px] uppercase tracking-tight border-border bg-surface-2 text-muted-foreground"
+          >
+            {eligibleCount}
+          </Badge>
+        )}
+      </Button>
+      <Button
+        size="sm"
+        onClick={createBulk}
+        disabled={busy !== null}
+        title="Spawn N create_burner_channel runs on the laptop agent. Default 50; per-account Google rate-limit is ~5-10/day so the tail will fail until tomorrow."
+      >
+        {busy === "create" ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <Plus className="h-3.5 w-3.5" />
+        )}
+        Create 50 channels
+      </Button>
     </div>
   );
 }

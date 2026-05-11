@@ -299,5 +299,213 @@ class TestStopEngage(unittest.IsolatedAsyncioTestCase):
         mock_stop.assert_called_once_with("burner1")
 
 
+class TestSubscribeAllBurners(unittest.IsolatedAsyncioTestCase):
+    async def test_no_burners(self) -> None:
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        env = {k: v for k, v in os.environ.items() if k != "K_SERVICE"}
+        with patch.dict("os.environ", env, clear=True), \
+             patch("control.routes.burner_routes.burner_engage.list_burner_channels",
+                   return_value=[]):
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.post("/api/burner_channels/subscribe_all_burners")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["enqueued_count"], 0)
+        self.assertEqual(data["skipped_count"], 0)
+        self.assertIn("hint", data)
+        self.assertIn("no burners registered", data["hint"])
+
+    async def test_skips_no_profile_and_running(self) -> None:
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        burners = [
+            {"slug": "noprof", "profile_known": False},
+            {"slug": "active", "profile_known": True},
+        ]
+
+        def _is_running(slug: str, **kw) -> bool:  # noqa: ARG001
+            return slug == "active"
+
+        env = {k: v for k, v in os.environ.items() if k != "K_SERVICE"}
+        with patch.dict("os.environ", env, clear=True), \
+             patch("control.routes.burner_routes.burner_engage.list_burner_channels",
+                   return_value=burners), \
+             patch("control.routes.burner_routes.burner_engage.is_running",
+                   side_effect=_is_running):
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.post("/api/burner_channels/subscribe_all_burners")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["enqueued_count"], 0)
+        self.assertEqual(data["skipped_count"], 2)
+        reasons = sorted(s["reason"] for s in data["skipped"])
+        self.assertEqual(reasons, ["already_running", "no_profile_mapping"])
+
+    async def test_cloud_enqueues_one_subscribe_only_task_per_eligible(self) -> None:
+        """Each eligible burner gets its own BURNER_ENGAGE task with mode=subscribe_only."""
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        burners = [
+            {"slug": "a", "profile_known": True},
+            {"slug": "b", "profile_known": True},
+            {"slug": "c", "profile_known": False},  # skipped
+        ]
+        captured: list = []
+
+        class _FakeQueue:
+            def enqueue(self, task) -> None:
+                captured.append(task)
+
+        with patch.dict("os.environ", {"K_SERVICE": "ytfactory-web"}), \
+             patch("control.routes.burner_routes.burner_engage.list_burner_channels",
+                   return_value=burners), \
+             patch("control.routes.burner_routes.burner_engage.is_running",
+                   return_value=False), \
+             patch("control.routes.burner_routes.burner_engage.clear_stop_sentinel"), \
+             patch("control.core.queue.get_queue", return_value=_FakeQueue()):
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.post("/api/burner_channels/subscribe_all_burners")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["enqueued_count"], 2)
+        self.assertEqual(data["skipped_count"], 1)
+        self.assertEqual(sorted(e["slug"] for e in data["enqueued"]), ["a", "b"])
+        from control.core.schema import TaskKind  # noqa: PLC0415
+        for task in captured:
+            self.assertEqual(task.kind, TaskKind.BURNER_ENGAGE)
+            self.assertEqual(task.payload["mode"], "subscribe_only")
+
+    async def test_laptop_dev_spawns_subprocess_per_eligible(self) -> None:
+        """Laptop dev path: one detached Popen per eligible burner."""
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        burners = [
+            {"slug": "a", "profile_known": True},
+            {"slug": "b", "profile_known": True},
+        ]
+        mock_proc = MagicMock()
+        mock_proc.pid = 999
+        mock_fp = MagicMock()
+        mock_fp.__enter__ = MagicMock(return_value=mock_fp)
+        mock_fp.__exit__ = MagicMock(return_value=False)
+
+        env_no_kservice = {k: v for k, v in os.environ.items() if k != "K_SERVICE"}
+        with patch.dict("os.environ", env_no_kservice, clear=True), \
+             patch("control.routes.burner_routes.burner_engage.list_burner_channels",
+                   return_value=burners), \
+             patch("control.routes.burner_routes.burner_engage.is_running",
+                   return_value=False), \
+             patch("control.routes.burner_routes.subprocess.Popen",
+                   return_value=mock_proc) as popen, \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "open", return_value=mock_fp):
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.post("/api/burner_channels/subscribe_all_burners")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["enqueued_count"], 2)
+        self.assertEqual(popen.call_count, 2)
+        # Every spawn must be `subscribe_only` mode.
+        for call in popen.call_args_list:
+            cmd = call.args[0]
+            self.assertIn("--mode", cmd)
+            self.assertEqual(cmd[cmd.index("--mode") + 1], "subscribe_only")
+
+
+class TestCreateBulk(unittest.IsolatedAsyncioTestCase):
+    async def test_bad_count_400(self) -> None:
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                "/api/burner_channels/create_bulk", json={"count": "not-an-int"}
+            )
+        self.assertEqual(r.status_code, 400)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post("/api/burner_channels/create_bulk", json={"count": 0})
+        self.assertEqual(r.status_code, 400)
+
+    async def test_default_count_caps_at_hard_max(self) -> None:
+        """Asking for 500 → capped to BULK_CREATE_HARD_MAX with cap_applied=True."""
+        from control.routes.burner_routes import BULK_CREATE_HARD_MAX  # noqa: PLC0415
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        captured: list = []
+
+        class _FakeQueue:
+            def enqueue(self, task) -> None:
+                captured.append(task)
+
+        with patch.dict("os.environ", {"K_SERVICE": "ytfactory-web"}), \
+             patch("control.core.queue.get_queue", return_value=_FakeQueue()):
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.post(
+                    "/api/burner_channels/create_bulk", json={"count": 500},
+                )
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertTrue(data["cap_applied"])
+        self.assertEqual(data["enqueued_count"], BULK_CREATE_HARD_MAX)
+        self.assertEqual(len(captured), BULK_CREATE_HARD_MAX)
+        from control.core.schema import TaskKind  # noqa: PLC0415
+        self.assertTrue(all(t.kind == TaskKind.CREATE_BURNER for t in captured))
+
+    async def test_cloud_enqueues_create_burner_tasks(self) -> None:
+        """Default count, cloud path: 50 CREATE_BURNER tasks; payload carries email/oauth."""
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        captured: list = []
+
+        class _FakeQueue:
+            def enqueue(self, task) -> None:
+                captured.append(task)
+
+        with patch.dict("os.environ", {"K_SERVICE": "ytfactory-web"}), \
+             patch("control.core.queue.get_queue", return_value=_FakeQueue()):
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.post(
+                    "/api/burner_channels/create_bulk",
+                    json={"count": 3, "email": "rs54@gmail.com", "oauth": False},
+                )
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["enqueued_count"], 3)
+        self.assertFalse(data["cap_applied"])
+        self.assertEqual(len(captured), 3)
+        from control.core.schema import TaskKind  # noqa: PLC0415
+        for task in captured:
+            self.assertEqual(task.kind, TaskKind.CREATE_BURNER)
+            self.assertEqual(task.payload, {"oauth": False, "email": "rs54@gmail.com"})
+
+    async def test_laptop_dev_spawns_create_burner_subprocesses(self) -> None:
+        """Laptop dev path: subprocess.Popen × count."""
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        mock_proc = MagicMock()
+        mock_proc.pid = 7777
+        mock_fp = MagicMock()
+        mock_fp.__enter__ = MagicMock(return_value=mock_fp)
+        mock_fp.__exit__ = MagicMock(return_value=False)
+        env_no_kservice = {k: v for k, v in os.environ.items() if k != "K_SERVICE"}
+        with patch.dict("os.environ", env_no_kservice, clear=True), \
+             patch("control.routes.burner_routes.subprocess.Popen",
+                   return_value=mock_proc) as popen, \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "open", return_value=mock_fp):
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.post(
+                    "/api/burner_channels/create_bulk", json={"count": 4},
+                )
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["enqueued_count"], 4)
+        self.assertEqual(popen.call_count, 4)
+        # Every spawn should be the create_burner_channel CLI.
+        for call in popen.call_args_list:
+            cmd = call.args[0]
+            self.assertIn("pipeline.cross_engage.create_burner_channel", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
