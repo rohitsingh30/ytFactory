@@ -190,7 +190,10 @@ class DashboardRoutesTest(DashboardBase, unittest.IsolatedAsyncioTestCase):
             async with await self._client() as c:
                 page = await c.get("/dashboard")
                 favicon = await c.get("/favicon.ico")
-                telemetry = await c.get("/api/telemetry/overview")
+                # /overview is now served by control.routes.telemetry_routes
+                # (real handler). The dashboard router only stubs the endpoints
+                # without a real impl yet — /llm + /latency.
+                telemetry = await c.get("/api/telemetry/llm")
                 research = await c.get("/api/research/videos")
                 rebuild = await c.post("/api/research/rebuild")
         self.assertEqual(page.status_code, 200)

@@ -305,11 +305,13 @@ async def favicon() -> Any:
     return Response(status_code=204)
 
 
-@router.get("/api/telemetry/overview")
-@router.get("/api/telemetry/stages")
-@router.get("/api/telemetry/timeline")
+# Only the telemetry endpoints WITHOUT a real handler in
+# control.routes.telemetry_routes stay stubbed here. The full set
+# (overview / stages / timeline / errors / services / init_status /
+# links) is served by that router; declaring them here too would
+# shadow the real handlers because this router is mounted before
+# telemetry_router in web/server.py (first-match wins in Starlette).
 @router.get("/api/telemetry/llm")
-@router.get("/api/telemetry/errors")
 @router.get("/api/telemetry/latency")
 async def telemetry_stub() -> dict:
     """Empty telemetry — pipeline runs on the laptop, not the cloud."""
