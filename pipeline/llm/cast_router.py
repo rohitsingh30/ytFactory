@@ -24,6 +24,8 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
+from pipeline import observability as _obs
+
 
 def _word_bounded(name: str, haystack: str) -> bool:
     """Return True if `name` appears in `haystack` as a word/phrase.
@@ -50,6 +52,7 @@ def _word_bounded(name: str, haystack: str) -> bool:
     return False
 
 
+@_obs.traced("llm.cast_router.route_character_description", category="llm")
 def route_character_description(
     *,
     beat_text: str,

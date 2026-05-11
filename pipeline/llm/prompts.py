@@ -25,6 +25,8 @@ import json
 import re
 from pathlib import Path
 
+from pipeline import observability as _obs
+
 from .. import images
 from . import cli as llm
 from ..beats import Beat
@@ -694,6 +696,7 @@ def _validate_and_clean(
     return cleaned
 
 
+@_obs.traced("llm.prompts.author_beat_prompts", category="llm")
 def author_beat_prompts(
     *,
     narration: str,

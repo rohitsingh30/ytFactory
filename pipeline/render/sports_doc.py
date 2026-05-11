@@ -7,22 +7,22 @@ real broadcast match footage + commentator/YouTuber talking-head clips +
 b-roll + chapter cards + lower-thirds.
 
 Inputs:
-    sportstoriesanimated/narrations/<slug>.json
+    sportsrecapped/narrations/<slug>.json
         chapters[]              — {id, title, start_s (optional, auto), beat, narration}
         engagement_asks[]       — {at_s, line, kind} (already inline in narration prose)
         narrator_tone           — tifo-academic | intense-podcast | playful-spicy | serious-doc
         cold_open               — string (informational; first chapter handles the open)
         thesis, title, hook, music_beds[], thumbnail, metadata
-    sportstoriesanimated/footage_plan/<slug>.json
+    sportsrecapped/footage_plan/<slug>.json
         match_footage[]         — {id, narration_anchor, url, in_s, out_s, mode, audio_mix, lower_third?}
         talking_heads[]         — {id, narration_anchor, url, in_s, out_s, speaker, speaker_handle, take, mode, audio_mix}
         b_roll[]                — {id, kind, narration_anchor (optional), url, in_s, out_s, audio_mix}
         archival_footage[]      — {id, decade, narration_anchor (optional), url, in_s, out_s, audio_mix}
         motion_graphics[]       — {id, kind, narration_anchor, deferred?, payload}  (Phase 2)
-    sportstoriesanimated/config.yaml `long_form_doc:` block
+    sportsrecapped/config.yaml `long_form_doc:` block
 
 Output:
-    sportstoriesanimated/long_form/<slug>.mp4   1920x1080 30fps AAC 192k
+    sportsrecapped/long_form/<slug>.mp4   1920x1080 30fps AAC 192k
 
 Pipeline:
     1. TTS (chunked, resumable). Reuses synth_long_narration() from the
@@ -43,7 +43,7 @@ Pipeline:
            handle, with fade in/out.
     5. Captions (authored-aligned, same path as historyrecapped sleep mode
        but bolder white, not yellow italic).
-    6. Music bed: per-section mood lookup in sportstoriesanimated/music/<mood>/.
+    6. Music bed: per-section mood lookup in sportsrecapped/music/<mood>/.
        Crossfade between sections. Auto-duck under any clip with audio_mix>0.
     7. Final mux: narration + music + clip audio (mix-weighted, ducked) +
        video + captions + watermark + chapter cards + lower-thirds.
@@ -55,8 +55,8 @@ NOT in v1 (stubbed gracefully — won't crash):
 
 Usage:
     caffeinate -i .venv/bin/python -u \\
-        sportstoriesanimated/scripts/render_long_form_doc.py \\
-        --channel sportstoriesanimated --slug <slug>
+        sportsrecapped/scripts/render_long_form_doc.py \\
+        --channel sportsrecapped --slug <slug>
 """
 from __future__ import annotations
 
@@ -74,6 +74,8 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 import yaml
+
+from pipeline import observability as obs
 
 # Reuse historyrecapped's narration synth + caption builder + watermark + mux.
 # These are battle-tested across 3+ shipped long-form sleep videos and
@@ -636,6 +638,21 @@ def main() -> int:
                          "stops before video assembly. Useful for verifying anchor matching.")
     args = ap.parse_args()
 
+    # OTel render envelope — channel + slug + render_kind=sports_doc.
+    with obs.render_envelope(
+        channel=args.channel,
+        slug=args.slug,
+        render_kind="sports_doc",
+    ):
+        try:
+            return _main_impl(args)
+        except BaseException as e:
+            obs.record_exception(e, fatal=True)
+            raise
+
+
+def _main_impl(args) -> int:
+
     # Pre-warm cloud GPU containers this channel will hit. Fire-and-
     # forget on a daemon thread; no-op when no CLOUDRUN_*_URL set.
     try:
@@ -1027,7 +1044,7 @@ def main() -> int:
 
 
 def cli_main() -> int:
-    """CLI entry point. Invoked by ``sportstoriesanimated/scripts/render_long_form_doc.py``."""
+    """CLI entry point. Invoked by ``sportsrecapped/scripts/render_long_form_doc.py``."""
     return main()
 
 

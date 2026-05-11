@@ -24,6 +24,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from pipeline import observability as _obs
+
 from . import cli as llm
 
 
@@ -293,6 +295,8 @@ everything's fine or if all issues are class-of-bug.
 """
 
 
+@_obs.traced("llm.critic.critique_short", category="llm",
+             capture=["slug"])
 def critique_short(
     *,
     slug: str,

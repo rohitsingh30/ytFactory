@@ -114,15 +114,22 @@ def _trigger_via_sdk(job_id: str) -> ExecutionRef:
         f"projects/{project_id()}/locations/{region()}/jobs/{job_name()}"
     )
 
-    # Per-execution env override: only YTFACTORY_JOB_ID. Everything else
-    # (CLOUDRUN_*_URL, GOOGLE_CLOUD_PROJECT, etc.) comes from the Job's
-    # deploy-time env so the override stays minimal.
+    # Per-execution env override: YTFACTORY_JOB_ID + (when this caller
+    # is inside an active OTel span) YTFACTORY_TRACEPARENT so the
+    # JOB's root span links back to the chat-request span that
+    # triggered it. Everything else (CLOUDRUN_*_URL,
+    # GOOGLE_CLOUD_PROJECT, etc.) comes from the Job's deploy-time
+    # env so the override stays minimal.
+    env_overrides = [
+        run_v2.EnvVar(name="YTFACTORY_JOB_ID", value=job_id),
+    ]
+    for k, v in _trace_env_overrides().items():
+        env_overrides.append(run_v2.EnvVar(name=k, value=v))
+
     overrides = run_v2.RunJobRequest.Overrides(
         container_overrides=[
             run_v2.RunJobRequest.Overrides.ContainerOverride(
-                env=[
-                    run_v2.EnvVar(name="YTFACTORY_JOB_ID", value=job_id),
-                ],
+                env=env_overrides,
             )
         ],
     )
@@ -153,11 +160,20 @@ def _trigger_via_cli(job_id: str) -> ExecutionRef:
             "  brew install --cask google-cloud-sdk"
         )
 
+    # Use ``^|^`` delimiter so a tracestate value containing a comma
+    # can't break the gcloud parser. ``YTFACTORY_TRACEPARENT`` itself
+    # is a fixed shape (``00-<trace>-<span>-<flags>``) with no commas;
+    # ``YTFACTORY_TRACESTATE`` may contain ``,`` in multi-vendor cases.
+    pairs = [f"YTFACTORY_JOB_ID={job_id}"]
+    for k, v in _trace_env_overrides().items():
+        pairs.append(f"{k}={v}")
+    env_arg = "^|^" + "|".join(pairs) if len(pairs) > 1 else pairs[0]
+
     cmd = [
         "gcloud", "run", "jobs", "execute", job_name(),
         "--project", project_id(),
         "--region", region(),
-        "--update-env-vars", f"YTFACTORY_JOB_ID={job_id}",
+        "--update-env-vars", env_arg,
         "--async",
         "--format", "value(metadata.name)",
     ]
@@ -177,6 +193,23 @@ def _trigger_via_cli(job_id: str) -> ExecutionRef:
         execution_name=execution_name,
         triggered_via="cli",
     )
+
+
+def _trace_env_overrides() -> dict[str, str]:
+    """Return ``{YTFACTORY_TRACEPARENT, YTFACTORY_TRACESTATE}`` from the
+    active OTel span, or an empty dict when no span is active / OTel
+    isn't installed.
+
+    Keeping the import inside the function so callers without OTel
+    installed (e.g. legacy laptop CI lanes) don't pay an import cost.
+    """
+    try:
+        from pipeline.observability import propagation  # noqa: PLC0415
+        env: dict[str, str] = {}
+        propagation.inject_into_env(env)
+        return env
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 # ---------------------------------------------------------------------------

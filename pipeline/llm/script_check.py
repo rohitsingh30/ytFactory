@@ -31,6 +31,7 @@ import re
 from dataclasses import dataclass
 
 from ..beats import Beat
+from pipeline import observability as _obs
 
 
 # AITA-class verdict acronyms (AITA, WIBTA, YTA, NTA) and the literal
@@ -236,6 +237,7 @@ def _leak_patterns(closer_format: str) -> list[re.Pattern[str]]:
     return pats
 
 
+@_obs.traced("llm.script_check.check_script_text", category="llm")
 def check_script_text(
     text: str, *, channel_cfg: dict | None = None
 ) -> list[ScriptIssue]:
@@ -513,6 +515,7 @@ def check_script_text(
     return issues
 
 
+@_obs.traced("llm.script_check.check_beats", category="llm")
 def check_beats(
     beats: list[Beat], *, channel_cfg: dict | None = None
 ) -> list[ScriptIssue]:

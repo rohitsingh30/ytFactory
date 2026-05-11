@@ -17,6 +17,8 @@ import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
+from pipeline import observability as _obs
+
 
 # Hard sentence terminators — primary break points (one beat per sentence).
 _SENTENCE_BREAKERS = {".", "!", "?"}
@@ -53,6 +55,8 @@ class Beat:
         return self.end - self.start
 
 
+@_obs.traced("beats.transcribe_words", category="asr",
+             capture=["provider", "model"])
 def transcribe_words(
     audio_path: Path,
     provider: str = "whisper_mlx",
@@ -279,6 +283,7 @@ def _find_subsequence(haystack: list[str], needle: list[str], start: int) -> int
     return -1
 
 
+@_obs.traced("beats.split_with_forced_boundaries", category="render")
 def split_with_forced_boundaries(
     words: list[Word],
     forced_narration_lines: list[str],
@@ -353,6 +358,7 @@ def split_with_forced_boundaries(
     return beats
 
 
+@_obs.traced("beats.split_into_beats", category="render")
 def split_into_beats(
     words: list[Word],
     target_s: float = 1.8,

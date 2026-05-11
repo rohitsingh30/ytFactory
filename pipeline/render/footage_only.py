@@ -59,6 +59,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 import yaml
 
 from pipeline import audio, beats as beats_mod, align, compose, footage as footage_mod  # noqa: E402
+from pipeline import observability as obs  # noqa: E402
 
 # Two aspect-specific blurred-letterbox filters. Selection is driven by
 # shotlist["aspect"] in _build_silent_video below — defaults to 9:16
@@ -278,7 +279,7 @@ def _regen_audio_caps(
 
     narrations_json = paths.narration_for(slug)
     if not narrations_json.exists():
-        # Try niche-nested location (legacy: pre-NICHE_CHANNEL writes).
+        # Try niche-nested location (legacy: pre-NicheDoc writes).
         for p in paths.channel_root.rglob(f"narrations/{slug}.json"):
             narrations_json = p
             break
@@ -685,6 +686,31 @@ def _mux_audio_no_captions(silent: Path, narration_path: Path, out_path: Path) -
 # --- main entry ----------------------------------------------------------
 
 def render(channel: str, slug: str, *, do_upload: bool = False, aspect_override: str | None = None) -> Path:
+    """Render one footage-only Short / long-form.
+
+    Public entry point. Wraps the implementation in an OTel render
+    envelope so every nested ``tlm.timed`` / ``tlm.track`` call
+    inherits the channel + slug context attrs (see
+    :func:`pipeline.observability.render_envelope`).
+    """
+    with obs.render_envelope(
+        channel=channel,
+        slug=slug,
+        render_kind="footage_only",
+    ):
+        try:
+            return _render_impl(
+                channel,
+                slug,
+                do_upload=do_upload,
+                aspect_override=aspect_override,
+            )
+        except BaseException as e:
+            obs.record_exception(e, fatal=True)
+            raise
+
+
+def _render_impl(channel: str, slug: str, *, do_upload: bool = False, aspect_override: str | None = None) -> Path:
     from pipeline.paths import RenderPaths  # noqa: PLC0415
     from pipeline.preflight import power_check, reset_mlx_state  # noqa: PLC0415
 

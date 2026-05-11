@@ -23,6 +23,7 @@ from pathlib import Path
 
 from . import cli as llm
 from . import script_lint
+from pipeline import observability as _obs
 
 
 @dataclass
@@ -464,6 +465,7 @@ def _closer_block(closer_format: str | None) -> str:
     )
 
 
+@_obs.traced("llm.rewrite.rewrite", category="llm")
 def rewrite(raw_story: dict, channel_cfg: dict | None = None) -> Script:
     """Rewrite a raw story dict into a Script.
 
@@ -600,6 +602,7 @@ def _rewrite_legacy(raw_story: dict, channel_cfg: dict) -> Script:
     )
 
 
+@_obs.traced("llm.rewrite.rewrite_part2", category="llm")
 def rewrite_part2(
     raw_story: dict,
     part1_narration: str,

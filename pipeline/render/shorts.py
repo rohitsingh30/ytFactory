@@ -3,9 +3,11 @@
 Reads providers from the channel YAML so swapping models is a config
 change, not a code edit:
 
-    asr_provider:    whisper_mlx | parakeet_mlx
-    tts_provider:    kokoro      | f5_tts
-    image_provider:  sd_turbo    | sdxl_lightning | mflux | z_image_turbo  (slideshow path)
+    asr_provider:    whisper_mlx | parakeet_mlx | faster_whisper
+    tts_provider:    kokoro | f5_tts | chatterbox | cloudrun_chatterbox
+                     | cloudrun_indicparler | cloudrun_indicf5 | …
+    image_provider:  sd_turbo | sdxl_lightning | mflux | z_image_turbo
+                     | cloudrun_flux2_klein | …  (slideshow path)
     motion_provider: <unset>     | animatediff_toonyou | animatediff_lcm
 
 If ``motion_provider`` is set, each beat becomes a continuous animated
@@ -16,6 +18,21 @@ Two ways to feed in narration:
 
     --text "..."                  hardcoded narration
     --script <path/to/script.json>  load a Script produced by /make-script
+
+Cross-cutting env (cloud + laptop):
+
+    YTFACTORY_ASR_PROVIDER          beats the YAML asr_provider default —
+                                    cloud worker forces ``faster_whisper``
+                                    here because ``whisper_mlx`` is Apple-only.
+
+Form-override carve-outs (``_apply_form_overrides``, ``make_short``):
+
+    voice=<bare-name>               on a ``cloudrun_*`` / ``azure_*`` channel,
+                                    LOGGED AND DROPPED — channel default ref
+                                    WAV survives. Pre-2026-05-11 the bare-name
+                                    overrides forced ``tts_provider=kokoro`` and
+                                    crashed every cloud render at TTS (the cloud
+                                    image doesn't ship ``kokoro_onnx``).
 """
 
 from __future__ import annotations
@@ -32,6 +49,7 @@ import yaml
 
 from pipeline import align, audio, beats, compose, images
 from pipeline.llm import prompts as prompts_mod, script_check
+from pipeline import observability as obs
 from pipeline import telemetry as tlm
 
 
@@ -65,16 +83,22 @@ _LAST_BEAT_ICONS = (
 )
 
 
-def _safe_prerender_word_captions(beat_list, cache_dir):
+def _safe_prerender_word_captions(beat_list, cache_dir, font_size=None):
     """Background-thread wrapper around compose.prerender_word_captions.
 
     Swallows any exception so a caption-render bug can't crash the
     pipeline — compose() will re-render anything we miss. Logged via
     print so it surfaces in stdout/telemetry but doesn't fail the job.
+
+    ``font_size`` (optional) overrides the default. Threaded through
+    from cfg.captions_density: minimal/standard/dense → 130/110/90.
+    Mismatch between the prerender and compose's own re-render path is
+    harmless because compose passes the same font_size — both produce
+    byte-identical PNGs.
     """
     try:
         t0 = time.time()
-        n = compose.prerender_word_captions(beat_list, cache_dir)
+        n = compose.prerender_word_captions(beat_list, cache_dir, font_size=font_size)
         if n > 0:
             print(
                 f"[caption-prerender] wrote {n} word PNGs in "
@@ -82,6 +106,23 @@ def _safe_prerender_word_captions(beat_list, cache_dir):
             )
     except Exception as e:
         print(f"[caption-prerender] non-fatal failure: {e!r}; compose will render fresh")
+
+
+# Map the form's `captions_density` value → caption font size in pixels.
+# Word-level captions show one word at a time, so density translates
+# to text *weight on screen*: minimal = bigger, dense = smaller.
+# The default (when no density is requested) matches captions.render_word_caption's
+# own default of 110 — so existing renders without the override are unchanged.
+_CAPTIONS_DENSITY_FONT_SIZE: dict[str, int] = {
+    "minimal":  130,
+    "standard": 110,
+    "dense":    90,
+}
+
+
+def _resolve_caption_font_size(cfg: dict) -> int | None:
+    density = (cfg.get("captions_density") or "").strip().lower()
+    return _CAPTIONS_DENSITY_FONT_SIZE.get(density)
 
 
 _CLOSER_KEYWORDS = ("like", "comment", "subscribe", "agree", "swap")
@@ -155,12 +196,27 @@ def _record_stage_done(
     }
     if extra:
         md.update(extra)
+    duration_ms = int((time.time() - t0) * 1000)
+    job_id = os.environ.get("YTFACTORY_JOB_ID") or None
     tlm.track_stage_done(
         "stage_done",
         category="pipeline",
         success=success,
-        duration_ms=int((time.time() - t0) * 1000),
-        job_id=os.environ.get("YTFACTORY_JOB_ID") or None,
+        duration_ms=duration_ms,
+        job_id=job_id,
+        metadata=md,
+    )
+    # Also surface the stage as a span in Cloud Trace so the
+    # /app/telemetry tab's waterfall view groups stages under the
+    # render-envelope's parent span (see pipeline.observability.
+    # render_envelope). emit_span uses a synthetic start time so the
+    # bar lines up with the stage's actual wall-clock window.
+    tlm.emit_span(
+        f"stage.{stage}",
+        duration_ms=duration_ms,
+        success=success,
+        category="pipeline",
+        job_id=job_id,
         metadata=md,
     )
 
@@ -819,6 +875,90 @@ def _validate_opening_image(prompt: str, directives: dict | None) -> list[str]:
 # character_description and per-beat scene/key_visual.
 
 
+def _find_music_bed_for_render(
+    channel_path: Path, bed_filename: str
+) -> Path | None:
+    """Resolve the absolute path of a music-bed file to mix under narration.
+
+    Lookup order matches the /api/music/catalog scanner so a bed
+    discoverable in the studio UI is also reachable at render time:
+      1. ``<channel>/music/<bed_filename>``
+      2. ``<channel>/branding/music/<bed_filename>``
+      3. ``<channel>/songs/<bed_filename>``
+      4. ``data/music/<bed_filename>`` (the shared procedural catalogue)
+
+    Returns ``None`` if no candidate exists. Caller logs and degrades
+    gracefully — a missing bed never fails the render.
+    """
+    from pipeline.paths import DATA_ROOT, PROJECT_ROOT  # noqa: PLC0415
+
+    chan_root = channel_path.parent
+    # `channel_path` may already be a variant overlay
+    # (pipeline/variants/<slug>/<v>.yaml) — recover the per-channel root
+    # by walking up until we find a sibling matching <slug>/.
+    if chan_root.name == "variants":
+        slug = channel_path.stem.split("_")[0]
+        chan_root = PROJECT_ROOT / slug if (PROJECT_ROOT / slug).is_dir() else chan_root.parent
+    elif chan_root.parent.name == "channels":
+        # Central-config layout: pipeline/channels/<slug>.yaml — slug
+        # is the YAML stem; the channel dir is at PROJECT_ROOT/<slug>/.
+        slug = channel_path.stem
+        if (PROJECT_ROOT / slug).is_dir():
+            chan_root = PROJECT_ROOT / slug
+
+    candidates = [
+        chan_root / "music" / bed_filename,
+        chan_root / "branding" / "music" / bed_filename,
+        chan_root / "songs" / bed_filename,
+        DATA_ROOT / "music" / bed_filename,
+    ]
+    for c in candidates:
+        if c.exists() and c.is_file():
+            return c
+    return None
+
+
+def _mix_music_bed_under_narration(
+    narration_path: Path,
+    bed_path: Path,
+    out_path: Path,
+    bed_db: float = -28.0,
+) -> Path:
+    """ffmpeg amix the bed under the narration WAV at ``bed_db``.
+
+    Bed audio is looped (``aloop=loop=-1``) to cover the full narration
+    duration, then attenuated to ``bed_db`` so it sits under spoken
+    word without competing. Output is mono PCM s16le matching the
+    pipeline's narration WAV format so downstream stages are agnostic
+    to whether a bed was applied.
+
+    The narration is intentionally NOT attenuated — bed alone is moved
+    down. This preserves the same dialog level the ASR/beats stage
+    saw, so any silence-detection / VAD heuristics the renderer runs
+    after this point still behave identically.
+    """
+    import subprocess  # noqa: PLC0415
+
+    # Read narration duration so amix's `duration=first` clips the looped
+    # bed to exactly that length without trailing silence.
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", str(narration_path),
+        # -stream_loop -1 loops the bed file infinitely; amix's
+        # duration=first then truncates to the narration's length.
+        "-stream_loop", "-1", "-i", str(bed_path),
+        "-filter_complex",
+        f"[1:a]volume={bed_db}dB[bed];"
+        f"[0:a][bed]amix=inputs=2:duration=first:dropout_transition=0[a]",
+        "-map", "[a]",
+        "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le",
+        str(out_path),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return out_path
+
+
 def _apply_form_overrides(cfg: dict, overrides: dict) -> None:
     """Translate website-form `channel_overrides` keys → channel YAML cfg keys.
 
@@ -875,8 +1015,159 @@ def _apply_form_overrides(cfg: dict, overrides: dict) -> None:
         # make_short().
         cfg["visual_source"] = visual_source
 
+    # ----- voice -----------------------------------------------------------
+    # Form's `voice` selection (e.g. af_sarah, am_michael, libri_phil_ohenry,
+    # or a path-style F5 ref). Pre-2026-05-11 this was silently dropped on
+    # the cloud worker path because the worker forwards `voice` via
+    # `--override voice=<key>` but `_apply_form_overrides` had no handler
+    # — the result was every cloud render using the channel YAML's
+    # default `tts_voice` regardless of the user's pick. The CLI flag
+    # `--tts-voice` did work but the worker never set it.
+    #
+    # Mirrors the explicit-Kokoro provider flip from make_short() below:
+    # a value with no "/" is a Kokoro voice id and forces tts_provider=
+    # kokoro + drops any stale tts_ref_text. A path-style value is an
+    # F5-TTS reference WAV — keep the channel's existing tts_provider
+    # (cloudrun_chatterbox / f5_tts) untouched.
+    #
+    # CLOUD CARVE-OUT (2026-05-11 — fixes prod render crash):
+    # When the channel YAML's tts_provider is a cloud engine
+    # (``cloudrun_*``), refuse to flip to ``kokoro`` from a bare-name
+    # voice override. Cloud images don't ship the laptop-only
+    # ``kokoro_onnx`` package — the previous behaviour crashed every
+    # form-driven cloud render the moment a user kept the default
+    # voice (the form's own English defaults — ``sarah``, ``am_michael``,
+    # ``bf_isabella`` — are ALL bare names that tripped the kokoro flip).
+    # On a cloud channel the channel YAML's ref WAV stays in force; we
+    # log a one-line warning so operators see the override was ignored
+    # without spamming the renderer log.
+    voice = overrides.get("voice")
+    if isinstance(voice, str) and voice.strip():
+        v = voice.strip()
+        current_provider = str(cfg.get("tts_provider") or "")
+        is_cloud_provider = current_provider.startswith("cloudrun_") or current_provider.startswith("azure_")
+        if "/" in v:
+            cfg["tts_voice"] = v
+        elif is_cloud_provider:
+            print(
+                f"[apply_form_overrides] voice='{v}' override ignored — "
+                f"channel uses cloud provider '{current_provider}' which "
+                f"requires a path-style ref WAV (channel default kept). "
+                f"Bare-name voice presets are laptop-Kokoro only.",
+                file=sys.stderr,
+            )
+        else:
+            cfg["tts_voice"] = v
+            cfg["tts_provider"] = "kokoro"
+            cfg.pop("tts_ref_text", None)
+
+    # ----- music_bed -------------------------------------------------------
+    # Form's `music_bed` selection ("off" | "ambient_low" | "ambient_med" |
+    # "cinematic" | "upbeat" | "lo_fi" | "mysterious" | "tense" | "dreamy" |
+    # "dark"). Translates to cfg.music_bed_default = "<key>.mp3" — the
+    # same cfg key the long_form + sports_doc renderers already read at
+    # render-time. Shorts compose looks up cfg.music_bed_default in
+    # data/music/ and amix's it under the narration (added 2026-05-11).
+    #
+    # "off" → empty string → renderer treats as "no bed". Keeps the
+    # cfg key present so consumers can branch on it without raising a
+    # KeyError.
+    music_bed = overrides.get("music_bed")
+    if isinstance(music_bed, str) and music_bed.strip():
+        if music_bed == "off":
+            cfg["music_bed_default"] = ""
+        else:
+            cfg["music_bed_default"] = f"{music_bed}.mp3"
+
+    # ----- captions_density ------------------------------------------------
+    # Form's `captions_density` ("minimal" | "standard" | "dense").
+    # Pre-2026-05-11 this was a dead UI knob — the form sent it but no
+    # consumer existed in pipeline/. Now landed on cfg so future caption
+    # tuners can read it; today the value is recorded in the per-render
+    # cfg fingerprint and surfaced in renderer.log so picking a density
+    # is at least observable.
+    captions_density = overrides.get("captions_density")
+    if captions_density in ("minimal", "standard", "dense"):
+        cfg["captions_density"] = captions_density
+
+    # ----- length_kind / length_s ------------------------------------------
+    # Form sends length_kind ∈ {"short", "long"} and length_s = the
+    # target duration in seconds (55 for short, minutes*60 for long).
+    # Pre-2026-05-11 both were silently dropped — the renderer ran
+    # the YAML default duration_max_s regardless. Now:
+    #   - cfg["length_kind"] records the form's choice for branching
+    #     downstream (e.g. compose tail_hold heuristics).
+    #   - cfg["duration_max_s"] is overridden so external_song /
+    #     song trimming respect the user's cap.
+    #
+    # Note: true long-form rendering (60-min sleep narration with
+    # archival footage matching) is a separate codepath
+    # (pipeline.render.long_form) that the cloud worker doesn't yet
+    # dispatch to — the worker always invokes pipeline.render.shorts.
+    # When length_kind=long the result is therefore an *extended*
+    # Shorts render, not a true sleep video. The cloud worker logs
+    # this clearly so the user knows what they got.
+    length_kind = overrides.get("length_kind")
+    if length_kind in ("short", "long"):
+        cfg["length_kind"] = length_kind
+
+    length_s = overrides.get("length_s")
+    if length_s is not None:
+        try:
+            n = int(length_s)
+        except (TypeError, ValueError):
+            n = 0
+        if n > 0:
+            cfg["duration_max_s"] = float(n)
+
 
 def make_short(
+    text: str,
+    channel_path: Path,
+    out_dir: Path,
+    slug: str,
+    source_story: str | None = None,
+    run_critic: bool = True,
+    tts_voice_override: str | None = None,
+    upload_override: bool | None = None,
+    require_critic: bool = False,
+    cfg_overrides: dict | None = None,
+) -> Path:
+    """Render one Short end-to-end.
+
+    Public entry point — opens an OTel render envelope (which pushes a
+    :class:`~pipeline.observability.RenderContext` and starts a single
+    parent span ``render.short``), then delegates to
+    :func:`_make_short_impl` whose body holds the actual stages. Every
+    nested ``tlm.timed`` / ``tlm.track`` / ``_record_stage_done`` call
+    inherits the envelope's context attrs, so the dashboard's
+    /app/telemetry waterfall view shows the whole render under one
+    root span keyed by channel + slug.
+    """
+    with obs.render_envelope(
+        channel=channel_path.stem,
+        slug=slug,
+        render_kind="short",
+    ) as _envelope:
+        try:
+            return _make_short_impl(
+                text,
+                channel_path,
+                out_dir,
+                slug,
+                source_story=source_story,
+                run_critic=run_critic,
+                tts_voice_override=tts_voice_override,
+                upload_override=upload_override,
+                require_critic=require_critic,
+                cfg_overrides=cfg_overrides,
+            )
+        except BaseException as e:
+            obs.record_exception(e, fatal=True)
+            raise
+
+
+def _make_short_impl(
     text: str,
     channel_path: Path,
     out_dir: Path,
@@ -939,12 +1230,35 @@ def make_short(
     # the synth call would dispatch to f5_tts with a Kokoro voice name and
     # crash. (Path-style overrides — pointing at a ref clip — are F5-TTS
     # references and should keep cfg["tts_provider"]=f5_tts.)
-    explicit_kokoro = bool(tts_voice_override) and "/" not in tts_voice_override
+    #
+    # CLOUD CARVE-OUT (2026-05-11): same as the form-override carve-out
+    # above — never flip a cloud channel to ``kokoro`` because the
+    # cloud image doesn't ship ``kokoro_onnx``. Path-style overrides
+    # still land on tts_voice; bare-name overrides log + are dropped on
+    # cloud so the channel default ref WAV survives.
+    _current_provider = str(cfg.get("tts_provider") or "")
+    _is_cloud_provider = _current_provider.startswith("cloudrun_") or _current_provider.startswith("azure_")
+    explicit_kokoro = (
+        bool(tts_voice_override)
+        and "/" not in tts_voice_override
+        and not _is_cloud_provider
+    )
     if tts_voice_override:
-        cfg["tts_voice"] = tts_voice_override
-        if explicit_kokoro:
-            cfg["tts_provider"] = "kokoro"
-            cfg.pop("tts_ref_text", None)
+        if "/" in tts_voice_override:
+            cfg["tts_voice"] = tts_voice_override
+        elif _is_cloud_provider:
+            print(
+                f"[make_short] tts_voice_override='{tts_voice_override}' "
+                f"ignored — channel uses cloud provider "
+                f"'{_current_provider}' which requires a path-style ref "
+                f"WAV (channel default kept).",
+                file=sys.stderr,
+            )
+        else:
+            cfg["tts_voice"] = tts_voice_override
+            if explicit_kokoro:
+                cfg["tts_provider"] = "kokoro"
+                cfg.pop("tts_ref_text", None)
     cache = out_dir / "cache" / slug
     cache.mkdir(parents=True, exist_ok=True)
 
@@ -966,7 +1280,18 @@ def make_short(
         )
 
     # Provider knobs — sane defaults preserve current behaviour.
-    asr_provider = cfg.get("asr_provider", "whisper_mlx")
+    #
+    # ASR provider honours ``YTFACTORY_ASR_PROVIDER`` env BEFORE the
+    # YAML default. The cloud render-worker forces ``faster_whisper``
+    # via env because ``whisper_mlx`` is Apple-only and crashes on
+    # Linux containers. Pre-2026-05-11 the env was ignored — every
+    # cloud render entered ASR with ``whisper_mlx`` and died on the
+    # mlx_whisper import. Honouring env here is the single fix that
+    # keeps env semantics intuitive across laptop + cloud.
+    asr_provider = (
+        (os.environ.get("YTFACTORY_ASR_PROVIDER") or "").strip()
+        or cfg.get("asr_provider", "whisper_mlx")
+    )
     tts_provider = cfg.get("tts_provider", "kokoro")
     image_provider = cfg.get("image_provider", "sd_turbo")
     motion_provider = cfg.get("motion_provider")  # None → slideshow path
@@ -1397,6 +1722,51 @@ def make_short(
         extra={"provider": asr_provider, "n_beats": len(beat_list)},
     )
 
+    # Stage 5.25 — mix music bed UNDER narration if cfg requests one.
+    # Sits AFTER the beats stage (so ASR word timestamps are derived
+    # from the clean narration, not narration+music — Whisper is much
+    # more accurate on clean speech) and BEFORE compose / image gen
+    # (so the same mixed WAV flows into both compose paths AND the
+    # critic recompose loop without us threading it explicitly).
+    #
+    # Bed lookup precedence (first match wins):
+    #   1. <channel>/music/<key>.mp3       (channel-curated)
+    #   2. <channel>/branding/music/<key>  (sportsrecapped layout)
+    #   3. data/music/<key>.mp3            (shared procedural beds —
+    #      the form's stock options live here)
+    #
+    # Mix level: cfg.audio_music_bed_db (default -28 dB, matches
+    # the long_form / sports_doc convention).
+    music_bed_default = (cfg.get("music_bed_default") or "").strip()
+    if audio_path.exists() and music_bed_default:
+        bed_path = _find_music_bed_for_render(
+            channel_path=channel_path,
+            bed_filename=music_bed_default,
+        )
+        if bed_path is not None:
+            mixed_path = cache / "narration_with_bed.wav"
+            bed_db = float(cfg.get("audio_music_bed_db", -28.0))
+            print(f"[2.5/4] mixing music bed under narration: "
+                  f"{bed_path.name} @ {bed_db:.0f} dB → {mixed_path.name}")
+            try:
+                _mix_music_bed_under_narration(
+                    narration_path=audio_path,
+                    bed_path=bed_path,
+                    out_path=mixed_path,
+                    bed_db=bed_db,
+                )
+                audio_path = mixed_path
+            except Exception as exc:  # noqa: BLE001
+                # Music bed mixing is decorative — never fail the render.
+                # Surface the error so it's debuggable but keep going
+                # with the clean narration.
+                print(f"[2.5/4] music bed mix failed: {exc!r} — "
+                      f"continuing with clean narration")
+        else:
+            print(f"[2.5/4] music bed '{music_bed_default}' requested but "
+                  f"not found in <channel>/music/, <channel>/branding/music/, "
+                  f"or data/music/ — skipping mix")
+
     # Stage 5.5 — author per-beat prompts via claude CLI if not already
     # cached. The orchestrator-level cache means re-running on the same
     # slug skips this; deleting prompts.json is the way to force regen.
@@ -1687,9 +2057,10 @@ def make_short(
         # on disk. Saves ~7-15s per render (150 word PNGs × ~50ms) and
         # lays the groundwork for true streaming compose later.
         compose.wipe_stale_per_beat_artefacts(cache, len(beat_list))
+        _caption_font_size = _resolve_caption_font_size(cfg)
         caption_prerender_thread = threading.Thread(
             target=_safe_prerender_word_captions,
-            args=(beat_list, cache),
+            args=(beat_list, cache, _caption_font_size),
             name="captions.prerender",
             daemon=True,
         )
@@ -2270,6 +2641,7 @@ def make_short(
             closer_panel_path=closer_panel_path,
             closer_format=closer_format,
             rank_chips=rank_chips or None,
+            word_caption_font_size=_resolve_caption_font_size(cfg),
         )
         print(f"     done in {time.time() - compose_t0:.1f}s")
         _record_stage_done(
@@ -2411,6 +2783,7 @@ def make_short(
                         closer_format=closer_format,
                         pass_label="recompose",
                         rank_chips=rank_chips or None,
+                        word_caption_font_size=_resolve_caption_font_size(cfg),
                     )
                     print(f"✓ re-rendered {out_path}")
             elif score < min_score:
@@ -2567,11 +2940,10 @@ def _cli_main_impl() -> None:
         help=(
             "Output root for cache/, shorts/, uploads/, etc. Default "
             "derives from --channel via the per-channel layout: variant "
-            "channels resolve via pipeline.niches.NICHE_CHANNEL "
-            "(sports_ranked → sportstoriesanimated/ranked); simple "
-            "channels with config.yaml at <root>/config.yaml use <root>. "
-            "Pass an explicit --out only to override (legacy data/ root, "
-            "scratch dir for testing, etc)."
+            "channels resolve via NicheDocs (top5_countdown → "
+            "sportsrecapped/ranked); simple channels with config.yaml at "
+            "<root>/config.yaml use <root>. Pass an explicit --out only "
+            "to override (legacy data/ root, scratch dir for testing, etc)."
         ),
     )
     ap.add_argument(
@@ -2684,7 +3056,7 @@ def _cli_main_impl() -> None:
     # Output manifest — consumed by ``workers/heavy/render_short.py``
     # so the cloud worker doesn't have to guess per-channel paths.
     # Pre-2026-05-05 the worker grepped ``data/shorts/<slug>.mp4`` which
-    # silently broke when per-channel layout (NICHE_CHANNEL) landed.
+    # silently broke when per-channel layout (NicheDoc routing) landed.
     # Print on its own line with a stable prefix so any log-parser /
     # tail can pick it up; downstream consumers ignore lines that
     # don't start with ``OUTPUT_MANIFEST: ``.
@@ -2720,13 +3092,14 @@ def _resolve_channel_out_dir(channel_path: Path) -> Path:
 
     Lookup precedence (delegated to :meth:`RenderPaths.from_channel_yaml`):
 
-    1. ``pipeline.niches.NICHE_CHANNEL`` — authoritative for variant
-       channels (sports_ranked, aita, oddities, tih, …) where YAML and
-       state dir don't share a path prefix.
+    1. ``pipeline.niche_specs.niche_channel_map()`` (built from
+       NicheDocs) — authoritative for variant channels (top5_countdown,
+       aita, wiki_oddities, today_in_history, …) where YAML and state
+       dir don't share a path prefix.
     2. ``<channel_root>/config.yaml`` simple-channel convention.
     3. ``<channel_root>/variants/<variant>.yaml`` fallback — flat layout
-       under the channel root, with a loud WARN so the operator adds a
-       NICHE_CHANNEL entry.
+       under the channel root, with a loud WARN so the operator authors
+       a NicheDoc (``<channel>/niches/<key>.json``) to fix routing.
     """
     from pipeline.paths import RenderPaths  # noqa: PLC0415 — lazy
 
@@ -2737,11 +3110,12 @@ def _resolve_channel_out_dir(channel_path: Path) -> Path:
         # root, but with a loud warning so the regression is visible.
         # The 2026-05-05 rivalry-recap render hit this when nothing was
         # registered for a new slug — the mp4 landed in ``data/shorts/``
-        # instead of ``sportstoriesanimated/ranked/shorts/``.
+        # instead of ``sportsrecapped/ranked/shorts/``.
         print(
             f"[out] WARN: could not resolve channel state dir from "
-            f"{channel_path!r}; falling back to legacy 'data/' root. Add a "
-            f"pipeline.niches.NICHE_CHANNEL entry to fix."
+            f"{channel_path!r}; falling back to legacy 'data/' root. "
+            f"Author a NicheDoc under <channel>/niches/<key>.json with "
+            f"routing.variant_yaml set to fix this."
         )
         return Path("data")
 

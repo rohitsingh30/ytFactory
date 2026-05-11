@@ -59,6 +59,7 @@ YOUTUBE_DIR = RESEARCH_DIR / "youtube"
 # can read the cache via the youtube module's GCS-aware loaders rather
 # than walking the local FS directly.
 from pipeline.research import youtube as youtube_stats  # noqa: E402
+from pipeline import observability as _obs  # noqa: E402
 
 MEMORY_DIR = Path(
     os.environ.get(
@@ -512,6 +513,8 @@ def _write_jsonl(path: Path, rows: Iterable[dict]) -> int:
     return n
 
 
+@_obs.traced("research.aggregator.rebuild", category="research",
+             capture=["refresh_analytics"])
 def rebuild(
     slices: list[str] | None = None,
     *,

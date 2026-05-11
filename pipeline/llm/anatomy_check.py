@@ -25,6 +25,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pipeline import observability as _obs
+
 from . import cli as llm
 
 
@@ -60,6 +62,8 @@ Return JSON exactly:
 """
 
 
+@_obs.traced("llm.anatomy_check.check_anatomy", category="image",
+             capture=["model", "timeout_s"])
 def check_anatomy(
     png_path: Path,
     *,

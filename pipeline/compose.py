@@ -40,6 +40,7 @@ from pathlib import Path
 
 from .beats import Beat
 from . import captions
+from . import observability as _obs
 from . import telemetry as _tlm
 
 
@@ -56,7 +57,12 @@ def wipe_stale_per_beat_artefacts(cache_dir: Path, n_beats: int) -> None:
     _wipe_stale_per_beat_artefacts(cache_dir, n_beats)
 
 
-def prerender_word_captions(beats: list[Beat], cache_dir: Path) -> int:
+def prerender_word_captions(
+    beats: list[Beat],
+    cache_dir: Path,
+    *,
+    font_size: int | None = None,
+) -> int:
     """Render every word_NNNN.png the upcoming compose() call will need,
     skipping files that already exist on disk.
 
@@ -65,6 +71,13 @@ def prerender_word_captions(beats: list[Beat], cache_dir: Path) -> int:
     background thread during image gen overlaps the ~7-15s of caption
     work with the ~10-60 minute image stage, eliminating it from the
     serial post-image-stage compose budget.
+
+    ``font_size`` overrides the default in
+    ``captions.render_word_caption``. The Customize step's
+    ``captions_density`` field maps minimal/standard/dense → 130/110/90.
+    Pre-rendered files MUST be deleted by the caller (or via
+    ``_wipe_stale_per_beat_artefacts``) when the font size changes —
+    otherwise the cached PNGs from a previous run will be re-used.
 
     Idempotent: safe to call twice; safe to call inside compose()
     after this function has already populated the directory.
@@ -79,7 +92,10 @@ def prerender_word_captions(beats: list[Beat], cache_dir: Path) -> int:
                 continue
             wp = cache_dir / f"word_{gi:04d}.png"
             if not wp.exists():
-                captions.render_word_caption(text, wp, canvas_w=WIDTH)
+                kwargs: dict = {"canvas_w": WIDTH}
+                if font_size is not None:
+                    kwargs["font_size"] = font_size
+                captions.render_word_caption(text, wp, **kwargs)
                 n_rendered += 1
             gi += 1
     return n_rendered
@@ -311,6 +327,7 @@ def _compose_with_word_captions(
     closer_caption_rows: list[Path] | None = None,
     pass_label: str,
     rank_chips: list[tuple[int, Path]] | None = None,
+    word_caption_font_size: int | None = None,
 ) -> Path:
     """Compose the Short with per-word karaoke captions (the default path).
 
@@ -348,7 +365,10 @@ def _compose_with_word_captions(
     for gi, _ws, _we, text in all_words:
         wp = cache_dir / f"word_{gi:04d}.png"
         if not wp.exists():
-            captions.render_word_caption(text, wp, canvas_w=WIDTH)
+            kwargs: dict = {"canvas_w": WIDTH}
+            if word_caption_font_size is not None:
+                kwargs["font_size"] = word_caption_font_size
+            captions.render_word_caption(text, wp, **kwargs)
         word_pngs.append(wp)
 
     n_images = len(image_paths)
@@ -521,6 +541,8 @@ def _compose_with_word_captions(
     return out_path
 
 
+@_obs.traced("compose.compose", category="render",
+             capture=["pass_label", "caption_mode"])
 def compose(
     image_paths: list[Path],
     beats: list[Beat],
@@ -533,6 +555,7 @@ def compose(
     pass_label: str = "compose",
     caption_mode: str = "word",
     rank_chips: list[tuple[int, Path]] | None = None,
+    word_caption_font_size: int | None = None,
 ) -> Path:
     """Render the final Short.
 
@@ -598,6 +621,7 @@ def compose(
             closer_caption_rows=closer_caption_rows,
             pass_label=pass_label,
             rank_chips=rank_chips,
+            word_caption_font_size=word_caption_font_size,
         )
 
     # ---- Legacy per-beat caption mode (kept for backwards compat) ----
@@ -1000,6 +1024,7 @@ def _extend_beats_for_footage(
     return new_beats, out_audio
 
 
+@_obs.traced("compose.compose_hybrid", category="render")
 def compose_hybrid(
     beat_resolutions: list[tuple[str, Path]],
     beats: list[Beat],
@@ -1086,6 +1111,8 @@ def compose_hybrid(
     )
 
 
+@_obs.traced("compose.compose_clips", category="render",
+             capture=["pass_label", "caption_style"])
 def compose_clips(
     clip_paths: list[Path],
     beats: list[Beat],

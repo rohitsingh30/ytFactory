@@ -37,6 +37,8 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
+from pipeline import observability as _obs
+
 
 @dataclass(frozen=True)
 class CastIssue:
@@ -101,6 +103,7 @@ EXAMPLES_GOOD_NARRATOR_DESC: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 
 
+@_obs.traced("llm.cast_lint.check_cast", category="llm")
 def check_cast(cast: dict) -> list[CastIssue]:
     """Run every cast-shape gate. Returns ALL issues — caller separates
     errors from warnings.

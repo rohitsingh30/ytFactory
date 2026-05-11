@@ -1,4 +1,4 @@
-"""Stage 6 (alt) — real broadcast footage clip resolver for sportstoriesanimated.
+"""Stage 6 (alt) — real broadcast footage clip resolver for sportsrecapped.
 
 For beats with ``kind: footage``, download the source video with yt-dlp
 (cached by video id), trim to a frame-accurate ``[in_s, out_s]`` window
@@ -25,6 +25,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import observability as _obs
 from .. import telemetry as _tlm
 
 
@@ -32,7 +33,7 @@ _VIDEO_ID_RE = re.compile(
     r"(?:v=|/shorts/|youtu\.be/|/embed/|/v/)([A-Za-z0-9_-]{11})"
 )
 
-DEFAULT_CACHE_DIR = Path("sportstoriesanimated/footage/sources")
+DEFAULT_CACHE_DIR = Path("sportsrecapped/footage/sources")
 
 
 def _extract_video_id(url: str) -> str:
@@ -186,6 +187,7 @@ def _download_source(url: str, cache_dir: Path) -> Path:
     return dest
 
 
+@_obs.traced("footage.fetch_clip", category="footage", capture=["url"])
 def fetch_clip(
     url: str,
     in_s: float,

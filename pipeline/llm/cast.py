@@ -47,6 +47,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pipeline import observability as _obs
+
 from . import cli as llm
 
 
@@ -150,6 +152,7 @@ Return ONLY a JSON object with this exact shape (no prose, no fences):
 """
 
 
+@_obs.traced("llm.cast.author_cast", category="llm")
 def author_cast(
     *,
     raw_story: dict,

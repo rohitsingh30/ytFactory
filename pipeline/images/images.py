@@ -32,6 +32,8 @@ import time as _time
 from pathlib import Path
 from threading import Thread as _Thread
 
+from pipeline import observability as _obs
+
 # Module-state stubs — kept as None forever post-cleanup so any leftover
 # `_FLUX_PIPE is not None` truthiness check evaluates correctly. Their
 # only remaining purpose is back-compat for code that mutates them.
@@ -515,6 +517,61 @@ def warmup(
 
 
 def generate(
+    prompt: str,
+    style_prefix: str,
+    seed: int,
+    out_path: Path,
+    width: int = 768,
+    height: int = 1344,
+    steps: int = 4,
+    *,
+    provider: str = "cloudrun_flux2_klein",
+    ip_adapter_image: Path | None = None,
+    ip_adapter_scale: float = 0.6,
+    extra_negative: str | list[str] | None = None,
+    force_positive: str | list[str] | None = None,
+) -> Path:
+    """Generate one image. Dispatches on ``provider``.
+
+    Public entry — wraps :func:`_generate_impl` in an OTel
+    ``image_gen`` span so the dashboard can chart per-provider p95,
+    cold-load impact, and per-render image counts. The span carries
+    ``provider``, ``prompt_chars``, ``width``, ``height``, ``steps``,
+    ``seed`` as attrs.
+    """
+    metadata = {
+        "provider": provider,
+        "prompt_chars": len(prompt or ""),
+        "style_chars": len(style_prefix or ""),
+        "width": width,
+        "height": height,
+        "steps": steps,
+        "seed": seed,
+        "out_path": str(out_path),
+    }
+    with _obs.timed("image_gen", category="image", metadata=metadata) as t:
+        result = _generate_impl(
+            prompt=prompt,
+            style_prefix=style_prefix,
+            seed=seed,
+            out_path=out_path,
+            width=width,
+            height=height,
+            steps=steps,
+            provider=provider,
+            ip_adapter_image=ip_adapter_image,
+            ip_adapter_scale=ip_adapter_scale,
+            extra_negative=extra_negative,
+            force_positive=force_positive,
+        )
+        try:
+            t.add(metadata={"out_bytes": result.stat().st_size})
+        except Exception:  # noqa: BLE001
+            pass
+        return result
+
+
+def _generate_impl(
     prompt: str,
     style_prefix: str,
     seed: int,

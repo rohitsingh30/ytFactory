@@ -28,6 +28,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from .. import observability as _obs
+
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -164,17 +166,34 @@ def _run_script(script: Path, args: Iterable[str], timeout_s: float) -> WarmResu
                           stderr_tail=f"timeout after {timeout_s:.0f}s")
 
 
+@_obs.traced("cloud.warm.warm_for_channel", category="cloud",
+             capture=["channel", "timeout_s", "parallelism", "include_editing"])
 def warm_for_channel(
     channel: Optional[str] = None,
     *,
     timeout_s: float = 600.0,
     parallelism: int = 6,
+    include_editing: bool = False,
 ) -> WarmReport:
     """Pre-warm the cloud services this channel's next render will use.
 
     Returns immediately with ``fired=False`` when no relevant
     ``CLOUDRUN_*_URL`` env is set so the renderer can call this
     unconditionally without taking on the cold-load tax of a probe.
+
+    Args:
+        channel: Channel slug or path to channel.yaml. ``None`` uses
+            the default English Shorts pair (chatterbox + flux).
+        timeout_s: Per-script timeout (each warm script is a /readyz
+            probe with retries; usually completes in < 30s if warm,
+            up to ~7 min if cold).
+        parallelism: Max concurrent warm jobs in the thread pool.
+        include_editing: Also probe ``ytfactory-editing-agent`` /readyz.
+            Set to True from render entrypoints when the proposal opted
+            into the optional 8th orchestrator stage
+            (``proposal.editing.enabled``) so the editing-agent
+            cold-load happens behind TTS+image rather than serially
+            after compose.
     """
     report = WarmReport(channel=channel, fired=False)
 
@@ -189,7 +208,10 @@ def warm_for_channel(
         (image_targets and "flux" in image_targets and os.environ.get("CLOUDRUN_IMAGE_FLUX2_KLEIN_URL"))
         or (image_targets and "zimage" in image_targets and os.environ.get("CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL"))
     )
-    if not (has_any_tts_url or has_any_img_url):
+    has_editing_url = bool(
+        include_editing and os.environ.get("CLOUDRUN_EDITING_AGENT_URL")
+    )
+    if not (has_any_tts_url or has_any_img_url or has_editing_url):
         report.note = "no CLOUDRUN_*_URL configured; skipping (laptop fallback path)"
         return report
 
@@ -203,15 +225,54 @@ def warm_for_channel(
     else:
         report.skipped.extend(f"image:{t}" for t in image_targets)
 
-    if not jobs:
+    if not jobs and not has_editing_url:
         return report
 
     report.fired = True
-    with ThreadPoolExecutor(max_workers=min(parallelism, len(jobs))) as pool:
-        futs = [pool.submit(_run_script, script, args, timeout_s) for script, args in jobs]
-        for f in as_completed(futs):
+
+    # Editing-agent uses a Python probe (no warm.sh shell script — its
+    # shape doesn't match the GPU-targeted warm_*_services.sh helpers).
+    # We run it on the same thread pool so the timing budget stays
+    # bounded by ``timeout_s``.
+    futures = []
+    with ThreadPoolExecutor(max_workers=min(parallelism, max(1, len(jobs) + (1 if has_editing_url else 0)))) as pool:
+        for script, args in jobs:
+            futures.append(pool.submit(_run_script, script, args, timeout_s))
+        if has_editing_url:
+            futures.append(pool.submit(_warm_editing_agent, timeout_s))
+        for f in as_completed(futures):
             report.results.append(f.result())
     return report
+
+
+def _warm_editing_agent(timeout_s: float) -> WarmResult:
+    """Probe the editing-agent's /readyz directly via its laptop client.
+
+    Kept inline (no separate warm script) because the editing-agent is
+    a CPU service whose only "warm" step is a /readyz probe — there's
+    no GPU model to load in advance. If editing-agent ever grows a
+    cold-load step heavier than module import, port to a
+    cloud/warm_editing_agent.sh script alongside the GPU ones."""
+    started = time.perf_counter()
+    try:
+        from pipeline.editing.cloudrun import warmup  # noqa: PLC0415
+
+        ok = warmup()
+        return WarmResult(
+            target="editing-agent",
+            kind="video",
+            ok=ok,
+            duration_s=round(time.perf_counter() - started, 2),
+            stdout_tail="readyz=200" if ok else "readyz!=200",
+        )
+    except Exception as e:  # noqa: BLE001
+        return WarmResult(
+            target="editing-agent",
+            kind="video",
+            ok=False,
+            duration_s=round(time.perf_counter() - started, 2),
+            stderr_tail=str(e)[:400],
+        )
 
 
 def warm_async(channel: Optional[str] = None, **kwargs: Any) -> threading.Thread:

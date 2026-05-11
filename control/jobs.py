@@ -144,6 +144,20 @@ STATUS_FAILED = "failed"
 
 
 def create_job(job_id: str, *, channel: str, topic: str, proposal: dict[str, Any], owner_uid: str | None = None) -> None:
+    # Stamp the active OTel traceparent onto the job doc. The
+    # render-worker reads it back via attach_traceparent_from_env so
+    # the JOB's root span links into the chat-request trace.
+    extra: dict[str, Any] = {}
+    try:
+        from pipeline.observability import propagation as _trace_prop  # noqa: PLC0415
+        carrier: dict[str, str] = {}
+        _trace_prop.inject_into_dict(carrier)
+        if "traceparent" in carrier:
+            extra["traceparent"] = carrier["traceparent"]
+        if "tracestate" in carrier:
+            extra["tracestate"] = carrier["tracestate"]
+    except Exception:  # noqa: BLE001
+        pass
     get_jobs().create(
         job_id,
         channel=channel,
@@ -152,6 +166,7 @@ def create_job(job_id: str, *, channel: str, topic: str, proposal: dict[str, Any
         owner_uid=owner_uid,
         status=STATUS_PENDING,
         stage="queued",
+        **extra,
     )
 
 

@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from . import cli as llm
+from pipeline import observability as _obs
 
 
 # Channel-spec encoded directly in the prompt. If/when we want to re-use
@@ -118,6 +119,8 @@ def _word_count(s: str) -> int:
     return len(s.strip().split())
 
 
+@_obs.traced("llm.ai_recap_rewrite.rewrite", category="llm",
+             extra_metadata={"channel": "airecap"})
 def rewrite(raw_story: dict, *, model: str | None = None) -> dict:
     """Author an AI Recap script from a RawStory dict.
 

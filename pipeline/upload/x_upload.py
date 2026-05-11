@@ -32,6 +32,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pipeline import observability as _obs
+
 
 CONFIG_DIR = Path.home() / ".config" / "ytfactory"
 
@@ -219,6 +221,39 @@ def x_post(
     """Chunked-upload an mp4 to X and post it as a tweet.
 
     Returns ``{tweet_id, url, uploaded_at, media_id, ...}``.
+    Wrapped in an ``x_post`` span so the dashboard's per-channel X
+    upload health view can chart latency / error rate.
+    """
+    metadata: dict = {
+        "account": account,
+        "text_chars": len(text or ""),
+    }
+    try:
+        metadata["mp4_bytes"] = mp4_path.stat().st_size
+    except Exception:  # noqa: BLE001
+        pass
+    with _obs.timed("x_post", category="upload", metadata=metadata) as t:
+        result = _x_post_impl(
+            mp4_path, text=text, account=account, progress_cb=progress_cb,
+        )
+        if isinstance(result, dict):
+            t.add(metadata={
+                "tweet_id": result.get("tweet_id"),
+                "media_id": result.get("media_id"),
+            })
+        return result
+
+
+def _x_post_impl(
+    mp4_path: Path,
+    *,
+    text: str,
+    account: str = "default",
+    progress_cb: Any = None,
+) -> dict:
+    """Chunked-upload an mp4 to X and post it as a tweet.
+
+    Returns ``{tweet_id, url, uploaded_at, media_id, ...}``.
     """
     try:
         import tweepy  # noqa: PLC0415
@@ -314,6 +349,54 @@ def x_post(
 
 
 def post_short(
+    *,
+    project_root: Path,
+    channel_yaml: dict,
+    channel_dir: str,
+    slug: str,
+    mp4_path: Path,
+    script: dict,
+    raw: dict | None = None,
+    text_override: str | None = None,
+    force: bool = False,
+    dry_run: bool = False,
+    progress_cb: Any = None,
+) -> dict:
+    """High-level X post entry. Wraps the implementation in an
+    ``x_post_short`` span — the dashboard groups per-channel X health
+    on this name. The inner ``x_post`` span (one per actual API call)
+    nests under it.
+    """
+    metadata = {
+        "channel_dir": channel_dir,
+        "slug": slug,
+        "force": force,
+        "dry_run": dry_run,
+    }
+    with _obs.timed("x_post_short", category="upload",
+                    metadata=metadata) as t:
+        result = _post_short_impl(
+            project_root=project_root,
+            channel_yaml=channel_yaml,
+            channel_dir=channel_dir,
+            slug=slug,
+            mp4_path=mp4_path,
+            script=script,
+            raw=raw,
+            text_override=text_override,
+            force=force,
+            dry_run=dry_run,
+            progress_cb=progress_cb,
+        )
+        if isinstance(result, dict):
+            t.add(metadata={
+                "tweet_id": result.get("tweet_id"),
+                "skipped": result.get("skipped", False),
+            })
+        return result
+
+
+def _post_short_impl(
     *,
     project_root: Path,
     channel_yaml: dict,

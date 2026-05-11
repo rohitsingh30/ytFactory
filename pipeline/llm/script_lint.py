@@ -27,6 +27,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from pipeline import observability as _obs
+
 
 # Mirrors the rule constants stated in the rewrite prompt. Kept here so
 # both prompt and linter share one source of truth — change the rule
@@ -220,6 +222,7 @@ def _check(narration: str) -> list[str]:
     return issues
 
 
+@_obs.traced("llm.script_lint.lint_and_fix", category="llm")
 def lint_and_fix(narration: str) -> LintResult:
     """Validate narration; auto-fix the safely-fixable issues.
 

@@ -58,6 +58,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 import yaml
 
+from pipeline import observability as obs
+
 
 # ---------- env loading ----------------------------------------------------
 
@@ -107,7 +109,7 @@ def _split_into_chunks(text: str, target_chars: int = 380) -> list[str]:
 
 # ---------- per-chunk TTS adapters ----------------------------------------
 # `synth_long_narration` is the shared chunked+resumable+atempo'd long-form
-# narration synth used by historyrecapped (sleep), sportstoriesanimated
+# narration synth used by historyrecapped (sleep), sportsrecapped
 # (sports docs), and any future long-form channel. The historyrecapped
 # RENDERER rejects tts_provider != f5_tts upstream (strict-F5 rule), so the
 # shared function can support multiple providers without violating it.
@@ -162,7 +164,7 @@ def _kokoro_chunk(
 
     Delegates to pipeline.audio._synth_kokoro (per-sentence internally with
     modulation). Used by long-form renderers whose channel config picks
-    ``tts_provider: kokoro`` — currently sportstoriesanimated long-form doc
+    ``tts_provider: kokoro`` — currently sportsrecapped long-form doc
     after theo.wav was lost in the 2026-05-04 recovery wipe.
     """
     from pipeline import audio as _aud
@@ -246,7 +248,7 @@ def synth_long_narration(
         Picked as the canonical long-form English provider on
         2026-05-10 after ``ytfactory-tts-f5`` was retired in favour
         of ``ytfactory-tts-chatterbox``.
-      * ``kokoro`` (sportstoriesanimated long-form doc) — Kokoro 82M
+      * ``kokoro`` (sportsrecapped long-form doc) — Kokoro 82M
         voice catalogue. ``voice_id`` is a Kokoro voice id (e.g.
         ``am_michael``). ``ref_audio_text`` is unused. Local-only;
         not parallelised (Kokoro is fast enough that the fan-out
@@ -1561,6 +1563,24 @@ def main() -> int:
                     help="skip the visual_grade filter chain — lets the aspect-match "
                          "short-circuit stream-copy 1080p sources (avoids the long-clip crash)")
     args = ap.parse_args()
+
+    # OTel render envelope: pushes RenderContext + opens
+    # render.long_form parent span so every nested telemetry call
+    # (TTS chunks, footage trims, compose, upload) inherits
+    # channel/slug attrs.
+    with obs.render_envelope(
+        channel=args.channel,
+        slug=args.slug,
+        render_kind="long_form",
+    ):
+        try:
+            return _main_impl(args)
+        except BaseException as e:
+            obs.record_exception(e, fatal=True)
+            raise
+
+
+def _main_impl(args) -> int:
 
     # Pre-warm cloud GPU containers this channel will hit. Fire-and-
     # forget on a daemon thread; no-op when no CLOUDRUN_*_URL set.

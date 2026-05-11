@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .services import Service, ServiceKind, list_services
+from .. import observability as _obs
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +213,8 @@ def _classify(svc: Service, row: HealthRow) -> str:
     return "green"
 
 
+@_obs.traced("cloud.health.sweep", category="cloud",
+             capture=["parallelism", "timeout_s"])
 def sweep(
     services: Optional[list[Service]] = None,
     *,

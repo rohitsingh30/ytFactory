@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from pipeline import observability as _obs
+
 
 # Pixel sentinels — black/white frames usually mean the GPU service
 # failed silently or the safety filter blanked the output.
@@ -37,6 +39,8 @@ class ImageIssue:
     target_path: str       # 'beats[N].image'
 
 
+@_obs.traced("llm.image_lint.check_image", category="image",
+             capture=["beat_index", "expected_aspect"])
 def check_image(
     image_path: Path,
     *,

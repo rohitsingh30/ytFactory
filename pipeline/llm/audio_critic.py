@@ -36,6 +36,7 @@ import subprocess
 from pathlib import Path
 
 from .. import asr
+from pipeline import observability as _obs
 from . import cli as llm
 
 
@@ -463,6 +464,8 @@ def _tokenise(text: str) -> list[str]:
     return [t.lower() for t in re.findall(r"[\w']+", text, flags=re.UNICODE)]
 
 
+@_obs.traced("llm.audio_critic.critique_audio", category="llm",
+             capture=["asr_provider"])
 def critique_audio(
     *,
     audio_path: Path,

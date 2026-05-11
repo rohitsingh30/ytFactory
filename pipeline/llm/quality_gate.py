@@ -16,6 +16,8 @@ from pathlib import Path
 
 from PIL import Image, ImageFilter, ImageStat
 
+from pipeline import observability as _obs
+
 
 # OCR is optional — pytesseract requires brew tesseract, easyocr requires
 # torch + a 200MB model bundle. The text-artefact gate is feature-flagged
@@ -81,6 +83,7 @@ def _has_text_artefact(img: Image.Image, max_chars: int = 4) -> tuple[bool, str]
     return False, ""
 
 
+@_obs.traced("llm.quality_gate.check_image", category="image")
 def check_image(
     path: Path,
     *,

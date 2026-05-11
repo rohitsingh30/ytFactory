@@ -32,13 +32,27 @@ from control.scheduler_routes import router as scheduler_router
 # surface that the e2e test + the Next.js UI consume.
 from control.routes.channels_routes import router as channels_router_v2
 from control.routes.cloud_routes import router as cloud_router_v2
+from control.routes.music_routes import router as music_router_v2
 from control.routes.niche_specs_routes import router as niche_specs_router_v2
 from control.routes.render_routes import router as render_router_v2
+from control.routes.song_sample_routes import router as song_sample_router_v2
+from control.routes.telemetry_routes import router as telemetry_router_v2
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "web" / "static"
 
 app = FastAPI(title="ytFactory control (dev)")
+
+# Auto-instrument every route → an OTel HTTP span (named after the
+# route template, e.g. ``GET /api/render/{job_id}``). Spans nest with
+# any pipeline-side ``obs.timed`` calls inside the handler so the
+# dashboard's trace explorer shows the full request → render pipeline
+# in one waterfall. Idempotent: safe to call again on hot reload.
+from pipeline import observability as _obs  # noqa: E402
+
+_obs.instrument_fastapi(app)
+_obs.instrument_outbound_http()
+_obs.install_http_identity_middleware(app)
 # Mount the v2 (control/routes/*) routers FIRST so their concrete paths
 # win over any legacy variant with the same prefix.
 app.include_router(channels_router_v2)
@@ -48,6 +62,9 @@ app.include_router(cloud_router_v2)
 # Generate button 404s even when the dev server is up.
 app.include_router(niche_specs_router_v2)
 app.include_router(render_router_v2)
+app.include_router(music_router_v2)
+app.include_router(song_sample_router_v2)
+app.include_router(telemetry_router_v2)
 # Legacy routers — additive; they bring agent/chat/dashboard/niche/scheduler.
 app.include_router(agent_router)
 app.include_router(chat_router)

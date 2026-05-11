@@ -55,6 +55,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pipeline import observability as obs
+from pipeline import telemetry as tlm
+
 # ---- text normalisation (no torch deps) -----------------------------------
 # Public API:
 from pipeline.tts.text_normalize import (
@@ -243,6 +246,73 @@ from pipeline.tts.azure_aks import (  # noqa: E402, F401
 # tests/test_audio_tts_providers.py correctly intercepts.
 
 def synthesize(
+    text: str,
+    voice: str,
+    out_path: Path,
+    speed: float = 1.0,
+    provider: str = "kokoro",
+    ref_audio_text: str | None = None,
+    modulation: dict | None = None,
+    pronunciation_dict: dict | None = None,
+    language: str = "en",
+    narration_prosody: list[dict] | None = None,
+) -> Path:
+    """Generate speech audio. Returns path to the .wav file.
+
+    Public TTS dispatcher — every channel YAML's ``tts_provider``
+    funnels through here, so wrapping it once gives every TTS lane a
+    span. ``CloudRunUnavailable`` from a ``cloudrun_*`` provider is
+    propagated; the local-fallback path inside
+    :mod:`pipeline.tts.cloudrun` records its own ``tts_fallback``
+    event so the dashboard can split clean cloud success from
+    fallback-rescued runs.
+
+    See :func:`_synthesize_impl` for the per-provider routing — the
+    impl docstring carries the long-form behaviour notes.
+    """
+    chars = len(text or "")
+    metadata = {
+        "provider": provider,
+        "language": language,
+        "speed": speed,
+        "chars": chars,
+        "voice": str(voice)[:200] if voice else None,
+        "has_ref_text": bool(ref_audio_text),
+        "has_prosody": bool(narration_prosody),
+        "out_path": str(out_path),
+    }
+    with obs.timed("tts_synth", category="tts", metadata=metadata) as t:
+        result = _synthesize_impl(
+            text,
+            voice=voice,
+            out_path=out_path,
+            speed=speed,
+            provider=provider,
+            ref_audio_text=ref_audio_text,
+            modulation=modulation,
+            pronunciation_dict=pronunciation_dict,
+            language=language,
+            narration_prosody=narration_prosody,
+        )
+        # Best-effort: record the produced audio's wall-clock duration
+        # (cheap soundfile probe; falls back to file size if probe
+        # fails). Useful for the dashboard's chars/sec heatmap.
+        try:
+            import soundfile as _sf  # noqa: PLC0415
+            info = _sf.info(str(result))
+            t.add(metadata={
+                "wav_seconds": round(info.frames / info.samplerate, 2),
+                "samplerate": info.samplerate,
+            })
+        except Exception:  # noqa: BLE001
+            try:
+                t.add(metadata={"wav_bytes": result.stat().st_size})
+            except Exception:  # noqa: BLE001
+                pass
+        return result
+
+
+def _synthesize_impl(
     text: str,
     voice: str,
     out_path: Path,

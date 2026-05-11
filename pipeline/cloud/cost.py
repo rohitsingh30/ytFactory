@@ -5,11 +5,16 @@ Setup (one-time, documented in ``docs/cloudrun_admin_panel.md``):
 1. Enable the Cloud Billing → BigQuery export from the GCP console:
      Billing → Billing export → Detailed usage cost → BigQuery export
    pointed at dataset ``billing_export`` in project ``ytfactory-prod-v2``.
+   This is **Console-only** — no API or ``gcloud`` command exists for
+   creating the export config (verified 2026-05-11). The dataset itself
+   can be pre-created with ``bq mk --location=US billing_export``.
 2. The standard export table is named
-   ``gcp_billing_export_resource_v1_<BILLING_ACCOUNT_ID>``.
+   ``gcp_billing_export_resource_v1_<BILLING_ACCOUNT_ID>`` (dashes →
+   underscores). For ``ytfactory-prod-v2`` the billing account id is
+   ``012FF7-AF3923-1A94C4`` (so the table is ``..._012FF7_AF3923_1A94C4``).
 3. The service account running this code (laptop user creds in dev,
-   the Cloud Run JOB SA in prod) needs ``roles/bigquery.dataViewer``
-   on that dataset.
+   ``tts-runner@ytfactory-prod-v2`` for the prod web service) needs
+   ``roles/bigquery.dataViewer`` on that dataset.
 
 What we query
 -------------
@@ -38,6 +43,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from .services import Service, list_services
+from .. import observability as _obs
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +92,8 @@ def _bq_client():
     return bigquery.Client(project=DEFAULT_PROJECT)
 
 
+@_obs.traced("cloud.cost.fetch_cost_window", category="cloud",
+             capture=["days"])
 def fetch_cost_window(
     days: int = 30,
     *,
@@ -94,9 +102,12 @@ def fetch_cost_window(
 ) -> CostWindow:
     """Pull per-service per-day cost for the last ``days`` days.
 
-    ``billing_account_id`` defaults to ``BILLING_ACCOUNT_ID`` env. The
-    one for ``ytfactory-prod-v2`` is documented in
-    ``docs/cloudrun_tts.md`` (``012E39-E4ECEB-7F119F``).
+    ``billing_account_id`` defaults to the ``BILLING_ACCOUNT_ID`` env, then
+    to the hard-coded id for ``ytfactory-prod-v2``: ``012FF7-AF3923-1A94C4``
+    (verified via ``gcloud beta billing projects describe ytfactory-prod-v2``
+    on 2026-05-11). The old v1-era id ``012E39-E4ECEB-7F119F`` referenced in
+    ``docs/cloudrun_tts.md`` belongs to ``ytfactory-prod`` (v1) and is no
+    longer accessible.
     """
     targets = services if services is not None else list_services()
     name_to_short = {s.name: s.short for s in targets}
@@ -107,8 +118,7 @@ def fetch_cost_window(
                         range_start=start.isoformat(),
                         range_end=today.isoformat())
 
-    # Resolve billing account id.
-    bid = billing_account_id or os.environ.get("BILLING_ACCOUNT_ID") or "012E39-E4ECEB-7F119F"
+    bid = billing_account_id or os.environ.get("BILLING_ACCOUNT_ID") or "012FF7-AF3923-1A94C4"
     if not bid:
         window.reason = "BILLING_ACCOUNT_ID env not set"
         return window

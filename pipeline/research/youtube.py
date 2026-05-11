@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.paths import PROJECT_ROOT, RESEARCH_DIR
+from pipeline import observability as _obs
 
 # Local alias so tests + monkey-patching keep working (some test fixtures
 # rebind ``pipeline.research.youtube.YOUTUBE_DIR`` directly). New code
@@ -511,6 +512,8 @@ def _assert_safe_to_write(account: str) -> None:
         )
 
 
+@_obs.traced("research.youtube.fetch_account", category="research",
+             capture=["account"])
 def fetch_account(account: str, *, quiet: bool = False) -> dict | None:
     """Fetch channel meta + every uploaded video for one account.
 
@@ -549,6 +552,7 @@ def fetch_account(account: str, *, quiet: bool = False) -> dict | None:
     return payload
 
 
+@_obs.traced("research.youtube.fetch_all", category="research")
 def fetch_all(*, quiet: bool = False) -> dict[str, Any]:
     """Refresh every channel discoverable via <channel>/config.yaml.
 

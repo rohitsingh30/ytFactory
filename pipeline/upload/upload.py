@@ -36,6 +36,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from pipeline import observability as _obs
+
 
 # YouTube Data API v3 — uploading + setting privacy/publish-at + setting
 # a custom thumbnail all live under the upload scope (see
@@ -423,6 +425,15 @@ def authenticate(account: str = "default", *, interactive: bool = True) -> Any:
     Loads the cached refresh token if present; otherwise, if ``interactive``,
     runs the browser flow and writes the new token to disk.
     """
+    with _obs.timed(
+        "oauth_authenticate",
+        category="upload",
+        metadata={"account": account, "interactive": interactive},
+    ):
+        return _authenticate_impl(account, interactive=interactive)
+
+
+def _authenticate_impl(account: str = "default", *, interactive: bool = True) -> Any:
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request as GoogleAuthRequest
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -790,6 +801,58 @@ def set_thumbnail(video_id: str, thumbnail_path: Path, *, account: str = "defaul
 
 
 def youtube_upload(
+    mp4_path: Path,
+    *,
+    title: str,
+    description: str,
+    tags: list[str],
+    category_id: str = "24",
+    privacy: str = "private",
+    publish_at: str | None = None,
+    made_for_kids: bool = False,
+    account: str = "default",
+    thumbnail_path: Path | None = None,
+    progress_cb: Any = None,
+) -> dict:
+    """Resumable upload of one mp4. Public entry — wraps the
+    implementation in a ``youtube_upload`` span. Records video_id,
+    file size, privacy, and publish_at as span attrs on success;
+    span captures the exception on failure (notably
+    :class:`RefreshTokenLost` for stale OAuth tokens).
+    """
+    metadata: dict = {
+        "account": account,
+        "title": (title or "")[:120],
+        "tag_count": len(tags or []),
+        "category_id": category_id,
+        "privacy": privacy,
+        "made_for_kids": made_for_kids,
+        "has_thumbnail": bool(thumbnail_path),
+        "scheduled": bool(publish_at),
+    }
+    try:
+        metadata["mp4_bytes"] = mp4_path.stat().st_size
+    except Exception:  # noqa: BLE001
+        pass
+    with _obs.timed("youtube_upload", category="upload",
+                    metadata=metadata) as t:
+        result = _youtube_upload_impl(
+            mp4_path,
+            title=title, description=description, tags=tags,
+            category_id=category_id, privacy=privacy,
+            publish_at=publish_at, made_for_kids=made_for_kids,
+            account=account, thumbnail_path=thumbnail_path,
+            progress_cb=progress_cb,
+        )
+        if isinstance(result, dict):
+            t.add(metadata={
+                "video_id": result.get("video_id"),
+                "url": result.get("url"),
+            })
+        return result
+
+
+def _youtube_upload_impl(
     mp4_path: Path,
     *,
     title: str,
@@ -1211,6 +1274,89 @@ def _mirror_record_to_gcs(local_path: Path, project_root: Path, record: dict) ->
 
 
 def upload_short(
+    *,
+    project_root: Path,
+    channel_yaml: dict,
+    channel_dir: str,
+    slug: str,
+    mp4_path: Path,
+    script: dict,
+    raw: dict | None = None,
+    title_override: str | None = None,
+    description_override: str | None = None,
+    privacy_override: str | None = None,
+    publish_at: str | None = None,
+    tags_override: list[str] | None = None,
+    thumbnail_path: Path | None = None,
+    auto_thumbnail: bool | None = None,
+    headline_override: str | None = None,
+    force: bool = False,
+    skip_critic: bool = False,
+    force_critic: bool = False,
+    min_score_override: int | None = None,
+    progress_cb: Any = None,
+) -> dict:
+    """High-level: dedupe → derive metadata → upload → record.
+
+    Public entry — wraps the implementation in an ``upload_short``
+    span. The dispatcher span will see one ``youtube_upload`` child
+    span per actual API call and (when applicable) one
+    ``oauth_authenticate`` great-grandchild for the credential
+    refresh chain. The dashboard's per-channel upload health view is
+    sourced from this span.
+    """
+    metadata = {
+        "channel_dir": channel_dir,
+        "slug": slug,
+        "force": force,
+        "skip_critic": skip_critic,
+        "force_critic": force_critic,
+        "scheduled": bool(publish_at),
+        "has_thumbnail_override": bool(thumbnail_path),
+    }
+    with _obs.timed("upload_short", category="upload",
+                    metadata=metadata) as t:
+        try:
+            result = _upload_short_impl(
+                project_root=project_root,
+                channel_yaml=channel_yaml,
+                channel_dir=channel_dir,
+                slug=slug,
+                mp4_path=mp4_path,
+                script=script,
+                raw=raw,
+                title_override=title_override,
+                description_override=description_override,
+                privacy_override=privacy_override,
+                publish_at=publish_at,
+                tags_override=tags_override,
+                thumbnail_path=thumbnail_path,
+                auto_thumbnail=auto_thumbnail,
+                headline_override=headline_override,
+                force=force,
+                skip_critic=skip_critic,
+                force_critic=force_critic,
+                min_score_override=min_score_override,
+                progress_cb=progress_cb,
+            )
+        except RefreshTokenLost as rtl:
+            # Surface as a distinct attribute so the dashboard's
+            # OAuth-health card lights up immediately. Span is marked
+            # ERROR by the timed/record_exception path.
+            t.add(metadata={
+                "error_class": "RefreshTokenLost",
+                "account": getattr(rtl, "account", None),
+            })
+            raise
+        if isinstance(result, dict):
+            t.add(metadata={
+                "skipped": result.get("skipped", False),
+                "video_id": result.get("video_id"),
+            })
+        return result
+
+
+def _upload_short_impl(
     *,
     project_root: Path,
     channel_yaml: dict,

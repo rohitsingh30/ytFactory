@@ -181,6 +181,15 @@ _SERVICES: tuple[Service, ...] = (
         fallback_url=f"https://ytfactory-clone-video-worker-7hwnzw7lya-as.a.run.app",
         healthz_path="/healthz",
     ),
+    Service(
+        name="ytfactory-editing-agent",
+        short="editing-agent",
+        kind=ServiceKind.VIDEO,
+        env_var="CLOUDRUN_EDITING_AGENT_URL",
+        fallback_url="",
+        healthz_path="/readyz",
+        notes="Cinematic editor (polish + assemble-clips/stills/mixed). See docs/editing_agent.md and cloud/editing-agent/.",
+    ),
     # --- Infra (CPU services) ---
     Service(
         name="ytfactory-web-server",

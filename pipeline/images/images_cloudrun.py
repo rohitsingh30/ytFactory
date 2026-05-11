@@ -59,6 +59,7 @@ from pathlib import Path
 import requests
 
 from pipeline.cloud.cloudrun_auth import get_id_token
+from pipeline import telemetry as _tlm
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +171,16 @@ def _trip_breaker(reason: str) -> None:
             )
             _CLOUD_DISABLED_THIS_RENDER = True
             _BREAKER_REASON = reason
+            # Telemetry event so the dashboard can chart per-render
+            # breaker trips alongside per-image latency. ``success=False``
+            # reflects the loss-of-cloud event (the render itself may
+            # still succeed via local fallback).
+            _tlm.track(
+                "image_circuit_breaker_tripped",
+                category="image",
+                success=False,
+                metadata={"reason": str(reason)[:300]},
+            )
 
 
 def _breaker_open() -> bool:
@@ -207,9 +218,12 @@ def _post_generate(url: str, payload: dict) -> dict:
     last_err: Exception | None = None
     # 5 attempts with exponential backoff for 503/429 (Cloud Run "Rate
     # exceeded" — happens when the renderer fires N parallel image-gen
-    # requests against a max-instances=2 service). The whole retry
-    # window is bounded at ~30s so we don't masquerade a real outage as
-    # a long timeout.
+    # requests against a max-instances=3 service — bumped from 2 on
+    # 2026-05-11 alongside the per-render fan-out in
+    # ``pipeline.render.shorts._render_one_beat``; see
+    # ``docs/parallel_per_beat_fanout.md`` for the dispatcher recipe).
+    # The whole retry window is bounded at ~30s so we don't masquerade
+    # a real outage as a long timeout.
     backoff_s = [1, 2, 4, 8]
     for attempt in (1, 2, 3, 4, 5):
         sess = requests.Session()

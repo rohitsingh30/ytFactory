@@ -38,6 +38,7 @@ from pipeline.sources.youtube_video import (
 )
 
 from . import cli as llm
+from pipeline import observability as _obs
 
 
 # Niche → (channel_dir, channel_yaml) routing lives in pipeline.niches
@@ -206,6 +207,7 @@ def _analyze_prompt(*, title: str, author: str, video_id: str,
     return "\n".join(lines)
 
 
+@_obs.traced("llm.imitate.analyze", category="llm", capture=["url", "n_frames"])
 def analyze(
     url: str,
     *,
@@ -318,6 +320,7 @@ def _ideate_prompt(profile: dict, n: int) -> str:
     )
 
 
+@_obs.traced("llm.imitate.ideate", category="llm", capture=["n"])
 def ideate(profile: dict, *, n: int = 3) -> list[RawStory]:
     """Generate N novel story seeds matching the profile."""
     print(f"[imitate] [ideate] generating {n} seeds for niche={profile.get('niche_match')}")
@@ -364,6 +367,7 @@ def ideate(profile: dict, *, n: int = 3) -> list[RawStory]:
     return seeds
 
 
+@_obs.traced("llm.imitate.riff", category="llm", capture=["url", "n"])
 def riff(url: str, *, n: int = 3) -> tuple[dict, list[RawStory]]:
     """Convenience: analyze + ideate in one call."""
     profile = analyze(url)

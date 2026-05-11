@@ -1527,6 +1527,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="ytFactory", lifespan=lifespan)
 
+# OTel — auto-instrument every route → an HTTP server span (named
+# after the route template, e.g. ``POST /api/chat/confirm``). The
+# OTel ASGI middleware injected here also reads incoming
+# ``traceparent`` headers from the Next.js proxy so the chat →
+# render-worker → cloud-TTS span tree links into one trace. Idempotent.
+from pipeline import observability as _obs  # noqa: E402
+
+_obs.instrument_fastapi(app)
+_obs.instrument_outbound_http()
+_obs.install_http_identity_middleware(app)
+
 
 # ---------------------------------------------------------------------------
 # Performance middleware (2026-05-10)
@@ -1637,6 +1648,7 @@ from control.routes.render_routes import router as _control_render_router
 from control.routes.scheduler_routes import router as _control_scheduler_router
 from control.routes.script_jobs_routes import router as _control_script_jobs_router
 from control.routes.state_routes import router as _control_state_router
+from control.routes.telemetry_routes import router as _control_telemetry_router
 from control.routes.voices_routes import router as _control_voices_router
 
 # NOTE: app.include_router() calls for control routers happen at the
@@ -3647,11 +3659,19 @@ async def _run_cloudrun(
         #    execute` rather than the REST API because the gcloud CLI
         #    handles auth automatically; orchestrator runs as
         #    tts-runner SA which has the run.invoker / run.developer roles.
+        # Inject ``YTFACTORY_TRACEPARENT`` so the JOB's root span links
+        # back to this chat-request span — see
+        # ``cloud/_shared/otel_init.py::attach_traceparent_from_env``.
+        from pipeline.observability import propagation as _trace_prop  # noqa: PLC0415
+        env_pairs = [f"JOB_SPEC_GCS_URI={spec_uri}"]
+        for k, v in _trace_prop.inject_into_env({}).items():
+            env_pairs.append(f"{k}={v}")
+        env_arg = "^|^" + "|".join(env_pairs)
         execute_cmd = [
             "gcloud", "run", "jobs", "execute", CLOUDRUN_JOB_NAME,
             "--project", CLOUDRUN_JOB_PROJECT,
             "--region", CLOUDRUN_JOB_REGION,
-            "--update-env-vars", f"^|^JOB_SPEC_GCS_URI={spec_uri}",
+            "--update-env-vars", env_arg,
             "--async",
             "--format", "value(metadata.name)",
         ]
@@ -4578,406 +4598,6 @@ async def job_thumb(job_id: str, i: int) -> FileResponse:
     return FileResponse(str(img_path), media_type="image/png")
 
 
-# ---- telemetry --------------------------------------------------------
-#
-# Reads pipeline/telemetry's JSONL log on demand and computes the rollups
-# the dashboard wants. No DB, no background aggregation: the file is
-# small (a few MB at most for months of single-user usage) and pandas-
-# free Python beats both the complexity and the latency.
-
-
-@app.get("/api/telemetry/overview")
-async def telemetry_overview(hours: int = 24) -> dict:
-    """High-level totals + success rate + per-niche job counts."""
-    since = time.time() - max(1, hours) * 3600
-    events = await asyncio.to_thread(tlm.read_events, since_ts=since)
-    jobs_done = [e for e in events if e["event"] == "job_finished"]
-    jobs_started = [e for e in events if e["event"] == "job_started"]
-    llm_calls = [e for e in events if e["event"] == "llm_call"]
-    stage_errors = [e for e in events if e["event"] == "stage_error"]
-
-    success = sum(1 for e in jobs_done if e.get("success"))
-    failure = len(jobs_done) - success
-    durs = [e["duration_ms"] for e in jobs_done if e.get("duration_ms")]
-    llm_in = sum((e.get("metadata") or {}).get("input_tokens") or 0 for e in llm_calls)
-    llm_out = sum((e.get("metadata") or {}).get("output_tokens") or 0 for e in llm_calls)
-    llm_cost = sum((e.get("metadata") or {}).get("cost_usd") or 0.0 for e in llm_calls)
-
-    # Per-niche tallies.
-    by_niche: dict[str, dict[str, int]] = {}
-    for e in jobs_done:
-        n = (e.get("metadata") or {}).get("niche") or "?"
-        d = by_niche.setdefault(n, {"total": 0, "success": 0, "failed": 0,
-                                    "avg_ms": 0, "_dur_sum": 0, "_dur_n": 0})
-        d["total"] += 1
-        if e.get("success"):
-            d["success"] += 1
-        else:
-            d["failed"] += 1
-        if e.get("duration_ms"):
-            d["_dur_sum"] += e["duration_ms"]
-            d["_dur_n"] += 1
-    for d in by_niche.values():
-        d["avg_ms"] = round(d["_dur_sum"] / d["_dur_n"]) if d["_dur_n"] else 0
-        del d["_dur_sum"]
-        del d["_dur_n"]
-
-    return {
-        "hours": hours,
-        "jobs_started": len(jobs_started),
-        "jobs_finished": len(jobs_done),
-        "jobs_success": success,
-        "jobs_failed": failure,
-        "success_rate": round(success / len(jobs_done) * 100, 1) if jobs_done else None,
-        "avg_job_ms": round(sum(durs) / len(durs)) if durs else 0,
-        "p50_job_ms": round(tlm.percentile(durs, 0.5)),
-        "p95_job_ms": round(tlm.percentile(durs, 0.95)),
-        "max_job_ms": max(durs) if durs else 0,
-        "stage_errors": len(stage_errors),
-        "llm_calls": len(llm_calls),
-        "llm_input_tokens": llm_in,
-        "llm_output_tokens": llm_out,
-        "llm_cost_usd": round(llm_cost, 4),
-        "by_niche": by_niche,
-    }
-
-
-@app.get("/api/telemetry/stages")
-async def telemetry_stages(hours: int = 24) -> dict:
-    """Per-stage counts + avg/p50/p95/max duration. The headline view
-    that answers 'how long does each pipeline step actually take'."""
-    since = time.time() - max(1, hours) * 3600
-    raw = await asyncio.to_thread(tlm.read_events, since_ts=since)
-    events = [e for e in raw
-              if e["event"] == "stage_done" and e.get("duration_ms") is not None]
-    by_stage: dict[str, list[int]] = {}
-    for e in events:
-        stage = (e.get("metadata") or {}).get("stage") or "?"
-        by_stage.setdefault(stage, []).append(e["duration_ms"])
-
-    rows = []
-    for stage, durs in sorted(by_stage.items(), key=lambda kv: -sum(kv[1])):
-        rows.append({
-            "stage": stage,
-            "count": len(durs),
-            "avg_ms": round(sum(durs) / len(durs)),
-            "p50_ms": round(tlm.percentile(durs, 0.5)),
-            "p95_ms": round(tlm.percentile(durs, 0.95)),
-            "max_ms": max(durs),
-            "total_ms": sum(durs),
-        })
-    return {"hours": hours, "stages": rows}
-
-
-@app.get("/api/telemetry/timeline")
-async def telemetry_timeline(hours: int = 24) -> dict:
-    """Events bucketed by hour for a sparkline-style view."""
-    since = time.time() - max(1, hours) * 3600
-    events = await asyncio.to_thread(tlm.read_events, since_ts=since)
-    buckets: dict[int, dict[str, int]] = {}
-    for e in events:
-        # Bucket on the wall-clock hour.
-        hr = int(e["ts"] // 3600 * 3600)
-        b = buckets.setdefault(hr, {"jobs": 0, "errors": 0, "llm": 0})
-        if e["event"] == "job_finished":
-            b["jobs"] += 1
-            if not e.get("success"):
-                b["errors"] += 1
-        elif e["event"] == "stage_error":
-            b["errors"] += 1
-        elif e["event"] == "llm_call":
-            b["llm"] += 1
-    return {
-        "hours": hours,
-        "buckets": [
-            {"hour_ts": hr, **vals}
-            for hr, vals in sorted(buckets.items())
-        ],
-    }
-
-
-@app.get("/api/telemetry/llm")
-async def telemetry_llm(hours: int = 24) -> dict:
-    """Per-model LLM token + latency rollup."""
-    since = time.time() - max(1, hours) * 3600
-    raw = await asyncio.to_thread(tlm.read_events, since_ts=since)
-    events = [e for e in raw if e["event"] == "llm_call"]
-    by_model: dict[str, dict] = {}
-    for e in events:
-        meta = e.get("metadata") or {}
-        m = meta.get("model") or "?"
-        d = by_model.setdefault(m, {"calls": 0, "errors": 0,
-                                    "input_tokens": 0, "output_tokens": 0,
-                                    "cost_usd": 0.0, "_durs": []})
-        d["calls"] += 1
-        if not e.get("success"):
-            d["errors"] += 1
-        d["input_tokens"] += meta.get("input_tokens") or 0
-        d["output_tokens"] += meta.get("output_tokens") or 0
-        d["cost_usd"] += meta.get("cost_usd") or 0.0
-        if e.get("duration_ms") is not None:
-            d["_durs"].append(e["duration_ms"])
-    rows = []
-    for m, d in sorted(by_model.items(), key=lambda kv: -kv[1]["calls"]):
-        durs = d.pop("_durs")
-        rows.append({
-            "model": m,
-            **d,
-            "cost_usd": round(d["cost_usd"], 4),
-            "avg_ms": round(sum(durs) / len(durs)) if durs else 0,
-            "p95_ms": round(tlm.percentile(durs, 0.95)),
-        })
-    return {"hours": hours, "models": rows, "total_calls": len(events)}
-
-
-@app.get("/api/telemetry/errors")
-async def telemetry_errors(hours: int = 24, limit: int = 50) -> dict:
-    """Most recent failures across stages, jobs, and LLM calls."""
-    since = time.time() - max(1, hours) * 3600
-    events = await asyncio.to_thread(tlm.read_events, since_ts=since)
-    failed = [e for e in events
-              if e["event"] in ("stage_error",) or e.get("success") is False]
-    failed.sort(key=lambda e: e.get("ts", 0), reverse=True)
-    return {
-        "hours": hours,
-        "errors": [
-            {
-                "ts": e["ts"],
-                "event": e["event"],
-                "category": e.get("category"),
-                "job_id": e.get("job_id"),
-                "duration_ms": e.get("duration_ms"),
-                "metadata": e.get("metadata") or {},
-            }
-            for e in failed[:limit]
-        ],
-    }
-
-
-def _traceback_fingerprint(message: str) -> tuple[str, str]:
-    """Reduce a Python traceback string to (fingerprint, headline).
-
-    The fingerprint is the last non-empty line of the traceback (the
-    actual exception type + message), trimmed. Two failures with the
-    same fingerprint share a root cause even if their stacks differ in
-    line numbers. ``headline`` is a longer human-readable version.
-    """
-    if not message:
-        return ("(no message)", "(no message)")
-    lines = [ln.rstrip() for ln in str(message).splitlines() if ln.strip()]
-    if not lines:
-        return ("(no message)", "(no message)")
-    last = lines[-1].strip()
-    # Strip line/file numbers off the fingerprint so eg.
-    # `make_shorts.py:836` and `:824` collapse to the same group.
-    fp = last
-    for noise in ("0x[0-9a-fA-F]+", r"line \d+", r":\d+:"):
-        import re
-        fp = re.sub(noise, "", fp)
-    fp = " ".join(fp.split())[:200]
-    return (fp, last[:300])
-
-
-@app.get("/api/telemetry/latency")
-async def telemetry_latency(hours: int = 168) -> dict:
-    """Engineering-grade latency rollup. Surfaces:
-
-    - **hotspots**: stages ranked by cumulative wall time, with share %.
-      The whole point: see at a glance which stage is the bottleneck.
-    - **job_health**: per-niche success rate + p50/p90 wall time.
-    - **image_retries**: % of image_attempt events that were retries
-      (silent QC churn that doubles wall time per beat). Empty until
-      Task #2 ships the image_attempt event.
-    - **error_groups**: stage_errors bucketed by traceback fingerprint
-      so 17 raw failures collapse into 2-3 root causes.
-    - **slowest_recent_job**: timeline of the longest finished job —
-      first place to look when something feels slow.
-
-    Defaults to a 7-day window because successful jobs are sparse on
-    a single-host setup and the 24h view is often empty.
-    """
-    since = time.time() - max(1, hours) * 3600
-    events = await asyncio.to_thread(tlm.read_events, since_ts=since)
-
-    # ---- hotspots: stages by cumulative wall time ---------------------
-    #
-    # Three event sources fold into this view so the dashboard reflects
-    # the FULL pipeline footprint, not just stages that explicitly emit
-    # `stage_done`:
-    #
-    #   1. `stage_done` events with metadata.stage (when the renderer
-    #      wraps a stage in tlm.timed("stage_done", ...)).
-    #   2. `ffmpeg_compose` events — pre-existing telemetry from
-    #      pipeline.compose, bucketed under the synthetic "compose"
-    #      stage with metadata.pass appended (so libass vs drawtext
-    #      vs compose_clips passes are distinguishable).
-    #   3. `image_attempt` events — bucketed under "image" so the cloud
-    #      cold-load tax (max=2019s, 5.3% >60s; see d-phase telemetry
-    #      analysis) lands in the headline view, not just in the
-    #      separate image_retries panel.
-    #
-    # Pre-fix: hotspots was empty because `stage_done` is never emitted
-    # by today's renderer. Folding in the existing event types is what
-    # actually surfaces the bottleneck without waiting for a2 to ship.
-    by_stage: dict[str, list[int]] = {}
-    for e in events:
-        if e.get("duration_ms") is None:
-            continue
-        ev = e["event"]
-        meta = e.get("metadata") or {}
-        if ev == "stage_done":
-            stage = meta.get("stage") or "?"
-        elif ev == "ffmpeg_compose":
-            phase = meta.get("phase") or meta.get("pass") or "compose"
-            stage = f"compose:{phase}"
-        elif ev == "image_attempt":
-            stage = "image"
-        else:
-            continue
-        by_stage.setdefault(stage, []).append(e["duration_ms"])
-    total_stage_ms = sum(sum(v) for v in by_stage.values()) or 1
-    hotspots = []
-    for stage, durs in sorted(by_stage.items(), key=lambda kv: -sum(kv[1])):
-        tot = sum(durs)
-        hotspots.append({
-            "stage": stage,
-            "count": len(durs),
-            "total_ms": tot,
-            "share_pct": round(100 * tot / total_stage_ms, 1),
-            "p50_ms": round(tlm.percentile(durs, 0.5)),
-            "p90_ms": round(tlm.percentile(durs, 0.9)),
-            "max_ms": max(durs),
-        })
-
-    # ---- job health: per-niche success + p50/p90 ----------------------
-    jobs_started = [e for e in events if e["event"] == "job_started"]
-    jobs_finished = [e for e in events if e["event"] == "job_finished"]
-    by_niche_jobs: dict[str, dict] = {}
-    for e in jobs_started:
-        n = (e.get("metadata") or {}).get("niche") or "?"
-        by_niche_jobs.setdefault(n, {"started": 0, "ok": 0, "failed": 0,
-                                     "_durs": []})["started"] += 1
-    for e in jobs_finished:
-        n = (e.get("metadata") or {}).get("niche") or "?"
-        d = by_niche_jobs.setdefault(n, {"started": 0, "ok": 0, "failed": 0,
-                                         "_durs": []})
-        if e.get("success"):
-            d["ok"] += 1
-        else:
-            d["failed"] += 1
-        if e.get("duration_ms"):
-            d["_durs"].append(e["duration_ms"])
-    job_health = []
-    for n, d in sorted(by_niche_jobs.items(), key=lambda kv: -kv[1]["started"]):
-        durs = d.pop("_durs")
-        success_rate = (
-            round(100 * d["ok"] / (d["ok"] + d["failed"]), 1)
-            if (d["ok"] + d["failed"]) else None
-        )
-        job_health.append({
-            "niche": n,
-            **d,
-            "success_rate_pct": success_rate,
-            "p50_ms": round(tlm.percentile(durs, 0.5)) if durs else 0,
-            "p90_ms": round(tlm.percentile(durs, 0.9)) if durs else 0,
-            "max_ms": max(durs) if durs else 0,
-        })
-
-    # ---- image retry %: depends on image_attempt events ---------------
-    attempts = [e for e in events if e["event"] == "image_attempt"]
-    by_niche_attempts: dict[str, dict] = {}
-    for e in attempts:
-        md = e.get("metadata") or {}
-        n = md.get("niche") or "?"
-        d = by_niche_attempts.setdefault(n, {"attempts": 0, "retries": 0,
-                                             "qc_fails": 0})
-        d["attempts"] += 1
-        if (md.get("attempt") or 1) > 1:
-            d["retries"] += 1
-        if md.get("qc") == "fail":
-            d["qc_fails"] += 1
-    image_retries = []
-    for n, d in sorted(by_niche_attempts.items(), key=lambda kv: -kv[1]["attempts"]):
-        image_retries.append({
-            "niche": n,
-            **d,
-            "retry_pct": round(100 * d["retries"] / d["attempts"], 1) if d["attempts"] else 0,
-        })
-
-    # ---- error groups: bucket stage_errors by traceback fingerprint ---
-    err_groups: dict[str, dict] = {}
-    for e in events:
-        if e["event"] != "stage_error":
-            continue
-        md = e.get("metadata") or {}
-        msg = md.get("message") or md.get("error") or ""
-        fp, headline = _traceback_fingerprint(msg)
-        g = err_groups.setdefault(fp, {
-            "fingerprint": fp,
-            "count": 0,
-            "headline": headline,
-            "niches": set(),
-            "stages": set(),
-            "last_ts": 0,
-            "last_job_id": None,
-        })
-        g["count"] += 1
-        if md.get("niche"):
-            g["niches"].add(md["niche"])
-        if md.get("stage"):
-            g["stages"].add(md["stage"])
-        if e.get("ts", 0) > g["last_ts"]:
-            g["last_ts"] = e["ts"]
-            g["last_job_id"] = e.get("job_id")
-    error_groups = sorted(
-        ({**g, "niches": sorted(g["niches"]), "stages": sorted(g["stages"])}
-         for g in err_groups.values()),
-        key=lambda g: -g["count"],
-    )
-
-    # ---- slowest_recent_job: critical path of one bad apple -----------
-    # Find the longest finished job and rebuild its stage timeline so
-    # the user can see which beat / which call ate the budget.
-    slowest = None
-    if jobs_finished:
-        ranked = [e for e in jobs_finished if e.get("duration_ms")]
-        ranked.sort(key=lambda e: -e["duration_ms"])
-        if ranked:
-            target = ranked[0]
-            jid = target.get("job_id")
-            timeline = [
-                {
-                    "event": e["event"],
-                    "ts": e["ts"],
-                    "duration_ms": e.get("duration_ms"),
-                    "metadata": e.get("metadata") or {},
-                }
-                for e in events
-                if e.get("job_id") == jid and e["event"] in (
-                    "stage_done", "stage_error", "llm_call",
-                    "ffmpeg_compose", "footage_trim", "image_attempt",
-                )
-            ]
-            timeline.sort(key=lambda x: x["ts"])
-            slowest = {
-                "job_id": jid,
-                "niche": (target.get("metadata") or {}).get("niche"),
-                "duration_ms": target["duration_ms"],
-                "success": target.get("success"),
-                "ts": target["ts"],
-                "timeline": timeline,
-            }
-
-    return {
-        "hours": hours,
-        "total_stage_ms": total_stage_ms,
-        "hotspots": hotspots,
-        "job_health": job_health,
-        "image_retries": image_retries,
-        "error_groups": error_groups,
-        "slowest_recent_job": slowest,
-    }
-
 
 # Convenience: serve the live raw cache too (read-only).
 @app.get("/api/jobs/{job_id}/closer")
@@ -5713,4 +5333,5 @@ app.include_router(_control_render_router)
 app.include_router(_control_scheduler_router)
 app.include_router(_control_script_jobs_router)
 app.include_router(_control_state_router)
+app.include_router(_control_telemetry_router)
 app.include_router(_control_voices_router)

@@ -18,6 +18,7 @@ import re
 from difflib import SequenceMatcher
 
 from .beats import Word
+from pipeline import observability as _obs
 
 
 _TOKEN_RE = re.compile(r"\S+")
@@ -33,6 +34,7 @@ def _strip_for_match(s: str) -> str:
     return re.sub(r"[^\w]", "", s).lower()
 
 
+@_obs.traced("align.align_source_to_whisper", category="asr")
 def align_source_to_whisper(source_text: str, whisper_words: list[Word]) -> list[Word]:
     """Return a Word per source token, with timestamps from Whisper or
     interpolated where Whisper missed a token. The output length equals

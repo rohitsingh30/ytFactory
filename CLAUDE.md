@@ -170,6 +170,89 @@ failed Cloud Builds before a working one). Every step is mandatory:
 Skipping any step has historically cost 3-8 hours of failed build
 iterations. **The playbook saves that.** New service → read it first.
 
+**P9 add-on (2026-05-11):** every new Cloud Run service MUST also
+boot OTel via `cloud/_shared/otel_init.py` — see "Telemetry: OTel
+SDK + Cloud Trace + Cloud Monitoring + Cloud Logging" below for the
+boot block to add to `server.py` / `entrypoint.py`.
+
+---
+
+## Telemetry: OTel + Cloud Trace + Cloud Monitoring + Cloud Logging (2026-05-11 — COMPLETE)
+
+Single source of truth: [`docs/telemetry.md`](./docs/telemetry.md).
+Day-one debug cookbook: [`docs/observability_runbook.md`](./docs/observability_runbook.md).
+
+**Standing rules — every contributor + agent must follow:**
+
+* **Every new pipeline stage MUST emit a span** via either
+  `obs.timed("stage_name", category="...", metadata={...})` (for
+  blocks) or `@obs.traced("module.fn", category="...", capture=[...])`
+  (for full functions). The `category` must be one of
+  `tts / image / asr / render / llm / upload / footage / cloud / cron / http / pipeline`.
+* **Every new HTTP route MUST be auto-instrumented.** No manual
+  per-route spans — `obs.instrument_fastapi(app)` covers it. To add
+  channel/slug/job_id span attributes for a new path/query param,
+  extend `_CARRY_KEYS` in `pipeline/observability/http_middleware.py`.
+* **Every new Cloud Run service MUST init OTel** in its `server.py`
+  / `entrypoint.py` startup. The boot block:
+
+  ```python
+  try:
+      from otel_init import (
+          init as _otel_init,
+          instrument_fastapi as _otel_instrument_fastapi,
+          instrument_outbound_http as _otel_instrument_outbound,
+      )
+      _otel_init("my-new-service")
+      _otel_instrument_outbound()
+      _OTEL_OK = True
+  except Exception:
+      _OTEL_OK = False
+
+  app = FastAPI(title="my-new-service")
+  if _OTEL_OK:
+      _otel_instrument_fastapi(app)
+  ```
+
+  Then run, in order: `bash cloud/_shared/sync.sh` (copies
+  `otel_init.py` into the new service dir),
+  `bash cloud/_shared/append_otel_deps.sh` (appends OTel pin block
+  to `requirements.txt`), `bash cloud/_shared/add_otel_copy.sh`
+  (patches the Dockerfile to `COPY otel_init.py ./`).
+* **Telemetry must never block the pipeline.** Every `track` and
+  `timed` call swallows exceptions internally; if the SDK fails,
+  the render proceeds.
+* **Per-render context is free** when you wrap the render entry in
+  `obs.render_envelope(channel=..., slug=..., render_kind=...)`.
+  Every nested telemetry call inherits the channel+slug attrs —
+  don't pass them through manually.
+* **Cross-process trace propagation is automatic.** Outbound
+  `requests` / `httpx` / `aiohttp` → `traceparent` HTTP header.
+  Laptop → Cloud Run JOB → `YTFACTORY_TRACEPARENT` env. Chat →
+  Firestore job doc → `traceparent` field on the doc.
+
+### Where to find what
+
+- **Public API:** `pipeline/observability/__init__.py`
+- **Legacy back-compat shim** (`tlm.track`, `tlm.timed`, …):
+  `pipeline/telemetry.py` — still works; routes through OTel.
+- **Cloud Run init helper** (copied per service): `cloud/_shared/otel_init.py`
+- **Dashboard API** (`/api/telemetry/*`): `control/routes/telemetry_routes.py`
+- **Dashboard UI** (`/app/telemetry`): `web-next/app/app/telemetry/`
+- **IAM grant**: `cloud/iam/grant_telemetry.sh` (idempotent)
+- **Per-service file sync**: `cloud/_shared/sync.sh` (with `--check` for CI drift)
+- **Cloud-side parallel redeploy**: `cloud/_shared/redeploy_for_otel.sh`
+
+### Quick recipes
+
+| What | Where |
+|---|---|
+| "What's failing right now?" | `/app/telemetry` → Errors section |
+| "Show me the full call tree for this slug" | `/app/telemetry` → Open in GCP → Cloud Trace (slug filter pre-filled) |
+| "Which TTS provider is slow?" | `/app/telemetry` → Services section |
+| "Trace an LLM cost spike" | Cloud Logging: `jsonPayload.event="llm_call"` group by tier + sum tokens |
+| Anything else | `docs/observability_runbook.md` |
+
 ---
 
 ## LLM backend dispatcher (2026-05-10 — COMPLETE)
@@ -280,6 +363,59 @@ health probe → IAM grants needed).
   ``cloud/iam/grant_token_writeback.sh``.
 - **Cards on prod are blank?** Set ``YOUTUBE_API_KEY`` on the
   ytfactory-web service. That's the entire fix.
+
+---
+
+## Cloud-canonical writes never re-create laptop channel folders (2026-05-11)
+
+**Rule:** any module whose canonical store is GCS (gated on
+``YTFACTORY_STATE_BUCKET``) MUST NOT silently re-materialise the
+laptop's ``<channel>/`` folder as part of a write. Disk-mirror is
+**opt-in** behind an env var, not the default.
+
+Why this rule exists:
+
+The first GCS-canonical helper (``pipeline/niche_specs.py``) shipped
+with an unconditional disk write-through inside ``save_niche()``. Any
+caller that hit a save path — the seeder, the dashboard
+``POST/PUT /api/channels/<ch>/niches``, the chat AI-draft endpoint —
+re-created ``<channel>/niches/`` on the laptop, even though GCS was
+the source of truth. That meant ``rm -rf <channel>/`` only ever lasted
+until the next ``/create`` page load. The user (rightly) flagged this
+as a regression.
+
+Implementation pattern (mirror this for any new GCS-canonical store):
+
+```python
+_DISK_MIRROR_ENV = "YTFACTORY_<MODULE>_DISK_MIRROR"
+
+def _should_disk_mirror() -> bool:
+    """Disk IS canonical when no bucket — always mirror. Otherwise
+    require explicit opt-in via env."""
+    if _state_bucket() is None:
+        return True
+    val = os.environ.get(_DISK_MIRROR_ENV, "").strip().lower()
+    return val in {"1", "true", "yes", "on"}
+
+def save_xxx(channel_key, doc):
+    _gcs_save(channel_key, doc)
+    if not _should_disk_mirror():
+        return doc
+    # ... existing mkdir + atomic write ...
+```
+
+Tests that exercise the GCS path MUST clear the mirror env in setUp
+(see ``tests/test_niche_specs.py::TestNicheSpecsGcsBackend.setUp``)
+so test outcome doesn't depend on whatever the dev's shell happens
+to have set, and MUST include a regression test that asserts the
+laptop ``<channel>/`` folder is **not** created when the bucket is
+configured and the mirror env is unset.
+
+Currently in scope: ``pipeline/niche_specs.py`` (only GCS-canonical
+helper that writes inside a channel folder today). ``burner_engage``
+and ``research/youtube`` write under ``data/``, not ``<channel>/``,
+so they don't trigger this rule. Any future ``<channel>/<thing>/``
+GCS-canonical helper must opt the mirror behind its own env var.
 
 ---
 

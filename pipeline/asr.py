@@ -35,6 +35,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from pipeline import observability as _obs
+
 
 # Map of provider key -> (default model id). The model id may be
 # overridden per-call (e.g. by channel config).
@@ -174,6 +176,8 @@ def _normalize_whisper_size(model: str) -> str:
     return "base"
 
 
+@_obs.traced("asr.transcribe", category="asr",
+             capture=["provider", "model"])
 def transcribe(
     audio_path: Path,
     provider: str = DEFAULT_PROVIDER,

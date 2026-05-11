@@ -37,6 +37,8 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
+from pipeline import observability as _obs
+
 # Tokens that produce in-image gibberish text on SDXL/FLUX (mirrors the
 # central registry from pipeline.images.images.strip_text_bait — kept
 # here as a separate copy because importing would create a circular dep
@@ -67,6 +69,8 @@ class PromptIssue:
     target_path: str   # 'beats[N].prompt' or 'beats[N].scene' or 'beats'
 
 
+@_obs.traced("llm.prompt_lint.check_prompts", category="llm",
+             capture=["expected_beats"])
 def check_prompts(
     prompts: list,
     *,

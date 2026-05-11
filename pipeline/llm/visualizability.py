@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import re
 
+from pipeline import observability as _obs
+
 
 # Concrete-noun seeds. Stories that mention specific objects/places
 # render better than stories that are pure feelings/abstractions.
@@ -58,6 +60,7 @@ _DIALOGUE_RE = re.compile(r'"[^"]+"')
 _NUMBER_RE = re.compile(r"\b\d+\b|\b\$\d+|\b\d+\s*(dollars?|bucks?)\b", re.IGNORECASE)
 
 
+@_obs.traced("llm.visualizability.score_visualizability", category="llm")
 def score_visualizability(text: str) -> tuple[float, list[str]]:
     """Return (score 0..1, list of reason strings).
 

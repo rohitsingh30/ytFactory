@@ -65,6 +65,7 @@ logger = logging.getLogger(__name__)
 
 
 from pipeline.cloudrun_auth import get_id_token as _get_id_token  # noqa: E402, F401
+from pipeline import telemetry as _tlm  # noqa: E402
 
 
 # ---------------------------------------------------------------- base URL
@@ -136,15 +137,52 @@ def _local_fallback_or_raise(
     closure to bind the per-call args at the call site.
     """
     if _fallback_disabled():
+        # The fallback is intentionally off (e.g. canary tests). Record
+        # the failure as a telemetry event so the dashboard's TTS panel
+        # surfaces it instead of silently propagating.
+        _tlm.track(
+            "tts_fallback",
+            category="tts",
+            success=False,
+            metadata={
+                "label": fallback_label,
+                "fallback_disabled": True,
+                "cloud_error": str(cloud_err)[:200],
+            },
+        )
         raise cloud_err
     try:
-        return fallback_call()
+        out = fallback_call()
     except (ImportError, ModuleNotFoundError) as ie:
         logger.warning(
             "%s local fallback unavailable in this venv (%s); "
             "re-raising CloudRunUnavailable", fallback_label, ie,
         )
+        # Local fallback unavailable → user-visible failure. Record so
+        # the panel can chart "no path forward" outages distinctly from
+        # successful fallback rescues.
+        _tlm.track(
+            "tts_fallback",
+            category="tts",
+            success=False,
+            metadata={
+                "label": fallback_label,
+                "venv_missing": str(ie)[:200],
+                "cloud_error": str(cloud_err)[:200],
+            },
+        )
         raise cloud_err
+    # Successful cloud→local rescue.
+    _tlm.track(
+        "tts_fallback",
+        category="tts",
+        success=True,
+        metadata={
+            "label": fallback_label,
+            "cloud_error": str(cloud_err)[:200],
+        },
+    )
+    return out
 
 
 # ---------------------------------------------------------------- warmup

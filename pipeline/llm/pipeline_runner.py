@@ -47,6 +47,7 @@ from typing import Callable
 
 from . import cache as cache_mod
 from . import fix_router
+from pipeline import observability as _obs
 from .contracts import RewriteContract
 from .contracts.critic_contract import CriticContract
 from .dag import STAGE_DAG, StageNode, stages_invalidated_by, topo_order
@@ -116,6 +117,7 @@ class PipelineResult:
 _DEFAULT_MAX_CRITIC_PASSES = int(os.environ.get("YTFACTORY_CRITIC_MAX_PASSES", "2"))
 
 
+@_obs.traced("llm.pipeline_runner.run_pipeline", category="llm")
 def run_pipeline(
     job: RenderJob,
     *,
