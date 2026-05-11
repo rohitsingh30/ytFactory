@@ -25,7 +25,7 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>YTFACTORY_CONTROL_URL</key>
-        <string>https://ytfactory-control-7hwnzw7lya-as.a.run.app</string>
+        <string>https://ytfactory-web-7hwnzw7lya-as.a.run.app</string>
         <key>HOME</key>
         <string>/Users/rohit</string>
         <key>PATH</key>

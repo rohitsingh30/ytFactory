@@ -157,7 +157,7 @@ class TestHeartbeat(unittest.TestCase):
         mock_post.assert_called_once_with(
             "/agent/heartbeat",
             {"resources": {"agent_id": agent.AGENT_ID, "caps": agent.CAPS}},
-            timeout=10,
+            timeout=20,
         )
 
 
@@ -173,19 +173,27 @@ class TestClaimTask(unittest.TestCase):
 
     def test_returns_task_on_success(self):
         with patch.object(agent, "_post", return_value={"task": {"task_id": "t1", "kind": "burner_engage"}}):
-            result = agent._claim_task()
+            result = agent._claim_task(["burner_engage"])
         self.assertEqual(result, {"task_id": "t1", "kind": "burner_engage"})
 
     def test_returns_none_when_no_task(self):
         with patch.object(agent, "_post", return_value={}):
-            result = agent._claim_task()
+            result = agent._claim_task(["burner_engage"])
         self.assertIsNone(result)
+
+    def test_returns_none_when_caps_empty(self):
+        # Empty caps list short-circuits without an HTTP call — workers use
+        # this when every kind they serve is at local capacity.
+        with patch.object(agent, "_post") as mock_post:
+            result = agent._claim_task([])
+        self.assertIsNone(result)
+        mock_post.assert_not_called()
 
     def test_returns_none_on_401(self):
         err = urllib.error.HTTPError("http://x", 401, "Unauthorized", {}, None)
         with patch.object(agent, "_post", side_effect=err), \
              patch("time.sleep") as mock_sleep:
-            result = agent._claim_task()
+            result = agent._claim_task(["burner_engage"])
         self.assertIsNone(result)
         mock_sleep.assert_called_once_with(60)
 
@@ -193,14 +201,14 @@ class TestClaimTask(unittest.TestCase):
         err = urllib.error.HTTPError("http://x", 503, "Service Unavailable", {}, BytesIO(b"err"))
         with patch.object(agent, "_post", side_effect=err), \
              patch("time.sleep") as mock_sleep:
-            result = agent._claim_task()
+            result = agent._claim_task(["burner_engage"])
         self.assertIsNone(result)
         mock_sleep.assert_called_once_with(5)
 
     def test_returns_none_on_generic_exception(self):
         with patch.object(agent, "_post", side_effect=Exception("timeout")), \
              patch("time.sleep") as mock_sleep:
-            result = agent._claim_task()
+            result = agent._claim_task(["burner_engage"])
         self.assertIsNone(result)
         mock_sleep.assert_called_once_with(5)
 
@@ -227,7 +235,9 @@ class TestAck(unittest.TestCase):
         with patch.object(agent, "_post", return_value={}) as mock_post:
             agent._ack("tid2", ok=False, error="something broke")
         args = mock_post.call_args[0]
-        self.assertEqual(args[1]["status"], "failed")
+        # Cloud schema is Literal["ok", "error"] — the old "failed" string
+        # silently 422-d, leaving tasks LEASED forever (zombie pile).
+        self.assertEqual(args[1]["status"], "error")
         self.assertEqual(args[1]["error"], "something broke")
 
     def test_ack_swallows_exception(self):
@@ -241,19 +251,21 @@ class TestAck(unittest.TestCase):
 
 class TestExecute(unittest.TestCase):
     def test_unsupported_kind(self):
-        ok, out_uri, err = agent._execute({"task_id": "t1", "kind": "unknown_kind", "payload": {}})
+        ok, out_uri, err, child = agent._execute({"task_id": "t1", "kind": "unknown_kind", "payload": {}})
         self.assertFalse(ok)
         self.assertIsNone(out_uri)
+        self.assertIsNone(child)
         self.assertIn("unsupported", err)  # type: ignore[operator]
 
     def test_playwright_upload_raises_not_implemented(self):
-        ok, out_uri, err = agent._execute({
+        ok, out_uri, err, child = agent._execute({
             "task_id": "t1",
             "kind": "playwright_upload",
             "payload": {"mp4_uri": "gs://x/y.mp4"},
         })
         self.assertFalse(ok)
         self.assertIsNone(out_uri)
+        self.assertIsNone(child)
         # Either NotImplementedError or ImportError is acceptable —
         # depends on whether upload_short_via_playwright exists
         self.assertTrue(
@@ -262,12 +274,13 @@ class TestExecute(unittest.TestCase):
         )
 
     def test_burner_engage_missing_slug(self):
-        ok, out_uri, err = agent._execute({
+        ok, out_uri, err, child = agent._execute({
             "task_id": "t1",
             "kind": "burner_engage",
             "payload": {},
         })
         self.assertFalse(ok)
+        self.assertIsNone(child)
         self.assertIn("missing payload.slug", err)  # type: ignore[operator]
 
     def test_burner_engage_success(self):
@@ -277,7 +290,7 @@ class TestExecute(unittest.TestCase):
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
              patch.object(Path, "mkdir"), \
              patch.object(Path, "open", return_value=MagicMock()):
-            ok, out_uri, err = agent._execute({
+            ok, out_uri, err, child = agent._execute({
                 "task_id": "t1",
                 "kind": "burner_engage",
                 "payload": {"slug": "burner1"},
@@ -285,6 +298,9 @@ class TestExecute(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIsNone(out_uri)
         self.assertIsNone(err)
+        # Returned child Popen lets the worker thread hold its per-kind
+        # capacity slot until the spawned subprocess actually exits.
+        self.assertIs(child, mock_proc)
         # Ensure detached spawn (start_new_session=True) so the worker
         # outlives the agent process — otherwise launchd-restarting the
         # agent would kill an in-flight engage loop.
@@ -295,23 +311,25 @@ class TestExecute(unittest.TestCase):
         with patch("subprocess.Popen", side_effect=OSError("no exec for you")), \
              patch.object(Path, "mkdir"), \
              patch.object(Path, "open", return_value=MagicMock()):
-            ok, out_uri, err = agent._execute({
+            ok, out_uri, err, child = agent._execute({
                 "task_id": "t1",
                 "kind": "burner_engage",
                 "payload": {"slug": "burner1"},
             })
         self.assertFalse(ok)
+        self.assertIsNone(child)
         self.assertIn("failed to spawn", err)  # type: ignore[operator]
         self.assertIn("no exec for you", err)  # type: ignore[operator]
 
     def test_exception_in_execute_caught(self):
         with patch.object(agent, "_exec_burner_engage", side_effect=RuntimeError("boom")):
-            ok, out_uri, err = agent._execute({
+            ok, out_uri, err, child = agent._execute({
                 "task_id": "t1",
                 "kind": "burner_engage",
                 "payload": {"slug": "x"},
             })
         self.assertFalse(ok)
+        self.assertIsNone(child)
         self.assertIn("RuntimeError", err)  # type: ignore[operator]
 
     def test_create_burner_success_default_payload(self):
@@ -321,7 +339,7 @@ class TestExecute(unittest.TestCase):
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
              patch.object(Path, "mkdir"), \
              patch.object(Path, "open", return_value=MagicMock()):
-            ok, out_uri, err = agent._execute({
+            ok, out_uri, err, child = agent._execute({
                 "task_id": "t1",
                 "kind": "create_burner",
                 "payload": {},
@@ -329,6 +347,7 @@ class TestExecute(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIsNone(out_uri)
         self.assertIsNone(err)
+        self.assertIs(child, mock_proc)
         # Detached so it outlives the agent (channel-create can take minutes).
         self.assertTrue(mock_popen.call_args.kwargs.get("start_new_session"))
         cmd = mock_popen.call_args.args[0]
@@ -347,7 +366,7 @@ class TestExecute(unittest.TestCase):
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
              patch.object(Path, "mkdir"), \
              patch.object(Path, "open", return_value=MagicMock()):
-            ok, _out_uri, _err = agent._execute({
+            ok, _out_uri, _err, _child = agent._execute({
                 "task_id": "t2",
                 "kind": "create_burner",
                 "payload": {
@@ -372,101 +391,135 @@ class TestExecute(unittest.TestCase):
         with patch("subprocess.Popen", side_effect=OSError("chrome missing")), \
              patch.object(Path, "mkdir"), \
              patch.object(Path, "open", return_value=MagicMock()):
-            ok, _out_uri, err = agent._execute({
+            ok, _out_uri, err, child = agent._execute({
                 "task_id": "t3",
                 "kind": "create_burner",
                 "payload": {},
             })
         self.assertFalse(ok)
+        self.assertIsNone(child)
         self.assertIn("failed to spawn create_burner_channel", err)  # type: ignore[operator]
         self.assertIn("chrome missing", err)  # type: ignore[operator]
 
 
-# ── run() main loop ───────────────────────────────────────────────────────
+# ── _worker_loop + run() ─────────────────────────────────────────────────
 
 
-class TestRunLoop(unittest.TestCase):
+class TestWorkerLoop(unittest.TestCase):
     def setUp(self):
+        agent._SHUTDOWN.clear()
         agent._ID_TOKEN_CACHE.clear()
+        # Reset the active-by-kind counters since they're module-global.
+        with agent._CHILDREN_LOCK:
+            for k in agent._active_by_kind:
+                agent._active_by_kind[k] = 0
 
     def tearDown(self):
-        agent._ID_TOKEN_CACHE.clear()
+        agent._SHUTDOWN.set()  # ensure no leaked threads
+        agent._SHUTDOWN.clear()
 
-    def test_run_iterates_once_then_exits(self):
-        """Simulate: heartbeat → claim returns task → execute → ack → claim returns None → exit."""
-        task = {"task_id": "t1", "kind": "burner_engage", "payload": {"slug": "b1"}}
+    def test_worker_acquires_kind_then_leases_and_acks(self):
+        """One pass: acquire burner_engage slot → claim_task → execute → ack
+        → wait on child → release slot → shutdown."""
+        import threading as _t
 
-        calls = {"n": 0}
+        sems = {"burner_engage": _t.BoundedSemaphore(1)}
+        task = {"task_id": "tw1", "kind": "burner_engage", "payload": {"slug": "x"}}
+        mock_proc = MagicMock()
+        # child.wait() returns immediately.
+        mock_proc.wait.return_value = 0
 
-        def claim_side_effect():
-            calls["n"] += 1
-            if calls["n"] == 1:
+        claim_calls: list[list[str]] = []
+
+        def claim_side_effect(caps):
+            claim_calls.append(caps)
+            if len(claim_calls) == 1:
                 return task
-            raise StopIteration  # abort the while loop for testing
-
-        with patch.object(agent, "_heartbeat"), \
-             patch.object(agent, "_claim_task", side_effect=claim_side_effect), \
-             patch.object(agent, "_execute", return_value=(True, None, None)) as mock_exec, \
-             patch.object(agent, "_ack") as mock_ack, \
-             patch("time.sleep"):
-            with self.assertRaises(StopIteration):
-                agent.run()
-
-        mock_exec.assert_called_once_with(task)
-        mock_ack.assert_called_once_with("t1", ok=True, output_uri=None, error=None)
-
-    def test_run_sends_heartbeat_when_due(self):
-        """When time since last heartbeat exceeds HEARTBEAT_INTERVAL_S, heartbeat is called."""
-        calls = {"n": 0}
-
-        def claim_side_effect():
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return None
-            raise StopIteration
-
-        # time starts at 0 (initial), then advances to HEARTBEAT_INTERVAL_S+1
-        # so the first loop iteration sees now=61 > last_hb=0 → heartbeat fires
-        times = iter([0.0, agent.HEARTBEAT_INTERVAL_S + 1])
-
-        def fake_time():
-            try:
-                return next(times)
-            except StopIteration:
-                return agent.HEARTBEAT_INTERVAL_S + 1
-
-        with patch.object(agent, "_heartbeat") as mock_hb, \
-             patch.object(agent, "_claim_task", side_effect=claim_side_effect), \
-             patch("time.sleep"), \
-             patch("time.time", side_effect=fake_time):
-            with self.assertRaises(StopIteration):
-                agent.run()
-
-        mock_hb.assert_called()
-
-    def test_run_skips_heartbeat_when_recent(self):
-        """When last_hb is recent, heartbeat should not be called again."""
-        calls = {"n": 0}
-        t = time.time()
-
-        def fake_time():
-            return t  # time never advances → heartbeat interval never exceeded
-
-        def claim_side_effect():
-            calls["n"] += 1
-            if calls["n"] == 2:
-                raise StopIteration
+            # Second iteration: signal shutdown so _worker_loop exits.
+            agent._SHUTDOWN.set()
             return None
 
-        with patch.object(agent, "_heartbeat") as mock_hb, \
-             patch.object(agent, "_claim_task", side_effect=claim_side_effect), \
-             patch("time.sleep"), \
-             patch("time.time", side_effect=fake_time):
-            with self.assertRaises(StopIteration):
-                agent.run()
+        with patch.object(agent, "_claim_task", side_effect=claim_side_effect), \
+             patch.object(agent, "_execute", return_value=(True, None, None, mock_proc)) as mock_exec, \
+             patch.object(agent, "_ack") as mock_ack:
+            agent._worker_loop(0, sems)
 
-        # heartbeat called once (first loop) and cached thereafter
-        self.assertEqual(mock_hb.call_count, 1)
+        mock_exec.assert_called_once_with(task)
+        mock_ack.assert_called_once_with("tw1", ok=True, output_uri=None, error=None)
+        # Slot released — semaphore count back to original.
+        self.assertTrue(sems["burner_engage"].acquire(blocking=False))
+        # Caps narrowed to the single kind we acquired before each lease.
+        self.assertTrue(all(c == ["burner_engage"] for c in claim_calls))
+
+    def test_worker_does_not_lease_when_caps_full(self):
+        """All semaphores at zero → worker skips lease entirely."""
+        import threading as _t
+
+        sem = _t.BoundedSemaphore(1)
+        sem.acquire()  # immediately exhaust
+        sems = {"burner_engage": sem}
+
+        # Trip shutdown after one wait so the loop exits.
+        original_wait = agent._SHUTDOWN.wait
+
+        def _wait_then_shutdown(timeout=None):
+            agent._SHUTDOWN.set()
+            return original_wait(timeout)
+
+        with patch.object(agent, "_claim_task") as mock_claim, \
+             patch.object(agent._SHUTDOWN, "wait", side_effect=_wait_then_shutdown):
+            agent._worker_loop(1, sems)
+
+        mock_claim.assert_not_called()
+
+    def test_worker_releases_slot_when_claim_returns_none(self):
+        import threading as _t
+
+        sem = _t.BoundedSemaphore(2)
+        sems = {"burner_engage": sem}
+
+        calls = {"n": 0}
+
+        def claim_side_effect(_caps):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                agent._SHUTDOWN.set()
+            return None
+
+        with patch.object(agent, "_claim_task", side_effect=claim_side_effect), \
+             patch.object(agent, "_execute") as mock_exec:
+            agent._worker_loop(2, sems)
+
+        mock_exec.assert_not_called()
+        # Semaphore fully released (both permits free).
+        self.assertTrue(sem.acquire(blocking=False))
+        self.assertTrue(sem.acquire(blocking=False))
+
+
+class TestRun(unittest.TestCase):
+    def setUp(self):
+        agent._SHUTDOWN.clear()
+
+    def tearDown(self):
+        agent._SHUTDOWN.set()
+        agent._SHUTDOWN.clear()
+
+    def test_run_starts_workers_then_shuts_down(self):
+        """run() starts NUM_WORKERS daemon threads, beats heart, and exits on
+        _SHUTDOWN. We patch the worker loop to a no-op so the test is fast."""
+        with patch.object(agent, "_install_signal_handlers"), \
+             patch.object(agent, "_worker_loop") as mock_worker, \
+             patch.object(agent, "_heartbeat") as mock_hb, \
+             patch.object(agent, "NUM_WORKERS", 3):
+            # Trip shutdown immediately so the heartbeat loop exits on first
+            # iteration.
+            agent._SHUTDOWN.set()
+            agent.run()
+
+        # 3 workers spawned, each invoked once.
+        self.assertEqual(mock_worker.call_count, 3)
+        # Heartbeat fires at least once on startup.
+        self.assertGreaterEqual(mock_hb.call_count, 1)
 
 
 if __name__ == "__main__":

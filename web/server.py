@@ -538,6 +538,48 @@ async def _idle_watchdog() -> None:
             print(f"[watchdog] loop error: {e}")
 
 
+# ---- Periodic queue reaper -----------------------------------------------
+#
+# Returns stuck-LEASED tasks back to QUEUED so a crashed/orphaned agent
+# can't pin a task forever. On 2026-05-12 we discovered 158 zombie LEASED
+# burner_engage tasks accumulated over several days because the laptop
+# agent's _ack used to send status="failed" instead of the schema's "error",
+# silently 422-ing every failure ack and leaving the lease dangling. The
+# ack bug is fixed in pipeline/laptop_agent.py, but agents can still crash
+# mid-task — this reaper is the belt-and-braces guard.
+
+_QUEUE_REAPER_INTERVAL_S = int(os.environ.get("YTFACTORY_QUEUE_REAPER_INTERVAL_S", "300"))
+
+
+async def _periodic_queue_reaper() -> None:
+    """Call ``q.reap_expired()`` every ``_QUEUE_REAPER_INTERVAL_S`` seconds.
+
+    The reaper is idempotent — a no-op when no leases have expired. We run
+    it from the FastAPI app (min-instances=1 in prod) instead of Cloud
+    Scheduler so it doesn't depend on extra infrastructure.
+    """
+    # Lazy import — keeps tests that swap in the in-memory queue backend
+    # from paying the firestore-client startup cost.
+    from control.core.queue import get_queue  # noqa: PLC0415
+
+    while True:
+        try:
+            await asyncio.sleep(_QUEUE_REAPER_INTERVAL_S)
+            try:
+                # reap_expired is sync and may hit Firestore — push it off
+                # the event loop so a slow scan doesn't stall request
+                # handling.
+                n = await asyncio.to_thread(get_queue().reap_expired)
+                if n:
+                    print(f"[queue-reaper] reset {n} stuck-LEASED tasks back to QUEUED")
+            except Exception as e:  # noqa: BLE001
+                print(f"[queue-reaper] reap_expired failed: {e}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:  # noqa: BLE001
+            print(f"[queue-reaper] loop error: {e}")
+
+
 # ---- Job persistence ----------------------------------------------------
 #
 # The in-memory JOBS dict is wiped on every uvicorn reload. The pipeline
@@ -1514,12 +1556,24 @@ async def lifespan(app: FastAPI):
         # finishes will block on the lock then go straight through.
         asyncio.create_task(_warm_image_pipe())
     watchdog = asyncio.create_task(_idle_watchdog())
+    # Periodic queue reaper. The laptop agent's /agent/ack used to send
+    # status="failed" instead of the schema-required "error", which
+    # silently 422-d and left tasks LEASED forever (158 zombies built up
+    # by 2026-05-12). Even with that bug fixed, agents can crash mid-task
+    # and leave a lease orphaned. Run reap_expired() every 5 min so
+    # stuck-LEASED tasks return to QUEUED automatically.
+    queue_reaper = asyncio.create_task(_periodic_queue_reaper())
     try:
         yield
     finally:
         watchdog.cancel()
         try:
             await watchdog
+        except asyncio.CancelledError:
+            pass
+        queue_reaper.cancel()
+        try:
+            await queue_reaper
         except asyncio.CancelledError:
             pass
         await SCRIPT_JOBS.stop_flush_task()
