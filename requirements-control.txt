@@ -12,6 +12,24 @@ pyyaml>=6.0
 # GCP clients
 google-cloud-firestore>=2.27
 google-cloud-storage>=3.10
+# google-cloud-run: control.core.cloud_run.trigger_render_job uses
+# `google.cloud.run_v2` to dispatch the render-worker JOB execution.
+# Without this pin, the SDK path ImportErrors → falls back to
+# `gcloud run jobs execute`, which fails inside the container with
+# "You do not currently have an active account selected" (the gcloud
+# CLI in the image isn't auth'd as the runtime SA, and we don't want
+# to bake credentials in). The SDK uses ADC, which auto-picks up the
+# Cloud Run runtime service account — no extra wiring needed.
+google-cloud-run>=0.16
+# google-cloud-secret-manager: pipeline.upload.upload._persist_token
+# rotates refreshed YouTube OAuth tokens into Secret Manager when the
+# token blob lives under SECRETS_ROOT (i.e. inside Cloud Run, where the
+# mount is read-only). Without this pin, every successful in-cloud
+# refresh fails to persist its new access token → the next refresh
+# either replays the stale blob or hits the typed RefreshTokenLost
+# path, breaking publish-to-YouTube silently. See
+# docs/youtube_stats_refresh.md for the rotation chain.
+google-cloud-secret-manager>=2.20
 
 # Azure OpenAI for the chat backend
 openai>=1.50

@@ -595,6 +595,106 @@ def _new_window_page(browser, ctx, url: str, timeout_ms: int = 15000):
     time.sleep(random.uniform(lo, hi))  # pragma: no cover  # dead code after return
 
 
+def subscribe_to_channel(
+    page,
+    *,
+    channel_id: str,
+    channel_slug: str,
+    channel_label: str,
+    dry_run: bool,
+) -> dict:
+    """Visit a channel page and click Subscribe. Fast path for subscribe-only runs.
+
+    Avoids the per-video ``/watch?v=...`` round-trip that ``engage_video``
+    pays — the channel page is much lighter (no embedded player, no
+    related-videos hydration) and exposes the same
+    ``ytd-subscribe-button-renderer`` selector lane that
+    ``_probe_subscribe`` already understands.
+
+    Empirical wins (2026-05-11): each ``engage_video`` round-trip costs
+    25-40s (60s nav timeout + 15s like-button hydration wait + 4 retry
+    probe loops × 2s + human pauses). For a typical run with ~100
+    catalog videos from ~7 unique source channels, the old subscribe-
+    only path opened all 100 watch URLs even though only 7 actual clicks
+    happened (the rest no-op'd via ``subscribed_channels`` guard). This
+    helper visits the 7 channel pages directly — same number of clicks,
+    7× fewer page loads, ~80% less wall time per burner.
+    """
+    res = {
+        "channel_id": channel_id,
+        "channel": channel_slug,
+        "channel_label": channel_label,
+        "subscribe": "skipped",
+        "errors": [],
+    }
+    url = f"https://www.youtube.com/channel/{channel_id}"
+    print(f"  → channel {channel_id}  [{channel_slug}]  {channel_label!r}", flush=True)
+
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        try:
+            # Subscribe button hydrates after domcontentloaded — gate on
+            # its presence (any of the lanes _probe_subscribe knows about).
+            page.wait_for_selector(
+                "ytd-subscribe-button-renderer button, "
+                "yt-subscribe-button-view-model button, "
+                "button[aria-label*='Subscribe to' i]",
+                state="attached",
+                timeout=12000,
+            )
+        except Exception:
+            pass
+        _human_pause(1.0, 2.0)
+    except Exception as e:
+        res["errors"].append(f"goto {type(e).__name__}: {e}")
+        return res
+
+    if "accounts.google.com" in page.url:
+        res["errors"].append("redirected to sign-in (cookies stale)")
+        return res
+
+    # Detect "This page isn't available" / channel-deleted edge case.
+    try:
+        if page.locator("text='This page isn\\'t available'").first.is_visible(timeout=1500):
+            res["subscribe"] = "channel_unavailable"
+            return res
+    except Exception:
+        pass
+
+    state, btn = "unknown", None
+    for _ in range(3):
+        state, btn = _probe_subscribe(page)
+        if state in ("subscribed", "unsubscribed"):
+            break
+        time.sleep(1.5)
+    print(f"     sub state: {state}", flush=True)
+
+    if state == "subscribed":
+        res["subscribe"] = "already_subscribed"
+    elif state == "unsubscribed" and btn is not None:
+        if dry_run:
+            res["subscribe"] = "DRY_RUN_would_click"
+        else:
+            try:
+                btn.scroll_into_view_if_needed(timeout=3000)
+                time.sleep(0.3)
+                btn.click(force=True, timeout=6000)
+                time.sleep(3)
+                state2, _ = _probe_subscribe(page)
+                if state2 == "subscribed":
+                    res["subscribe"] = "OK"
+                else:
+                    res["subscribe"] = f"FAIL_state_after_click={state2}"
+            except Exception as e:
+                res["errors"].append(f"sub-click {type(e).__name__}: {e}")
+                res["subscribe"] = "FAIL_exception"
+    else:
+        res["subscribe"] = f"FAIL_no_button (state={state})"
+
+    _human_pause()
+    return res
+
+
 def engage_video(
     page,
     *,
@@ -856,34 +956,107 @@ def run(args: argparse.Namespace) -> dict:
                     f"channel — aborting before doing harm."
                 )
 
-            for i, v in enumerate(catalog, 1):
-                print(f"\n[{i}/{len(catalog)}]", flush=True)
-                vd = {
-                    "video_id": v.video_id,
-                    "channel": v.channel,
-                    "title": v.title,
-                    "url": v.url,
-                }
-                # Engagement runs in a SEPARATE Chrome process (different
-                # user-data-dir) — see the launch block above. This means
-                # ctx.new_page() opens a tab in OUR Chrome, not the user's.
-                vpage = ctx.new_page()
-                vpage.set_default_timeout(15000)
-                try:
-                    r = engage_video(
-                        vpage,
-                        video=vd,
-                        do_like=not args.no_like,
-                        do_subscribe=not args.no_subscribe,
-                        dry_run=args.dry_run,
-                        subscribed_channels=subscribed,
+            # ── FAST PATH: subscribe-only ───────────────────────────────────
+            # When --no-like is set we don't need to open every catalog
+            # video — just walk the unique source channels and click
+            # Subscribe on each channel page. ~80% faster per burner
+            # because we skip the heavy /watch player hydration.
+            if args.no_like and not args.no_subscribe:
+                # Build the unique source channel list, preserving the
+                # catalog's deterministic order (most-recent uploads
+                # first → earliest channels touched first).
+                ch_id_registry = _load_json(CHANNEL_IDS_PATH, {})
+                seen: set[str] = set()
+                unique_channels: list[dict] = []
+                missing_id: list[dict] = []
+                for v in catalog:
+                    if v.channel in seen:
+                        continue
+                    seen.add(v.channel)
+                    rec = ch_id_registry.get(v.channel) or {}
+                    cid = rec.get("channel_id")
+                    if not cid:
+                        missing_id.append({"slug": v.channel, "label": v.channel_label})
+                        continue
+                    unique_channels.append({
+                        "slug": v.channel,
+                        "label": v.channel_label or rec.get("title") or v.channel,
+                        "channel_id": cid,
+                    })
+                summary["unique_channels_total"] = len(unique_channels)
+                summary["unique_channels_missing_id"] = len(missing_id)
+                if missing_id:
+                    print(
+                        f"\n[engage-burner] WARN: {len(missing_id)} catalog "
+                        f"channel(s) have no entry in {CHANNEL_IDS_PATH.name} — "
+                        f"skipping (run resolve-channel-ids to populate): "
+                        f"{[m['slug'] for m in missing_id]}",
+                        flush=True,
                     )
-                    results.append(r)
-                finally:
-                    try: vpage.close()
-                    except Exception: pass
-                summary_path = work_dir / "result.json"
-                summary_path.write_text(json.dumps(summary, indent=2))
+                print(
+                    f"\n[engage-burner] subscribe-only mode: "
+                    f"{len(unique_channels)} unique source channel(s) "
+                    f"(deduped from {len(catalog)} catalog videos)",
+                    flush=True,
+                )
+                for i, ch in enumerate(unique_channels, 1):
+                    print(f"\n[{i}/{len(unique_channels)}]", flush=True)
+                    cpage = ctx.new_page()
+                    cpage.set_default_timeout(15000)
+                    try:
+                        r = subscribe_to_channel(
+                            cpage,
+                            channel_id=ch["channel_id"],
+                            channel_slug=ch["slug"],
+                            channel_label=ch["label"],
+                            dry_run=args.dry_run,
+                        )
+                        # Keep the result row shape compatible with the
+                        # per-video path so the final summary aggregator
+                        # still works (it counts r["subscribe"] and
+                        # r["errors"]; like/video_id are absent here).
+                        r.setdefault("like", "skipped")
+                        r.setdefault("video_id", "")
+                        r.setdefault("title", f"channel:{ch['slug']}")
+                        results.append(r)
+                        if r["subscribe"] in ("OK", "already_subscribed"):
+                            subscribed.add(ch["slug"])
+                    finally:
+                        try: cpage.close()
+                        except Exception: pass
+                    summary_path = work_dir / "result.json"
+                    summary_path.write_text(json.dumps(summary, indent=2))
+            else:
+                # Default path: per-video like (+ subscribe deduped via
+                # subscribed_channels guard).
+                for i, v in enumerate(catalog, 1):
+                    print(f"\n[{i}/{len(catalog)}]", flush=True)
+                    vd = {
+                        "video_id": v.video_id,
+                        "channel": v.channel,
+                        "title": v.title,
+                        "url": v.url,
+                    }
+                    # Engagement runs in a SEPARATE Chrome process (different
+                    # user-data-dir) — see the launch block above. This means
+                    # ctx.new_page() opens a tab in OUR Chrome, not the user's.
+                    vpage = ctx.new_page()
+                    vpage.set_default_timeout(15000)
+                    try:
+                        r = engage_video(
+                            vpage,
+                            video=vd,
+                            do_like=not args.no_like,
+                            do_subscribe=not args.no_subscribe,
+                            dry_run=args.dry_run,
+                            subscribed_channels=subscribed,
+                        )
+                        results.append(r)
+                    finally:
+                        try: vpage.close()
+                        except Exception: pass
+                    summary_path = work_dir / "result.json"
+                    summary_path.write_text(json.dumps(summary, indent=2))
 
     finally:
         # Coexistence: NEVER kill Chrome we attached to. Even when WE
@@ -915,7 +1088,7 @@ def main() -> int:
     ap.add_argument("--user-data-dir", type=pathlib.Path, default=DEFAULT_USER_DATA_DIR, help=f"Chrome user-data-dir for this engage instance. Default {DEFAULT_USER_DATA_DIR.name!r} is a SIBLING of the canonical Chrome-Debug — keeps your main Chrome-Debug window completely untouched (separate process, separate tabs).")
     ap.add_argument("--limit", type=int, default=0, help="Only engage with the first N catalog videos (0 = all).")
     ap.add_argument("--include-self", action="store_true", help="Include videos whose source channel matches the burner. Default: skip (don't self-engage).")
-    ap.add_argument("--no-like", action="store_true", help="Skip the Like step (subscribe only).")
+    ap.add_argument("--no-like", action="store_true", help="Skip the Like step (subscribe only). Activates the FAST PATH that visits each unique source channel once instead of opening every catalog video — typically ~5-8× faster per burner.")
     ap.add_argument("--no-subscribe", action="store_true", help="Skip the Subscribe step (like only).")
     ap.add_argument("--force-fresh", action="store_true", help="Always launch a new Chrome-Debug. Default detects + attaches to a running one.")
     ap.add_argument("--dry-run", action="store_true", help="Probe like/subscribe state per video but don't click.")

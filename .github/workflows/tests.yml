@@ -42,7 +42,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-control.txt
           pip install Pillow requests sse-starlette
-          pip install numpy 'playwright>=1.40' pytest coverage yt-dlp google-cloud-run
+          pip install numpy 'playwright>=1.40' pytest coverage yt-dlp google-cloud-run soundfile
 
       - name: Run unit tests (excluding heavy-ML tests)
         # tests/test_audio_tts_providers.py is the only file that
