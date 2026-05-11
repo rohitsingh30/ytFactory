@@ -15,7 +15,13 @@ no longer depends on a Mac being awake.
 
 A Cloud Run **Job** (not a Service — Jobs run-to-completion) deployed
 as `ytfactory-render-worker-v2` in `asia-southeast1`. The control plane
-triggers one execution per render via the `google-cloud-run` SDK.
+triggers one execution per render via the `google-cloud-run` SDK
+(`google.cloud.run_v2`). That SDK MUST be pinned in
+`requirements-control.txt` — without it, the dispatcher's CLI fallback
+fires and fails inside the container with "no active account
+selected". Pinning is mechanically enforced by
+`tests/test_cloud_runtime_deps.py`; full contract in
+[`cloud_runtime_deps.md`](./cloud_runtime_deps.md).
 
 ```
    user clicks Render
@@ -35,6 +41,13 @@ triggers one execution per render via the `google-cloud-run` SDK.
         ▼
    UI poll loop (/api/jobs/<job_id>) sees live progress
 ```
+
+> **The UI poll endpoint** (`GET /api/jobs/<job_id>`) is NOT a single
+> route — it falls through three job stores. See
+> [`jobs_snapshot_unification.md`](./jobs_snapshot_unification.md)
+> for the route-shadowing trap and the unified-shape adapter. A
+> 32-char-hex `<job_id>` is the diagnostic for "born in
+> `_enqueue_render_job`" — i.e. came through this dispatch path.
 
 ## LLM backends — three choices
 

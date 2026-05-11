@@ -194,6 +194,51 @@ re-export); see `pipeline/{images,upload}/__init__.py` for the
 package-level PEP 562 lazy `__getattr__` form (which fixes
 `patch.object(pkg, attr)` too).
 
+**4. `importlib.util.find_spec` for "is this importable?" drift checks
+(don't load the module at all):**
+
+If the test's intent is "verify that a package the cloud image
+depends on is installable in the current venv" (drift between
+`requirements-control.txt` and the laptop venv), use
+`importlib.util.find_spec` instead of a real `import`:
+
+```python
+# WRONG — real import binds google.cloud.secretmanager as a
+# package attribute on google.cloud, leaking into every later
+# test that patch.dict's sys.modules to inject a fake. Caused
+# tests/test_upload_youtube.py::test_secret_mount_path_… to
+# fail when run after the new test.
+import google.cloud.secretmanager  # noqa: F401
+
+# RIGHT — find_spec consults the finder/spec but doesn't load
+# the module → no parent-package-attribute binding → no leak.
+import importlib.util
+spec = importlib.util.find_spec("google.cloud.secretmanager")
+self.assertIsNotNone(spec, "google-cloud-secret-manager not installed")
+```
+
+`find_spec` returns the `ModuleSpec` if the package can be
+imported; `None` if the finder can't locate it. It's the
+`isinstance(x, type)` of import — checks the relationship without
+materialising the value. Used in
+`tests/test_cloud_runtime_deps.py::CloudRunDispatchEnvironmentTest`
+for both `google.cloud.run_v2` and `google.cloud.secretmanager`
+drift checks.
+
+When you need to verify the package can ALSO be CONSTRUCTED
+(constructor doesn't raise on missing transitive deps), you
+have two choices:
+
+- Use `find_spec` for cheap "installable" check + a separate
+  integration test that exercises the constructor in a
+  controlled scope (preferred — keeps the pollution localized).
+- Real `import` + restore via the suite-level conftest fixture
+  in approach 1 above (works but expensive — every test pays
+  the snapshot/restore cost).
+
+Default to `find_spec` for any test whose only goal is "this
+package should be installable".
+
 ### Audit recipes
 
 ```bash

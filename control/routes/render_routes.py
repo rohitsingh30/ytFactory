@@ -375,6 +375,15 @@ class QueueResponse(BaseModel):
     running: list[dict]
     completed: list[dict]
     held: list[dict]
+    # Per-section error strings. Empty when the section's underlying
+    # query succeeded; populated with a short, operator-readable reason
+    # when it didn't (e.g. "missing Firestore composite index — deploy
+    # firestore.indexes.json"). The UI surfaces these so a half-broken
+    # backend never silently presents itself as an empty queue —
+    # the original silent-swallow bug that made operators believe
+    # /api/queue served fake data when really the terminal-state query
+    # was 400ing on a missing composite index for 18 real failed jobs.
+    warnings: dict[str, str] = {}
 
 
 # How many recent terminal-state jobs the queue page surfaces in the
@@ -384,20 +393,50 @@ class QueueResponse(BaseModel):
 _COMPLETED_LIMIT = 20
 
 
+def _summarise_firestore_error(exc: Exception) -> str:
+    """Turn a Firestore exception into a one-line operator hint.
+
+    The most common failure mode for /api/queue is a missing composite
+    index — Firestore throws ``FailedPrecondition: 400 The query requires
+    an index. You can create it here: https://...``. We strip the URL
+    (it's noisy + leaks project id) and substitute a deploy hint that
+    points the operator at the source of truth (firestore.indexes.json)
+    so the fix is self-service instead of "click the link in the log
+    every time the project gets re-bootstrapped".
+    """
+    msg = str(exc)
+    if "requires an index" in msg.lower():
+        return (
+            "Firestore composite index missing — deploy "
+            "firestore.indexes.json (gcloud firestore indexes composite "
+            "create or `firebase deploy --only firestore:indexes`)"
+        )
+    # Trim — the wire payload from Firestore can be multi-KB and we only
+    # want enough for an operator to grep logs.
+    return f"{type(exc).__name__}: {msg[:200]}"
+
+
 @router.get("/api/queue", response_model=QueueResponse)
 async def get_queue_state() -> QueueResponse:
     """Snapshot of the queue + per-channel holds + recent completions.
 
     "queued" / "running" come from job docs (not raw tasks) so the UI can
     show topic + channel without an extra fetch. "completed" returns the
-    last ~20 terminal-state (done | failed) jobs so the Queue page also
-    serves as the "what just shipped, ready to review" surface — without
-    forcing a roundtrip to Library. "held" comes from each channel's
-    _holds.json (written by /ingest-critiques)."""
+    last ~20 terminal-state (done | failed | cancelled) jobs so the Queue
+    page also serves as the "what just shipped, ready to review" surface
+    — without forcing a roundtrip to Library. "held" comes from each
+    channel's _holds.json (written by /ingest-critiques).
+
+    Error handling: each Firestore query has its OWN try/except so a
+    missing composite index on the terminal query can't blank out the
+    active queue (or vice-versa). Failures are surfaced in
+    ``warnings[section]`` so the UI can render an actionable banner
+    instead of silently lying about an empty queue."""
     backend = jobs_mod.get_jobs()
     queued: list[dict] = []
     running: list[dict] = []
     completed: list[dict] = []
+    warnings: dict[str, str] = {}
 
     if isinstance(backend, jobs_mod._MemoryJobs):  # noqa: SLF001
         with backend._lock:  # noqa: SLF001
@@ -415,26 +454,69 @@ async def get_queue_state() -> QueueResponse:
     else:
         docs = []
         terminal_docs: list[tuple[str, dict]] = []
+        # Two independent try/except blocks: a failure on the terminal
+        # query (the historical foot-gun — composite-index 400) MUST NOT
+        # also blank out queued/running. Likewise a transient permission
+        # blip on the active query shouldn't hide what just shipped.
         try:
             from google.cloud import firestore  # noqa: PLC0415
             db = firestore.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2"))
-            for snap in db.collection("jobs").where("status", "in", ["pending", "rendering", "uploading"]).limit(200).stream():
-                docs.append((snap.id, snap.to_dict() or {}))
-            # Separate query for terminal states so the active-queue cap
-            # of 200 doesn't starve the completed column on busy days.
-            # "cancelled" is included alongside done/failed so a render
-            # the operator just stopped stays clickable from the Queue.
-            term_stream = (
-                db.collection("jobs")
-                .where("status", "in", ["done", "failed", "cancelled"])
-                .order_by("updated_at", direction=firestore.Query.DESCENDING)
-                .limit(_COMPLETED_LIMIT)
-                .stream()
-            )
-            for snap in term_stream:
-                terminal_docs.append((snap.id, snap.to_dict() or {}))
-        except Exception:  # noqa: BLE001
-            logger.warning("firestore queue scan failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("firestore client init failed", exc_info=True)
+            warnings["queued"] = _summarise_firestore_error(exc)
+            warnings["running"] = warnings["queued"]
+            warnings["completed"] = warnings["queued"]
+            db = None  # type: ignore[assignment]
+
+        if db is not None:
+            try:
+                # No order_by here — `where status in [...]` without sort
+                # uses only the auto-created single-field indexes, so
+                # this query keeps working even if the composite index
+                # for the terminal query hasn't been deployed yet.
+                # We sort in Python below.
+                stream = (
+                    db.collection("jobs")
+                    .where("status", "in", ["pending", "rendering", "uploading"])
+                    .limit(200)
+                    .stream()
+                )
+                for snap in stream:
+                    docs.append((snap.id, snap.to_dict() or {}))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("firestore active-queue scan failed", exc_info=True)
+                msg = _summarise_firestore_error(exc)
+                warnings["queued"] = msg
+                warnings["running"] = msg
+
+            try:
+                # Separate query for terminal states so the active-queue
+                # cap of 200 doesn't starve the completed column on busy
+                # days. "cancelled" is included alongside done/failed so
+                # a render the operator just stopped stays clickable from
+                # the Queue. NOTE: this composite query needs the
+                # `jobs(status ASC, updated_at DESC)` index — see
+                # firestore.indexes.json. Without it Firestore returns
+                # FailedPrecondition; the warning is surfaced to the UI
+                # so the empty column is visibly explained.
+                term_stream = (
+                    db.collection("jobs")
+                    .where("status", "in", ["done", "failed", "cancelled"])
+                    .order_by("updated_at", direction=firestore.Query.DESCENDING)
+                    .limit(_COMPLETED_LIMIT)
+                    .stream()
+                )
+                for snap in term_stream:
+                    terminal_docs.append((snap.id, snap.to_dict() or {}))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("firestore terminal-queue scan failed", exc_info=True)
+                warnings["completed"] = _summarise_firestore_error(exc)
+
+    # Active queue: sort newest-first by updated_at so the UI presents
+    # a stable, predictable order across pages. (The Firestore query
+    # intentionally omits order_by so it doesn't need a composite index;
+    # we sort here instead — cheap on ≤200 rows.)
+    docs.sort(key=lambda jd: str(jd[1].get("updated_at") or ""), reverse=True)
 
     for jid, d in docs:
         s = d.get("status")
@@ -484,7 +566,13 @@ async def get_queue_state() -> QueueResponse:
         except Exception:  # noqa: BLE001
             logger.warning("failed to parse %s", holds_file, exc_info=True)
 
-    return QueueResponse(queued=queued, running=running, completed=completed, held=held)
+    return QueueResponse(
+        queued=queued,
+        running=running,
+        completed=completed,
+        held=held,
+        warnings=warnings,
+    )
 
 
 # ---------------------------------------------------------------------------

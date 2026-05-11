@@ -85,6 +85,7 @@ export default function QueuePage() {
           tone="text-violet-300"
           jobs={queue?.running ?? null}
           emptyHint="No worker active. Render something to wake the sim."
+          warning={queue?.warnings?.running}
           showCancel
         />
         <Column
@@ -93,6 +94,7 @@ export default function QueuePage() {
           tone="text-amber-300"
           jobs={queue?.queued ?? null}
           emptyHint="The queue is empty. The next render lands here."
+          warning={queue?.warnings?.queued}
           showCancel
         />
         <Column
@@ -101,6 +103,7 @@ export default function QueuePage() {
           tone="text-emerald-300"
           jobs={queue?.completed ?? null}
           emptyHint="Recently shipped renders show up here. Click to review."
+          warning={queue?.warnings?.completed}
         />
         <HeldColumn held={queue?.held ?? null} onResolved={refresh} />
       </div>
@@ -115,6 +118,7 @@ function Column({
   jobs,
   emptyHint,
   showCancel,
+  warning,
 }: {
   title: string;
   icon: typeof Play;
@@ -122,6 +126,7 @@ function Column({
   jobs: Job[] | null;
   emptyHint: string;
   showCancel?: boolean;
+  warning?: string;
 }) {
   return (
     <section className="flex flex-col rounded-xl border border-border bg-surface">
@@ -135,7 +140,22 @@ function Column({
         </span>
       </div>
       <div className="flex-1 space-y-2 p-4">
-        {jobs === null ? (
+        {warning ? (
+          // Backend told us this column's underlying query failed.
+          // Show the operator-readable hint INSTEAD of "Empty" so a
+          // missing index / permission blip never lies to the operator
+          // about an empty queue. Keep the layout the same so the page
+          // doesn't jump when the warning clears on next refresh.
+          <div className="flex flex-col items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-[12px] text-amber-200">
+            <div className="flex items-center gap-1.5 font-medium">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              Backend error
+            </div>
+            <div className="font-mono text-[10.5px] leading-snug text-amber-100/85">
+              {warning}
+            </div>
+          </div>
+        ) : jobs === null ? (
           <>
             <Skeleton className="h-16" />
             <Skeleton className="h-16" />

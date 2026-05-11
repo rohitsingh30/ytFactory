@@ -41,6 +41,12 @@ WORKDIR /workspace
 # laptop's requirements.txt does `-r requirements-control.txt` + extras;
 # this image installs only requirements-control.txt (no torch/diffusers,
 # no playwright, no faster-whisper).
+#
+# *** Every google.cloud.X import on the cloud-deployed code path
+# *** (control/, web/, pipeline/) MUST be pinned in requirements-
+# *** control.txt. Enforced by tests/test_cloud_runtime_deps.py.
+# *** See docs/cloud_runtime_deps.md for the test contract — adding a
+# *** new GCP SDK call site? Read that doc first or pytest will fail.
 COPY requirements-control.txt /tmp/requirements-control.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-control.txt
 

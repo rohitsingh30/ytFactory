@@ -433,6 +433,15 @@ subbed.
   Phase-0+Phase-1 architecture all engagement modes ride on.
 - [`docs/many_chrome_tabs.md`](many_chrome_tabs.md) — the Chrome flags
   + page.goto policy that make 50+ simultaneous YouTube tabs survivable.
+- [`docs/cross_channel_engagement.md` § Subscribe-only fast path](cross_channel_engagement.md#subscribe-only-fast-path---no-like-2026-05-11) —
+  the laptop attach-mode CLI (`cross_engage_burner_attached --no-like`)
+  takes the dedupe insight one step further: visits each unique source
+  channel's `/channel/<UC>` page directly instead of opening even the
+  deduped representative `/watch?v=…`. Same `_probe_subscribe`
+  selectors, ~5-8× faster per burner. Candidate follow-up for the
+  cloud worker's `subscribe_only` mode (would replace the per-channel
+  watch-page open with a per-channel channel-page open — same actions,
+  lighter pages).
 
 ## Files touched
 

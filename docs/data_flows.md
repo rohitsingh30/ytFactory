@@ -217,6 +217,45 @@ sequenceDiagram
 | Firestore composite index missing | Lease endpoint 500s; agent backoff retries. (Created at deploy time — see `gcloud firestore indexes composite list`.) |
 | Long-lived Chrome task (`burner_engage`) | Fire-and-forget pattern — agent spawns the worker via `subprocess.Popen(start_new_session=True)` and acks immediately. Worker outlives the agent. UI tracks per-burner progress via the GCS-mirrored state file (see `docs/cross_engage_cloud_v2.md`), not via task status. |
 
+### Standing rule — composite-index discipline (2026-05-11)
+
+**Any Firestore query combining `where(...)` with `order_by(otherField)`
+requires a composite index.** Single-field auto-indexes are NOT enough.
+This includes:
+
+- `where("status", "==", "X").order_by("updated_at", DESC)` — needs
+  `(status ASC, updated_at DESC)`.
+- `where("status", "in", [...]).order_by("updated_at", DESC)` — same
+  index covers it (Firestore treats `in` as a fan-out of equality
+  predicates).
+
+Whenever you add such a query to `control/routes/*` or any cloud
+worker, you MUST also:
+
+1. Add the index to **`firestore.indexes.json`** (source of truth).
+2. Deploy it: `gcloud firestore indexes composite create
+   --collection-group=<COLL> --query-scope=COLLECTION
+   --field-config=field-path=<F1>,order=ascending
+   --field-config=field-path=<F2>,order=descending
+   --project=ytfactory-prod-v2`
+3. Wait for `state=READY` (poll `gcloud firestore indexes composite
+   list`; small datasets build in ~60-120s).
+4. **Wrap each Firestore query in its OWN `try/except`** so a
+   missing-index `FailedPrecondition` on one query cannot blank out
+   adjacent ones. The `/api/queue` endpoint had this exact bug for
+   two days before the 2026-05-11 fix: a single `try/except` around
+   both the active-queue and terminal-queue scans meant a missing
+   `jobs(status, updated_at)` index made the Studio Queue page show
+   "Empty" in the Completed column while Firestore actually held 18+
+   real terminal jobs.
+5. **Surface the failure to the UI** via a typed `warnings: dict[str,
+   str]` field on the response. Empty backend column ≠ empty backend
+   data — the UI must be able to render an actionable banner instead
+   of silently lying with "Empty".
+
+See `control/routes/render_routes.py::get_queue_state` for the
+canonical pattern.
+
 ### App-level auth gotcha — `K_SERVICE` bypass
 
 Cloud Run's Google Frontend validates the agent's gcloud OIDC

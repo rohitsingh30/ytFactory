@@ -80,6 +80,130 @@ class CancelJobTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(q.get("td").status, TaskStatus.DONE)  # type: ignore[union-attr]
 
 
+class QueueEndpointTest(unittest.IsolatedAsyncioTestCase):
+    """Regression tests for /api/queue.
+
+    Born from the 2026-05-11 outage where the Studio Queue page showed
+    "Empty" in the Completed column for two days while Firestore actually
+    held 18+ terminal jobs. Root cause was a missing composite index
+    (``jobs(status ASC, updated_at DESC)``) on the
+    ``where(status in [...]).order_by(updated_at)`` query — combined with
+    a single try/except around BOTH the active-queue and terminal-queue
+    Firestore calls that silently swallowed the index error and blanked
+    Completed without telling the operator.
+
+    These tests pin the post-fix invariants:
+      1. In-memory backend: queued/running/completed buckets are
+         classified by status correctly + sorted newest-first.
+      2. Each Firestore query has its OWN try/except so a failure on the
+         terminal query cannot blank queued/running.
+      3. Failures are SURFACED in ``warnings[section]`` — we never again
+         silently lie about an empty queue."""
+
+    def setUp(self) -> None:
+        reset_queue()
+        jobs_mod.reset_jobs()
+        rate_limit.reset_backend()
+
+    async def _get_queue(self) -> dict:
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.get("/api/queue")
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()
+
+    async def test_in_memory_buckets_jobs_by_status(self) -> None:
+        # Three jobs across the three live statuses + three terminal.
+        jobs_mod.create_job("p1", channel="auto", topic="pending one", proposal={})
+        jobs_mod.create_job("r1", channel="auto", topic="running one", proposal={})
+        jobs_mod.get_jobs().update("r1", status="rendering", stage="images")
+        jobs_mod.create_job("u1", channel="auto", topic="uploading one", proposal={})
+        jobs_mod.get_jobs().update("u1", status="uploading", stage="gcs_upload")
+        jobs_mod.create_job("d1", channel="auto", topic="done one", proposal={})
+        jobs_mod.get_jobs().update("d1", status="done", stage="done")
+        jobs_mod.create_job("f1", channel="auto", topic="failed one", proposal={})
+        jobs_mod.get_jobs().update("f1", status="failed", stage="dispatching", error="boom")
+        jobs_mod.create_job("c1", channel="auto", topic="cancelled one", proposal={})
+        jobs_mod.get_jobs().update("c1", status="cancelled", stage="cancelled")
+
+        body = await self._get_queue()
+
+        self.assertEqual([j["topic"] for j in body["queued"]], ["pending one"])
+        self.assertEqual(
+            sorted(j["topic"] for j in body["running"]),
+            ["running one", "uploading one"],
+        )
+        # Completed includes done + failed + cancelled (newest-first, but
+        # all three were created in this test so the relative order will
+        # follow updated_at — just assert the SET membership which is the
+        # invariant the user cares about: failed/cancelled MUST appear).
+        completed_topics = {j["topic"] for j in body["completed"]}
+        self.assertEqual(
+            completed_topics,
+            {"done one", "failed one", "cancelled one"},
+        )
+        # No Firestore in this test → warnings should be empty.
+        self.assertEqual(body.get("warnings", {}), {})
+
+    async def test_firestore_terminal_failure_does_not_blank_active_queue(self) -> None:
+        """The original bug: missing composite index → terminal query 400s
+        → ALL columns blanked because of one shared try/except.
+
+        After the fix: active query still returns its results; the
+        terminal query's failure is surfaced in warnings.completed."""
+        # Force the Firestore branch by swapping the backend to a MagicMock
+        # that is NOT an instance of _MemoryJobs.
+        from google.api_core.exceptions import FailedPrecondition
+        from control.routes import render_routes as rr
+
+        # Build a fake non-memory backend so the route takes the Firestore branch.
+        fake_backend = MagicMock()
+        # Two distinct query builders so we can simulate "active OK,
+        # terminal raises" — the original bug shape.
+        active_q = MagicMock()
+        active_snap = MagicMock()
+        active_snap.id = "abc123"
+        active_snap.to_dict.return_value = {
+            "channel": "mystoriesanimated", "topic": "live render",
+            "status": "pending", "stage": "queued",
+        }
+        active_q.where.return_value.limit.return_value.stream.return_value = iter([active_snap])
+
+        terminal_q = MagicMock()
+        terminal_q.where.return_value.order_by.return_value.limit.return_value.stream.side_effect = (
+            FailedPrecondition("400 The query requires an index. ...")
+        )
+
+        fake_db = MagicMock()
+        # Two consecutive db.collection("jobs") calls — first returns
+        # the active-query builder, second returns the terminal one.
+        fake_db.collection.side_effect = [active_q, terminal_q]
+
+        fake_firestore_module = MagicMock()
+        fake_firestore_module.Client.return_value = fake_db
+        fake_firestore_module.Query.DESCENDING = "DESCENDING"
+
+        # _MemoryJobs check uses isinstance — ensure our mock isn't one.
+        with patch.object(rr.jobs_mod, "get_jobs", return_value=fake_backend), \
+             patch.dict("sys.modules", {"google.cloud.firestore": fake_firestore_module}):
+            body = await self._get_queue()
+
+        # Active query worked → queued column shows the real pending job.
+        self.assertEqual(len(body["queued"]), 1)
+        self.assertEqual(body["queued"][0]["topic"], "live render")
+        # Terminal query failed → completed is empty BUT warnings
+        # explains why so the UI can render an actionable banner.
+        self.assertEqual(body["completed"], [])
+        warnings = body.get("warnings", {})
+        self.assertIn("completed", warnings)
+        self.assertIn("composite index", warnings["completed"].lower())
+        # Active sections should NOT carry the terminal error (the
+        # original bug was that they did, via a shared try/except).
+        self.assertNotIn("queued", warnings)
+        self.assertNotIn("running", warnings)
+
+
 class HealthEndpointTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         rate_limit.reset_backend()

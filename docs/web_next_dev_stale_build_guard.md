@@ -37,6 +37,14 @@ GET /_next/static/chunks/app-pages-internals.js 404 in 20ms
 GET /_next/static/chunks/app/app/library/page.js 404 in 23ms
 ```
 
+> **Sibling failure mode (2026-05-11) — Queue page shows "Empty"
+> in prod when Firestore actually has data.** Different root cause
+> (missing composite index on `jobs(status, updated_at)` + a too-
+> broad `try/except` swallowing the `FailedPrecondition`), same
+> operator symptom ("the page lies"). If the dev-build guard rules
+> this one out, jump to `docs/data_flows.md` § "composite-index
+> discipline" for the production-side debug path.
+
 ## Smoking gun
 
 `.next/BUILD_ID` is written by `next build` and **never** by

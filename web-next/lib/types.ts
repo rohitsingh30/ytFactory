@@ -173,6 +173,13 @@ export interface QueueState {
   running: Job[];
   completed: Job[];
   held: QueueHeldEntry[];
+  // Per-section error strings populated when the backend's underlying
+  // Firestore query failed (e.g. missing composite index). The UI
+  // surfaces these so a half-broken backend never silently presents
+  // itself as "Empty" — historically a missing jobs(status,updated_at)
+  // composite index made the Completed column always show 0 even when
+  // 18 real terminal jobs existed in Firestore.
+  warnings?: { queued?: string; running?: string; completed?: string };
 }
 
 export interface RenderRequest {

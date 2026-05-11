@@ -168,3 +168,36 @@ runs through a separate flow on Cloud Run + the laptop agent:
   [`docs/cross_engage_cloud_v2.md`](cross_engage_cloud_v2.md) —
   enqueues a `BURNER_ENGAGE` task that the laptop agent leases and
   executes against a real signed-in Chrome window.
+
+## Subscribe-only fast path (`--no-like`, 2026-05-11)
+
+`pipeline.cross_engage.cross_engage_burner_attached` previously routed
+`--no-like` (subscribe-only) runs through `engage_video()` for every
+video in the catalog — opening each `/watch?v=…` URL, waiting ~15s for
+the like-button to hydrate (even though we'd skip it), probing the
+subscribe state with up-to-4 retries, and only **actually** clicking
+once per source channel (the rest no-op'd via the `subscribed_channels`
+guard). On a typical 100-video × 7-channel catalog that's ~95 wasted
+page loads per burner.
+
+The fast path (auto-activated when `--no-like` is set without
+`--no-subscribe`) walks **unique source channels** instead — looks up
+each source channel's `UC…` id from `~/.config/ytfactory/channel_ids.json`
+and visits `https://www.youtube.com/channel/<UC>` directly. Channel
+pages are far lighter than watch pages (no embedded player, no
+related-videos hydration); same `_probe_subscribe` selector lane works
+on both.
+
+| metric              | old per-video path       | new fast path             |
+| ------------------- | ------------------------ | ------------------------- |
+| page loads / burner | one per catalog video    | one per unique channel    |
+| wall time / burner  | ~50 min (100 × ~30s)     | ~3-5 min (7 × ~15-20s)    |
+| actual sub clicks   | one per unique channel   | one per unique channel    |
+
+The result-row shape stays compatible with the per-video path
+(`like` defaults to `"skipped"`, `video_id` is empty, `title` becomes
+`channel:<slug>`) so the final `n_liked / n_subbed` aggregator and the
+`work_dir/result.json` consumers don't need updating.
+
+Falls back to the per-video path automatically when `--no-like` is
+NOT set, and warns + skips channels that aren't in `channel_ids.json`.

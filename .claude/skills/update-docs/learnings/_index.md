@@ -5,6 +5,43 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
 
 ## CLASS-OF-BUG (rule changes to SKILL.md)
 
+- 2026-05-11 — **Firestore `where + order_by` queries silently 400
+  on missing composite index, and a too-broad try/except hides it
+  from the UI.** Studio Queue page's Completed column showed "Empty"
+  for 2 days while Firestore held 18+ real terminal jobs — the
+  `jobs(status, updated_at)` composite index was never deployed and
+  the single `try/except` around both `/api/queue` Firestore calls
+  swallowed the `FailedPrecondition`. Standing rule landed in
+  `docs/data_flows.md` § "composite-index discipline" (split each
+  query's try/except, surface failures via typed `warnings: dict[str,
+  str]` on the response, UI MUST render an actionable banner instead
+  of an "Empty" placeholder when the backend reports a section
+  warning). Sweep recipe to catch siblings:
+  `grep -rn "\.where(.*\.order_by(" control/ web/server.py pipeline/ --include='*.py'` —
+  every match is a candidate that needs a composite index in
+  `firestore.indexes.json` AND a per-query try/except. Memory:
+  `feedback_queue_endpoint_silent_index_swallow_2026_05_11.md`.
+- 2026-05-11 — **Action-cardinality mismatch is a recurring perf
+  pattern.** Sibling modules
+  `pipeline/cross_engage/burner_engage.py` (cloud worker,
+  `MODE_SUBSCRIBE_ONLY`) and
+  `pipeline/cross_engage/cross_engage_burner_attached.py` (laptop
+  attach-mode CLI, `--no-like`) both shipped with subscribe-only flows
+  that iterated the catalog video-by-video despite Subscribe being a
+  per-channel action. Two independent fixes landed (dedupe-then-open-
+  one-video for the cloud worker on 2026-05-11; `/channel/<UC>`
+  direct navigation for the CLI on 2026-05-11) — the meta-pattern
+  was the same: project the catalog to the action's cardinality
+  key BEFORE iterating, and use the lightest YouTube surface that
+  exposes the action key (channel page for Subscribe; video page
+  for Like / Watch / Comment). Sweep recipe to catch siblings:
+  `grep -rn "for .* in catalog" pipeline/cross_engage/ pipeline/upload/` —
+  every match should be checked: if the inner action is per-channel
+  (Subscribe) or per-creator, the loop is iterating the wrong set.
+  Memory: `feedback_subscribe_only_fast_path.md` +
+  `feedback_subscribe_only_dedupes_catalog.md` (cross-linked).
+  Project doc: `docs/cross_channel_engagement.md` § "Subscribe-only
+  fast path".
 - 2026-05-11 — **SW helper extraction loses `event` scope** (caught
   by user report `Uncaught (in promise) ReferenceError: event is not
   defined at staleWhileRevalidate (sw.js:118:7)`). Every `/api/*`
@@ -38,6 +75,16 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
 
 ## ONE-OFFs noted (no project-doc needed)
 
+- 2026-05-11 — **Stale "Pending" claim audit while fixing
+  `/api/queue` silent-empty.** During the related-doc sweep for the
+  composite-index fix, `docs/full_cloud_cutover_2026_05_09.md:224`
+  said the `tasks(kind,status,created_at)` index was "creating at
+  session end" — actually `state=READY` for days. Edited inline,
+  added a "Resolved (2026-05-11 audit)" line so the timeline survives.
+  Sweep recipe to catch sibling stale-claim docs:
+  `grep -rn "Pending:.*index\|composite index.*pending\|index.*was creating" docs/` —
+  every match should be re-verified against
+  `gcloud firestore indexes composite list --project=ytfactory-prod-v2`.
 - 2026-05-11 — **Selector edits need post-edit grep-verify.** The
   LIKE_SELECTORS dislike-guard fix recurred as a regression mid-
   session — the file briefly went back to the broken substring-only

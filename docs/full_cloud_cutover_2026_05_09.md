@@ -225,6 +225,12 @@ direct-CLI path still works in dev when `K_SERVICE` is unset.
 was creating at session end (~5 min build). Once live the lease will
 return tasks cleanly when any are queued.
 
+**Resolved (2026-05-11 audit):** the `tasks(kind,status,created_at)`
+composite index is `state=READY` in `ytfactory-prod-v2`. Verified via
+`gcloud firestore indexes composite list`. (Audit triggered by the
+`/api/queue` silent-empty fix — see `docs/data_flows.md` § "composite-
+index discipline" — which surfaced this stale "Pending" claim.)
+
 ### Phase 5 — decommission laptop control plane
 
 - Killed local uvicorn (PID 73210).
