@@ -110,6 +110,15 @@ def init(
         logger_provider = LoggerProvider(resource=resource)
         if bundle.log_processor is not None:
             logger_provider.add_log_record_processor(bundle.log_processor)
+        if bundle.shadow_log_processor is not None:
+            # Secondary in-process buffer that backs /api/telemetry/*.
+            # Runs alongside the primary exporter so the dashboard has
+            # a same-process source of recent events without depending
+            # on Cloud Logging ingestion. See
+            # ``BoundedInMemoryLogRecordExporter`` in exporters.py.
+            logger_provider.add_log_record_processor(
+                bundle.shadow_log_processor,
+            )
         set_logger_provider(logger_provider)
 
         _STATE.update({

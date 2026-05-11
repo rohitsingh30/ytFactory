@@ -21,8 +21,8 @@ from __future__ import annotations
 import logging
 from typing import Optional, Sequence
 
-from opentelemetry.sdk._logs import LogData
-from opentelemetry.sdk._logs.export import LogExporter, LogExportResult
+from opentelemetry.sdk._logs import ReadableLogRecord
+from opentelemetry.sdk._logs.export import LogExporter, LogRecordExportResult
 
 
 _logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ class CloudLoggingLogExporter(LogExporter):
 
     # ------------------------------------------------------------ exporter API
 
-    def export(self, batch: Sequence[LogData]) -> LogExportResult:
+    def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
         """Best-effort write of every record. We never raise; failure
         logs locally and reports SUCCESS so the SDK doesn't retry the
         whole batch (we'd rather drop a record than block the pipeline).
@@ -69,14 +69,14 @@ class CloudLoggingLogExporter(LogExporter):
                 self._write_one(ld)
             except Exception as e:  # noqa: BLE001
                 _logger.warning("Cloud Logging write failed: %s", e)
-        return LogExportResult.SUCCESS
+        return LogRecordExportResult.SUCCESS
 
     def shutdown(self) -> None:
         """No-op — :class:`google.cloud.logging.Client` cleans itself up."""
 
     # ----------------------------------------------------------------- helpers
 
-    def _write_one(self, ld: LogData) -> None:
+    def _write_one(self, ld: ReadableLogRecord) -> None:
         rec = ld.log_record
         body = rec.body
         struct: dict = {}

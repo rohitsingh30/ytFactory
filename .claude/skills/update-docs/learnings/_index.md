@@ -378,6 +378,36 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
 
 ## ONE-OFF (audit recipes for the next run)
 
+- 2026-05-12 — **JSONL-era stale `/api/telemetry/*` doc claims
+  survived the OTel migration.** While fixing the empty-dashboard
+  bug (shadow-buffer rollout), the related-doc sweep surfaced two
+  documents still describing the legacy JSONL telemetry backend,
+  routes that no longer exist, and pipeline.telemetry semantics
+  from before pipeline.observability:
+  - `web/README.md` lines 108-196 — describes `/api/telemetry/llm`,
+    `/api/telemetry/latency`, `/api/telemetry/stages` with fields
+    (`image_retries`, `error_groups`, `slowest_recent_job`,
+    `_traceback_fingerprint`) that came from `web/server.py` JSONL
+    rollups. The current routes at `control/routes/telemetry_routes.py`
+    expose a different subset (overview / stages / services /
+    timeline / errors / links / init_status) and the underlying
+    store is OTel logs, not JSONL shards.
+  - `docs/pipeline_latency_2026.md` lines 325-414 — describes
+    `pipeline.telemetry.read_events()` "caches parsed shards" /
+    "blocking JSONL reads in async routes" / per-route latency
+    benchmarks against the JSONL backend that no longer exists.
+
+  These were too broad to refactor as a side-quest of the empty-
+  dashboard fix. Captured here for the next run that touches
+  /api/telemetry/* doc surface. Sweep recipe:
+
+  ```bash
+  grep -rnE "JSONL|/api/telemetry/llm|/api/telemetry/latency|image_retries|error_groups|slowest_recent_job|_traceback_fingerprint" docs/ web/ control/ 2>&1 | grep -v ".pyc"
+  ```
+
+  Each hit is a candidate for "rewrite to describe the OTel backend
+  + actual route surface in `control/routes/telemetry_routes.py`".
+
 - 2026-05-11 — **Stale `--max-instances=2` banner survived
   earlier doc-edit pass.** When my image-fan-out commit
   (`a3c4e47`) updated 4 docs (cloudrun_image.md +

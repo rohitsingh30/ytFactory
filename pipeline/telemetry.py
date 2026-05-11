@@ -214,13 +214,19 @@ def read_events(
             "metadata": dict,
         }
 
-    In :func:`pipeline.observability.init` ``inmemory`` mode (tests +
-    legacy /api/telemetry endpoints when no GCP creds), this reads the
-    in-memory log exporter directly. In ``gcp`` mode the dashboard's
-    new ``/api/telemetry/*`` routes (built in P6) source from Cloud
-    Logging instead — :func:`read_events` returns ``[]`` for that mode
-    so the legacy fall-through path doesn't silently report empty data
-    from a sink it can't see.
+    Backed by the in-process bounded shadow log buffer
+    (:class:`pipeline.observability.exporters.BoundedInMemoryLogRecordExporter`)
+    in ``console`` / ``gcp`` / ``otlp`` modes, and by the test
+    in-memory exporter in ``inmemory`` mode. ``none`` mode returns
+    ``[]``. Disable the shadow buffer via
+    ``YTFACTORY_TELEMETRY_BUFFER_DISABLE=1`` (then this returns
+    ``[]`` everywhere except ``inmemory``).
+
+    Caveat: shadow buffer is per-process. The Cloud Run web-server
+    instance only sees its own emissions; cross-instance and
+    cross-service visibility (e.g. render-worker JOB events) still
+    requires Cloud Logging queries — see ``docs/telemetry.md`` for
+    the deep-link path.
 
     Returns events sorted oldest → newest. ``limit`` (when set) keeps
     the most recent N. The returned list is a fresh list — callers
@@ -236,11 +242,10 @@ def read_events(
         return []
 
     if bundle.log_inmemory is None:
-        # ``gcp`` / ``console`` / ``otlp`` / ``none`` — read path is
-        # outside this process. The dashboard's new telemetry routes
-        # will query Cloud Logging directly. Returning [] here keeps
-        # legacy callers honest (they'll show "no events" instead of
-        # silently aggregating an outdated cache).
+        # ``none`` mode (or ``YTFACTORY_TELEMETRY_BUFFER_DISABLE=1`` in
+        # any non-inmemory mode) — there's no in-process buffer to
+        # read from. The dashboard will surface an "unconfigured"
+        # hint via /api/telemetry/init_status.
         return []
 
     # Force-flush the BatchLogRecordProcessor so test assertions see

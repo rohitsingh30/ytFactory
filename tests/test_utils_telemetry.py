@@ -154,11 +154,31 @@ class TestReadEvents(_Base):
         self.assertEqual(len(out), 2)
         self.assertEqual(out[-1]["event"], "e4")
 
-    def test_returns_empty_when_not_inmemory_mode(self) -> None:
+    def test_console_mode_shadow_buffer_serves_events(self) -> None:
+        """``console`` mode now installs a bounded in-process shadow
+        log buffer alongside the primary console exporter so the
+        dashboard's ``/api/telemetry/*`` routes have data without
+        depending on Cloud Logging ingestion. Pre-fix this returned
+        ``[]`` and the dashboard was silent in every real deployment.
+        """
         obs.reset_for_tests()
         obs.init(mode="console", force=True)
-        tlm.track("stub")
-        self.assertEqual(tlm.read_events(), [])
+        tlm.track("stub", category="cat", metadata={"k": "v"})
+        events = tlm.read_events()
+        self.assertEqual([e["event"] for e in events], ["stub"])
+        self.assertEqual(events[0]["category"], "cat")
+
+    def test_shadow_buffer_disabled_via_env(self) -> None:
+        import os
+        obs.reset_for_tests()
+        os.environ["YTFACTORY_TELEMETRY_BUFFER_DISABLE"] = "1"
+        try:
+            obs.init(mode="console", force=True)
+            tlm.track("stub")
+            self.assertEqual(tlm.read_events(), [])
+        finally:
+            os.environ.pop("YTFACTORY_TELEMETRY_BUFFER_DISABLE", None)
+            obs.reset_for_tests()
 
 
 class TestPercentile(unittest.TestCase):

@@ -53,6 +53,54 @@ OTel separates spans (traces), metrics, and logs. We use all three:
    platform's log capture; on laptop we use `CloudLoggingLogExporter`
    in `pipeline/observability/gcp_log_bridge.py`.
 
+### In-process shadow log buffer (powers `/api/telemetry/*`)
+
+The dashboard's API at `control/routes/telemetry_routes.py` reads
+events via `pipeline.telemetry.read_events()`, which sources from a
+**bounded in-process shadow log buffer**
+(`BoundedInMemoryLogRecordExporter` in `pipeline/observability/exporters.py`).
+
+How it's wired:
+
+- In `console` / `gcp` / `otlp` modes, `build_exporters()` constructs
+  the shadow buffer alongside the primary exporter (Cloud
+  Logging / console / OTLP). Both processors are attached to the
+  same `LoggerProvider` — every `obs.track` / `obs.timed` emit fans
+  out to BOTH.
+- The shadow processor is a `SimpleLogRecordProcessor` (no
+  batching), so the dashboard sees fresh records without any
+  `force_flush()` round-trip.
+- In `inmemory` mode the primary IS in-memory — same buffer, no
+  shadow needed. In `none` mode there is no buffer.
+
+Why it exists: prior to 2026-05-12, `read_events()` short-circuited
+to `[]` for every mode except `inmemory`. The dashboard was empty
+in every real deployment (laptop ran in `console` mode → empty;
+Cloud Run web-server ran in `gcp` mode → empty). The "P6 — query
+Cloud Logging" path in the docstring was never built.
+
+Tuning knobs:
+
+- `YTFACTORY_TELEMETRY_BUFFER_SIZE=N` — record cap (default `5000`).
+- `YTFACTORY_TELEMETRY_BUFFER_DISABLE=1` — turn the shadow off
+  entirely; `read_events()` returns `[]`. Useful for memory-pinched
+  cloud services that prefer to consult Cloud Logging directly via
+  the dashboard's deep-link cards.
+
+Caveats — read these before quoting a dashboard number:
+
+- **Per-process.** A Cloud Run service instance only sees the events
+  IT emitted. The web-server dashboard does NOT show render-worker
+  JOB events (separate process — that's still a Cloud Logging query
+  away via `/app/telemetry → Open in GCP`).
+- **Per-instance.** When the web-server scales above
+  `--min-instances=1`, the dashboard request lands on whichever
+  instance the load balancer picked. Numbers will vary across
+  refreshes. Treat the in-process panel as "live activity sample",
+  not "global production telemetry".
+- **Bounded.** Last `YTFACTORY_TELEMETRY_BUFFER_SIZE` events only.
+  For full retention use Cloud Logging / Trace / Monitoring.
+
 ### Single dispatcher pattern
 
 Most "wrap one entry point gives every variant a span" wins came from
@@ -334,6 +382,14 @@ gcloud run services logs tail ytfactory-tts-chatterbox \
   same paths.
 - Tests that asserted on JSONL files (`tests/test_utils_telemetry.py`)
   were rewritten to assert via the OTel in-memory exporter.
+- **2026-05-12 — dashboard wired to in-process shadow log buffer.**
+  Previously `read_events()` returned `[]` whenever the active mode
+  was anything other than `inmemory` — i.e. the dashboard was empty
+  in every real deployment. Now `console` / `gcp` / `otlp` modes
+  install a bounded shadow buffer alongside the primary exporter so
+  the dashboard always has a same-process source of recent events.
+  See "In-process shadow log buffer" above for caveats and tuning
+  knobs.
 
 ## Operational rules
 

@@ -76,6 +76,80 @@ class TestBuildExporters(unittest.TestCase):
         self.assertIsNotNone(b.metric_reader)
         self.assertIsNotNone(b.log_processor)
 
+    def test_console_mode_attaches_shadow_buffer(self) -> None:
+        """Primary console log processor PLUS in-process shadow buffer.
+
+        The dashboard's ``/api/telemetry/*`` routes read from the
+        shadow buffer; without this the laptop dashboard was empty
+        even after months of pipeline activity.
+        """
+        b = exporters.build_exporters("console")
+        self.assertIsNotNone(b.log_processor, "primary still required")
+        self.assertIsNotNone(b.shadow_log_processor)
+        self.assertIsNotNone(b.log_inmemory)
+
+    def test_otlp_mode_attaches_shadow_buffer(self) -> None:
+        try:
+            b = exporters.build_exporters("otlp")
+        except ImportError:
+            self.skipTest("otlp http exporter not installed")
+        self.assertIsNotNone(b.shadow_log_processor)
+        self.assertIsNotNone(b.log_inmemory)
+
+    def test_none_mode_has_no_shadow_buffer(self) -> None:
+        b = exporters.build_exporters("none")
+        self.assertIsNone(b.shadow_log_processor)
+        self.assertIsNone(b.log_inmemory)
+
+    def test_shadow_buffer_disabled_via_env(self) -> None:
+        os.environ["YTFACTORY_TELEMETRY_BUFFER_DISABLE"] = "1"
+        try:
+            b = exporters.build_exporters("console")
+            self.assertIsNotNone(b.log_processor)
+            self.assertIsNone(b.shadow_log_processor)
+            self.assertIsNone(b.log_inmemory)
+        finally:
+            os.environ.pop("YTFACTORY_TELEMETRY_BUFFER_DISABLE", None)
+
+    def test_bounded_buffer_drops_oldest(self) -> None:
+        from opentelemetry.sdk._logs import ReadableLogRecord
+        from opentelemetry.sdk._logs._internal import LogRecord
+        from opentelemetry.sdk.resources import Resource
+        exp = exporters.BoundedInMemoryLogRecordExporter(maxlen=3)
+        resource = Resource.get_empty()
+        for i in range(5):
+            rec = ReadableLogRecord(
+                log_record=LogRecord(body={"i": i}),
+                resource=resource,
+            )
+            exp.export([rec])
+        records = exp.get_finished_logs()
+        self.assertEqual(len(records), 3)
+        # Oldest two dropped → bodies are 2, 3, 4.
+        self.assertEqual(
+            [r.log_record.body["i"] for r in records],
+            [2, 3, 4],
+        )
+
+    def test_bounded_buffer_safe_after_shutdown(self) -> None:
+        from opentelemetry.sdk._logs import ReadableLogRecord
+        from opentelemetry.sdk._logs._internal import LogRecord
+        from opentelemetry.sdk.resources import Resource
+        exp = exporters.BoundedInMemoryLogRecordExporter(maxlen=10)
+        rec = ReadableLogRecord(
+            log_record=LogRecord(body={"x": 1}),
+            resource=Resource.get_empty(),
+        )
+        exp.export([rec])
+        exp.shutdown()
+        # Subsequent calls must be safe.
+        self.assertEqual(len(exp.get_finished_logs()), 1)
+        result = exp.export([rec])  # post-shutdown no-op, still SUCCESS
+        from opentelemetry.sdk._logs.export import LogRecordExportResult
+        self.assertEqual(result, LogRecordExportResult.SUCCESS)
+        # Idempotent shutdown.
+        exp.shutdown()
+
     def test_unknown_mode_raises(self) -> None:
         with self.assertRaises(ValueError):
             exporters.build_exporters("nonsense")
@@ -102,6 +176,11 @@ class TestBuildExporters(unittest.TestCase):
         # metric reader is best-effort (alpha exporter); may be None.
         # log processor falls through to console when not on Cloud Run.
         self.assertIsNotNone(b.log_processor)
+        # Shadow buffer powers the in-process /api/telemetry/* dashboard
+        # in cloud too (per-instance view; cross-instance still needs
+        # Cloud Logging queries — see docs/telemetry.md).
+        self.assertIsNotNone(b.shadow_log_processor)
+        self.assertIsNotNone(b.log_inmemory)
 
 
 if __name__ == "__main__":

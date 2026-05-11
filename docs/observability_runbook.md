@@ -33,15 +33,31 @@ the chat-request span's child for `trigger_render_job`.
 ## Recipe: the dashboard shows zero events but the renderer is running
 
 * Confirm the exporter mode: `GET /api/telemetry/init_status`.
-  - `{"exporter": "inmemory"}` — you're on a fresh laptop without
-    GCP creds; the dashboard shows the in-process buffer only.
-  - `{"exporter": "console"}` — same, signals are going to stdout
-    only.
-  - `{"exporter": "gcp"}` — exports are happening; check Cloud
-    Trace directly.
+  - `{"exporter": "inmemory"}` — fresh laptop without GCP creds; the
+    dashboard reads the in-process OTel in-memory exporter directly.
+  - `{"exporter": "console"}` — primary exporter prints to stdout AND
+    a bounded in-process **shadow log buffer** feeds the dashboard
+    (see `docs/telemetry.md` § "In-process shadow log buffer").
+  - `{"exporter": "gcp"}` — primary writes to Cloud Trace / Logging /
+    Monitoring AND the same in-process shadow buffer feeds the
+    dashboard. The dashboard view is **per-process and per-instance**
+    — it shows what THIS instance emitted, not the global picture.
+    For full-fleet truth, click "Open in GCP → Cloud Logging" with
+    your slug filter pre-filled.
   - `{"initialised": false}` — the SDK never booted; something
     silently swallowed an exception in `obs.init()`. Check stderr
     for `"OTel init failed"`.
+
+* Still empty after the above?
+  - Check `YTFACTORY_TELEMETRY_BUFFER_DISABLE` is unset (env knob
+    that turns off the shadow buffer entirely; dashboard then returns
+    `[]` in non-`inmemory` modes).
+  - Check `YTFACTORY_TELEMETRY_BUFFER_SIZE` (default 5000) hasn't
+    been set absurdly low.
+  - Confirm the process emitting events is the same one serving
+    `/api/telemetry/*`. Cross-process visibility (e.g. dashboard in
+    web-server, events in render-worker JOB) is NOT covered by the
+    shadow buffer — use the Cloud Logging deep-link.
 
 ## Recipe: cloud TTS is slow — which provider?
 
