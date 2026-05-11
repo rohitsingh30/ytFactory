@@ -19,13 +19,36 @@ def _reset_jobs():
 
 class GcsClientTest(unittest.TestCase):
     def test_returns_storage_client(self):
+        # ``from google.cloud import storage`` first checks if
+        # ``google.cloud`` has a ``storage`` attribute (gained once any
+        # earlier test imports the real client). Patching sys.modules
+        # alone isn't enough — also override the package attribute.
         mock_storage = MagicMock()
         mock_client_instance = MagicMock()
         mock_storage.Client.return_value = mock_client_instance
-        with patch.dict("sys.modules", {"google.cloud.storage": mock_storage}):
-            import importlib
-            mod = importlib.import_module("control.routes.script_jobs_routes")
-            result = mod._gcs_client()
+        try:
+            import google.cloud as _gc  # type: ignore[import-not-found]
+        except ImportError:
+            _gc = None
+
+        saved_attr = getattr(_gc, "storage", None) if _gc is not None else None
+        had_attr = hasattr(_gc, "storage") if _gc is not None else False
+        if _gc is not None:
+            _gc.storage = mock_storage
+        try:
+            with patch.dict("sys.modules", {"google.cloud.storage": mock_storage}):
+                import importlib
+                mod = importlib.import_module("control.routes.script_jobs_routes")
+                result = mod._gcs_client()
+        finally:
+            if _gc is not None:
+                if had_attr:
+                    _gc.storage = saved_attr
+                else:
+                    try:
+                        delattr(_gc, "storage")
+                    except AttributeError:
+                        pass
         mock_storage.Client.assert_called_once()
         self.assertIs(result, mock_client_instance)
 

@@ -32,10 +32,17 @@ jobs:
         # imports `from web import server` which uses it for the AI-critic
         # SSE stream. web/server.py is the legacy operator UI (not in the
         # Cloud Run image — see Dockerfile) so it's a test-time dep only.
+        # numpy + playwright + pytest + coverage + yt-dlp + google-cloud-run
+        # are all small Python-only packages required by various CI-safe
+        # test modules (test_footage_compose / test_tts_* / test_cross_engage_*
+        # / test_cloud_snapshot / test_critique_runner / test_scripts_cli /
+        # test_control_cloud_run). Total install footprint: ~80 MB extra,
+        # ~25 s — much cheaper than skipping ~140 tests. Validated 2026-05-11.
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-control.txt
           pip install Pillow requests sse-starlette
+          pip install numpy 'playwright>=1.40' pytest coverage yt-dlp google-cloud-run
 
       - name: Run unit tests (excluding heavy-ML tests)
         # tests/test_audio_tts_providers.py is the only file that

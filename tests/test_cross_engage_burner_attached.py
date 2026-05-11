@@ -212,12 +212,20 @@ class TestResolveBurner(unittest.TestCase):
 
 class TestOpenAvatarMenu(unittest.TestCase):
     def test_clicks_avatar(self):
+        # Post 2026-05-10 _open_avatar_menu first wait_for's the
+        # masthead container, then calls _dismiss_consent (which would
+        # also click via the same MagicMock-shared locator), then
+        # iterates avatar selectors. Patch _dismiss_consent out so
+        # the only click counted is the avatar click itself.
         page = MagicMock()
         avatar = MagicMock()
         page.locator.return_value.first = avatar
-        with patch("time.sleep"):
+        with patch(f"{_P}._dismiss_consent"), patch("time.sleep"):
             _open_avatar_menu(page)
-        avatar.wait_for.assert_called_once()
+        # wait_for fires for the masthead gate (timeout=15000) AND for
+        # the first avatar selector (timeout=3500); both share the
+        # same Mock since page.locator returns the same object.
+        self.assertEqual(avatar.wait_for.call_count, 2)
         avatar.click.assert_called_once()
 
 
@@ -787,6 +795,106 @@ class TestEngageVideo(unittest.TestCase):
         self.assertEqual(r["subscribe"], "already_subscribed")
 
 
+# ── subscribe_to_channel() ─────────────────────────────────────────────────────
+
+class TestSubscribeToChannel(unittest.TestCase):
+    """Coverage for the subscribe-only fast path helper added 2026-05-11."""
+
+    _PROBE_SUB = f"{_P}._probe_subscribe"
+
+    def _make_page(self, url="https://www.youtube.com/channel/UC_X", unavail=False):
+        page = MagicMock()
+        page.goto.return_value = None
+        page.wait_for_selector.return_value = None
+        page.url = url
+        unavail_loc = MagicMock()
+        unavail_loc.is_visible.return_value = unavail
+        page.locator.return_value.first = unavail_loc
+        return page
+
+    def _call(self, page, *, dry_run=False):
+        from pipeline.cross_engage.cross_engage_burner_attached import subscribe_to_channel
+        return subscribe_to_channel(
+            page,
+            channel_id="UC_X",
+            channel_slug="ch_x",
+            channel_label="Channel X",
+            dry_run=dry_run,
+        )
+
+    def test_already_subscribed(self):
+        page = self._make_page()
+        with patch("time.sleep"), \
+             patch(self._PROBE_SUB, return_value=("subscribed", MagicMock())):
+            r = self._call(page)
+        self.assertEqual(r["subscribe"], "already_subscribed")
+        self.assertEqual(r["channel_id"], "UC_X")
+        self.assertEqual(r["channel"], "ch_x")
+
+    def test_dry_run(self):
+        page = self._make_page()
+        with patch("time.sleep"), \
+             patch(self._PROBE_SUB, return_value=("unsubscribed", MagicMock())):
+            r = self._call(page, dry_run=True)
+        self.assertEqual(r["subscribe"], "DRY_RUN_would_click")
+
+    def test_click_ok(self):
+        page = self._make_page()
+        n = {"n": 0}
+        def probe(p):
+            n["n"] += 1
+            return ("unsubscribed", MagicMock()) if n["n"] == 1 else ("subscribed", MagicMock())
+        with patch("time.sleep"), patch(self._PROBE_SUB, side_effect=probe):
+            r = self._call(page)
+        self.assertEqual(r["subscribe"], "OK")
+
+    def test_click_state_unchanged(self):
+        page = self._make_page()
+        with patch("time.sleep"), \
+             patch(self._PROBE_SUB, return_value=("unsubscribed", MagicMock())):
+            r = self._call(page)
+        self.assertIn("FAIL_state_after_click", r["subscribe"])
+
+    def test_click_exception(self):
+        page = self._make_page()
+        btn = MagicMock()
+        btn.scroll_into_view_if_needed.side_effect = Exception("scroll bad")
+        with patch("time.sleep"), \
+             patch(self._PROBE_SUB, return_value=("unsubscribed", btn)):
+            r = self._call(page)
+        self.assertEqual(r["subscribe"], "FAIL_exception")
+        self.assertTrue(any("scroll bad" in e for e in r["errors"]))
+
+    def test_no_button_after_retries(self):
+        page = self._make_page()
+        with patch("time.sleep"), \
+             patch(self._PROBE_SUB, return_value=("unknown", None)):
+            r = self._call(page)
+        self.assertIn("FAIL_no_button", r["subscribe"])
+
+    def test_redirect_to_signin(self):
+        page = self._make_page(url="https://accounts.google.com/signin")
+        with patch("time.sleep"):
+            r = self._call(page)
+        self.assertTrue(any("sign-in" in e for e in r["errors"]))
+
+    def test_goto_fails(self):
+        page = self._make_page()
+        page.goto.side_effect = Exception("net err")
+        with patch("time.sleep"):
+            r = self._call(page)
+        self.assertTrue(any("goto" in e for e in r["errors"]))
+
+    def test_wait_for_selector_failure_swallowed(self):
+        """Hydration timeout is non-fatal — we still try to probe."""
+        page = self._make_page()
+        page.wait_for_selector.side_effect = Exception("timeout")
+        with patch("time.sleep"), \
+             patch(self._PROBE_SUB, return_value=("subscribed", MagicMock())):
+            r = self._call(page)
+        self.assertEqual(r["subscribe"], "already_subscribed")
+
+
 # ── run() ──────────────────────────────────────────────────────────────────────
 
 class TestRun(unittest.TestCase):
@@ -991,6 +1099,144 @@ class TestRun(unittest.TestCase):
             summary = _run_fn(args)
         # close exception swallowed; results populated
         self.assertEqual(len(summary["results"]), 1)
+
+    def test_run_subscribe_only_fast_path(self):
+        """--no-like activates the fast path: subscribe_to_channel called per
+        unique source channel (not engage_video per video)."""
+        args = self._make_args(no_like=True, no_subscribe=False)
+        burner = {"slug": "b1", "channel_id": "UC_B",
+                  "title": "Burner", "email": "host@e.com"}
+        # 4 catalog videos, only 2 unique source channels (ch0, ch1).
+        catalog = []
+        for i, ch in enumerate(["ch0", "ch1", "ch0", "ch1"]):
+            e = MagicMock()
+            e.video_id = f"v{i}"
+            e.channel = ch
+            e.channel_label = f"{ch}_label"
+            e.title = f"Title {i}"
+            e.url = f"https://youtube.com/watch?v=v{i}"
+            catalog.append(e)
+        mock_sp, pw, browser, ctx, page = make_fake_playwright("https://www.youtube.com/")
+        ctx.new_page.return_value = page
+        # Both unique channels resolve in channel_ids.json.
+        ch_ids = {
+            "ch0": {"channel_id": "UC0", "title": "Channel Zero"},
+            "ch1": {"channel_id": "UC1", "title": "Channel One"},
+        }
+        sub_results = [
+            {"channel_id": "UC0", "channel": "ch0", "channel_label": "ch0_label",
+             "subscribe": "OK", "errors": []},
+            {"channel_id": "UC1", "channel": "ch1", "channel_label": "ch1_label",
+             "subscribe": "already_subscribed", "errors": []},
+        ]
+
+        from pipeline.cross_engage.cross_engage_burner_attached import run as _run_fn
+        engage_video_mock = MagicMock()
+        sub_to_ch_mock = MagicMock(side_effect=sub_results)
+        with patch.object(_mod, "resolve_burner", return_value=burner), \
+             patch(f"{_P}.resolve_profile", return_value="Profile 1"), \
+             patch("pipeline.utils.catalog.list_catalog", return_value=catalog), \
+             patch(f"{_P}.find_running_chrome_debug", return_value=None), \
+             patch(f"{_P}.bridge_cookies"), \
+             patch(f"{_P}._clear_singleton"), \
+             patch(f"{_P}.launch_chrome_for",
+                   return_value=(MagicMock(pid=9), 12345)), \
+             patch(f"{_P}.switch_to_burner_brand", return_value=True), \
+             patch(f"{_P}.engage_video", engage_video_mock), \
+             patch(f"{_P}.subscribe_to_channel", sub_to_ch_mock), \
+             patch(f"{_P}._load_json", return_value=ch_ids), \
+             patch("playwright.sync_api.sync_playwright", mock_sp), \
+             patch("time.sleep"), \
+             patch("random.uniform", return_value=0.0):
+            summary = _run_fn(args)
+
+        # Fast path: engage_video must NOT be called even once.
+        engage_video_mock.assert_not_called()
+        # Exactly one subscribe call per unique source channel.
+        self.assertEqual(sub_to_ch_mock.call_count, 2)
+        called_ids = [c.kwargs["channel_id"] for c in sub_to_ch_mock.call_args_list]
+        self.assertEqual(sorted(called_ids), ["UC0", "UC1"])
+        # Summary surfaces the dedup count.
+        self.assertEqual(summary["unique_channels_total"], 2)
+        self.assertEqual(summary["unique_channels_missing_id"], 0)
+        self.assertEqual(len(summary["results"]), 2)
+
+    def test_run_subscribe_only_skips_channels_without_id(self):
+        """Channels missing from channel_ids.json are warned + skipped, not crashed."""
+        args = self._make_args(no_like=True, no_subscribe=False)
+        burner = {"slug": "b1", "channel_id": "UC_B",
+                  "title": "Burner", "email": "host@e.com"}
+        catalog = []
+        for ch in ["known", "unknown"]:
+            e = MagicMock()
+            e.video_id = f"v_{ch}"
+            e.channel = ch
+            e.channel_label = ch
+            e.title = ch
+            e.url = "https://youtube.com/"
+            catalog.append(e)
+        mock_sp, pw, browser, ctx, page = make_fake_playwright("https://www.youtube.com/")
+        ctx.new_page.return_value = page
+        ch_ids = {"known": {"channel_id": "UC_KNOWN", "title": "Known"}}
+
+        from pipeline.cross_engage.cross_engage_burner_attached import run as _run_fn
+        sub_to_ch_mock = MagicMock(return_value={
+            "channel_id": "UC_KNOWN", "channel": "known", "channel_label": "known",
+            "subscribe": "OK", "errors": [],
+        })
+        with patch.object(_mod, "resolve_burner", return_value=burner), \
+             patch(f"{_P}.resolve_profile", return_value="Profile 1"), \
+             patch("pipeline.utils.catalog.list_catalog", return_value=catalog), \
+             patch(f"{_P}.find_running_chrome_debug", return_value=None), \
+             patch(f"{_P}.bridge_cookies"), \
+             patch(f"{_P}._clear_singleton"), \
+             patch(f"{_P}.launch_chrome_for",
+                   return_value=(MagicMock(pid=9), 12345)), \
+             patch(f"{_P}.switch_to_burner_brand", return_value=True), \
+             patch(f"{_P}.subscribe_to_channel", sub_to_ch_mock), \
+             patch(f"{_P}._load_json", return_value=ch_ids), \
+             patch("playwright.sync_api.sync_playwright", mock_sp), \
+             patch("time.sleep"), \
+             patch("random.uniform", return_value=0.0):
+            summary = _run_fn(args)
+
+        self.assertEqual(sub_to_ch_mock.call_count, 1)
+        self.assertEqual(summary["unique_channels_total"], 1)
+        self.assertEqual(summary["unique_channels_missing_id"], 1)
+
+    def test_run_no_like_with_no_subscribe_falls_back_to_video_path(self):
+        """--no-like AND --no-subscribe → fast path NOT taken (nothing to do
+        either way; default per-video loop runs and produces 'skipped' rows)."""
+        args = self._make_args(no_like=True, no_subscribe=True)
+        burner = {"slug": "b1", "channel_id": "UC_B",
+                  "title": "Burner", "email": "host@e.com"}
+        catalog = self._catalog()
+        mock_sp, pw, browser, ctx, page = make_fake_playwright("https://www.youtube.com/")
+        ctx.new_page.return_value = page
+        engage_video_mock = MagicMock(return_value={
+            "like": "skipped", "subscribe": "skipped", "errors": [],
+        })
+        sub_to_ch_mock = MagicMock()
+
+        from pipeline.cross_engage.cross_engage_burner_attached import run as _run_fn
+        with patch.object(_mod, "resolve_burner", return_value=burner), \
+             patch(f"{_P}.resolve_profile", return_value="Profile 1"), \
+             patch("pipeline.utils.catalog.list_catalog", return_value=catalog), \
+             patch(f"{_P}.find_running_chrome_debug", return_value=None), \
+             patch(f"{_P}.bridge_cookies"), \
+             patch(f"{_P}._clear_singleton"), \
+             patch(f"{_P}.launch_chrome_for",
+                   return_value=(MagicMock(pid=9), 12345)), \
+             patch(f"{_P}.switch_to_burner_brand", return_value=True), \
+             patch(f"{_P}.engage_video", engage_video_mock), \
+             patch(f"{_P}.subscribe_to_channel", sub_to_ch_mock), \
+             patch("playwright.sync_api.sync_playwright", mock_sp), \
+             patch("time.sleep"), \
+             patch("random.uniform", return_value=0.0):
+            _run_fn(args)
+        # Per-video path used; fast path NOT used.
+        sub_to_ch_mock.assert_not_called()
+        self.assertEqual(engage_video_mock.call_count, len(catalog))
 
 
 # ── main() ─────────────────────────────────────────────────────────────────────

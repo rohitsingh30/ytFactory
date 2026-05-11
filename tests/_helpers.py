@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -11,6 +14,108 @@ from unittest.mock import MagicMock
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _real_googleapiclient_spec():
+    """Return ``importlib.util.find_spec('googleapiclient')`` resolved
+    against the real on-disk package, NOT whatever fake some prior
+    test stuffed into ``sys.modules``. Returns None when the real
+    package isn't installed (CI minimal image, future expectation).
+
+    Why temporarily evict sys.modules entries: ``find_spec`` checks
+    sys.modules first and returns the cached module's spec when found.
+    A previous test's fake ``googleapiclient`` shows up there with
+    ``__path__ = []``, masking the real package on disk.
+    """
+    saved: dict[str, types.ModuleType | None] = {}
+    for key in list(sys.modules.keys()):
+        if key == "googleapiclient" or key.startswith("googleapiclient."):
+            saved[key] = sys.modules.pop(key)
+    try:
+        return importlib.util.find_spec("googleapiclient")
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                sys.modules[k] = v
+
+
+def make_fake_googleapiclient_pkg() -> types.ModuleType:
+    """Build a fake ``googleapiclient`` package object that's safe to drop
+    into ``sys.modules`` without breaking later imports of submodules.
+
+    POLLUTION-SAFE: when the real ``googleapiclient`` package is installed
+    (CI or laptop full venv), copy its ``__path__`` and mirror any
+    already-loaded ``googleapiclient.*`` submodules onto the fake. That
+    way a later test doing ``from googleapiclient.http import
+    MediaFileUpload`` still resolves either via the cached attribute on
+    the package OR via the real package's __path__ + import system.
+
+    Pre-fix the various ad-hoc fakes scattered across
+    ``test_research_youtube.py`` /
+    ``test_research_cross_engage.py`` /
+    ``test_pipeline_youtube_stats.py`` had no ``__path__`` and
+    preserved no submodules, so a later import of
+    ``googleapiclient.http`` raised
+    ``ModuleNotFoundError: 'googleapiclient' is not a package`` and
+    every test_upload_youtube test that touched MediaFileUpload turned
+    into a CI ERROR. Fixed 2026-05-11.
+    """
+    fake_pkg = types.ModuleType("googleapiclient")
+
+    real_path: list[str] = []
+    spec = _real_googleapiclient_spec()
+    if spec and spec.submodule_search_locations:
+        real_path = list(spec.submodule_search_locations)
+    fake_pkg.__path__ = real_path  # type: ignore[attr-defined]
+
+    # Mirror any already-loaded real submodules onto the fake so later
+    # ``from googleapiclient.X import Y`` resolves via getattr without
+    # re-invoking the loader.
+    for name, mod in list(sys.modules.items()):
+        if name.startswith("googleapiclient."):
+            short = name.split(".", 1)[1]
+            if "." not in short:  # only direct submodules, not nested
+                setattr(fake_pkg, short, mod)
+    return fake_pkg
+
+
+def make_fake_googleapiclient_errors() -> types.ModuleType:
+    """Build a fake ``googleapiclient.errors`` module that's safe to
+    drop into ``sys.modules`` even if the real ``googleapiclient.http``
+    later imports symbols (e.g. ``BatchError``) from it.
+
+    Strategy: clone the real ``googleapiclient.errors`` module (if
+    importable) so all its public names survive, then OVERRIDE the
+    HttpError with a tests-friendly version that accepts
+    ``HttpError(resp, content)`` where ``resp`` may be a plain
+    ``MagicMock`` with a ``.status`` attribute. The real HttpError
+    requires a ``httplib2.Response`` shaped object and rejects bare
+    Mocks at construction time, so tests need this looser variant.
+    """
+    real_errors = None
+    pkg_spec = _real_googleapiclient_spec()
+    if pkg_spec and pkg_spec.submodule_search_locations:
+        # Use FileFinder against the real package's __path__ so we
+        # bypass any fake currently sitting in sys.modules.
+        try:
+            spec = importlib.machinery.PathFinder.find_spec(
+                "googleapiclient.errors",
+                path=list(pkg_spec.submodule_search_locations),
+            )
+            if spec and spec.loader is not None:
+                real_errors = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(real_errors)
+        except Exception:  # noqa: BLE001
+            real_errors = None
+
+    fake = types.ModuleType("googleapiclient.errors")
+    if real_errors is not None:
+        for k, v in vars(real_errors).items():
+            if not k.startswith("__"):
+                setattr(fake, k, v)
+    return fake
 
 
 @dataclass

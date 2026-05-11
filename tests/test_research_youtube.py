@@ -6,6 +6,7 @@ All YouTube API calls are mocked.  No network, no credentials.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import types
 import tempfile
@@ -105,9 +106,25 @@ def _make_http_error(status: int):
 
 
 def _install_fake_google(youtube_obj):
+    """Install fake googleapiclient.{discovery,errors} into sys.modules.
+
+    POLLUTION-SAFE via :func:`tests._helpers.make_fake_googleapiclient_pkg`
+    + :func:`make_fake_googleapiclient_errors` — see those docstrings
+    for the rationale (otherwise ``test_upload_youtube`` later in the
+    alphabetical order trips
+    ``ModuleNotFoundError: 'googleapiclient' is not a package`` OR
+    ``ImportError: cannot import name 'BatchError'`` on its
+    ``from googleapiclient.http import MediaFileUpload``).
+    Fixed 2026-05-11.
+    """
+    from tests._helpers import (
+        make_fake_googleapiclient_errors,
+        make_fake_googleapiclient_pkg,
+    )
+
     discovery = types.ModuleType("googleapiclient.discovery")
     discovery.build = lambda *a, **kw: youtube_obj
-    errors = types.ModuleType("googleapiclient.errors")
+    errors = make_fake_googleapiclient_errors()
 
     class HttpError(Exception):
         def __init__(self, resp, content=b""):
@@ -117,7 +134,11 @@ def _install_fake_google(youtube_obj):
 
     errors.HttpError = HttpError
 
-    sys.modules["googleapiclient"] = types.ModuleType("googleapiclient")
+    fake_pkg = make_fake_googleapiclient_pkg()
+    fake_pkg.discovery = discovery
+    fake_pkg.errors = errors
+
+    sys.modules["googleapiclient"] = fake_pkg
     sys.modules["googleapiclient.discovery"] = discovery
     sys.modules["googleapiclient.errors"] = errors
 
@@ -243,11 +264,18 @@ class FixtureLockdownTest(unittest.TestCase):
     def test_fetch_account_refuses_real_dir_during_pytest(self):
         """The autouse isolate_research_dirs fixture has already pointed
         ``YOUTUBE_DIR`` at a tmp dir, so we have to UNDO that to simulate
-        a buggy test that forgot to monkey-patch."""
+        a buggy test that forgot to monkey-patch.
+
+        ``_assert_safe_to_write`` is gated on ``PYTEST_CURRENT_TEST``
+        being set — pytest sets it automatically, but the CI runs the
+        suite via ``python -m unittest`` where the env var is absent.
+        Set it explicitly so the guard fires under both runners.
+        """
         from pipeline.paths import RESEARCH_DIR as _real_research
 
         real_youtube_dir = _real_research / "youtube"
-        with patch.object(yt_mod, "YOUTUBE_DIR", real_youtube_dir):
+        with patch.dict(os.environ, {"PYTEST_CURRENT_TEST": "FixtureLockdownTest"}), \
+             patch.object(yt_mod, "YOUTUBE_DIR", real_youtube_dir):
             with self.assertRaises(RuntimeError) as cm:
                 yt_mod.fetch_account("anyaccount", quiet=True)
             self.assertIn("Refusing to write", str(cm.exception))

@@ -39,7 +39,16 @@ import pipeline.research.cross_engage as ce_mod
 def _install_fake_google_for_ce():
     """Install a minimal googleapiclient stub into sys.modules."""
     discovery = types.ModuleType("googleapiclient.discovery")
-    errors_mod = types.ModuleType("googleapiclient.errors")
+    # POLLUTION-SAFE: clone the real errors module so all its public
+    # symbols (BatchError, …) survive — otherwise downstream imports
+    # like ``from googleapiclient.errors import BatchError`` (done by
+    # googleapiclient.http) explode. See
+    # tests._helpers.make_fake_googleapiclient_errors for the rationale.
+    from tests._helpers import (
+        make_fake_googleapiclient_errors,
+        make_fake_googleapiclient_pkg,
+    )
+    errors_mod = make_fake_googleapiclient_errors()
 
     class HttpError(Exception):
         def __init__(self, resp, content=b""):
@@ -54,7 +63,8 @@ def _install_fake_google_for_ce():
     errors_mod.HttpError = HttpError
     errors_mod._Resp = _Resp
 
-    sys.modules.setdefault("googleapiclient", types.ModuleType("googleapiclient"))
+    if "googleapiclient" not in sys.modules:
+        sys.modules["googleapiclient"] = make_fake_googleapiclient_pkg()
     sys.modules["googleapiclient.discovery"] = discovery
     sys.modules["googleapiclient.errors"] = errors_mod
 

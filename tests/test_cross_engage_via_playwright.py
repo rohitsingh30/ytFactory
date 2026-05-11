@@ -207,9 +207,16 @@ class TestLaunchChromeFor(unittest.TestCase):
         mock_proc = MagicMock()
         mock_proc.kill.return_value = None
 
+        # Post 2026-05-11 launch_chrome_for double-checks the CDP port
+        # is alive via _cdp_alive(); mock that to True so the function
+        # doesn't kill the (mocked) chrome and raise.
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
              patch("time.sleep"), \
-             patch("builtins.open", return_value=MagicMock()):
+             patch("builtins.open", return_value=MagicMock()), \
+             patch(
+                 "pipeline.cross_engage.cross_engage_via_playwright._cdp_alive",
+                 return_value=True,
+             ):
             proc, port = launch_chrome_for("Profile 1", work_dir=work_dir)
 
         self.assertEqual(port, "55123")
@@ -247,7 +254,11 @@ class TestLaunchChromeFor(unittest.TestCase):
 
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
              patch("time.sleep"), \
-             patch("builtins.open", return_value=MagicMock()):
+             patch("builtins.open", return_value=MagicMock()), \
+             patch(
+                 "pipeline.cross_engage.cross_engage_via_playwright._cdp_alive",
+                 return_value=True,
+             ):
             proc, port = launch_chrome_for(
                 "Profile 1", work_dir=work_dir, user_data_dir=custom_udd
             )

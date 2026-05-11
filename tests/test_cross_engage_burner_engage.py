@@ -1412,19 +1412,25 @@ class TestCli(unittest.TestCase):
         with patch.object(_mod, "run", return_value=0) as mock_run:
             rc = self._run_cli(["run", "b1"])
         self.assertEqual(rc, 0)
-        mock_run.assert_called_once_with("b1", headless=False, mode="like_subscribe_view")
+        mock_run.assert_called_once_with(
+            "b1", headless=False, mode="like_subscribe_view", catalog_file=None,
+        )
 
     def test_run_cmd_headless(self):
         with patch.object(_mod, "run", return_value=0) as mock_run:
             rc = self._run_cli(["run", "b1", "--headless"])
-        mock_run.assert_called_once_with("b1", headless=True, mode="like_subscribe_view")
+        mock_run.assert_called_once_with(
+            "b1", headless=True, mode="like_subscribe_view", catalog_file=None,
+        )
 
     def test_run_cmd_mode(self):
         """--mode plumbs through to run()."""
         with patch.object(_mod, "run", return_value=0) as mock_run:
             rc = self._run_cli(["run", "b1", "--mode", "subscribe_only"])
         self.assertEqual(rc, 0)
-        mock_run.assert_called_once_with("b1", headless=False, mode="subscribe_only")
+        mock_run.assert_called_once_with(
+            "b1", headless=False, mode="subscribe_only", catalog_file=None,
+        )
 
     def test_unknown_parsed_command_returns_2(self):
         from pipeline.cross_engage.burner_engage import _cli

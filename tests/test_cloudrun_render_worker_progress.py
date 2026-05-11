@@ -69,76 +69,78 @@ class ClassifyRendererLineTests(unittest.TestCase):
         cls.ep = _load_entrypoint()
 
     def test_tts_start_with_provider(self):
-        msg = self.ep._classify_renderer_line("[1/4] TTS (cloudrun_chatterbox)")
-        self.assertIsNotNone(msg)
+        event = self.ep._classify_renderer_line("[1/4] TTS (cloudrun_chatterbox)")
+        self.assertIsNotNone(event)
+        stage, msg = event
+        self.assertEqual(stage, "tts")
         self.assertIn("Synthesizing narration", msg)
         self.assertIn("cloudrun_chatterbox", msg)
 
     def test_tts_start_without_provider(self):
-        msg = self.ep._classify_renderer_line("[1/4] TTS")
-        self.assertEqual(msg, "Synthesizing narration")
+        event = self.ep._classify_renderer_line("[1/4] TTS")
+        self.assertEqual(event, ("tts", "Synthesizing narration"))
 
     def test_tts_cached(self):
         self.assertEqual(
             self.ep._classify_renderer_line("[1/4] TTS cached"),
-            "Reusing cached narration",
+            ("tts", "Reusing cached narration"),
         )
 
     def test_beats_start(self):
-        msg = self.ep._classify_renderer_line("[2/4] faster_whisper aligning timestamps")
-        self.assertEqual(msg, "Aligning captions (faster_whisper)")
+        event = self.ep._classify_renderer_line("[2/4] faster_whisper aligning timestamps")
+        self.assertEqual(event, ("asr", "Aligning captions (faster_whisper)"))
 
     def test_beats_cached(self):
         self.assertEqual(
             self.ep._classify_renderer_line("[2/4] beats cached"),
-            "Reusing cached caption alignment",
+            ("asr", "Reusing cached caption alignment"),
         )
 
     def test_beats_done_summary(self):
-        msg = self.ep._classify_renderer_line("    22 beats, total 58.4s")
-        self.assertEqual(msg, "Aligned 22 beats — 58.4s of audio")
+        event = self.ep._classify_renderer_line("    22 beats, total 58.4s")
+        self.assertEqual(event, ("asr", "Aligned 22 beats — 58.4s of audio"))
 
     def test_prompts_start(self):
         self.assertEqual(
             self.ep._classify_renderer_line("[prompts] authoring 22 beat prompts"),
-            "Authoring 22 image prompts",
+            ("images", "Authoring 22 image prompts"),
         )
 
     def test_image_start(self):
-        msg = self.ep._classify_renderer_line(
+        event = self.ep._classify_renderer_line(
             "[3/4] cloudrun_flux2_klein: generating 22 images"
         )
-        self.assertEqual(msg, "Generating 22 images via cloudrun_flux2_klein")
+        self.assertEqual(event, ("images", "Generating 22 images via cloudrun_flux2_klein"))
 
     def test_image_per_beat_progress(self):
         self.assertEqual(
             self.ep._classify_renderer_line("    [12/22] beat=07 sarah-coffee"),
-            "Image 12 of 22",
+            ("images", "Image 12 of 22"),
         )
 
     def test_image_per_beat_done(self):
         self.assertEqual(
             self.ep._classify_renderer_line("[image-done] beat 7 of 22"),
-            "Image 7 of 22 done",
+            ("images", "Image 7 of 22 done"),
         )
 
     def test_compose_start(self):
         self.assertEqual(
             self.ep._classify_renderer_line("[4/4] ffmpeg compose 9:16"),
-            "Stitching video with ffmpeg",
+            ("compose", "Stitching video with ffmpeg"),
         )
 
     def test_compose_recompose(self):
         self.assertEqual(
             self.ep._classify_renderer_line("[critic] recomposing after patch"),
-            "Recomposing after critic patch",
+            ("compose", "Recomposing after critic patch"),
         )
 
     def test_compose_done_uses_basename_only(self):
-        msg = self.ep._classify_renderer_line(
+        event = self.ep._classify_renderer_line(
             "[compose] wrote /tmp/render/abc/mystoriesanimated/shorts/aita07.mp4"
         )
-        self.assertEqual(msg, "Wrote aita07.mp4")
+        self.assertEqual(event, ("compose", "Wrote aita07.mp4"))
 
     def test_unknown_line_returns_none(self):
         # Random debug noise from upstream libraries must NOT cause a
@@ -160,7 +162,7 @@ class ClassifyRendererLineTests(unittest.TestCase):
         a = self.ep._classify_renderer_line(line)
         b = self.ep._classify_renderer_line(line)
         self.assertEqual(a, b)
-        self.assertEqual(a, "Image 3 of 22")
+        self.assertEqual(a, ("images", "Image 3 of 22"))
 
 
 class TailRendererLogTests(unittest.TestCase):
@@ -188,7 +190,8 @@ class TailRendererLogTests(unittest.TestCase):
         seen: list[str] = []
         seen_lock = threading.Lock()
 
-        def cb(msg: str) -> None:
+        def cb(stage: str, msg: str) -> None:
+            # Tailer signature is (stage, msg); tests assert on msgs only.
             with seen_lock:
                 seen.append(msg)
 
@@ -268,7 +271,7 @@ class TailRendererLogTests(unittest.TestCase):
             seen: list[str] = []
             t = threading.Thread(
                 target=self.ep._tail_renderer_log,
-                args=(log_path, seen.append, stop),
+                args=(log_path, lambda stage, msg: seen.append(msg), stop),
                 kwargs={"poll_interval": 0.05},
                 daemon=True,
             )
@@ -288,7 +291,7 @@ class TailRendererLogTests(unittest.TestCase):
             seen: list[str] = []
             calls = {"n": 0}
 
-            def cb(msg: str) -> None:
+            def cb(stage: str, msg: str) -> None:
                 calls["n"] += 1
                 if calls["n"] == 1:
                     raise RuntimeError("simulated firestore outage")
@@ -323,7 +326,7 @@ class TailRendererLogTests(unittest.TestCase):
             stop = threading.Event()
             t = threading.Thread(
                 target=self.ep._tail_renderer_log,
-                args=(log_path, seen.append, stop),
+                args=(log_path, lambda stage, msg: seen.append(msg), stop),
                 kwargs={"poll_interval": 0.05},
                 daemon=True,
             )
@@ -409,7 +412,7 @@ class RunRendererSubprocessProgressTests(unittest.TestCase):
             seen: list[str] = []
             seen_lock = threading.Lock()
 
-            def cb(msg: str) -> None:
+            def cb(stage: str, msg: str) -> None:
                 with seen_lock:
                     seen.append(msg)
 

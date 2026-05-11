@@ -355,13 +355,36 @@ class GcsClientDirectTest(unittest.TestCase):
     """Cover the _gcs_client() function body (lines 100-101)."""
 
     def test_returns_storage_client(self):
+        # ``from google.cloud import storage`` first checks if
+        # ``google.cloud`` has a ``storage`` attribute (gained once any
+        # earlier test imports the real client). Patching sys.modules
+        # alone isn't enough — also override the package attribute.
         import sys
         from control.routes.state_routes import _gcs_client
         mock_client_instance = MagicMock()
         mock_storage = MagicMock()
         mock_storage.Client.return_value = mock_client_instance
-        with patch.dict("sys.modules", {"google.cloud.storage": mock_storage}):
-            result = _gcs_client()
+        try:
+            import google.cloud as _gc  # type: ignore[import-not-found]
+        except ImportError:
+            _gc = None
+
+        saved_attr = getattr(_gc, "storage", None) if _gc is not None else None
+        had_attr = hasattr(_gc, "storage") if _gc is not None else False
+        if _gc is not None:
+            _gc.storage = mock_storage
+        try:
+            with patch.dict("sys.modules", {"google.cloud.storage": mock_storage}):
+                result = _gcs_client()
+        finally:
+            if _gc is not None:
+                if had_attr:
+                    _gc.storage = saved_attr
+                else:
+                    try:
+                        delattr(_gc, "storage")
+                    except AttributeError:
+                        pass
         mock_storage.Client.assert_called_once()
         self.assertEqual(result, mock_client_instance)
 

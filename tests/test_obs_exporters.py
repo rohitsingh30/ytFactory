@@ -84,6 +84,18 @@ class TestBuildExporters(unittest.TestCase):
         # We're not on GCP and don't have ADC, but the exporter classes
         # should still construct without raising. Network I/O happens
         # later, lazily.
+        #
+        # That assumption only holds when SOMETHING — gcloud ADC, a GCP
+        # metadata server, or a fake-creds env — provides credentials
+        # to ``CloudTraceSpanExporter._create_default_client``. CI has
+        # neither, so skip there. Laptop devs running ``gcloud auth
+        # application-default login`` once still get coverage.
+        try:
+            import google.auth  # type: ignore[import-not-found]
+            google.auth.default()
+        except Exception as e:
+            self.skipTest(f"no GCP ADC available — skipping gcp-mode build: {e}")
+
         b = exporters.build_exporters("gcp")
         self.assertEqual(b.mode, "gcp")
         self.assertIsNotNone(b.span_processor)

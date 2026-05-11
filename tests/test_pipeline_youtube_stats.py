@@ -108,13 +108,22 @@ def _install_fake_googleapiclient(youtube: _FakeYouTube) -> dict[str, object | N
     }
     discovery = types.ModuleType("googleapiclient.discovery")
     discovery.build = lambda *a, **kw: youtube
-    errors = types.ModuleType("googleapiclient.errors")
+    # POLLUTION-SAFE: clone the real errors module so all its public
+    # symbols (BatchError, …) survive — otherwise downstream imports
+    # like ``from googleapiclient.errors import BatchError`` (done by
+    # googleapiclient.http) explode. See
+    # tests._helpers.make_fake_googleapiclient_errors for the rationale.
+    from tests._helpers import (
+        make_fake_googleapiclient_errors,
+        make_fake_googleapiclient_pkg,
+    )
+    errors = make_fake_googleapiclient_errors()
 
     class HttpError(Exception):
         pass
 
     errors.HttpError = HttpError
-    pkg = types.ModuleType("googleapiclient")
+    pkg = make_fake_googleapiclient_pkg()
     pkg.discovery = discovery
     pkg.errors = errors
     sys.modules["googleapiclient"] = pkg

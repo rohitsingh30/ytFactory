@@ -210,8 +210,13 @@ class TestFindRunningChromeDebug(unittest.TestCase):
 
 class TestCdpAlive(unittest.TestCase):
     def test_200_returns_true(self):
+        # Post 2026-05-11 _cdp_alive parses the /json/version response
+        # body and only returns True when payload["Browser"] starts with
+        # "Chrome/" or "Edge/" (rejects sibling node.js V8 inspectors).
+        # Mock r.read() to return a real Chrome /json/version payload.
         resp = MagicMock()
         resp.status = 200
+        resp.read.return_value = b'{"Browser": "Chrome/120.0.6099.71"}'
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         with patch("urllib.request.urlopen", return_value=resp):

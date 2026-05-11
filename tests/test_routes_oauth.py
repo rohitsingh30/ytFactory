@@ -166,15 +166,37 @@ class TestFirestoreDoc(unittest.TestCase):
                 sys.modules[k] = orig[k]
 
     def test_firestore_mode_exception_returns_none(self) -> None:
-        """Covers lines 129-131: Firestore import failure falls back to None."""
+        """Covers lines 129-131: Firestore import failure falls back to None.
+
+        ``from google.cloud import firestore`` first checks if
+        ``google.cloud`` has a ``firestore`` attribute (which it gains
+        once any earlier test imports the real Firestore client).
+        Setting ``sys.modules["google.cloud.firestore"] = None`` alone
+        is not enough — also temporarily clear the package attribute.
+        """
         import sys
-        # Make the import fail by removing the module so it raises ImportError
+        try:
+            import google.cloud as _gc  # type: ignore[import-not-found]
+            saved_attr = getattr(_gc, "firestore", None)
+            had_attr = hasattr(_gc, "firestore")
+        except ImportError:
+            _gc = None
+            saved_attr = None
+            had_attr = False
+
+        if had_attr:
+            try:
+                delattr(_gc, "firestore")
+            except AttributeError:
+                pass
         sys.modules["google.cloud.firestore"] = None  # causes ImportError on `from google.cloud import firestore`
         try:
             with patch.dict(os.environ, {"YTFACTORY_QUEUE_BACKEND": "firestore"}):
                 result = _firestore_doc("test-account")
         finally:
             sys.modules.pop("google.cloud.firestore", None)
+            if had_attr and _gc is not None:
+                _gc.firestore = saved_attr
         self.assertIsNone(result)
 
 
