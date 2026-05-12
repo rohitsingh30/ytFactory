@@ -321,6 +321,24 @@ spawning the JOB.
   - `custom.googleapis.com/opentelemetry/ytfactory.stage_duration_ms`
 * Filter by `event` / `category` / `success` labels.
 
+> **Per-process resource projection (2026-05-13).** Every Cloud Run
+> service / JOB execution / spawned subprocess sets per-process
+> identity attrs (`service.instance.id` = `<execution>-<task_index>-<pid>`,
+> `service.namespace`, `cloud.region`) so the OTel→GCP MonitoredResource
+> mapping projects to `generic_task` (per-process bucket) instead of
+> `generic_node` (one bucket per region with all-empty labels). Without
+> this, every fresh JOB execution wrote against the SAME time-series
+> tuple and Cloud Monitoring rejected ~100% of metric flushes with
+> `400 Points must be written in order`. The exporter swallows the
+> 400 internally (returns `MetricExportResult.FAILURE`, just logs via
+> `logger.error(exc_info=ex)`) — but the logged traceback then drowned
+> the real subprocess crash in `pipeline.render.video::_extract_last_traceback`'s
+> error surface. Both layers fixed in
+> `pipeline/observability/otel.py::_cloud_run_identity_attrs` /
+> `cloud/_shared/otel_init.py` (lines 134-157) and
+> `pipeline/render/video.py::_is_telemetry_traceback`. Full
+> post-mortem: [`cloud_monitoring_resource_collision.md`](cloud_monitoring_resource_collision.md).
+
 ### One-click from the dashboard
 
 `/app/telemetry` → "Open in GCP" section. Type a channel/slug into

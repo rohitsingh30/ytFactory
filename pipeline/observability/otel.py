@@ -261,7 +261,81 @@ def _build_resource(
     if extra:
         attrs.update(extra)
     base = Resource.create(attrs)
-    return _maybe_merge_gcp_resource(base)
+    base = _maybe_merge_gcp_resource(base)
+
+    # Apply per-process collision-breaker attrs LAST so they're
+    # authoritative — see ``_cloud_run_identity_attrs`` for the full
+    # rationale (root cause of the 2026-05-13 "Points must be written
+    # in order" Cloud Monitoring 400 cascade that drowned the
+    # render-worker-v2 subprocess error surface).
+    #
+    # We also re-assert ``service.name`` and ``service.version`` here
+    # because the GCP detector's ``Resource.merge`` semantics let
+    # detected attrs override base attrs — without re-asserting,
+    # ``service.name`` falls back to the detector's default
+    # ``"unknown_service"``, which then propagates as the
+    # ``generic_task.job`` label and breaks per-service grouping in
+    # Cloud Monitoring dashboards.
+    identity = _cloud_run_identity_attrs(name)
+    if identity:
+        identity[SERVICE_NAME] = name
+        identity[SERVICE_VERSION] = version
+        base = base.merge(Resource.create(identity))
+    return base
+
+
+def _cloud_run_identity_attrs(service_name: str) -> dict:
+    """Per-process resource attrs that distinguish each Cloud Run
+    JOB execution + each spawned subprocess.
+
+    Cloud Monitoring's CreateTimeSeries rejects out-of-order writes
+    per ``(metric, resource_labels)`` tuple. Without these attrs, the
+    OTel→Cloud Monitoring mapping projects every ytfactory process
+    onto ``generic_node`` with all-empty labels (the GCP resource
+    detector has no Cloud Run JOB support), so every JOB execution +
+    every ``pipeline.render.long_form`` subprocess writes to the SAME
+    bucket. A new run's start_time is older than the previous run's
+    most recent point → 400 InvalidArgument every export interval.
+
+    Setting ``service.instance.id`` (+ ``service.namespace`` +
+    ``cloud.region``) flips the mapping to ``generic_task`` per the
+    `_mapping.py` rule (``SERVICE_NAME`` + ``SERVICE_INSTANCE_ID`` →
+    ``generic_task``; mapped fields: ``task_id`` ←
+    ``service.instance.id``, ``namespace`` ← ``service.namespace``,
+    ``location`` ← ``cloud.availability_zone`` || ``cloud.region``,
+    ``job`` ← ``service.name``). Each process gets its own task_id
+    bucket → no collision.
+
+    Off Cloud Run (laptop / pytest), returns ``{}`` — there's no
+    Cloud Monitoring exporter to clash with.
+    """
+    on_cr = bool(
+        os.environ.get("K_SERVICE")
+        or os.environ.get("CLOUD_RUN_JOB")
+        or os.environ.get("CLOUD_RUN_EXECUTION")
+    )
+    if not on_cr:
+        return {}
+    parts = [
+        os.environ.get("CLOUD_RUN_EXECUTION")
+        or os.environ.get("K_REVISION")
+        or "unknown",
+        os.environ.get("CLOUD_RUN_TASK_INDEX") or "0",
+        str(os.getpid()),
+    ]
+    return {
+        "service.instance.id": "-".join(parts),
+        "service.namespace": (
+            os.environ.get("K_SERVICE")
+            or os.environ.get("CLOUD_RUN_JOB")
+            or service_name
+        ),
+        "cloud.region": (
+            os.environ.get("GOOGLE_CLOUD_REGION")
+            or os.environ.get("CLOUD_RUN_REGION")
+            or "asia-southeast1"
+        ),
+    }
 
 
 def _resolve_env() -> str:

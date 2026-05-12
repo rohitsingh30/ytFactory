@@ -110,6 +110,130 @@ class ExtractLastTracebackTest(unittest.TestCase):
         out = _video._extract_last_traceback(log, max_lines=50)
         self.assertLessEqual(len(out.splitlines()), 50)
 
+    def test_skips_telemetry_traceback_when_real_traceback_present(self) -> None:
+        # The 2026-05-13 b0986504 post-mortem: the long_form
+        # subprocess crashed with a real Python exception at line N,
+        # then at process exit the OTel Cloud Monitoring exporter
+        # ALSO logged a 400 "Points must be written in order" via
+        # `logger.error(exc_info=ex)`. The exporter swallows its
+        # own exception (returns FAILURE internally), so the
+        # telemetry traceback is NOT what killed the subprocess —
+        # it's logged noise that happens to be the LAST traceback
+        # in the log. Without this filter, operators see "Cloud
+        # Monitoring 400" and chase a phantom telemetry bug while
+        # the actual render error sits buried above.
+        log = (
+            "[INFO] starting render\n"
+            "Traceback (most recent call last):\n"
+            "  File \"/workspace/pipeline/render/long_form.py\", line 1234, in compose\n"
+            "    final = _ffmpeg_mux(parts)\n"
+            "RuntimeError: this is the REAL crash\n"
+            "[INFO] subprocess shutting down\n"
+            "Traceback (most recent call last):\n"
+            "  File \"/usr/local/lib/python3.12/site-packages/opentelemetry/exporter/cloud_monitoring/__init__.py\", line 429, in export\n"
+            "    self._batch_write(all_series)\n"
+            "  File \"/usr/local/lib/python3.12/site-packages/google/api_core/grpc_helpers.py\", line 57, in error_remapped_callable\n"
+            "    raise exceptions.from_grpc_error(exc) from exc\n"
+            "google.api_core.exceptions.InvalidArgument: 400 Points must be written in order.\n"
+        )
+        out = _video._extract_last_traceback(log)
+        self.assertIn("RuntimeError: this is the REAL crash", out)
+        self.assertNotIn("Points must be written in order", out)
+        self.assertNotIn("opentelemetry/exporter", out)
+
+    def test_falls_back_to_telemetry_traceback_when_only_one_present(self) -> None:
+        # If telemetry is the ONLY traceback in the log, surface
+        # it anyway — the operator at least sees something, and
+        # an all-telemetry log is itself a diagnostic clue (the
+        # subprocess died from a non-Python path: signal kill,
+        # OOM, or hard exit).
+        log = (
+            "[INFO] running\n"
+            "Traceback (most recent call last):\n"
+            "  File \"/usr/local/lib/python3.12/site-packages/opentelemetry/exporter/cloud_monitoring/__init__.py\", line 429, in export\n"
+            "    self._batch_write(all_series)\n"
+            "google.api_core.exceptions.InvalidArgument: 400 something\n"
+        )
+        out = _video._extract_last_traceback(log)
+        self.assertIn("Traceback", out)
+        self.assertIn("opentelemetry/exporter/cloud_monitoring", out)
+
+    def test_recognizes_otel_sdk_export_path_as_telemetry(self) -> None:
+        # The SDK export side (BatchSpanProcessor / metric reader
+        # flush) lives under opentelemetry/sdk/<signal>/export/ —
+        # also non-fatal logged noise.
+        log = (
+            "Traceback (most recent call last):\n"
+            "  File \"/workspace/pipeline/render/long_form.py\", line 50, in main\n"
+            "RuntimeError: REAL ERROR\n"
+            "Traceback (most recent call last):\n"
+            "  File \"/usr/local/lib/python3.12/site-packages/opentelemetry/sdk/metrics/export/__init__.py\", line 200, in _drain\n"
+            "google.api_core.exceptions.InvalidArgument: telemetry noise\n"
+        )
+        out = _video._extract_last_traceback(log)
+        self.assertIn("RuntimeError: REAL ERROR", out)
+        self.assertNotIn("telemetry noise", out)
+
+    def test_telemetry_classifier_uses_first_file_frame_only(self) -> None:
+        # Catch the rubber-duck blind spot: a real render error
+        # whose CAUSING frame happens to be deep in
+        # `google.api_core` should NOT be misclassified as
+        # telemetry. Only the FIRST `File ...` frame (entry point)
+        # determines telemetry-vs-real.
+        log = (
+            "Traceback (most recent call last):\n"
+            "  File \"/workspace/pipeline/upload/upload.py\", line 99, in upload\n"
+            "    creds.refresh()\n"
+            "  File \"/usr/local/lib/python3.12/site-packages/google/api_core/grpc_helpers.py\", line 57, in error_remapped_callable\n"
+            "    raise exceptions.from_grpc_error(exc) from exc\n"
+            "google.api_core.exceptions.PermissionDenied: 403 Forbidden\n"
+        )
+        out = _video._extract_last_traceback(log)
+        self.assertIn("PermissionDenied", out)
+        self.assertIn("pipeline/upload/upload.py", out)
+
+
+class IsTelemetryTracebackTest(unittest.TestCase):
+    """Direct unit tests on the classifier helper."""
+
+    def test_exporter_path_is_telemetry(self) -> None:
+        block = [
+            "Traceback (most recent call last):",
+            "  File \"/x/opentelemetry/exporter/cloud_monitoring/__init__.py\", line 1, in y",
+        ]
+        self.assertTrue(_video._is_telemetry_traceback(block))
+
+    def test_sdk_export_path_is_telemetry(self) -> None:
+        block = [
+            "Traceback (most recent call last):",
+            "  File \"/x/opentelemetry/sdk/metrics/export/__init__.py\", line 1, in y",
+        ]
+        self.assertTrue(_video._is_telemetry_traceback(block))
+
+    def test_render_path_is_not_telemetry(self) -> None:
+        block = [
+            "Traceback (most recent call last):",
+            "  File \"/workspace/pipeline/render/long_form.py\", line 1, in y",
+        ]
+        self.assertFalse(_video._is_telemetry_traceback(block))
+
+    def test_otel_api_path_is_not_telemetry(self) -> None:
+        # `opentelemetry/api/` is the user-facing API surface — if a
+        # real render error originates from `obs.timed(...)` failing,
+        # we want to see it (it's an actual bug, not exporter noise).
+        block = [
+            "Traceback (most recent call last):",
+            "  File \"/x/opentelemetry/api/metrics/__init__.py\", line 1, in y",
+        ]
+        self.assertFalse(_video._is_telemetry_traceback(block))
+
+    def test_empty_block_is_not_telemetry(self) -> None:
+        self.assertFalse(_video._is_telemetry_traceback([]))
+
+    def test_block_without_file_frame_is_not_telemetry(self) -> None:
+        block = ["Traceback (most recent call last):", "RuntimeError: x"]
+        self.assertFalse(_video._is_telemetry_traceback(block))
+
 
 class StreamSubprocessTeeTest(unittest.TestCase):
     """Pin the tee-to-parent-stdout behaviour."""

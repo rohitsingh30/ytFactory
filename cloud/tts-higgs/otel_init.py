@@ -113,6 +113,49 @@ def init(
             except Exception:  # noqa: BLE001
                 pass
 
+        # Per-process collision-breaker attrs MUST be applied LAST so
+        # they're authoritative even if a future GCP detector starts
+        # emitting `service.instance.id`. Without these, every Cloud
+        # Run JOB execution + every spawned subprocess maps to the
+        # SAME `generic_node` Cloud Monitoring resource (all-empty
+        # labels) and CreateTimeSeries returns 400 "Points must be
+        # written in order" every export interval. Setting
+        # `service.instance.id` flips the mapping to `generic_task`
+        # with a unique `task_id` per process. We also re-assert
+        # `service.name` + `service.version` here because the GCP
+        # detector's `Resource.merge` semantics let detected attrs
+        # override base attrs — without re-asserting, `service.name`
+        # falls back to the detector's `"unknown_service"` default,
+        # which then propagates as the `generic_task.job` label and
+        # breaks per-service grouping. See
+        # `pipeline/observability/otel.py::_cloud_run_identity_attrs`
+        # for the full mapping spec — kept in lock-step here because
+        # `cloud/<svc>/` cannot import `pipeline/`.
+        if on_cloud_run:
+            instance_parts = [  # coverage: cloud-only branch — pinned by tests/test_otel_init.py source-grep + canonical runtime via tests/test_obs_otel_init.py::TestCloudRunIdentityAttrs
+                os.environ.get("CLOUD_RUN_EXECUTION")
+                or os.environ.get("K_REVISION")
+                or "unknown",
+                os.environ.get("CLOUD_RUN_TASK_INDEX") or "0",
+                str(os.getpid()),
+            ]
+            identity_attrs = {  # coverage: cloud-only branch — pinned by tests/test_otel_init.py source-grep + canonical runtime via tests/test_obs_otel_init.py::TestCloudRunIdentityAttrs
+                SERVICE_NAME: service_name,
+                SERVICE_VERSION: version,
+                "service.instance.id": "-".join(instance_parts),
+                "service.namespace": (
+                    os.environ.get("K_SERVICE")
+                    or os.environ.get("CLOUD_RUN_JOB")
+                    or service_name
+                ),
+                "cloud.region": (
+                    os.environ.get("GOOGLE_CLOUD_REGION")
+                    or os.environ.get("CLOUD_RUN_REGION")
+                    or "asia-southeast1"
+                ),
+            }
+            resource = resource.merge(Resource.create(identity_attrs))  # coverage: cloud-only branch — pinned by tests/test_otel_init.py source-grep + canonical runtime via tests/test_obs_otel_init.py::TestCloudRunIdentityAttrs
+
         # Span exporter: GCP Cloud Trace on Cloud Run, console
         # everywhere else (avoids authenticating against Cloud Trace
         # in pytest / dev environments).
@@ -143,9 +186,24 @@ def init(
                     CloudMonitoringMetricsExporter,
                 )
                 project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+                # ``add_unique_identifier=True`` appends an 8-hex
+                # per-process suffix to every metric. Without it, every
+                # Cloud Run JOB task / replica / service-revision writes
+                # against the same ``(metric_type, generic_node{global,
+                # "", ""})`` tuple — Cloud Monitoring then 400s with
+                # ``Points must be written in order`` whenever a fresh
+                # writer's start_time is older than the most recent
+                # write. Pre-fix this rejected ~100% of metric flushes
+                # from render-worker-v2 and (via stderr spam) poisoned
+                # ``_format_subprocess_failure``'s log-tail extraction,
+                # masking every renderer subprocess error. See the
+                # 2026-05-13 cron-failure post-mortem.
                 readers.append(
                     PeriodicExportingMetricReader(
-                        CloudMonitoringMetricsExporter(project_id=project),
+                        CloudMonitoringMetricsExporter(
+                            project_id=project,
+                            add_unique_identifier=True,
+                        ),
                         export_interval_millis=60_000,
                     ),
                 )

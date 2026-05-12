@@ -504,33 +504,109 @@ def _stream_subprocess(
 # warning-but-recovered one).
 _TRACEBACK_HEADER_RE = re.compile(r"^Traceback \(most recent call last\):\s*$")
 
+# Tracebacks rooted in these paths are LOGGED by OTel exporters via
+# ``logger.error(..., exc_info=ex)`` — they do NOT crash the
+# subprocess (the exporter catches the exception internally and
+# returns ``MetricExportResult.FAILURE``). Without this filter, the
+# telemetry traceback drowns the REAL fatal traceback in the
+# subprocess error surface — operators see "Cloud Monitoring 400
+# Points must be written in order" and miss the actual render
+# failure that ran earlier in the subprocess. Confirmed against
+# ``opentelemetry-exporter-gcp-monitoring 1.12.0a0`` whose
+# ``CloudMonitoringMetricsExporter.export()`` (lines 428-435)
+# wraps ``self._batch_write(all_series)`` in a try/except. The
+# 2026-05-13 8a4f7e15 post-mortem.
+_TELEMETRY_TRACEBACK_FRAME_RE = re.compile(
+    r"opentelemetry/(?:exporter|sdk/(?:metrics|_logs|trace)/export)/"
+)
+
+
+def _is_telemetry_traceback(block: list[str]) -> bool:
+    """True when the FIRST ``File "..."`` frame in ``block`` is in a
+    known OTel exporter / SDK export path.
+
+    Why "first frame": the entry frame identifies the call origin.
+    A real render error that incidentally calls into telemetry
+    has its first frame in user code (``pipeline/render/...``);
+    a logged exporter failure has its first frame in
+    ``opentelemetry/exporter/...``. The deeper frames (e.g.
+    ``google/api_core/grpc_helpers.py``) are present in both cases
+    and so are not a reliable filter on their own.
+    """
+    for line in block:
+        s = line.lstrip()
+        if s.startswith("File "):
+            return bool(_TELEMETRY_TRACEBACK_FRAME_RE.search(line))
+    return False
+
 
 def _extract_last_traceback(log_text: str, *, max_lines: int = 80) -> str:
-    """Return the last Python traceback block in ``log_text``.
+    """Return the last *non-telemetry* Python traceback in ``log_text``.
 
-    Walks lines top-to-bottom remembering the index of the most recent
-    ``Traceback (most recent call last):`` header. Returns from there
-    forward, capped at ``max_lines`` (preserving the HEAD of the
-    traceback so the actionable ``ErrorClass: message`` line — which
-    appears in the first few lines of the traceback — survives the
-    cap even when the traceback is followed by hundreds of lines of
-    OTel ConsoleMetricExporter JSON noise from the subprocess's
-    exit-time metric flush).
+    Walks lines top-to-bottom collecting every
+    ``Traceback (most recent call last):`` header position. Returns
+    from the position of the last NON-telemetry traceback (real
+    fatal error) capped at ``max_lines``.
 
-    If no traceback is found, returns the trailing 25 lines as the
-    legacy fallback (so callers that pre-date this helper still see
-    *something*).
+    Falls back to:
+    - the last traceback (even if telemetry) when no non-telemetry
+      traceback exists — preserves the legacy behaviour for callers
+      where telemetry IS the only error in the log.
+    - the trailing 25 lines when no traceback is found at all.
+
+    Pre-2026-05-13 (commit 8a4f7e15) the extractor returned the LAST
+    traceback unconditionally. That surfaced the OTel Cloud Monitoring
+    "Points must be written in order" 400 (a logged-but-non-fatal
+    exporter failure) as the subprocess's "real error" and operators
+    chased a phantom telemetry bug while the actual render error sat
+    a few hundred lines higher in the log.
     """
     if not log_text:
         return ""
     lines = log_text.splitlines()
-    last_tb_idx: int | None = None
+
+    tb_starts: list[int] = []
     for idx, line in enumerate(lines):
         if _TRACEBACK_HEADER_RE.match(line):
-            last_tb_idx = idx
-    if last_tb_idx is None:
+            tb_starts.append(idx)
+    if not tb_starts:
         return "\n".join(lines[-25:])
-    block = lines[last_tb_idx:]
+
+    # Prefer the LAST non-telemetry traceback. Build per-block slices
+    # (header → next header or EOF) so the telemetry classifier sees
+    # only the frames belonging to that one traceback.
+    chosen_start: int | None = None
+    chosen_end: int | None = None
+    for i in range(len(tb_starts) - 1, -1, -1):
+        start = tb_starts[i]
+        end = tb_starts[i + 1] if i + 1 < len(tb_starts) else len(lines)
+        if not _is_telemetry_traceback(lines[start:end]):
+            chosen_start = start
+            # When the chosen non-telemetry traceback is followed by
+            # one or more telemetry tracebacks at process-exit, end
+            # the surface at the NEXT traceback boundary so the
+            # surfaced block doesn't smuggle the telemetry noise back
+            # in via the trailing slice (the bug the
+            # 2026-05-13 b0986504 post-mortem was filed against).
+            # If there's no following traceback, surface to EOF
+            # — that includes any non-traceback tail (e.g. final
+            # log lines like "[INFO] cleanup ok") which is
+            # operator-useful.
+            if i + 1 < len(tb_starts):
+                chosen_end = tb_starts[i + 1]
+            else:
+                chosen_end = len(lines)
+            break
+    if chosen_start is None:
+        # Every traceback in the log is telemetry — surface the last
+        # one anyway so the operator at least sees *something* (and
+        # the fact that ALL tracebacks are telemetry is itself a
+        # diagnostic clue: subprocess died from a SIGNAL or no-error
+        # path like OOM kill, not from a Python exception).
+        chosen_start = tb_starts[-1]
+        chosen_end = len(lines)
+
+    block = lines[chosen_start:chosen_end]
     if len(block) > max_lines:
         # Keep the HEAD of the traceback (operator-actionable
         # ErrorClass + early frames) — the tail is usually deep

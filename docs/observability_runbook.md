@@ -215,6 +215,58 @@ AttributeError: 'NonRecordingSpan' object has no attribute 'status'
 See `feedback_otel_nonrecording_span_status_crash.md` for the
 generalised rule.
 
+## Recipe: render-worker crashes with `400 Points must be written in order` (Cloud Monitoring)
+
+Class-of-bug: every Cloud Run JOB execution + every spawned subprocess
+writes to the SAME `(metric_type, generic_node{location:'global',
+namespace:'', node_id:''})` time-series tuple. A new run's
+`start_time` is older than the previous run's last point → Cloud
+Monitoring rejects every metric flush with 400. Pre-fix the
+exporter's logged exit-time traceback ALSO drowned the real
+subprocess crash in `_extract_last_traceback`'s output.
+
+**Pinned fix already in place** (commit landing 2026-05-13) —
+`pipeline/observability/otel.py::_cloud_run_identity_attrs` (and the
+mirrored `cloud/_shared/otel_init.py` lines 134-157) inject
+per-process `service.instance.id` (+ `service.namespace` +
+`cloud.region`) so the OTel→GCP MonitoredResource mapping projects to
+`generic_task` (per-process bucket) instead of `generic_node`. The
+`_extract_last_traceback` helper now classifies tracebacks by entry
+frame and prefers the LAST non-telemetry traceback, falling back to
+telemetry only when it's the only traceback in the log.
+
+**If you see this AFTER the fix shipped:**
+
+1. Confirm the worker actually re-deployed since the fix:
+   ```bash
+   gcloud run services describe ytfactory-render-worker-v2 \
+     --region asia-southeast1 --project ytfactory-prod-v2 \
+     --format='value(metadata.annotations."run.googleapis.com/lastDeployedAt")'
+   ```
+   Should be on or after the fix's commit date. If older →
+   `bash cloud/render-worker-v2/deploy.sh`.
+
+2. Confirm the resource attrs are actually present on the failing
+   metric:
+   ```bash
+   gcloud monitoring time-series list \
+     --project ytfactory-prod-v2 \
+     --filter='metric.type="workload.googleapis.com/ytfactory.events"' \
+     --interval='end-time=now,start-time=-1h' \
+     --format='value(resource.type, resource.labels)' | head -5
+   ```
+   Should print `generic_task` (NOT `generic_node`). If still
+   `generic_node` → the worker's `otel_init.py` copy is stale.
+   Re-sync via `bash cloud/_shared/sync.sh && bash cloud/render-worker-v2/deploy.sh`.
+
+3. If the surface STILL contains a Cloud Monitoring traceback even
+   though there's a real Python traceback in the subprocess log:
+   `pipeline/render/video.py::_extract_last_traceback` is mis-
+   classifying. Read `tests/test_render_video.py::IsTelemetryTracebackTest`
+   to extend the regex (`_TELEMETRY_TRACEBACK_FRAME_RE`).
+
+Full post-mortem: `docs/cloud_monitoring_resource_collision.md`.
+
 ## Recipe: figure out the slowest stage in a render
 
 **Fastest path** (added 2026-05-12): open `/app/telemetry` →

@@ -117,13 +117,13 @@ class TestOtelInitLockstep(unittest.TestCase):
                 mod.init(f"smoke-{path.parent.name}")
 
     def test_audit_q263_cloud_run_json_exporter_imports_cleanly(self) -> None:
-        """Audit Q2.63 — pre-fix `test_init_off_cloud_run_does_not_raise`
-        wrapped `init()` whose body itself swallows all exceptions.
-        That test passed even if ``import cloud_run_json_exporter``
-        failed silently inside ``init()`` — exactly the regression
-        the lockstep was supposed to catch. Now ALSO directly import
-        the sibling JSON exporter from the same dir as each
-        otel_init.py copy so a missing / rotted helper fails loudly.
+        """Audit Q2.63 — pre-fix the test above wrapped `init()` whose
+        body itself swallows all exceptions. The test passed even if
+        ``import cloud_run_json_exporter`` failed silently inside
+        ``init()`` — exactly the regression the lockstep was supposed
+        to catch. Now ALSO directly import the sibling JSON exporter
+        from the same dir as each otel_init.py copy so a missing /
+        rotted helper fails loudly here.
         """
         for init_path in _every_otel_init_path():
             with self.subTest(init_path=str(init_path)):
@@ -163,6 +163,93 @@ class TestOtelInitLockstep(unittest.TestCase):
             spec.loader.exec_module(mod)
             # Should not raise even when no traceparent env is set.
             mod.attach_traceparent_from_env()
+
+    def test_cloud_monitoring_exporter_uses_unique_identifier(self) -> None:
+        """Pin ``add_unique_identifier=True`` on every per-service
+        ``CloudMonitoringMetricsExporter(...)`` construction.
+
+        Without this flag, every Cloud Run JOB task / replica / service
+        revision writes against the same ``(metric_type, generic_node{
+        location:'global', namespace:'', node_id:''})`` tuple. Cloud
+        Monitoring rejects the second writer's points with ``400 Points
+        must be written in order`` whenever its start_time is older than
+        the most recent write — which is *every* fresh JOB execution.
+
+        Pre-fix this rejected ~100% of metric flushes from
+        render-worker-v2 AND poisoned ``_format_subprocess_failure``'s
+        log-tail extraction (the OTel exporter's stderr trace was the
+        last "Python traceback" before exit, masking the real renderer
+        error). See the 2026-05-13 cron-failure post-mortem.
+
+        The lockstep test above guarantees per-service copies match
+        the canonical, so the canonical is the only file we have to
+        grep — but we re-check every copy here so a future drift fix
+        that bypasses sync.sh can't silently ship the broken default.
+        """
+        for path in _every_otel_init_path():
+            with self.subTest(path=str(path)):
+                src = path.read_text()
+                self.assertIn(
+                    "CloudMonitoringMetricsExporter(",
+                    src,
+                    f"{path}: helper no longer constructs "
+                    f"CloudMonitoringMetricsExporter — update this test",
+                )
+                self.assertIn(
+                    "add_unique_identifier=True",
+                    src,
+                    f"{path}: CloudMonitoringMetricsExporter must be "
+                    f"constructed with add_unique_identifier=True so "
+                    f"per-process metric writers don't collide on the "
+                    f"shared (metric_type, generic_node) resource tuple "
+                    f"and trigger '400 Points must be written in order'.",
+                )
+
+    def test_resource_has_per_process_identity_attrs(self) -> None:
+        """Pin the per-process collision-breaker resource attrs.
+
+        ``add_unique_identifier=True`` (above) makes the *exporter*
+        emit a unique label per process, but Cloud Monitoring's
+        resource-side projection ALSO needs ``service.instance.id``
+        (+ ``service.namespace`` + ``cloud.region``) to flip the
+        OTel→GCP MonitoredResource mapping from ``generic_node``
+        (one bucket region-wide) to ``generic_task`` (one bucket
+        per process). Without the resource attrs, the exporter's
+        unique-id makes its own writes consistent but does NOT
+        prevent the cross-process collision that triggered the
+        2026-05-13 b0986504 "Points must be written in order"
+        cascade. Belt-and-braces.
+
+        Source-grep rather than runtime call because ``init()``'s
+        on-cloud-run branch needs ADC + real GCP exporters; the
+        canonical's runtime behaviour is covered by
+        ``tests/test_obs_otel_init.py::TestCloudRunIdentityAttrs``.
+        """
+        required_substrings = (
+            "service.instance.id",
+            "service.namespace",
+            "cloud.region",
+            "CLOUD_RUN_EXECUTION",
+            "CLOUD_RUN_TASK_INDEX",
+            "os.getpid()",
+        )
+        for path in _every_otel_init_path():
+            with self.subTest(path=str(path)):
+                src = path.read_text()
+                for needle in required_substrings:
+                    self.assertIn(
+                        needle,
+                        src,
+                        f"{path}: missing per-process identity attr "
+                        f"`{needle}` — the OTel→Cloud Monitoring "
+                        f"resource projection will fall back to "
+                        f"`generic_node` with all-empty labels and "
+                        f"every JOB execution / spawned subprocess "
+                        f"will collide on the same time-series "
+                        f"bucket. Run `bash cloud/_shared/sync.sh` "
+                        f"after editing the canonical to mirror the "
+                        f"fix into this copy.",
+                    )
 
 
 if __name__ == "__main__":

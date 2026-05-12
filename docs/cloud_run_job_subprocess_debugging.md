@@ -228,5 +228,17 @@ grep -rn "stdout=subprocess.PIPE" pipeline/ cloud/ \
   (updated 2026-05-13 with `AZURE_OPENAI_TOKEN_PARAM`)
 - `docs/cloud_service_dep_playbook.md` — playbook for adding new
   Cloud Run services (this doc is the JOB-side companion)
+- `docs/cloud_monitoring_resource_collision.md` — **2026-05-13
+  follow-up:** even with bugs #2 + #3 above fixed, a SECOND render
+  failure (`b0986504`) showed the OTel exporter ITSELF failing with
+  `400 Points must be written in order` on every metric flush — and
+  THAT traceback drowned the real subprocess error in the operator
+  surface. Two-layer fix: (a) per-process `service.instance.id` resource
+  attrs flip the OTel→Cloud Monitoring projection from `generic_node`
+  to `generic_task`, eliminating the cross-process collision; (b) the
+  `_extract_last_traceback` helper now classifies tracebacks by entry
+  frame and prefers the LAST non-telemetry traceback, so future
+  exporter failures (throttling, IAM glitches, etc.) won't poison the
+  surface.
 - `pipeline/observability/exporters.py::_on_cloud_run` — central helper
 - `pipeline/render/video.py::_extract_last_traceback` — diagnostic tail
