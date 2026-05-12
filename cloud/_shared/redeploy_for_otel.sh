@@ -48,6 +48,13 @@ declare -a SERVICES=(
     "editing-agent|./deploy.sh"
     "clone-video-worker|./deploy.sh"
     "render-worker-v2|./deploy.sh"
+    # web-server is the dashboard backend itself. Including it in the
+    # OTel redeploy ensures the dashboard's Cloud Logging reader path
+    # (pipeline.observability.cloud_log_reader) is shipped alongside
+    # the per-service stdout JSON exporter — without this, every other
+    # service emits structured ytfactory.event records, but the
+    # dashboard backend can't read them.
+    "web-server|./deploy.sh"
 )
 
 # Re-sync the canonical otel_init.py into every per-service dir.

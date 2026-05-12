@@ -214,19 +214,32 @@ def read_events(
             "metadata": dict,
         }
 
-    Backed by the in-process bounded shadow log buffer
-    (:class:`pipeline.observability.exporters.BoundedInMemoryLogRecordExporter`)
-    in ``console`` / ``gcp`` / ``otlp`` modes, and by the test
-    in-memory exporter in ``inmemory`` mode. ``none`` mode returns
-    ``[]``. Disable the shadow buffer via
-    ``YTFACTORY_TELEMETRY_BUFFER_DISABLE=1`` (then this returns
-    ``[]`` everywhere except ``inmemory``).
+    Source resolution (in order):
+
+    1. ``gcp`` mode + ``GOOGLE_CLOUD_PROJECT`` set → query Cloud
+       Logging via
+       :class:`pipeline.observability.cloud_log_reader.CloudLoggingEventReader`.
+       This is the **cross-service** path the dashboard needs in
+       production: the web-server is a thin BFF, every render / TTS /
+       image / upload runs in a *different* process. The in-process
+       buffer below would be near-empty in that case.
+    2. In-process bounded shadow buffer
+       (:class:`pipeline.observability.exporters.BoundedInMemoryLogRecordExporter`)
+       — backs ``console`` / ``otlp`` / ``inmemory`` modes, and is
+       also the fallback when the Cloud Logging read fails.
+    3. ``none`` mode (or
+       ``YTFACTORY_TELEMETRY_BUFFER_DISABLE=1`` in any non-inmemory
+       mode) → returns ``[]``.
+
+    Disable the Cloud Logging read with
+    ``YTFACTORY_TELEMETRY_CLOUDLOG_DISABLE=1``. Tune cache TTL via
+    ``YTFACTORY_TELEMETRY_CLOUDLOG_TTL`` and result cap via
+    ``YTFACTORY_TELEMETRY_CLOUDLOG_LIMIT``.
 
     Caveat: shadow buffer is per-process. The Cloud Run web-server
     instance only sees its own emissions; cross-instance and
-    cross-service visibility (e.g. render-worker JOB events) still
-    requires Cloud Logging queries — see ``docs/telemetry.md`` for
-    the deep-link path.
+    cross-service visibility (e.g. render-worker JOB events) requires
+    the Cloud Logging path above. See ``docs/telemetry.md``.
 
     Returns events sorted oldest → newest. ``limit`` (when set) keeps
     the most recent N. The returned list is a fresh list — callers
@@ -240,6 +253,24 @@ def read_events(
         bundle = _obs.current_bundle()
     if bundle is None:
         return []
+
+    # Cross-service path: in production the web-server is a thin BFF
+    # so the in-process buffer below is near-empty. Read from Cloud
+    # Logging instead, which has every service's emissions.
+    if _OBSERVABILITY_AVAILABLE and bundle.mode == "gcp":
+        try:
+            from pipeline.observability.cloud_log_reader import get_reader
+            reader = get_reader()
+        except Exception:  # noqa: BLE001
+            reader = None
+        if reader is not None:
+            since = since_ts if since_ts is not None else 0.0
+            events = reader.read(since_ts=since)
+            if events is not None:
+                if limit is not None and len(events) > limit:
+                    events = events[-limit:]
+                return events
+        # Fall through to in-process buffer on any reader failure.
 
     if bundle.log_inmemory is None:
         # ``none`` mode (or ``YTFACTORY_TELEMETRY_BUFFER_DISABLE=1`` in

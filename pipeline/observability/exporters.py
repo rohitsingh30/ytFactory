@@ -344,25 +344,39 @@ def _build_gcp_log_processor(
     package; the supported pattern is ``google-cloud-logging``'s
     :class:`google.cloud.logging.handlers.StructuredLogHandler` which
     writes JSON to stderr that Cloud Run / GKE / GCE picks up natively.
-    Inside Cloud Run we therefore prefer ``ConsoleLogExporter`` because
-    Cloud Run already collects stdout/stderr into Cloud Logging.
 
-    If the caller wants per-record API writes instead (laptop without
-    Cloud Run), we use ``CloudLoggingExporter`` from the
-    ``google-cloud-logging`` integration.
+    Inside Cloud Run we use :class:`CloudRunStructuredJsonLogExporter`,
+    a tiny stdout JSON writer whose output the platform's structured-
+    log handler promotes to ``jsonPayload`` Cloud Logging entries with
+    every ``ytfactory.*`` field individually queryable. **Without
+    this, the dashboard's cross-service Cloud Logging query path
+    cannot filter records by event/category/channel** — pre-2026-05-12
+    we used ``ConsoleLogRecordExporter`` whose Python ``__repr__``-ish
+    output indexes as ``textPayload`` only.
+
+    Off Cloud Run (laptop without ``K_SERVICE``), we still try the
+    direct REST API writer (``CloudLoggingLogExporter``) because the
+    laptop has no platform agent to scrape stdout — fall back to the
+    same structured JSON exporter when ``google-cloud-logging`` isn't
+    installed.
     """
+    from .cloud_run_json_exporter import CloudRunStructuredJsonLogExporter
     if os.environ.get("K_SERVICE"):
-        return BatchLogRecordProcessor(ConsoleLogRecordExporter())
+        return BatchLogRecordProcessor(
+            CloudRunStructuredJsonLogExporter(project_id=project),
+        )
     try:
         from .gcp_log_bridge import CloudLoggingLogExporter
         exp: LogExporter = CloudLoggingLogExporter(project_id=project)
         return BatchLogRecordProcessor(exp)
     except Exception as e:  # noqa: BLE001
         _logger.warning(
-            "Cloud Logging exporter unavailable, falling back to console: %s",
-            e,
+            "Cloud Logging exporter unavailable, falling back to "
+            "stdout JSON: %s", e,
         )
-        return BatchLogRecordProcessor(ConsoleLogRecordExporter())
+        return BatchLogRecordProcessor(
+            CloudRunStructuredJsonLogExporter(project_id=project),
+        )
 
 
 __all__ = [

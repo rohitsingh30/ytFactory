@@ -41,6 +41,7 @@ RUN python -c "from cached_path import cached_path; \
 
 WORKDIR /app
 COPY server.py handler.py ./
+COPY cloud_run_json_exporter.py ./
 COPY otel_init.py ./
 COPY models/ ./models/
 

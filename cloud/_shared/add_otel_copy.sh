@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
-# Insert the right COPY otel_init.py line into every Python
+# Insert the right COPY <helper>.py lines into every Python
 # cloud/<service>/Dockerfile.
+#
+# 2026-05-12 — multi-helper. The OTel boot now imports a sibling
+# `cloud_run_json_exporter.py` for Cloud-Run-shaped structured log
+# output. Both files must live next to server.py / entrypoint.py at
+# build time, so this script patches a COPY for each. New helpers go
+# into the OTEL_HELPERS array below — Dockerfile patching is fully
+# data-driven from there.
 #
 # 2026-05-11 — context-aware. Two valid build-context conventions in
 # this repo:
 #
 #   1. **per-service-dir** (12 services): `cd cloud/<svc>/ && gcloud
 #      builds submit .`. Top-of-Dockerfile clue: `COPY server.py ./` /
-#      `COPY requirements.txt .`. OTel COPY: `COPY otel_init.py ./`.
+#      `COPY requirements.txt .`. OTel COPY: `COPY <helper> ./`.
 #
 #   2. **repo-root** (editing-agent, render-worker-v2): `gcloud builds
 #      submit . --config=cloud/<svc>/cloudbuild.yaml` (from repo root).
 #      Top-of-Dockerfile clue: any `COPY pipeline/...` /
 #      `COPY cloud/<svc>/...` / `COPY scripts/...` / `COPY <svc>/...`
 #      line. OTel COPY:
-#      `COPY cloud/<svc>/otel_init.py /workspace/otel_init.py`.
+#      `COPY cloud/<svc>/<helper> /workspace/<helper>`.
 #
 # This script detects each Dockerfile's context and emits the matching
 # COPY line. Idempotent — checks for the COPY (either form) before
@@ -39,6 +46,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Helpers that must be COPY'd into every Python Cloud Run image. Keep
+# this in lockstep with cloud/_shared/sync.sh::HELPERS.
+OTEL_HELPERS=(
+    "otel_init.py"
+    "cloud_run_json_exporter.py"
+)
+
 count=0
 for df in "${ROOT}"/*/Dockerfile; do
     [[ -f "$df" ]] || continue
@@ -46,53 +60,67 @@ for df in "${ROOT}"/*/Dockerfile; do
     svc_dir="$(dirname "$df")"
     svc="$(basename "${svc_dir}")"
 
-    # Scope filter: only Python services (server.py / entrypoint.py)
-    # use OTel today. Skip everything else (web-next is Node.js;
-    # weights-staging is a one-shot init container; etc.). This MUST
+    # Scope filter: only Python services (server.py / entrypoint.py /
+    # an existing otel_init.py) use OTel today. Skip everything else
+    # (web-next is Node.js; weights-staging is a one-shot init
+    # container; etc.). The ``otel_init.py`` clause catches slim-wrapper
+    # images like cloud/web-server/ whose actual app code lives in
+    # web/server.py and is COPY'd in via repo-root context. This MUST
     # mirror the filter in cloud/_shared/sync.sh — if they ever
     # disagree, deploys break with `COPY otel_init.py: file not
     # found`.
-    if [[ ! -f "${svc_dir}/server.py" && ! -f "${svc_dir}/entrypoint.py" ]]; then
+    if [[ ! -f "${svc_dir}/server.py" \
+          && ! -f "${svc_dir}/entrypoint.py" \
+          && ! -f "${svc_dir}/otel_init.py" ]]; then
         echo "skip (non-Python service): ${rel}"
         continue
     fi
 
-    # Skip if either form of the COPY is already present.
-    if grep -qE '^COPY (cloud/[^/]+/)?otel_init\.py' "$df"; then
-        echo "skip (already has): ${rel}"
-        continue
-    fi
-
-    # Detect build context by scanning for repo-root-relative COPYs.
-    # The list of root prefixes intentionally includes BOTH well-known
-    # source roots (pipeline/scripts/control/cloud) AND any
-    # COPY <svc>/... line — services like web-next use the latter
-    # pattern when they ship from the repo root via cloudbuild.yaml.
+    # Detect build context once per Dockerfile. List of root prefixes
+    # intentionally includes BOTH well-known source roots
+    # (pipeline/scripts/control/cloud) AND any COPY <svc>/... line —
+    # services like web-next use the latter pattern when they ship
+    # from the repo root via cloudbuild.yaml.
     if grep -qE "^COPY (pipeline|scripts|control|cloud|${svc})/" "$df"; then
-        # Repo-root context: emit absolute repo-root path.
-        COPY_LINE="COPY cloud/${svc}/otel_init.py /workspace/otel_init.py"
         ctx="repo-root"
     else
-        # Per-service-dir context: emit local relative path.
-        COPY_LINE="COPY otel_init.py ./"
         ctx="per-service-dir"
     fi
 
-    # Insert after first match of "COPY server.py" or "COPY entrypoint.py".
-    # If neither, append at end.
-    if grep -qE "^COPY (server|entrypoint)\.py" "${df}"; then
-        awk -v line="${COPY_LINE}" '
-            /^COPY (server|entrypoint)\.py/ && !done { print; print line; done=1; next }
-            { print }
-            END { if (!done) print line }
-        ' "${df}" > "${df}.tmp"
+    patched_in_file=0
+    for helper in "${OTEL_HELPERS[@]}"; do
+        helper_re="${helper//./\\.}"
+        # Skip if either form of the COPY is already present.
+        if grep -qE "^COPY (cloud/[^/]+/)?${helper_re}" "$df"; then
+            continue
+        fi
+
+        if [[ "${ctx}" == "repo-root" ]]; then
+            COPY_LINE="COPY cloud/${svc}/${helper} /workspace/${helper}"
+        else
+            COPY_LINE="COPY ${helper} ./"
+        fi
+
+        if grep -qE "^COPY (server|entrypoint)\.py" "${df}"; then
+            awk -v line="${COPY_LINE}" '
+                /^COPY (server|entrypoint)\.py/ && !done { print; print line; done=1; next }
+                { print }
+                END { if (!done) print line }
+            ' "${df}" > "${df}.tmp"
+        else
+            cat "${df}" > "${df}.tmp"
+            printf '\n%s\n' "${COPY_LINE}" >> "${df}.tmp"
+        fi
+        mv "${df}.tmp" "${df}"
+        patched_in_file=$((patched_in_file + 1))
+        echo "patched (${ctx}, ${helper}): ${rel}"
+    done
+
+    if [[ ${patched_in_file} -eq 0 ]]; then
+        echo "skip (already has all helpers): ${rel}"
     else
-        cat "${df}" > "${df}.tmp"
-        printf '\n%s\n' "${COPY_LINE}" >> "${df}.tmp"
+        count=$((count + 1))
     fi
-    mv "${df}.tmp" "${df}"
-    echo "patched (${ctx}): ${rel}"
-    count=$((count + 1))
 done
 
 echo ""

@@ -93,3 +93,5 @@ WORKDIR /workspace
 CMD ["sh", "-c", "uvicorn web.server:app --host 0.0.0.0 --port ${PORT:-8080}"]
 
 COPY cloud/web-server/otel_init.py /workspace/otel_init.py
+
+COPY cloud/web-server/cloud_run_json_exporter.py /workspace/cloud_run_json_exporter.py

@@ -45,6 +45,7 @@ RUN python -c "from diffusers import ZImagePipeline; print('ZImagePipeline impor
 
 WORKDIR /app
 COPY server.py ./
+COPY cloud_run_json_exporter.py ./
 COPY otel_init.py ./
 
 EXPOSE 8080

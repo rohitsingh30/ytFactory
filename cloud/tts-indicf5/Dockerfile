@@ -103,6 +103,7 @@ RUN python -c "import f5_tts; from f5_tts.infer.utils_infer import infer_process
 
 WORKDIR /app
 COPY server.py ./
+COPY cloud_run_json_exporter.py ./
 COPY otel_init.py ./
 
 EXPOSE 8080

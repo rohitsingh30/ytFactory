@@ -40,6 +40,7 @@ RUN python -m pip install "git+https://github.com/huggingface/diffusers"
 
 WORKDIR /app
 COPY server.py ./
+COPY cloud_run_json_exporter.py ./
 COPY otel_init.py ./
 
 EXPOSE 8080

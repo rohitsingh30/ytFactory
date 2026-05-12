@@ -94,13 +94,41 @@ def telemetry_init_status(
     """Tell the UI whether telemetry is wired up + which exporter is
     active. Used to render the "deep-link to GCP" buttons only when the
     GCP exporter is actually exporting.
+
+    Also surfaces whether the cross-service Cloud Logging reader is
+    available so the dashboard can render an honest hint when the
+    in-process buffer is empty (e.g. when the web-server has restarted
+    recently and Cloud Logging is the only source of recent events).
     """
     _require_auth(authorization)
+    cloudlog_available = False
+    cloudlog_reason: str | None = None
+    if _has_gcp_exporter():
+        try:
+            from pipeline.observability.cloud_log_reader import (
+                _disabled_via_env,
+                get_reader,
+            )
+            if _disabled_via_env():
+                cloudlog_reason = "disabled via YTFACTORY_TELEMETRY_CLOUDLOG_DISABLE"
+            elif not _gcp_project():
+                cloudlog_reason = "GOOGLE_CLOUD_PROJECT not set"
+            else:
+                reader = get_reader()
+                cloudlog_available = reader is not None
+                if reader is None:
+                    cloudlog_reason = (
+                        "google-cloud-logging package or ADC unavailable"
+                    )
+        except Exception as e:  # noqa: BLE001
+            cloudlog_reason = f"reader init failed: {e}"
     return {
         "initialised": obs.is_initialised(),
         "exporter": obs.current_mode(),
         "gcp_project": _gcp_project(),
         "has_gcp_exporter": _has_gcp_exporter(),
+        "cloud_logging_reader_available": cloudlog_available,
+        "cloud_logging_reader_reason": cloudlog_reason,
     }
 
 

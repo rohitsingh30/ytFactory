@@ -112,6 +112,7 @@ RUN python -c "from huggingface_hub import snapshot_download; \
 # --- app code ---
 WORKDIR /app
 COPY server.py handler.py ./
+COPY cloud_run_json_exporter.py ./
 COPY otel_init.py ./
 COPY models/ ./models/
 

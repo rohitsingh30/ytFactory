@@ -69,3 +69,5 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /workspace
 
 ENTRYPOINT ["python", "/workspace/cloud/render-worker-v2/entrypoint.py"]
+
+COPY cloud/render-worker-v2/cloud_run_json_exporter.py /workspace/cloud_run_json_exporter.py

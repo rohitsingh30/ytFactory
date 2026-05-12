@@ -88,6 +88,7 @@ RUN python -c "import boson_multimodal; from boson_multimodal.dataset import cha
 
 WORKDIR /app
 COPY server.py ./
+COPY cloud_run_json_exporter.py ./
 COPY otel_init.py ./
 
 EXPOSE 8080

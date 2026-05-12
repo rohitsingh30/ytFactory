@@ -31,6 +31,14 @@ google-cloud-run>=0.16
 # docs/youtube_stats_refresh.md for the rotation chain.
 google-cloud-secret-manager>=2.20
 
+# google-cloud-logging: pipeline.observability.cloud_log_reader queries
+# Cloud Logging for the dashboard's cross-service ``/api/telemetry/*``
+# read path. Without this pin the dashboard falls back to the in-process
+# shadow buffer (per-instance, per-process — structurally near-empty in
+# production because the web-server is a thin BFF). See
+# docs/telemetry.md §"In-process shadow log buffer".
+google-cloud-logging>=3.10
+
 # Azure OpenAI for the chat backend
 openai>=1.50
 

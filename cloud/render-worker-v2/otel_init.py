@@ -153,9 +153,30 @@ def init(
 
         logger_provider = LoggerProvider(resource=resource)
         # Cloud Run captures structured stdout into Cloud Logging
-        # natively, so the Console log exporter is the right sink.
+        # natively; the platform promotes any line whose JSON contains
+        # a top-level "severity" key into a ``jsonPayload`` entry. The
+        # custom exporter writes one line per record in Cloud-Run-shape
+        # so every ``ytfactory.*`` field is independently queryable
+        # — what the dashboard's cross-service Cloud Logging reader
+        # filters on. (Pre-2026-05-12 we used ConsoleLogRecordExporter
+        # whose Python ``__repr__``-ish output indexed only as
+        # ``textPayload`` and was not queryable.)
+        try:
+            from cloud_run_json_exporter import (
+                CloudRunStructuredJsonLogExporter,
+            )
+            log_exporter = CloudRunStructuredJsonLogExporter(
+                project_id=os.environ.get("GOOGLE_CLOUD_PROJECT"),
+            )
+        except Exception as e:  # noqa: BLE001
+            _logger.warning(
+                "CloudRunStructuredJsonLogExporter unavailable, "
+                "falling back to ConsoleLogRecordExporter (events will "
+                "not be queryable as jsonPayload): %s", e,
+            )
+            log_exporter = ConsoleLogRecordExporter()
         logger_provider.add_log_record_processor(
-            BatchLogRecordProcessor(ConsoleLogRecordExporter()),
+            BatchLogRecordProcessor(log_exporter),
         )
         set_logger_provider(logger_provider)
 
