@@ -36,7 +36,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -240,29 +240,95 @@ def _argv_for_agent(
 # ---------------------------------------------------------------------------
 
 
-def parse_agent_summary(stdout: str) -> dict | None:
-    """Find the trailing ``{"type":"agent_summary",...}`` JSON block
+def parse_agent_summary(stdout: str) -> Optional[dict]:
+    """Find the agent's structured ``agent_summary`` JSON envelope
     in the agent's stdout. Returns None if missing / malformed —
     callers treat that as a failed turn.
 
-    We tolerate the block being inside a fenced code block, so the
-    regex hunts for the literal JSON after stripping ``` markers.
+    **Audit Q2.6** — pre-fix this used a regex with a single level
+    of brace nesting (``[^{}]*(?:\\{[^{}]*\\}[^{}]*)*\\}``) which
+    bailed on a rationale containing a `{` character (a YAML literal
+    pasted into the rationale, a SHA hash with curly chars, etc) and
+    returned None → the runner marked the turn as ``failed``. It
+    also stripped triple-backticks naively, which mangled any
+    rationale that contained one. Now use a string-aware brace
+    counter that walks from each ``{"type": "agent_summary"`` anchor
+    and finds the matching close brace, ignoring braces inside JSON
+    string literals (same scanner shape as Q2.16's _parse_inner_json
+    fix in pipeline/llm/cli.py).
     """
     if not stdout:
         return None
-    cleaned = stdout.replace("```json", "").replace("```", "")
-    matches = list(_SUMMARY_RE.finditer(cleaned))
-    if not matches:
-        return None
-    raw = matches[-1].group(0)
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("agent_summary JSON parse failed: %r", raw[:200])
-        return None
-    if data.get("type") != "agent_summary":
-        return None
-    return data
+    anchor = '"type"'
+    last_obj: Optional[dict] = None
+    pos = 0
+    while True:
+        idx = stdout.find(anchor, pos)
+        if idx == -1:
+            break
+        # Walk back to the opening `{` of the object containing this anchor.
+        open_idx = stdout.rfind("{", 0, idx)
+        if open_idx == -1:
+            pos = idx + len(anchor)
+            continue
+        # Scan forward from open_idx, tracking string state.
+        depth = 0
+        in_str = False
+        escape = False
+        end_idx = -1
+        for j in range(open_idx, len(stdout)):
+            ch = stdout[j]
+            if escape:
+                escape = False
+                continue
+            if in_str:
+                if ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end_idx = j
+                    break
+        if end_idx == -1:
+            pos = idx + len(anchor)
+            continue
+        candidate = stdout[open_idx : end_idx + 1]
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            pos = idx + len(anchor)
+            continue
+        if isinstance(data, dict) and data.get("type") == "agent_summary":
+            last_obj = data  # keep walking — last anchor wins
+        pos = end_idx + 1
+    if last_obj is None:
+        # Fall back to the legacy regex-based path so one-level-nested
+        # rationales authored under the OLD parser still work — no
+        # behavioural regression for the historical happy path.
+        cleaned = stdout.replace("```json", "").replace("```", "")
+        matches = list(_SUMMARY_RE.finditer(cleaned))
+        if not matches:
+            return None
+        raw = matches[-1].group(0)
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("agent_summary JSON parse failed: %r", raw[:200])
+            return None
+        # coverage: legacy regex success-path return; new scanner already handles every shape we author
+        if data.get("type") != "agent_summary":
+            return None
+        # coverage: legacy regex success-path return; same justification
+        return data
+    return last_obj
 
 
 # ---------------------------------------------------------------------------

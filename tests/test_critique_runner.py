@@ -333,6 +333,114 @@ class ParseAgentSummaryTests(unittest.TestCase):
         bad = '{"type":"agent_summary","action":"done",, broken}'
         self.assertIsNone(agent_mod.parse_agent_summary(bad))
 
+    def test_audit_q26_rationale_with_curly_brace_works(self):
+        """Audit Q2.6 — pre-fix the regex bailed on rationale strings
+        containing `{` (YAML literals, JSON snippets, etc) and
+        returned None → runner marked the turn as failed."""
+        s = (
+            'tail noise\n'
+            '{"type":"agent_summary","action":"done","files_changed":[],'
+            '"tests_added":[],"rationale":"matched {placeholder} in template",'
+            '"follow_up_questions":[]}'
+        )
+        d = agent_mod.parse_agent_summary(s)
+        self.assertIsNotNone(d)
+        self.assertEqual(d["action"], "done")
+        self.assertIn("placeholder", d["rationale"])
+
+    def test_audit_q26_rationale_with_triple_backtick_works(self):
+        """Audit Q2.6 — pre-fix the literal ``` strip mangled any
+        rationale containing a triple backtick. Now the new
+        string-aware brace counter walks the JSON without that
+        global text mutation."""
+        s = (
+            '{"type":"agent_summary","action":"done","files_changed":[],'
+            '"tests_added":[],"rationale":"saw ``` in stdout and handled",'
+            '"follow_up_questions":[]}'
+        )
+        d = agent_mod.parse_agent_summary(s)
+        self.assertIsNotNone(d)
+        self.assertIn("```", d["rationale"])
+
+    def test_audit_q26_nested_object_in_summary_works(self):
+        """Two-level nesting in a sub-key — one level was the
+        pre-fix regex limit."""
+        s = (
+            '{"type":"agent_summary","action":"done","files_changed":[],'
+            '"tests_added":[],"rationale":"r","follow_up_questions":[],'
+            '"meta":{"inner":{"deep":1}}}'
+        )
+        d = agent_mod.parse_agent_summary(s)
+        self.assertIsNotNone(d)
+        self.assertEqual(d["meta"]["inner"]["deep"], 1)
+
+    def test_returns_last_summary_when_multiple_present(self):
+        """Last anchor wins so a re-run that prints two summaries
+        picks up the final decision."""
+        s = (
+            '{"type":"agent_summary","action":"failed",'
+            '"files_changed":[],"tests_added":[],"rationale":"first","follow_up_questions":[]}'
+            '\n\n'
+            '{"type":"agent_summary","action":"done",'
+            '"files_changed":[],"tests_added":[],"rationale":"second","follow_up_questions":[]}'
+        )
+        d = agent_mod.parse_agent_summary(s)
+        self.assertEqual(d["action"], "done")
+
+    def test_audit_q26_anchor_with_no_open_brace_skips(self):
+        """If the `"type"` substring appears in stdout BEFORE any
+        opening brace (e.g. inside narrative text), the scanner
+        skips it and keeps looking. The trailing real summary
+        still wins."""
+        s = (
+            'Saw a "type" mention in chatter without any { before it. '
+            'Then the real summary: '
+            '{"type":"agent_summary","action":"done","files_changed":[],'
+            '"tests_added":[],"rationale":"r","follow_up_questions":[]}'
+        )
+        d = agent_mod.parse_agent_summary(s)
+        self.assertEqual(d["action"], "done")
+
+    def test_audit_q26_escape_handling_in_string(self):
+        """Backslash inside the rationale string keeps the in-string
+        state so the next char (e.g. an escaped quote, or a backslash)
+        doesn't terminate the string prematurely."""
+        s = (
+            r'{"type":"agent_summary","action":"done","files_changed":[],'
+            r'"tests_added":[],"rationale":"line one\nline two and a \\ backslash",'
+            r'"follow_up_questions":[]}'
+        )
+        d = agent_mod.parse_agent_summary(s)
+        self.assertIsNotNone(d)
+        self.assertIn("line one", d["rationale"])
+        self.assertIn("backslash", d["rationale"])
+
+    def test_audit_q26_unbalanced_open_brace_after_anchor_skips(self):
+        """If we find a `"type"` anchor but the surrounding object
+        is never closed (truncated stdout), advance past the anchor
+        rather than infinite-looping."""
+        s = '{"type":"agent_summary","action":"done"  # never closed'
+        d = agent_mod.parse_agent_summary(s)
+        self.assertIsNone(d)
+
+    def test_audit_q26_invalid_json_after_anchor_falls_through(self):
+        """Anchor present but JSON broken at first try — the scanner
+        advances past the anchor and the legacy regex fallback kicks
+        in with the real summary."""
+        s = (
+            '{"type":"agent_summary",, broken}\n'
+            '{"type":"agent_summary","action":"done","files_changed":[],'
+            '"tests_added":[],"rationale":"r","follow_up_questions":[]}'
+        )
+        d = agent_mod.parse_agent_summary(s)
+        self.assertEqual(d["action"], "done")
+
+    def test_audit_q26_legacy_fallback_wrong_type_returns_none(self):
+        """Legacy regex matches but type != agent_summary → still None.
+        Pin that the legacy fallback's type guard still fires."""
+        s = '{"type":"something_else","action":"done"}'
+        self.assertIsNone(agent_mod.parse_agent_summary(s))
+
 
 class RunAgentTurnTests(unittest.TestCase):
     """Drive the subprocess pipeline through a tiny fake agent.
