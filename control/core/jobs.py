@@ -197,7 +197,11 @@ def get_job(job_id: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-def _enqueue_render_job(proposal: "ShortProposal") -> ConfirmResponse:  # noqa: F821
+def _enqueue_render_job(
+    proposal: "ShortProposal",  # noqa: F821
+    *,
+    owner_uid: str | None = None,
+) -> ConfirmResponse:
     """Shared path for /api/render AND the round-robin scheduler.
 
     Dispatches based on ``YTFACTORY_RENDER_BACKEND``:
@@ -211,6 +215,12 @@ def _enqueue_render_job(proposal: "ShortProposal") -> ConfirmResponse:  # noqa: 
     - ``laptop`` (DEPRECATED) → same as ``sim`` (queue drop), but the
                      laptop agent is supposed to be the consumer. Kept
                      for one release while the cloud worker proves out.
+
+    Audit S1.7 — when the caller passes ``owner_uid`` (e.g. POST /api/render
+    forwards request.state.user_email), the value is persisted on
+    the Firestore job doc so the read endpoints can fence per-user
+    access. Scheduler-driven jobs (no user) leave it None and remain
+    accessible to admins only.
     """
     # Deferred imports — these modules import jobs.py for ConfirmResponse,
     # so importing them at module load time would be circular.
@@ -238,6 +248,7 @@ def _enqueue_render_job(proposal: "ShortProposal") -> ConfirmResponse:  # noqa: 
         channel=proposal.channel,
         topic=proposal.topic,
         proposal=proposal.model_dump(),
+        owner_uid=owner_uid,
     )
 
     backend = cloud_run.render_backend()

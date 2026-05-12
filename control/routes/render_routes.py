@@ -118,7 +118,53 @@ async def render(
         notes=(req.notes or "").strip(),
         channel_overrides=req.channel_overrides or {},
     )
-    return _enqueue_render_job(proposal)
+    # Audit S1.7 — stamp the requesting user onto the job so the read
+    # endpoints can fence per-user access.
+    owner_uid = getattr(request.state, "user_email", None)
+    return _enqueue_render_job(proposal, owner_uid=owner_uid)
+
+
+def _job_owner_check(request: Request, doc: dict) -> None:
+    """Audit S1.7 — fence /api/jobs/{id}/* read endpoints to the doc's
+    owner. Pre-fix, owner_uid was stored on the doc but never compared
+    against ``request.state.user_email`` → any authenticated user
+    could poll/preview every other user's renders + signed GCS URLs.
+
+    Rules:
+
+    - Admin (request.state.user_is_admin) — sees everything, no check.
+    - Doc has no owner_uid (legacy doc, or scheduler-driven job that
+      doesn't have a single human owner) — admit (back-compat); admins
+      see everything anyway.
+    - Doc has an owner_uid AND the requesting user matches — admit.
+    - Doc has an owner_uid AND the requesting user does NOT match —
+      403. Distinct from 404 so the operator can tell it's a permissions
+      issue, not a missing job.
+
+    Anonymous (no user_email on request.state — typically only the
+    M2M / agent path) is treated as admin-equivalent for now: those
+    paths already gate by Bearer/IAM upstream so the request only
+    reaches us with explicit machine auth. The S1.7 fix is about
+    cross-tenant browser access, not M2M.
+    """
+    if getattr(request.state, "user_is_admin", False):
+        return
+    user = getattr(request.state, "user_email", None)
+    if user is None:
+        # M2M / unauthenticated dev — no user identity to compare
+        # against. Allowed; upstream auth already gated this.
+        return
+    owner = doc.get("owner_uid")
+    if owner is None:
+        # Legacy doc with no owner — admit for back-compat. Once
+        # every in-flight job carries owner_uid we can flip this to
+        # admin-only.
+        return
+    if owner != user:
+        raise HTTPException(
+            status_code=403,
+            detail="forbidden: this job belongs to a different owner",
+        )
 
 
 def _clamp_length(raw: int) -> int:
@@ -221,15 +267,16 @@ def _doc_to_view(job_id: str, doc: dict) -> JobView:
 
 
 @router.get("/api/jobs/{job_id}", response_model=JobView)
-async def get_job(job_id: str) -> JobView:
+async def get_job(job_id: str, request: Request) -> JobView:
     doc = jobs_mod.get_job(job_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="job not found")
+    _job_owner_check(request, doc)  # audit S1.7
     return _doc_to_view(job_id, doc)
 
 
 @router.get("/api/jobs/{job_id}/preview.mp4")
-async def preview_mp4(job_id: str):
+async def preview_mp4(job_id: str, request: Request):
     """Return the rendered (or simulated) mp4.
 
     - sim:// → serve the cached placeholder file from disk.
@@ -239,6 +286,7 @@ async def preview_mp4(job_id: str):
     doc = jobs_mod.get_job(job_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="job not found")
+    _job_owner_check(request, doc)  # audit S1.7
 
     short_uri = doc.get("short_uri")
     local = doc.get("preview_local_path")
@@ -272,7 +320,10 @@ async def preview_mp4(job_id: str):
 
 
 @router.get("/api/jobs/{job_id}/artifact/{kind}")
-async def artifact_redirect(job_id: str, kind: str, index: int | None = None):
+async def artifact_redirect(
+    job_id: str, kind: str, request: Request,
+    index: int | None = None,
+):
     """302-redirect to a 1-hour signed URL for a per-job artifact.
 
     Single endpoint for every artifact kind (script / narration /
@@ -295,6 +346,7 @@ async def artifact_redirect(job_id: str, kind: str, index: int | None = None):
     doc = jobs_mod.get_job(job_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="job not found")
+    _job_owner_check(request, doc)  # audit S1.7
 
     artifacts = doc.get("artifacts") or {}
     entry = artifacts.get(kind)
@@ -354,6 +406,7 @@ class JobsListResponse(BaseModel):
 
 @router.get("/api/jobs", response_model=JobsListResponse)
 async def list_jobs(
+    request: Request,
     channel: str | None = Query(default=None),
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
@@ -364,6 +417,10 @@ async def list_jobs(
     Backend:
     - InMemoryJobs: walks the dict.
     - FirestoreJobs: streams jobs collection.
+
+    Audit S1.7 — non-admin callers see only their OWN jobs (matched
+    on owner_uid). Legacy docs without owner_uid stay visible to
+    everyone for back-compat (admins see them too).
     """
     backend = jobs_mod.get_jobs()
     docs: list[tuple[str, dict]] = []
@@ -388,6 +445,15 @@ async def list_jobs(
         docs = [(j, d) for j, d in docs if d.get("channel") == channel]
     if status:
         docs = [(j, d) for j, d in docs if d.get("status") == status]
+
+    # Audit S1.7 — non-admin sees only their own + ownerless docs.
+    if not getattr(request.state, "user_is_admin", False):
+        user = getattr(request.state, "user_email", None)
+        if user is not None:
+            docs = [
+                (j, d) for j, d in docs
+                if d.get("owner_uid") in (None, user)
+            ]
 
     # Sort newest first by updated_at.
     docs.sort(key=lambda jd: str(jd[1].get("updated_at") or ""), reverse=True)
@@ -420,6 +486,7 @@ class PublishResponse(BaseModel):
 async def publish(
     job_id: str,
     body: PublishRequest,
+    request: Request,
     _pin: None = Depends(require_pin),
 ) -> PublishResponse:
     """Publish a finished render to YouTube.
@@ -432,6 +499,7 @@ async def publish(
     doc = jobs_mod.get_job(job_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="job not found")
+    _job_owner_check(request, doc)  # audit S1.7
     if doc.get("status") != jobs_mod.STATUS_DONE:
         raise HTTPException(
             status_code=409,
@@ -476,11 +544,12 @@ class CancelResponse(BaseModel):
 
 
 @router.post("/api/jobs/{job_id}/cancel", response_model=CancelResponse)
-async def cancel_job(job_id: str) -> CancelResponse:
+async def cancel_job(job_id: str, request: Request) -> CancelResponse:
     """Mark a job cancelled + drain any of its tasks still in the queue."""
     doc = jobs_mod.get_job(job_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="job not found")
+    _job_owner_check(request, doc)  # audit S1.7
 
     cancelled = 0
     q = get_queue()

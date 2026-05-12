@@ -227,5 +227,155 @@ class TestResolveCritiquePathDirect(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestJobOwnerFence(unittest.IsolatedAsyncioTestCase):
+    """Audit S1.7 — /api/jobs/{id}/* read endpoints must compare the
+    requesting user_email against the doc's owner_uid. Pre-fix any
+    authenticated user could poll/preview every other user's renders
+    + signed GCS URLs."""
+
+    def setUp(self) -> None:
+        from control.core import jobs as jobs_mod, rate_limit
+        from control.core.queue import reset_queue
+        reset_queue()
+        jobs_mod.reset_jobs()
+        rate_limit.reset_backend()
+
+    async def _client(self, *, user: str | None, is_admin: bool = False):
+        # Inject an auth middleware that stamps user_email + is_admin
+        # on request.state — matches what web/server.py's real
+        # auth_middleware does in prod.
+        from fastapi import FastAPI, Request
+        from starlette.middleware.base import BaseHTTPMiddleware
+        from control.routes.render_routes import router as render_router
+
+        class _StampUserMW(BaseHTTPMiddleware):
+            async def dispatch(self, request: Request, call_next):
+                if user is not None:
+                    request.state.user_email = user
+                request.state.user_is_admin = is_admin
+                return await call_next(request)
+
+        app = FastAPI()
+        app.include_router(render_router)
+        app.add_middleware(_StampUserMW)
+        transport = httpx.ASGITransport(app=app)
+        return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+    async def test_owner_can_read_own_job(self) -> None:
+        from control.core import jobs as jobs_mod
+        jobs_mod.create_job("j-mine", channel="auto", topic="t",
+                            proposal={}, owner_uid="alice@example.com")
+        async with await self._client(user="alice@example.com") as c:
+            r = await c.get("/api/jobs/j-mine")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["job_id"], "j-mine")
+
+    async def test_non_owner_blocked_with_403(self) -> None:
+        from control.core import jobs as jobs_mod
+        jobs_mod.create_job("j-other", channel="auto", topic="t",
+                            proposal={}, owner_uid="alice@example.com")
+        async with await self._client(user="eve@evil.example") as c:
+            r = await c.get("/api/jobs/j-other")
+        self.assertEqual(r.status_code, 403)
+
+    async def test_admin_sees_other_users_jobs(self) -> None:
+        from control.core import jobs as jobs_mod
+        jobs_mod.create_job("j-someone-else", channel="auto", topic="t",
+                            proposal={}, owner_uid="alice@example.com")
+        async with await self._client(
+            user="admin@docx.co.in", is_admin=True,
+        ) as c:
+            r = await c.get("/api/jobs/j-someone-else")
+        self.assertEqual(r.status_code, 200)
+
+    async def test_legacy_doc_without_owner_admits_any_user(self) -> None:
+        # Back-compat: existing docs without owner_uid stay readable
+        # so we don't break in-flight renders during the rollout.
+        from control.core import jobs as jobs_mod
+        jobs_mod.create_job("j-legacy", channel="auto", topic="t",
+                            proposal={})
+        async with await self._client(user="random@example.com") as c:
+            r = await c.get("/api/jobs/j-legacy")
+        self.assertEqual(r.status_code, 200)
+
+    async def test_list_jobs_filters_to_owner_for_non_admin(self) -> None:
+        from control.core import jobs as jobs_mod
+        jobs_mod.create_job("j-a", channel="auto", topic="ta",
+                            proposal={}, owner_uid="alice@example.com")
+        jobs_mod.create_job("j-b", channel="auto", topic="tb",
+                            proposal={}, owner_uid="bob@example.com")
+        jobs_mod.create_job("j-legacy", channel="auto", topic="tl",
+                            proposal={})  # no owner — visible to all
+        async with await self._client(user="alice@example.com") as c:
+            r = await c.get("/api/jobs")
+        self.assertEqual(r.status_code, 200)
+        ids = {j["job_id"] for j in r.json()["jobs"]}
+        self.assertIn("j-a", ids)
+        self.assertNotIn("j-b", ids)  # bob's hidden
+        self.assertIn("j-legacy", ids)  # ownerless, admitted
+
+    async def test_list_jobs_admin_sees_all(self) -> None:
+        from control.core import jobs as jobs_mod
+        jobs_mod.create_job("j-a", channel="auto", topic="ta",
+                            proposal={}, owner_uid="alice@example.com")
+        jobs_mod.create_job("j-b", channel="auto", topic="tb",
+                            proposal={}, owner_uid="bob@example.com")
+        async with await self._client(
+            user="admin@docx.co.in", is_admin=True,
+        ) as c:
+            r = await c.get("/api/jobs")
+        ids = {j["job_id"] for j in r.json()["jobs"]}
+        self.assertIn("j-a", ids)
+        self.assertIn("j-b", ids)
+
+    async def test_cancel_blocked_for_non_owner(self) -> None:
+        from control.core import jobs as jobs_mod
+        jobs_mod.create_job("j-cancel", channel="auto", topic="t",
+                            proposal={}, owner_uid="alice@example.com")
+        async with await self._client(user="eve@evil.example") as c:
+            r = await c.post("/api/jobs/j-cancel/cancel")
+        self.assertEqual(r.status_code, 403)
+
+    async def test_preview_mp4_blocked_for_non_owner(self) -> None:
+        from control.core import jobs as jobs_mod
+        jobs_mod.create_job("j-preview", channel="auto", topic="t",
+                            proposal={}, owner_uid="alice@example.com")
+        async with await self._client(user="eve@evil.example") as c:
+            r = await c.get("/api/jobs/j-preview/preview.mp4")
+        self.assertEqual(r.status_code, 403)
+
+    async def test_artifact_blocked_for_non_owner(self) -> None:
+        from control.core import jobs as jobs_mod
+        jobs_mod.create_job("j-art", channel="auto", topic="t",
+                            proposal={}, owner_uid="alice@example.com")
+        async with await self._client(user="eve@evil.example") as c:
+            r = await c.get("/api/jobs/j-art/artifact/script")
+        self.assertEqual(r.status_code, 403)
+
+    async def test_publish_blocked_for_non_owner(self) -> None:
+        from control.core import jobs as jobs_mod
+        jobs_mod.create_job("j-pub", channel="auto", topic="t",
+                            proposal={}, owner_uid="alice@example.com")
+        async with await self._client(user="eve@evil.example") as c:
+            r = await c.post(
+                "/api/jobs/j-pub/publish",
+                json={"visibility": "unlisted"},
+            )
+        self.assertEqual(r.status_code, 403)
+
+    async def test_post_render_stamps_owner_uid(self) -> None:
+        from control.core import jobs as jobs_mod
+        async with await self._client(user="alice@example.com") as c:
+            r = await c.post("/api/render", json={
+                "channel": "sportsrecapped",
+                "topic": "test topic",
+                "length_s": 55,
+            })
+        self.assertEqual(r.status_code, 200, r.text)
+        job_id = r.json()["job_id"]
+        doc = jobs_mod.get_job(job_id)
+        self.assertEqual(doc["owner_uid"], "alice@example.com")
+
+
 if __name__ == "__main__":
     unittest.main()
