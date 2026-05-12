@@ -371,7 +371,7 @@ def play_view(
     video_id: str,
     *,
     duration_s: int = 45,
-    headless: bool = False,
+    headless: bool = True,
 ) -> dict[str, Any]:
     """Open the YouTube watch URL in a muted Chromium tab and let it play.
 
@@ -385,8 +385,14 @@ def play_view(
         autoplay even with --autoplay-policy=no-user-gesture-required.
       - Click-based play has to dodge the ambient cookie / sign-in
         banners which differ by region.
-    Using headless=False is more reliable; we default to True for
-    server use and let callers flip it.
+
+    **Audit T1.21 — default is now headless=True.** Pre-fix the default
+    was headless=False even though the docstring (mis-)claimed
+    "we default to True for server use". On Cloud Run / any
+    no-display environment, headless=False fails with
+    ``Missing X server or $DISPLAY`` and burned ~30s before the
+    daemon thread surrendered. Laptop callers that want a visible
+    browser still pass ``headless=False`` explicitly.
     """
     try:
         from playwright.sync_api import sync_playwright

@@ -716,6 +716,43 @@ class PlayViewTest(unittest.TestCase):
                 result = ce_mod.play_view("VID1", duration_s=2)
 
         self.assertIn(result["status"], ("viewed", "error"))
+        # Audit T1.21 — default headless=True so this works on Cloud
+        # Run / any no-display environment without an X server.
+        launch_kwargs = mock_pw_instance.chromium.launch.call_args.kwargs
+        self.assertTrue(
+            launch_kwargs.get("headless"),
+            "play_view must default to headless=True; pre-fix the "
+            "default was False and burned ~30s on no-display envs",
+        )
+
+    def test_explicit_headless_false_honoured(self):
+        # Operator who genuinely wants a visible browser (laptop
+        # debugging) can still pass headless=False.
+        mock_page = MagicMock()
+        mock_page.evaluate = MagicMock(return_value=0.0)
+        mock_context = MagicMock()
+        mock_context.new_page.return_value = mock_page
+        mock_browser = MagicMock()
+        mock_browser.new_context.return_value = mock_context
+        mock_pw_instance = MagicMock()
+        mock_pw_instance.__enter__ = MagicMock(return_value=mock_pw_instance)
+        mock_pw_instance.__exit__ = MagicMock(return_value=False)
+        mock_pw_instance.chromium.launch.return_value = mock_browser
+        mock_sync_playwright = MagicMock(return_value=mock_pw_instance)
+
+        fake_pw_module = types.ModuleType("playwright.sync_api")
+        fake_pw_module.sync_playwright = mock_sync_playwright
+        fake_pw_parent = types.ModuleType("playwright")
+
+        with patch.dict("sys.modules", {
+            "playwright": fake_pw_parent,
+            "playwright.sync_api": fake_pw_module,
+        }):
+            with patch("time.sleep"):
+                ce_mod.play_view("VID1", duration_s=1, headless=False)
+
+        launch_kwargs = mock_pw_instance.chromium.launch.call_args.kwargs
+        self.assertFalse(launch_kwargs.get("headless"))
 
     def test_playwright_exception_returns_error(self):
         mock_pw_instance = MagicMock()
