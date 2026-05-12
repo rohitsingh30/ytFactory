@@ -321,24 +321,46 @@ class TestLockstepWithCloudShared(unittest.TestCase):
             self.assertIn(fn, copy, f"{fn} missing from cloud/_shared copy")
 
     def test_severity_map_identical(self) -> None:
-        # The map is the only fully data-driven contract — pin it
-        # exactly to avoid a copy drifting.
+        # Audit Q2.62 — pre-fix this only asserted the SUBSTRINGS
+        # ``"DEBUG"`` and ``"EMERGENCY"`` appear in the dict literal.
+        # Numeric→string mapping drift (DEBUG → "INFO" by mistake)
+        # was undetectable. Now compare the actual parsed dicts of
+        # the two _SEVERITY_MAP literals using ast.literal_eval, so
+        # any drift in keys, values, or shape between the canonical
+        # copy and the cloud/_shared copy fails the test.
+        import ast
         from pathlib import Path
         import re
         repo = Path(__file__).resolve().parent.parent
-        for path in (
-            repo / "pipeline" / "observability" / "cloud_run_json_exporter.py",
-            repo / "cloud" / "_shared" / "cloud_run_json_exporter.py",
-        ):
-            text = self._read_helper(path)
-            # Extract the literal _SEVERITY_MAP block.
+        canonical_path = repo / "pipeline" / "observability" / "cloud_run_json_exporter.py"
+        copy_path = repo / "cloud" / "_shared" / "cloud_run_json_exporter.py"
+
+        def _extract_map(p: Path) -> dict:
+            text = self._read_helper(p)
             match = re.search(
-                r"_SEVERITY_MAP:.*?\n\}",
+                r"_SEVERITY_MAP[^=]*=\s*(\{.*?\n\})",
                 text, flags=re.DOTALL,
             )
-            self.assertIsNotNone(match, f"map not found in {path}")
-            self.assertIn('"DEBUG"', match.group(0))
-            self.assertIn('"EMERGENCY"', match.group(0))
+            self.assertIsNotNone(match, f"map not found in {p}")
+            return ast.literal_eval(match.group(1))
+
+        canonical_map = _extract_map(canonical_path)
+        copy_map = _extract_map(copy_path)
+        for required_value in ("DEBUG", "EMERGENCY"):
+            with self.subTest(value=required_value):
+                self.assertIn(
+                    required_value, set(canonical_map.values()),
+                    f"{required_value} not a value in canonical map: {canonical_map}",
+                )
+                self.assertIn(
+                    required_value, set(copy_map.values()),
+                    f"{required_value} not a value in copy map: {copy_map}",
+                )
+        self.assertEqual(
+            canonical_map, copy_map,
+            "Severity map drift between canonical pipeline/observability/ "
+            "and cloud/_shared/ — re-run cloud/_shared/sync.sh to re-mirror.",
+        )
 
     def test_every_per_service_copy_loads_and_renders_correctly(self) -> None:
         """Import every copy via importlib (each in its own namespace)

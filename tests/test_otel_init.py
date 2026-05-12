@@ -116,6 +116,43 @@ class TestOtelInitLockstep(unittest.TestCase):
                 # leaks past the wrapper.
                 mod.init(f"smoke-{path.parent.name}")
 
+    def test_audit_q263_cloud_run_json_exporter_imports_cleanly(self) -> None:
+        """Audit Q2.63 — pre-fix `test_init_off_cloud_run_does_not_raise`
+        wrapped `init()` whose body itself swallows all exceptions.
+        That test passed even if ``import cloud_run_json_exporter``
+        failed silently inside ``init()`` — exactly the regression
+        the lockstep was supposed to catch. Now ALSO directly import
+        the sibling JSON exporter from the same dir as each
+        otel_init.py copy so a missing / rotted helper fails loudly.
+        """
+        for init_path in _every_otel_init_path():
+            with self.subTest(init_path=str(init_path)):
+                exporter_path = init_path.parent / "cloud_run_json_exporter.py"
+                self.assertTrue(
+                    exporter_path.exists(),
+                    f"cloud_run_json_exporter.py missing next to {init_path}; "
+                    f"the otel_init.py boot helper imports it via relative "
+                    f"name and would silently fall back to ConsoleLogRecordExporter "
+                    f"(which Cloud Logging treats as textPayload, breaking "
+                    f"jsonPayload-based filters in the dashboard).",
+                )
+                spec = importlib.util.spec_from_file_location(
+                    f"_jsonexp_strict_{init_path.parent.name}",
+                    str(exporter_path),
+                )
+                self.assertIsNotNone(spec)
+                mod = importlib.util.module_from_spec(spec)
+                # If this raises, the test FAILS — the silent
+                # try/except inside otel_init.init() can't hide it
+                # because we're invoking the exporter loader directly.
+                spec.loader.exec_module(mod)
+                # Smoke-check the public surface the otel_init expects.
+                self.assertTrue(
+                    hasattr(mod, "CloudRunJSONLogExporter")
+                    or hasattr(mod, "render_log_record"),
+                    f"{exporter_path} is missing both expected symbols",
+                )
+
     def test_attach_traceparent_no_env_is_noop(self) -> None:
         os.environ.pop("YTFACTORY_TRACEPARENT", None)
         for path in _every_otel_init_path():

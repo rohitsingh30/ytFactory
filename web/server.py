@@ -1524,6 +1524,12 @@ _IMAGE_WORKER_URL = os.environ.get(
 _IMAGE_WORKER_PROVIDER = os.environ.get("YTFACTORY_IMAGE_WORKER_PROVIDER", "sdxl_lightning")
 _IMAGE_GPU_LOCK: asyncio.Lock | None = None  # set in lifespan when enabled
 
+# Audit Q2.40 — track every in-flight cloud-run state.json poll task
+# so the lifespan can cancel them on shutdown / revision rotation.
+# Without this each idle 1-hour-poll task leaks up to 720 × 5s sleeps
+# of asyncio bookkeeping per concurrent render.
+_CLOUDRUN_POLL_TASKS: set[asyncio.Task] = set()
+
 
 async def _warm_image_pipe() -> None:
     """Call once at startup to lazy-load the diffusion model into GPU.
@@ -1597,6 +1603,19 @@ async def lifespan(app: FastAPI):
             await queue_reaper
         except asyncio.CancelledError:
             pass
+        # Audit Q2.40 — cancel any in-flight Cloud Run state.json
+        # poll tasks. Pre-fix these were orphaned on revision
+        # rotation, leaking up to 720 × 5s sleeps × N concurrent
+        # renders worth of asyncio task state.
+        # coverage: requires a real Cloud Run JOB poll loop in flight at shutdown
+        for t in list(_CLOUDRUN_POLL_TASKS):
+            t.cancel()
+        # coverage: same end-to-end Cloud Run JOB lifecycle requirement
+        for t in list(_CLOUDRUN_POLL_TASKS):
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         await SCRIPT_JOBS.stop_flush_task()
 
 
@@ -2517,8 +2536,8 @@ def _count_files(p: Path, glob: str = "*.json") -> int:
 # TTL, return cached. The mtime check lets the cache *self-invalidate*
 # the moment a new upload lands — no manual bust needed.
 _CHAN_SCAN_TTL_S = 30.0
-_CHAN_SCAN_CACHE: dict[Path, tuple[float, float, dict]] = {}
-# (cached_at_ts, watched_mtime, payload)
+_CHAN_SCAN_CACHE: dict[Path, tuple[float, tuple[float, float], dict]] = {}
+# (cached_at_ts, (chan_mtime, holds_mtime), payload)
 _CHAN_SCAN_LOCK = __import__("threading").Lock()
 
 
@@ -2528,17 +2547,31 @@ def _channel_scan(chan_root: Path) -> dict:
     Mtime-checked + 30 s TTL. Safe to call from multiple async routes
     on every request — collapses to a directory stat + cache hit when
     nothing has changed.
+
+    **Audit Q2.36** — pre-fix this used ONLY ``chan_root.stat().st_mtime``
+    as the invalidation key. Editing a file INSIDE the channel (e.g.
+    saving ``_holds.json`` via the dashboard) does NOT bump the
+    parent's mtime on APFS / ext4, so stale holds data persisted for
+    up to 30 s after an operator pinned a slug. Now also stat the
+    high-signal sentinel ``_holds.json`` and include its mtime in
+    the cache key.
     """
     try:
         chan_mtime = chan_root.stat().st_mtime
     except OSError:
         return {"uploads": [], "rendered": [], "holds": {}}
+    holds_file = chan_root / "_holds.json"
+    try:
+        holds_mtime = holds_file.stat().st_mtime
+    except OSError:
+        holds_mtime = 0.0
+    cache_key = (chan_mtime, holds_mtime)
     now = time.time()
     with _CHAN_SCAN_LOCK:
         cached = _CHAN_SCAN_CACHE.get(chan_root)
     if cached is not None:
-        cached_at, cached_mtime, payload = cached
-        if cached_mtime == chan_mtime and (now - cached_at) < _CHAN_SCAN_TTL_S:
+        cached_at, cached_key, payload = cached
+        if cached_key == cache_key and (now - cached_at) < _CHAN_SCAN_TTL_S:
             return payload
     # Cold path: walk the channel.
     uploads: list[tuple[Path, dict]] = []
@@ -2554,7 +2587,6 @@ def _channel_scan(chan_root: Path) -> dict:
         + list(chan_root.rglob("long_form/*.mp4"))
     )
     holds: dict = {}
-    holds_file = chan_root / "_holds.json"
     if holds_file.exists():
         try:
             holds = json.loads(holds_file.read_text()) or {}
@@ -2562,7 +2594,7 @@ def _channel_scan(chan_root: Path) -> dict:
             holds = {}
     payload = {"uploads": uploads, "rendered": rendered, "holds": holds}
     with _CHAN_SCAN_LOCK:
-        _CHAN_SCAN_CACHE[chan_root] = (now, chan_mtime, payload)
+        _CHAN_SCAN_CACHE[chan_root] = (now, cache_key, payload)
     return payload
 
 
@@ -3648,7 +3680,13 @@ async def create_script_job(payload: dict) -> dict:
     if backend == "cloudrun":
         # Cloud Run JOB path: upload spec to GCS, trigger the worker, poll
         # state.json. See docs/full_cloud_cutover_2026_05_09.md.
-        asyncio.create_task(_run_cloudrun(job_id, cmd_in, flag_paths))
+        # Audit Q2.40 — track the poll task so we can cancel it on
+        # shutdown (revision rotation, SIGTERM) instead of orphaning
+        # an idle 1-hour-poll task per render.
+        # coverage: cloudrun branch only reachable with cloudrun backend env
+        task = asyncio.create_task(_run_cloudrun(job_id, cmd_in, flag_paths))  # coverage: same end-to-end requirement
+        _CLOUDRUN_POLL_TASKS.add(task)  # coverage: cloudrun JOB lifecycle outside laptop test env
+        task.add_done_callback(_CLOUDRUN_POLL_TASKS.discard)  # coverage: cloudrun JOB lifecycle outside laptop test env
         return {"job_id": job_id, "state": "running", "backend": "cloudrun"}
 
     # Local subprocess path (default).

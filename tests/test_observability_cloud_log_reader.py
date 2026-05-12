@@ -201,6 +201,50 @@ class TestCloudLoggingEventReader(unittest.TestCase):
         self.assertRegex(filter_, r'timestamp >= "[0-9TZ:\-]+"')
         self.assertEqual(kwargs["order_by"], "timestamp desc")
 
+    def test_audit_q264_filter_string_is_valid_lql(self) -> None:
+        """Audit Q2.64 — pre-fix this only asserted SUBSTRINGS appeared
+        in the filter string. Quote-escaping bugs around
+        ``jsonPayload."ytfactory.event"`` would 400 in prod (Cloud
+        Logging Filter Language is strict about quote balance) and
+        the test would still pass.
+
+        Pin the filter string is parseable by checking quote balance
+        and the AND/OR operator structure — if a refactor breaks
+        quote escaping, this fails before the prod 400 surfaces.
+        """
+        reader, client = self._make_reader([])
+        reader.read(since_ts=1700000000.0)
+        kwargs = client.list_entries.call_args.kwargs
+        filter_ = kwargs["filter_"]
+        # 1. Double-quote balance — every `"` must close.
+        n_dquote = filter_.count('"')
+        self.assertEqual(
+            n_dquote % 2, 0,
+            f"unbalanced double-quotes ({n_dquote}) in filter: {filter_!r}",
+        )
+        # 2. Parens balance.
+        self.assertEqual(
+            filter_.count("("), filter_.count(")"),
+            f"unbalanced parens in filter: {filter_!r}",
+        )
+        # 3. The jsonPayload field name MUST be quoted (the dot in
+        # ``ytfactory.event`` is a path separator in LQL — without
+        # quotes Cloud Logging interprets it as nested attr access
+        # which 400s).
+        self.assertRegex(
+            filter_,
+            r'jsonPayload\."[^"]+"',
+            f"unquoted jsonPayload field in filter: {filter_!r}",
+        )
+        # 4. The two resource.type clauses must be OR-ed (not AND-ed —
+        # AND would only match logs that are simultaneously a service
+        # AND a job, which is impossible).
+        self.assertRegex(
+            filter_,
+            r'resource\.type="cloud_run_revision".*OR.*resource\.type="cloud_run_job"',
+            f"resource.type clauses must be OR'd in filter: {filter_!r}",
+        )
+
     def test_drops_entries_older_than_since_ts(self) -> None:
         old = _entry(
             {"ytfactory.event": "old"},
