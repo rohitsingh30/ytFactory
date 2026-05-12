@@ -122,3 +122,4 @@ docs/screenshots/
 # Coverage runtime
 .coverage
 .coverage.*
+.coverage_gate.*
