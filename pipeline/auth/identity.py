@@ -328,14 +328,82 @@ def _doc_ref(email: str):
     return db.collection(_FIRESTORE_COLLECTION).document(email.lower())
 
 
+# ---------------------------------------------------------------------------
+# Audit Q2.34 — get_user TTL cache.
+#
+# Pre-fix the auth middleware called ``get_user(email)`` on every
+# authenticated request, which hit Firestore once per request. Polled
+# dashboards (chat, jobs, telemetry) hit ~6 reads/sec/tab; a few open
+# tabs alone burned through the per-replica Firestore quota and
+# inflated the GCP bill. Now cache per email with a tiny TTL (default
+# 60 s). The trade-off: a freshly-promoted user has to wait up to TTL
+# seconds for their session to see the new status. That's fine — admin
+# promotion via /api/admin/users immediately calls invalidate_user_cache
+# below to bust the entry, and the user re-loads after seeing the
+# email arrive.
+#
+# Override the TTL via YTFACTORY_USER_CACHE_TTL_S=0 to disable.
+# ---------------------------------------------------------------------------
+
+import time as _time
+import threading as _threading
+
+_USER_CACHE: dict[str, tuple[float, Optional[dict]]] = {}
+_USER_CACHE_LOCK = _threading.Lock()
+_USER_CACHE_TTL_DEFAULT_S = 60.0
+
+
+def _user_cache_ttl_s() -> float:
+    raw = os.environ.get("YTFACTORY_USER_CACHE_TTL_S", "").strip()
+    if not raw:
+        return _USER_CACHE_TTL_DEFAULT_S
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _USER_CACHE_TTL_DEFAULT_S
+
+
+def invalidate_user_cache(email: Optional[str] = None) -> None:
+    """Bust the get_user cache for ``email`` (or all entries when None).
+
+    Call this from any code that mutates a user doc (admin
+    approve/deny, status change) so the cached value doesn't shadow
+    the change for up to TTL seconds.
+    """
+    with _USER_CACHE_LOCK:
+        if email is None:
+            _USER_CACHE.clear()
+        else:
+            _USER_CACHE.pop(email.lower(), None)
+
+
 def get_user(email: str) -> Optional[dict]:
-    """Return user doc as dict, or None if not registered."""
+    """Return user doc as dict, or None if not registered.
+
+    Audit Q2.34 — cached for ``YTFACTORY_USER_CACHE_TTL_S`` seconds
+    (default 60). Mutators must call ``invalidate_user_cache(email)``.
+    """
+    key = email.lower()
+    ttl = _user_cache_ttl_s()
+    if ttl > 0:
+        now = _time.time()
+        with _USER_CACHE_LOCK:
+            cached = _USER_CACHE.get(key)
+        if cached is not None:
+            cached_at, value = cached
+            if (now - cached_at) <= ttl:
+                return value
     snap = _doc_ref(email).get()
     if not snap.exists:
-        return None
-    data = snap.to_dict() or {}
-    data["email"] = email.lower()
-    return data
+        result: Optional[dict] = None
+    else:
+        data = snap.to_dict() or {}
+        data["email"] = key
+        result = data
+    if ttl > 0:
+        with _USER_CACHE_LOCK:
+            _USER_CACHE[key] = (_time.time(), result)
+    return result
 
 
 def upsert_user(
@@ -364,6 +432,9 @@ def upsert_user(
             update["picture"] = picture
         if update:  # pragma: no branch
             ref.update(update)
+            # Audit Q2.34 — bust the cache so the next get_user
+            # picks up the backfilled name / picture / last_seen_at.
+            invalidate_user_cache(email)
         existing.update(update)
         existing["email"] = email
         return existing
@@ -393,6 +464,8 @@ def upsert_user(
         "last_seen_at": now_iso,
     }
     ref.set(doc)
+    # Audit Q2.34 — bust the get_user cache on first sign-in too.
+    invalidate_user_cache(email)
     return doc
 
 
@@ -422,6 +495,9 @@ def _set_status(email: str, status: str, *, by: str) -> dict:
     out = snap.to_dict() or {}
     out.update(update)
     out["email"] = email.lower()
+    # Audit Q2.34 — bust the get_user cache so the change is
+    # visible to subsequent auth-middleware lookups immediately.
+    invalidate_user_cache(email)
     return out
 
 

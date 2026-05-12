@@ -41,6 +41,7 @@ import os
 import re
 import secrets
 import signal
+import threading as _threading
 import time
 
 # Load .env on startup so CLOUDRUN_*_URL, GOOGLE_CLOUD_PROJECT, OAuth
@@ -2740,12 +2741,33 @@ def _dashboard_state_bucket() -> str | None:
     return os.environ.get("YTFACTORY_STATE_BUCKET") or None
 
 
+_DASHBOARD_GCS_CLIENT = None
+_DASHBOARD_GCS_CLIENT_PROJECT: str | None = None
+_DASHBOARD_GCS_CLIENT_LOCK = _threading.Lock()
+
+
 def _dashboard_gcs_client():
-    """Lazy google-cloud-storage client for the cloud dashboard reads."""
-    from google.cloud import storage  # noqa: PLC0415
-    return storage.Client(
-        project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
-    )
+    """Process-cached google-cloud-storage client for the cloud dashboard.
+
+    **Audit Q2.35** — pre-fix this constructed a fresh ``storage.Client()``
+    on every dashboard read. Each Client builds an auth-refresh thread
+    + connection pool internally; under polled-dashboard load (every
+    5-10 s per tab × multiple tabs × 4-6 endpoints/tab) that meant
+    constant connection-pool churn and a steady-state of ~30 idle auth
+    threads in the web service. Now memoised at module scope, keyed
+    by project so a multi-project dev env still works.
+    """
+    global _DASHBOARD_GCS_CLIENT, _DASHBOARD_GCS_CLIENT_PROJECT
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+    with _DASHBOARD_GCS_CLIENT_LOCK:
+        if (
+            _DASHBOARD_GCS_CLIENT is None
+            or _DASHBOARD_GCS_CLIENT_PROJECT != project
+        ):
+            from google.cloud import storage  # noqa: PLC0415
+            _DASHBOARD_GCS_CLIENT = storage.Client(project=project)
+            _DASHBOARD_GCS_CLIENT_PROJECT = project
+        return _DASHBOARD_GCS_CLIENT
 
 
 def _iter_channel_slugs() -> list[str]:

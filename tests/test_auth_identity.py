@@ -473,6 +473,12 @@ def _make_db():
 
 
 class TestGetUser(unittest.TestCase):
+    def setUp(self):
+        # Audit Q2.34 — bust the get_user cache between tests so each
+        # test sees fresh Firestore reads.
+        from pipeline.auth import identity
+        identity.invalidate_user_cache()
+
     def test_user_found(self):
         from pipeline.auth import identity
         db, col, ref, snap = _make_db()
@@ -494,6 +500,91 @@ class TestGetUser(unittest.TestCase):
             result = identity.get_user("nobody@example.com")
 
         self.assertIsNone(result)
+
+
+class TestGetUserTtlCache(unittest.TestCase):
+    """Audit Q2.34 — pre-fix every authenticated request hit Firestore.
+    Now ``get_user`` is TTL-cached per email; mutators call
+    ``invalidate_user_cache(email)`` to bust the entry on demand.
+    """
+
+    def setUp(self):
+        from pipeline.auth import identity
+        identity.invalidate_user_cache()
+
+    def test_second_lookup_within_ttl_uses_cache(self):
+        from pipeline.auth import identity
+        db, col, ref, snap = _make_db()
+        snap.exists = True
+        snap.to_dict.return_value = {"status": "approved"}
+
+        with patch.object(identity, "_firestore", return_value=db) as m_fs:
+            identity.get_user("a@x.com")
+            identity.get_user("a@x.com")
+            identity.get_user("a@x.com")
+        # Three calls, but only one Firestore client construction.
+        self.assertEqual(m_fs.call_count, 1)
+
+    def test_invalidate_user_cache_busts_one_entry(self):
+        from pipeline.auth import identity
+        db, col, ref, snap = _make_db()
+        snap.exists = True
+        snap.to_dict.return_value = {"status": "approved"}
+
+        with patch.object(identity, "_firestore", return_value=db) as m_fs:
+            identity.get_user("a@x.com")
+            identity.invalidate_user_cache("a@x.com")
+            identity.get_user("a@x.com")
+        # Two Firestore client constructions because the cache was busted.
+        self.assertEqual(m_fs.call_count, 2)
+
+    def test_invalidate_user_cache_clear_all_busts_every_entry(self):
+        from pipeline.auth import identity
+        db, col, ref, snap = _make_db()
+        snap.exists = True
+        snap.to_dict.return_value = {"status": "approved"}
+
+        with patch.object(identity, "_firestore", return_value=db) as m_fs:
+            identity.get_user("a@x.com")
+            identity.get_user("b@x.com")
+            identity.invalidate_user_cache()  # no email → clear all
+            identity.get_user("a@x.com")
+        # 2 from initial fills + 1 after clear = 3 Firestore reads.
+        self.assertEqual(m_fs.call_count, 3)
+
+    def test_ttl_zero_disables_cache(self):
+        from pipeline.auth import identity
+        db, col, ref, snap = _make_db()
+        snap.exists = True
+        snap.to_dict.return_value = {"status": "approved"}
+
+        with patch.object(identity, "_firestore", return_value=db) as m_fs, \
+             patch.dict(os.environ, {"YTFACTORY_USER_CACHE_TTL_S": "0"}):
+            identity.get_user("a@x.com")
+            identity.get_user("a@x.com")
+        # TTL 0 disables caching → both lookups hit Firestore.
+        self.assertEqual(m_fs.call_count, 2)
+
+    def test_invalid_ttl_env_falls_back_to_default(self):
+        from pipeline.auth import identity
+        with patch.dict(os.environ, {"YTFACTORY_USER_CACHE_TTL_S": "not-a-number"}):
+            self.assertEqual(identity._user_cache_ttl_s(),
+                             identity._USER_CACHE_TTL_DEFAULT_S)
+
+    def test_set_status_invalidates_cache(self):
+        from pipeline.auth import identity
+        db, col, ref, snap = _make_db()
+        snap.exists = True
+        snap.to_dict.return_value = {"status": "pending"}
+
+        with patch.object(identity, "_firestore", return_value=db):
+            identity.get_user("a@x.com")
+            # _set_status must bust the cache; verify by calling get_user
+            # again and confirming a fresh Firestore read happened.
+            identity._set_status("a@x.com", identity.USER_STATUS_APPROVED, by="op")
+        # The cache should now be empty for this email.
+        with identity._USER_CACHE_LOCK:
+            self.assertNotIn("a@x.com", identity._USER_CACHE)
 
 
 class TestUpsertUser(unittest.TestCase):
