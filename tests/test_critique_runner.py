@@ -554,6 +554,51 @@ class RunAgentTurnTests(unittest.TestCase):
                       "watchdog kill must annotate stderr_tail with cause")
         self.assertIn("killed after 2s", result.stderr_tail)
 
+    def test_audit_q27_stderr_drained_in_parallel_does_not_deadlock(self):
+        """Audit Q2.7 — pre-fix stderr was only read AFTER proc.wait().
+        The OS pipe buffer is 64 KB; once filled, the agent's next
+        write() to stderr blocks → its stdout writes also stall →
+        watchdog has to rescue and the agent's 30-min budget is
+        wasted. Now stderr is drained concurrently in a daemon
+        thread.
+
+        Reproducer: have the fake agent emit ~128 KB of stderr (2x
+        pipe buffer) BEFORE its agent_summary on stdout. Pre-fix
+        this would hang until the watchdog killed it; post-fix it
+        completes promptly because stderr drains concurrently.
+        """
+        # ~128 KB of stderr noise + a clean done summary on stdout.
+        snippet = (
+            "import sys, json\n"
+            "sys.stderr.write('A' * (128 * 1024))\n"
+            "sys.stderr.flush()\n"
+            "print(json.dumps({"
+            "'type':'agent_summary','action':'done',"
+            "'files_changed':[],'tests_added':[],'rationale':'r',"
+            "'follow_up_questions':[]}))\n"
+        )
+        argv = [sys.executable, "-c", snippet]
+        t0 = time.time()
+        with mock.patch.object(agent_mod, "_argv_for_agent", return_value=argv):
+            result = agent_mod.run_agent_turn(
+                agent_mod.AGENT_CLAUDE, "PROMPT",
+                repo_root=Path.cwd(), timeout_s=10,
+            )
+        elapsed = time.time() - t0
+        # Must complete WELL under timeout — no deadlock. Pre-fix
+        # this would hit timeout_s (10 s) and watchdog-kill.
+        self.assertLess(
+            elapsed, 5,
+            f"stderr drain race → run took {elapsed:.1f}s, "
+            f"likely deadlocked on full pipe buffer",
+        )
+        self.assertEqual(result.action, "done")
+        # Stderr was captured + completed without deadlock (the
+        # truncated stderr_tail is at most 2000 chars by design;
+        # the no-deadlock proof IS the elapsed-time assertion above).
+        self.assertGreater(len(result.stderr_tail), 0,
+                           "stderr drain captured nothing")
+
 
 # ---------------------------------------------------------------------------
 # Tests for runner.py — claim, gate failure loop, happy push

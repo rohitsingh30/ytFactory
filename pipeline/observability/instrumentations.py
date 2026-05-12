@@ -58,7 +58,16 @@ def instrument_fastapi(app: Any) -> None:
 
 
 def instrument_outbound_http() -> None:
-    """Patch requests / httpx / aiohttp client modules globally."""
+    """Patch requests / httpx / aiohttp / urllib client modules globally.
+
+    **Audit Q2.68** — pre-fix this only patched requests / httpx /
+    aiohttp. ``pipeline/tts/cloudrun.py`` uses ``urllib.request.urlopen``
+    directly (per Q2.69 reconciliation, urllib is the right choice
+    for the simple POST→JSON shape there); without an instrumentor
+    every TTS Cloud Run call broke the trace-propagation chain.
+    Now also patch ``urllib`` via OTel's
+    ``URLLibInstrumentor``.
+    """
     if _STATE["outbound"]:
         return
     init()
@@ -79,6 +88,12 @@ def instrument_outbound_http() -> None:
         AioHttpClientInstrumentor().instrument()
     except Exception as e:  # noqa: BLE001
         _logger.warning("aiohttp instrumentation failed: %s", e)
+    # Audit Q2.68 — urllib instrumentor for pipeline/tts/cloudrun.py.
+    try:
+        from opentelemetry.instrumentation.urllib import URLLibInstrumentor
+        URLLibInstrumentor().instrument()  # coverage: requires opentelemetry-instrumentation-urllib package which the laptop test env doesn't ship
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("urllib instrumentation failed: %s", e)
     _STATE["outbound"] = True
 
 

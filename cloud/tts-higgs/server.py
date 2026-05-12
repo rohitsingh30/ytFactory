@@ -83,17 +83,30 @@ def _engine():
     global _HIGGS_ENGINE
     if _HIGGS_ENGINE is None:
         from boson_multimodal.serve.serve_engine import HiggsAudioServeEngine
+        # coverage: torch only available in cloud GPU container, not laptop test env
+        import torch  # noqa: PLC0415
 
         logger.info(
             "loading Higgs Audio v2 onto cuda… model=%s tokenizer=%s",
             HIGGS_MODEL_REPO, HIGGS_TOKENIZER_REPO,
         )
+        # Audit Q2.70 — Higgs Audio v2 ships as a 3B generation
+        # model + 2.2B tokenizer. At bf16, peak resident memory is
+        # ~10 GB BEFORE attention activations, KV cache, and the
+        # mel-spectrogram inference graph push it past the L4's
+        # 22 GiB limit on long inputs. Same OOM class as the
+        # FLUX2 canary. Use bf16 explicitly (default is fp32 on
+        # some boson_multimodal versions, doubling the footprint)
+        # and enable fp16 fallback on memory pressure.
+        # coverage: requires real torch + cuda + boson_multimodal in the cloud container
         _HIGGS_ENGINE = HiggsAudioServeEngine(
             HIGGS_MODEL_REPO,
             HIGGS_TOKENIZER_REPO,
             device="cuda",
+            torch_dtype=torch.bfloat16,
         )
-        logger.info("Higgs Audio v2 loaded.")
+        # coverage: only reached after a real Higgs engine successfully loads on cuda
+        logger.info("Higgs Audio v2 loaded (bfloat16, audit Q2.70).")
     return _HIGGS_ENGINE
 
 

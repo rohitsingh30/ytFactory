@@ -47,9 +47,15 @@ class RouteCharacterDescriptionTest(unittest.TestCase):
         )
         self.assertEqual((desc, name), ("Ryan desc", "Ryan"))
 
+    @unittest.expectedFailure
     def test_witness_beat_keeps_narrator_even_when_name_matches(self):
-        if not hasattr(cr, "_is_witness_beat"):
-            self.skipTest("witness-beat guard not present in this source version")
+        # Audit Q2.58 — pre-fix this self.skipTest'd when the helper
+        # was missing, marking the test SKIPPED (green) rather than
+        # surfacing the gap. ``_is_witness_beat`` does NOT exist in
+        # the current cast_router source; @expectedFailure surfaces
+        # the gap as an XFAIL line in test output (visible) instead
+        # of a SKIP (invisible).
+        self.assertTrue(hasattr(cr, "_is_witness_beat"))
         desc, name = cr.route_character_description(
             beat_text="Then Ryan walks in", scene="Ryan at the doorway", key_visual="", narrator_desc="narrator", supporting_full=self.supporting
         )

@@ -264,11 +264,20 @@ def _post_synth(payload: dict) -> dict:
         not a fall-back-to-local situation).
 
     The implementation uses ``urllib.request.urlopen`` directly. Each
-    call opens a fresh socket, which sidesteps the stale-TCP issue we
-    saw with reused ``requests.Session()`` connections during Cloud
-    Run cold-load (memory/feedback_urllib_cloudrun_stale_tcp.md). The
-    important property is "fresh socket per attempt" — which urllib
-    gives us by default — combined with a wall-clock timeout.
+    call opens a fresh socket. Audit Q2.69 — pre-fix this docstring
+    and the docstring in ``pipeline/images/images_cloudrun.py`` told
+    OPPOSITE stories about urllib vs requests stale-TCP behaviour.
+    The actual fact is: BOTH urllib (per-call ``urlopen``) and
+    requests (per-call ``requests.Session()``) avoid the stale-TCP
+    bug by NOT reusing connections — the bug only ever bit
+    long-lived ``Session`` reuse. The choice between the two is
+    about API ergonomics (urllib = stdlib, no extra dep; requests
+    = nicer streaming API), NOT about stale TCP.
+
+    The 2026-05-07 canary that surfaced the bug used a long-lived
+    ``Session()`` shared across calls; switching either to per-call
+    sockets (urllib here, fresh Session in images) fixed it. See
+    ``memory/feedback_urllib_cloudrun_stale_tcp.md``.
     """
     import urllib.error  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415

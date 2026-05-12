@@ -19,11 +19,25 @@ Lifecycle of one critique doc:
   │ 6. After max_failed_turns or status flip: release the doc.   │
   └──────────────────────────────────────────────────────────────┘
 
-Single-laptop design (Phase 1). Multi-runner safety would need:
-  - Watchdog reaper that resets in_progress + claimed_at older than
-    30 min back to queued.
-  - claim_transaction is already correct under contention (Firestore
-    transactions are linearisable on the doc).
+Single-laptop design (Phase 1) — multi-runner safety needs more:
+
+  * **Stuck-claim reaper** — there is NO background watchdog yet
+    that resets in_progress + claimed_at older than 30 min back
+    to queued. Instead, ``process_one_critique`` polls per-doc
+    abandonment via ``config.abandoned_after_no_user_msg_s``
+    (audit Q2.2) and releases its OWN claim. A runner that
+    crashes mid-claim still leaves the doc parked until manual
+    intervention.
+  * ``claim_transaction`` is already correct under contention
+    (Firestore transactions are linearisable on the doc).
+
+The 2026-05-12 commit (audit Q2.2 / Q2.4) added in-process
+abandonment + stop_event handling but did NOT add the cross-
+runner reaper. That remains a future-work item for Phase 2
+(multi-runner). Operators today work around it by SIGTERM'ing
+the process and letting launchd restart, which clears the
+runner's own claims via process_one_critique's stop_event
+branch.
 
 Public entry point is :func:`run_forever`; all helpers underneath it
 are exposed so tests can exercise each layer in isolation.

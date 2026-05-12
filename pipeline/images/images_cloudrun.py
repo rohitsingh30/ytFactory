@@ -17,15 +17,18 @@ the same process skip cloud entirely. Renderer entry points call
 ``reset_circuit_breaker()`` at the top of every render to clear the
 flag.
 
-**HTTP client: ``requests`` (not ``urllib``).** Earlier rev of this
-file used ``urllib.request.urlopen``; that revealed a class of bug
-during canary 2026-05-07 where cold-load + idle TCP timeouts on the
-Cloud Run LB severed the laptop's connection mid-request, but
-``urllib``'s blocking read didn't notice — the client hung until its
-own 900 s timeout fired even when the server had returned 200 OK
-minutes earlier. ``requests`` uses a fresh ``requests.Session()``
-per call, no connection-pool reuse across stale TCP, plus an
-explicit retry on connection-reset errors.
+**HTTP client: per-call ``requests.Session()`` (NOT a shared
+``urllib`` socket pool).** Audit Q2.69 — the related docstring in
+``pipeline/tts/cloudrun.py`` historically claimed urllib "sidesteps"
+the stale-TCP bug while this file said the opposite. The actual
+fact is that BOTH approaches avoid stale TCP by NOT reusing
+connections — the bug only ever bit long-lived ``Session`` reuse.
+The 2026-05-07 canary surfaced this when the Cloud Run LB severed
+an idle TCP connection mid-request and the laptop's blocking read
+didn't notice. Both files now use per-call sockets (urllib in tts,
+fresh Session in images) for the same reason: the choice between
+the two libs is about API ergonomics (streaming JSON / progress
+events for images, simple POST→JSON for tts), NOT about TCP behaviour.
 
 Env vars:
 

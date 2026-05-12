@@ -58,28 +58,43 @@ async def attach_identity_attrs(
 ) -> "Response":
     """Add ytFactory identity attrs to the active span.
 
-    Runs the handler first (``await call_next``) so FastAPI has populated
-    ``request.path_params`` from the matched route. Path params are
-    empty in the pre-handler phase of Starlette middleware (the
-    routing match happens during ``call_next``). The OTel server span
-    is still open at this point — its ``end()`` happens later as the
-    ASGI ``http.response.body`` event flushes — so we can still write
-    attributes onto it.
+    **Audit Q2.12** — pre-fix this attached attrs ONLY after
+    ``call_next`` returned. Path params come from FastAPI route
+    matching, which only populates them during ``call_next``, so we
+    DO need to wait for that. BUT on streaming/SSE/file responses,
+    the OTel auto-instrumentor often calls ``end()`` on the server
+    span BEFORE the response object propagates back through the
+    middleware chain — and span.set_attribute is a silent no-op
+    after ``end()``. The attrs never landed on the span for those
+    routes.
+
+    Fix: do TWO passes. (1) Pre-handler, attach query-param attrs
+    immediately — those don't need the route to be matched, and the
+    span is guaranteed to still be open. (2) Post-handler, attach
+    path_params (the only attrs that genuinely need ``call_next``
+    to populate them) inside ``is_recording()`` guard so a
+    span-already-ended path doesn't crash.
     """
-    response = await call_next(request)
     span = _trace.get_current_span()
+    # Pass 1 — query-param attrs (available pre-handler).
     if span is not None and span.is_recording():
-        for k, v in (request.path_params or {}).items():
-            if k in _CARRY_KEYS and v is not None:
-                span.set_attribute(f"ytfactory.{k}", str(v)[:200])
         try:
             qp = request.query_params
             for k in _CARRY_KEYS:
                 v = qp.get(k)
-                if v is not None and not _has_attr(span, f"ytfactory.{k}"):
+                if v is not None:
                     span.set_attribute(f"ytfactory.{k}", str(v)[:200])
         except Exception:  # noqa: BLE001
             pass
+    response = await call_next(request)
+    # Pass 2 — path-param attrs (require route match). is_recording
+    # is False if the span already ended (streaming response case);
+    # we silently skip rather than no-oping the set_attribute calls.
+    span = _trace.get_current_span()
+    if span is not None and span.is_recording():
+        for k, v in (request.path_params or {}).items():
+            if k in _CARRY_KEYS and v is not None and not _has_attr(span, f"ytfactory.{k}"):
+                span.set_attribute(f"ytfactory.{k}", str(v)[:200])
     return response
 
 

@@ -62,6 +62,34 @@ class TestOutboundIdempotent(_Base):
         inst.instrument_outbound_http()
         inst.instrument_outbound_http()  # second call must not raise
 
+    def test_audit_q268_urllib_instrumentor_attempted(self) -> None:
+        """Audit Q2.68 — pre-fix instrument_outbound_http only patched
+        requests / httpx / aiohttp. ``pipeline/tts/cloudrun.py`` uses
+        ``urllib.request.urlopen`` directly; without an instrumentor
+        every TTS Cloud Run call broke the trace-propagation chain.
+        Now also patches urllib via OTel's URLLibInstrumentor.
+
+        Test verifies the URLLibInstrumentor import branch is
+        attempted (logs a warning if the optional package isn't
+        installed; fine in test env). The presence of the import in
+        the source is the contract; this test pins it.
+        """
+        # Source-level pin: the urllib instrumentor import must be
+        # in instrument_outbound_http's body.
+        from pathlib import Path
+        src = (
+            Path(__file__).resolve().parent.parent
+            / "pipeline" / "observability" / "instrumentations.py"
+        )
+        text = src.read_text()
+        self.assertIn(
+            "from opentelemetry.instrumentation.urllib import URLLibInstrumentor",
+            text,
+            "Q2.68 — urllib instrumentor must be wired into "
+            "instrument_outbound_http so pipeline/tts/cloudrun.py "
+            "urllib calls show up in Cloud Trace.",
+        )
+
 
 class TestInstallAll(_Base):
     def test_install_all_runs(self) -> None:

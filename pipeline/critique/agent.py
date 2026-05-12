@@ -420,6 +420,32 @@ def run_agent_turn(
     watchdog.daemon = True
     watchdog.start()
 
+    # Audit Q2.7 — drain stderr in a parallel daemon thread.
+    # Pre-fix stderr was only read AFTER proc.wait(). The OS pipe
+    # buffer is 64 KB on macOS / 64 KB on most Linux; once filled,
+    # the agent's next write() to stderr blocks indefinitely → its
+    # stdout writes also stall (because a process generally writes
+    # stderr before stdout for its current operation), and the
+    # watchdog has to rescue. The 30-min agent budget is wasted on
+    # an avoidable deadlock. Reading stderr concurrently keeps the
+    # buffer drained.
+    def _drain_stderr() -> None:
+        if proc.stderr is None:  # coverage: stderr is always PIPE'd in production
+            return
+        # coverage: defensive — readline rarely raises; the daemon thread should never crash the parent
+        try:
+            while True:
+                line = proc.stderr.readline()
+                if not line:
+                    break
+                stderr_lines.append(line)
+        # coverage: defensive — readline rarely raises; the daemon thread should never crash the parent
+        except Exception:  # noqa: BLE001
+            pass
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
     # Drain stdout line-by-line so on_stdout_line fires in real time.
     # stderr we read at the end (lower-priority for chat display).
     assert proc.stdout is not None
@@ -445,8 +471,10 @@ def run_agent_turn(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
-        if proc.stderr is not None:
-            stderr_lines.extend(proc.stderr.readlines())
+        # Audit Q2.7 — wait for the stderr drain thread to finish so
+        # we capture the full tail (the readline loop exits naturally
+        # when the closed pipe returns "").
+        stderr_thread.join(timeout=2.0)
 
     elapsed = time.time() - t0
     stdout = "".join(stdout_lines)

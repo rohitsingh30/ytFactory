@@ -54,9 +54,15 @@ class CheckViolationsTest(unittest.TestCase):
 
 
 class CapitalizeAndLintTest(unittest.TestCase):
+    @unittest.expectedFailure
     def test_capitalizes_sentence_starts_and_honorific_typos(self):
-        if not hasattr(sl, "_capitalize_sentence_starts"):
-            self.skipTest("capitalization helper not present in this source version")
+        # Audit Q2.58 — pre-fix this self.skipTest'd when the helper
+        # was missing, marking the test SKIPPED (green) and hiding
+        # the feature gap. ``_capitalize_sentence_starts`` does NOT
+        # exist in the current source; @expectedFailure surfaces
+        # the gap as an XFAIL line in test output (visible) instead
+        # of a SKIP (invisible).
+        self.assertTrue(hasattr(sl, "_capitalize_sentence_starts"))
         fixed, n = sl._capitalize_sentence_starts("she left. then Dr, martin arrived.")
         self.assertEqual(fixed, "She left. Then Dr. Martin arrived.")
         self.assertEqual(n, 3)
@@ -66,8 +72,10 @@ class CapitalizeAndLintTest(unittest.TestCase):
         self.assertTrue(result.fixed)
         self.assertIn("Wine, crafts, just us.", result.narration)
         self.assertTrue(any("merged" in f for f in result.fixes_applied))
-        if hasattr(sl, "_capitalize_sentence_starts"):
-            self.assertTrue(any("capitalized" in f for f in result.fixes_applied))
+        # Audit Q2.58 — capitalization helper is documented missing
+        # via the @expectedFailure above; the public lint_and_fix
+        # API still exists and is fully tested without depending
+        # on the missing helper.
 
     def test_lint_and_fix_clean_input_is_unchanged(self):
         narration = " ".join(["This sentence has exactly six words."] * 10)
