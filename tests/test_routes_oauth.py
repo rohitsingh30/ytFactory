@@ -14,15 +14,17 @@ os.environ.setdefault("YTFACTORY_QUEUE_BACKEND", "memory")
 import httpx
 
 from control.routes.oauth_web_routes import (
-    _PENDING_STATE,
+    _CSRF_COOKIE,
     _client,
     _file_path,
     _firestore_doc,
-    _gc,
+    _hash_csrf,
     _html_done,
     _public_base_url,
     _redirect_uri,
     _secret_mount_path,
+    _sign_state,
+    _verify_state,
     load_token,
     router,
     save_token,
@@ -168,16 +170,159 @@ class TestRedirectUri(unittest.TestCase):
         self.assertEqual(result, "https://app.example.com/api/oauth/callback")
 
 
-class TestGc(unittest.TestCase):
-    def test_gc_removes_expired(self) -> None:
-        _PENDING_STATE.clear()
-        now = time.time()
-        _PENDING_STATE["expired"] = {"created_at": now - 700, "account": "a", "return_to": "/"}
-        _PENDING_STATE["fresh"] = {"created_at": now, "account": "b", "return_to": "/"}
-        _gc(now)
-        self.assertNotIn("expired", _PENDING_STATE)
-        self.assertIn("fresh", _PENDING_STATE)
-        _PENDING_STATE.clear()
+class TestStateTokenSignAndVerify(unittest.TestCase):
+    """Audit S1.14 — replaces the old in-memory _PENDING_STATE map.
+    Pin the new HMAC-signed self-contained state token contract."""
+
+    def test_roundtrip_with_matching_csrf_succeeds(self) -> None:
+        csrf = "csrf-cookie-value-xyz"
+        state = _sign_state({
+            "account": "rhymetimejunction",
+            "return_to": "/app/channels",
+            "expires_at": time.time() + 60,
+            "csrf_hash": _hash_csrf(csrf),
+        })
+        payload = _verify_state(state, csrf_cookie=csrf)
+        self.assertEqual(payload["account"], "rhymetimejunction")
+        self.assertEqual(payload["return_to"], "/app/channels")
+
+    def test_missing_state_raises_400(self) -> None:
+        with self.assertRaises(HTTPException) as ctx:
+            _verify_state("", csrf_cookie="x")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_malformed_state_raises_400(self) -> None:
+        for bad in ["abc", "v1.body", "v1.body.sig.extra", "v9.body.sig"]:
+            with self.assertRaises(HTTPException) as ctx:
+                _verify_state(bad, csrf_cookie="x")
+            self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_tampered_signature_raises_400(self) -> None:
+        csrf = "abc"
+        state = _sign_state({
+            "account": "a",
+            "return_to": "/",
+            "expires_at": time.time() + 60,
+            "csrf_hash": _hash_csrf(csrf),
+        })
+        version, body, sig = state.split(".")
+        # Flip the last sig char.
+        flipped = sig[:-1] + ("A" if sig[-1] != "A" else "B")
+        tampered = f"{version}.{body}.{flipped}"
+        with self.assertRaises(HTTPException) as ctx:
+            _verify_state(tampered, csrf_cookie=csrf)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_tampered_payload_raises_400(self) -> None:
+        csrf = "abc"
+        state = _sign_state({
+            "account": "victim",
+            "return_to": "/",
+            "expires_at": time.time() + 60,
+            "csrf_hash": _hash_csrf(csrf),
+        })
+        version, body, sig = state.split(".")
+        # Re-encode body with attacker-chosen account, keep sig.
+        import base64 as _b64, json as _json
+        evil = _json.dumps({
+            "account": "attacker", "return_to": "/", "expires_at": time.time() + 60,
+            "csrf_hash": _hash_csrf(csrf),
+        }).encode("utf-8")
+        evil_body = _b64.urlsafe_b64encode(evil).decode("ascii").rstrip("=")
+        with self.assertRaises(HTTPException) as ctx:
+            _verify_state(f"{version}.{evil_body}.{sig}", csrf_cookie=csrf)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_expired_state_raises_400(self) -> None:
+        csrf = "abc"
+        state = _sign_state({
+            "account": "a", "return_to": "/",
+            "expires_at": time.time() - 1,
+            "csrf_hash": _hash_csrf(csrf),
+        })
+        with self.assertRaises(HTTPException) as ctx:
+            _verify_state(state, csrf_cookie=csrf)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_missing_csrf_cookie_raises_400(self) -> None:
+        csrf = "abc"
+        state = _sign_state({
+            "account": "a", "return_to": "/",
+            "expires_at": time.time() + 60,
+            "csrf_hash": _hash_csrf(csrf),
+        })
+        with self.assertRaises(HTTPException) as ctx:
+            _verify_state(state, csrf_cookie=None)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_wrong_csrf_cookie_raises_400(self) -> None:
+        """The bearer of just the state token can't complete the flow
+        without also presenting the matching csrf cookie."""
+        csrf = "abc"
+        state = _sign_state({
+            "account": "a", "return_to": "/",
+            "expires_at": time.time() + 60,
+            "csrf_hash": _hash_csrf(csrf),
+        })
+        with self.assertRaises(HTTPException) as ctx:
+            _verify_state(state, csrf_cookie="wrong-cookie")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_state_payload_missing_required_fields_raises_400(self) -> None:
+        from control.routes.oauth_web_routes import _STATE_VERSION
+        import base64 as _b64, hashlib as _hl, hmac as _hm, json as _json
+        # No expires_at.
+        body = _b64.urlsafe_b64encode(
+            _json.dumps({"account": "x"}).encode()
+        ).decode().rstrip("=")
+        from control.routes.oauth_web_routes import _state_secret
+        msg = f"{_STATE_VERSION}.{body}".encode()
+        sig = _b64.urlsafe_b64encode(
+            _hm.new(_state_secret(), msg, _hl.sha256).digest()
+        ).decode().rstrip("=")
+        with self.assertRaises(HTTPException) as ctx:
+            _verify_state(f"{_STATE_VERSION}.{body}.{sig}", csrf_cookie="x")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_state_payload_must_be_dict(self) -> None:
+        from control.routes.oauth_web_routes import _STATE_VERSION, _state_secret
+        import base64 as _b64, hashlib as _hl, hmac as _hm, json as _json
+        body = _b64.urlsafe_b64encode(
+            _json.dumps(["not", "a", "dict"]).encode()
+        ).decode().rstrip("=")
+        msg = f"{_STATE_VERSION}.{body}".encode()
+        sig = _b64.urlsafe_b64encode(
+            _hm.new(_state_secret(), msg, _hl.sha256).digest()
+        ).decode().rstrip("=")
+        with self.assertRaises(HTTPException) as ctx:
+            _verify_state(f"{_STATE_VERSION}.{body}.{sig}", csrf_cookie="x")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_state_payload_invalid_json_raises_400(self) -> None:
+        from control.routes.oauth_web_routes import _STATE_VERSION, _state_secret
+        import base64 as _b64, hashlib as _hl, hmac as _hm
+        body = _b64.urlsafe_b64encode(b"not-json").decode().rstrip("=")
+        msg = f"{_STATE_VERSION}.{body}".encode()
+        sig = _b64.urlsafe_b64encode(
+            _hm.new(_state_secret(), msg, _hl.sha256).digest()
+        ).decode().rstrip("=")
+        with self.assertRaises(HTTPException) as ctx:
+            _verify_state(f"{_STATE_VERSION}.{body}.{sig}", csrf_cookie="x")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_state_payload_missing_csrf_hash_raises_400(self) -> None:
+        from control.routes.oauth_web_routes import _STATE_VERSION, _state_secret
+        import base64 as _b64, hashlib as _hl, hmac as _hm, json as _json
+        body = _b64.urlsafe_b64encode(
+            _json.dumps({"account": "x", "expires_at": time.time() + 10}).encode()
+        ).decode().rstrip("=")
+        msg = f"{_STATE_VERSION}.{body}".encode()
+        sig = _b64.urlsafe_b64encode(
+            _hm.new(_state_secret(), msg, _hl.sha256).digest()
+        ).decode().rstrip("=")
+        with self.assertRaises(HTTPException) as ctx:
+            _verify_state(f"{_STATE_VERSION}.{body}.{sig}", csrf_cookie="x")
+        self.assertEqual(ctx.exception.status_code, 400)
 
 
 class TestFirestoreDoc(unittest.TestCase):
@@ -547,7 +692,7 @@ class TestSafeReturnTo(unittest.TestCase):
 
 
 class TestStartEndpoint(unittest.IsolatedAsyncioTestCase):
-    async def test_start_redirects(self) -> None:
+    async def test_start_redirects_and_sets_csrf_cookie(self) -> None:
         app = _make_app()
         transport = httpx.ASGITransport(app=app)
         secret = json.dumps({"installed": {"client_id": "cid", "client_secret": "csec"}})
@@ -561,8 +706,34 @@ class TestStartEndpoint(unittest.IsolatedAsyncioTestCase):
                 r = await client.get("/api/oauth/start?account=mychan")
         self.assertEqual(r.status_code, 302)
         self.assertIn("accounts.google.com", r.headers["location"])
-        # Cleanup pending state
-        _PENDING_STATE.clear()
+        # Audit S1.14 — csrf cookie must be set, HttpOnly, scoped to /api/oauth/.
+        set_cookie = r.headers.get("set-cookie", "")
+        self.assertIn(_CSRF_COOKIE, set_cookie)
+        self.assertIn("HttpOnly", set_cookie)
+        self.assertIn("Path=/api/oauth/", set_cookie)
+        # The state= query param must verify against the cookie value.
+        from urllib.parse import parse_qs, urlsplit
+        qs = parse_qs(urlsplit(r.headers["location"]).query)
+        self.assertIn("state", qs)
+        # Cookie value isn't directly readable from set-cookie via httpx
+        # in this synthetic ASGITransport — use the client's cookie jar.
+        # That round-trip is exercised in TestCallbackEndpoint below.
+
+    async def test_start_secure_cookie_in_cloud_run(self) -> None:
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        secret = json.dumps({"installed": {"client_id": "cid", "client_secret": "csec"}})
+        with patch.dict(os.environ, {
+            "YTFACTORY_CLIENT_SECRET": secret,
+            "YTFACTORY_PUBLIC_BASE_URL": "https://example.com",
+            "K_SERVICE": "ytfactory-web",
+        }):
+            test_client = httpx.AsyncClient(transport=transport, base_url="http://test",
+                                            follow_redirects=False)
+            async with test_client as client:
+                r = await client.get("/api/oauth/start?account=mychan")
+        # On Cloud Run we set Secure to keep the cookie HTTPS-only.
+        self.assertIn("Secure", r.headers.get("set-cookie", ""))
 
 
 class TestCallbackEndpoint(unittest.IsolatedAsyncioTestCase):
@@ -602,22 +773,29 @@ class TestCallbackEndpoint(unittest.IsolatedAsyncioTestCase):
         cm.__aexit__ = AsyncMock(return_value=None)
         return cm
 
+    def _build_state_with_cookie(self, account: str = "mychan",
+                                  return_to: str = "/app/channels") -> tuple[str, str]:
+        csrf_value = "fixture-csrf-value"
+        state = _sign_state({
+            "account": account,
+            "return_to": return_to,
+            "expires_at": time.time() + 60,
+            "csrf_hash": _hash_csrf(csrf_value),
+        })
+        return state, csrf_value
+
     async def test_callback_token_exchange_failure(self) -> None:
         app = _make_app()
         transport = httpx.ASGITransport(app=app)
         secret = json.dumps({"installed": {"client_id": "cid", "client_secret": "csec"}})
-        _PENDING_STATE["teststate"] = {
-            "account": "mychan",
-            "return_to": "/app/channels",
-            "created_at": time.time(),
-        }
+        state, csrf = self._build_state_with_cookie()
         mock_response = MagicMock()
         mock_response.status_code = 400
         mock_response.text = "bad request"
         mock_cm = self._make_http_client_cm(mock_response)
 
-        # Create test client BEFORE patching httpx.AsyncClient (same module object)
-        test_client = httpx.AsyncClient(transport=transport, base_url="http://test")
+        test_client = httpx.AsyncClient(transport=transport, base_url="http://test",
+                                        cookies={_CSRF_COOKIE: csrf})
         with patch.dict(os.environ, {
             "YTFACTORY_CLIENT_SECRET": secret,
             "YTFACTORY_PUBLIC_BASE_URL": "https://example.com",
@@ -625,7 +803,7 @@ class TestCallbackEndpoint(unittest.IsolatedAsyncioTestCase):
             with patch("control.routes.oauth_web_routes.httpx.AsyncClient",
                        return_value=mock_cm):
                 async with test_client as client:
-                    r = await client.get("/api/oauth/callback?code=authcode&state=teststate")
+                    r = await client.get(f"/api/oauth/callback?code=authcode&state={state}")
         self.assertEqual(r.status_code, 400)
         self.assertIn("Token exchange failed", r.text)
 
@@ -633,11 +811,7 @@ class TestCallbackEndpoint(unittest.IsolatedAsyncioTestCase):
         app = _make_app()
         transport = httpx.ASGITransport(app=app)
         secret = json.dumps({"installed": {"client_id": "cid", "client_secret": "csec"}})
-        _PENDING_STATE["goodstate"] = {
-            "account": "mychan",
-            "return_to": "/app/channels",
-            "created_at": time.time(),
-        }
+        state, csrf = self._build_state_with_cookie()
         tok_resp = {
             "access_token": "at123",
             "refresh_token": "rt456",
@@ -650,8 +824,8 @@ class TestCallbackEndpoint(unittest.IsolatedAsyncioTestCase):
         mock_response.json.return_value = tok_resp
         mock_cm = self._make_http_client_cm(mock_response)
 
-        # Create test client BEFORE patching httpx.AsyncClient (same module object)
-        test_client = httpx.AsyncClient(transport=transport, base_url="http://test")
+        test_client = httpx.AsyncClient(transport=transport, base_url="http://test",
+                                        cookies={_CSRF_COOKIE: csrf})
         with patch.dict(os.environ, {
             "YTFACTORY_CLIENT_SECRET": secret,
             "YTFACTORY_PUBLIC_BASE_URL": "https://example.com",
@@ -660,10 +834,39 @@ class TestCallbackEndpoint(unittest.IsolatedAsyncioTestCase):
                        return_value=mock_cm):
                 with patch("control.routes.oauth_web_routes.save_token") as mock_save:
                     async with test_client as client:
-                        r = await client.get("/api/oauth/callback?code=authcode&state=goodstate")
+                        r = await client.get(f"/api/oauth/callback?code=authcode&state={state}")
         self.assertEqual(r.status_code, 200)
         self.assertIn("connected", r.text)
         mock_save.assert_called_once()
+        # Audit S1.14 — flow completion clears the csrf cookie.
+        set_cookie = r.headers.get("set-cookie", "")
+        self.assertIn(_CSRF_COOKIE, set_cookie)
+        # delete_cookie sets Max-Age=0.
+        self.assertTrue(
+            "Max-Age=0" in set_cookie or 'expires=Thu, 01 Jan 1970' in set_cookie.lower(),
+            f"expected cookie clear directive, got: {set_cookie!r}",
+        )
+
+    async def test_callback_without_csrf_cookie_rejected(self) -> None:
+        """Audit S1.14 — bearer of just the state token (no cookie) is denied."""
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        state, _csrf = self._build_state_with_cookie()
+        # No cookie on the client.
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.get(f"/api/oauth/callback?code=authcode&state={state}")
+        self.assertEqual(r.status_code, 400)
+
+    async def test_callback_with_wrong_csrf_cookie_rejected(self) -> None:
+        """Audit S1.14 — attacker presenting state token + an unrelated
+        cookie (e.g. their own session cookie) is denied."""
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        state, _csrf = self._build_state_with_cookie()
+        async with httpx.AsyncClient(transport=transport, base_url="http://test",
+                                     cookies={_CSRF_COOKIE: "attacker-cookie"}) as client:
+            r = await client.get(f"/api/oauth/callback?code=authcode&state={state}")
+        self.assertEqual(r.status_code, 400)
 
 
 class TestStatusEndpoint(unittest.IsolatedAsyncioTestCase):

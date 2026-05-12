@@ -18,6 +18,9 @@ control-plane and render-worker containers via the
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import html as _html
 import json
 import logging
@@ -51,11 +54,116 @@ SCOPES = " ".join([
     "https://www.googleapis.com/auth/youtube",
 ])
 
-# State token → account map; small TTL. In-memory is fine because the
-# OAuth round-trip completes in seconds; the user shouldn't be doing
-# multi-replica round-robin during a sign-in.
-_PENDING_STATE: dict[str, dict[str, Any]] = {}
+# ---------------------------------------------------------------------------
+# OAuth state — Audit S1.14
+# ---------------------------------------------------------------------------
+#
+# Pre-fix this module stashed pending OAuth state in a per-process
+# ``_PENDING_STATE: dict[str, dict]`` keyed by a random nonce. Three
+# problems:
+#
+#   1. **Multi-replica callback mismatch.** Cloud Run scales the
+#      web service horizontally; ``/api/oauth/start`` lands on
+#      replica A, generates a state nonce, stashes it in A's
+#      memory. The user signs in with Google, Google redirects to
+#      ``/api/oauth/callback``, the load balancer routes to
+#      replica B → state nonce not found in B's memory → 400.
+#   2. **No size cap.** A bored attacker hammering ``/start``
+#      without ever reaching ``/callback`` filled the dict
+#      indefinitely (``_gc`` only ran on subsequent ``/start``
+#      calls). Slow-leak DoS / process OOM.
+#   3. **Not session-bound.** The state nonce was the only
+#      secret. Any tab / device that learned the nonce (eavesdrop,
+#      browser-history scrape, victim-side malware) could complete
+#      the OAuth dance and have the resulting token stashed under
+#      the operator's account.
+#
+# Fix: stop using server-side storage. The state token IS the
+# storage — a HMAC-signed, base64url-encoded JSON blob carrying
+# {account, return_to, expires_at, csrf_hash}. The ``csrf_hash``
+# is HMAC(session_secret, csrf_cookie_value) — we set the
+# csrf_cookie at /start time as an HttpOnly Secure cookie, then
+# verify at /callback time that the inbound cookie hashes to the
+# value embedded in the state token. Replicas need only share the
+# HMAC secret (already true via YTFACTORY_SESSION_SECRET); no
+# memory map is involved.
+
 _STATE_TTL_S = 600
+_STATE_VERSION = "v1"
+_CSRF_COOKIE = "yt_oauth_csrf"
+
+
+def _state_secret() -> bytes:
+    """HMAC key for the OAuth state token. Reuses the project-wide
+    YTFACTORY_SESSION_SECRET (same key already protects the user's
+    Sign-in-with-Google session cookie). Falls back to a per-process
+    random secret so dev / tests don't crash without an explicit env."""
+    from pipeline.auth import identity as _id  # noqa: PLC0415
+    return _id._session_secret()
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(s: str) -> bytes:
+    padding = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + padding)
+
+
+def _hash_csrf(csrf_value: str) -> str:
+    """Hash the raw csrf-cookie value. We store the HASH inside the
+    state token (so a leaked state doesn't reveal the cookie value)
+    and verify at /callback by re-hashing the inbound cookie."""
+    h = hmac.new(_state_secret(), b"oauth-csrf:" + csrf_value.encode("utf-8"),
+                 hashlib.sha256).digest()
+    return _b64url_encode(h)
+
+
+def _sign_state(payload: dict[str, Any]) -> str:
+    """Return ``<version>.<b64url(json)>.<b64url(hmac)>``."""
+    body = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    msg = f"{_STATE_VERSION}.{body}".encode("ascii")
+    sig = _b64url_encode(hmac.new(_state_secret(), msg, hashlib.sha256).digest())
+    return f"{_STATE_VERSION}.{body}.{sig}"
+
+
+def _verify_state(state: str, *, csrf_cookie: str | None,
+                  now: float | None = None) -> dict[str, Any]:
+    """Validate signature, freshness, and CSRF binding. Raises
+    HTTPException(400) on any failure with a stable detail string
+    so callers can map to user-friendly errors without leaking
+    which check failed.
+    """
+    if not state:
+        raise HTTPException(400, detail="invalid or expired state")
+    parts = state.split(".")
+    if len(parts) != 3 or parts[0] != _STATE_VERSION:
+        raise HTTPException(400, detail="invalid or expired state")
+    version, body_b64, sig_b64 = parts
+    msg = f"{version}.{body_b64}".encode("ascii")
+    expect = _b64url_encode(hmac.new(_state_secret(), msg, hashlib.sha256).digest())
+    if not hmac.compare_digest(expect, sig_b64):
+        raise HTTPException(400, detail="invalid or expired state")
+    try:
+        payload = json.loads(_b64url_decode(body_b64).decode("utf-8"))
+    except (ValueError, json.JSONDecodeError):
+        raise HTTPException(400, detail="invalid or expired state") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(400, detail="invalid or expired state")
+    expires_at = payload.get("expires_at")
+    if not isinstance(expires_at, (int, float)):
+        raise HTTPException(400, detail="invalid or expired state")
+    if (now if now is not None else time.time()) > float(expires_at):
+        raise HTTPException(400, detail="invalid or expired state")
+    csrf_hash = payload.get("csrf_hash")
+    if not isinstance(csrf_hash, str) or not csrf_hash:
+        raise HTTPException(400, detail="invalid or expired state")
+    if not csrf_cookie:
+        raise HTTPException(400, detail="invalid or expired state")
+    if not hmac.compare_digest(_hash_csrf(csrf_cookie), csrf_hash):
+        raise HTTPException(400, detail="invalid or expired state")
+    return payload
 
 
 def _client() -> dict[str, str]:
@@ -164,12 +272,6 @@ def _redirect_uri(request: Request) -> str:
     return f"{_public_base_url(request)}/api/oauth/callback"
 
 
-def _gc(now: float) -> None:
-    expired = [k for k, v in _PENDING_STATE.items() if now - v["created_at"] > _STATE_TTL_S]
-    for k in expired:
-        _PENDING_STATE.pop(k, None)
-
-
 # ---------------------------------------------------------------------------
 # Token storage — Firestore in cloud, falls back to per-account file in dev
 # ---------------------------------------------------------------------------
@@ -274,19 +376,27 @@ async def start(
 
     Use case: link in the web UI like
     ``<a href="/api/oauth/start?account=rhymetimejunction">Connect</a>``.
+
+    **Audit S1.14** — state is now a self-contained, HMAC-signed,
+    CSRF-cookie-bound token. No server-side storage means:
+      - works across Cloud Run replicas (callback can land on any
+        replica and verify the same signature);
+      - no in-memory map to fill via /start spam;
+      - the token alone is useless — the inbound /callback request
+        must also carry the matching csrf cookie this /start set.
     """
     cs = _client()
-    state = secrets.token_urlsafe(32)
     # Audit S1.3 — clamp return_to to a same-origin path before
     # storing so the eventual ``location.href = return_to`` in the
     # success page can't redirect off-host.
     safe_return_to = _safe_return_to(return_to)
-    _PENDING_STATE[state] = {
+    csrf_value = secrets.token_urlsafe(32)
+    state = _sign_state({
         "account": account,
         "return_to": safe_return_to,
-        "created_at": time.time(),
-    }
-    _gc(time.time())
+        "expires_at": time.time() + _STATE_TTL_S,
+        "csrf_hash": _hash_csrf(csrf_value),
+    })
 
     params = {
         "response_type": "code",
@@ -299,7 +409,21 @@ async def start(
         "include_granted_scopes": "true",
     }
     auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
-    return RedirectResponse(url=auth_url, status_code=302)
+    response = RedirectResponse(url=auth_url, status_code=302)
+    # HttpOnly + Secure + SameSite=Lax: cookie returns on the
+    # top-level GET callback (Lax allows top-level navigations),
+    # is unreadable to JS, and never travels over plain HTTP in
+    # production. max_age matches state TTL.
+    response.set_cookie(
+        _CSRF_COOKIE,
+        csrf_value,
+        max_age=_STATE_TTL_S,
+        httponly=True,
+        secure=bool(os.environ.get("K_SERVICE")),
+        samesite="lax",
+        path="/api/oauth/",
+    )
+    return response
 
 
 @router.get("/callback", response_class=HTMLResponse)
@@ -309,14 +433,22 @@ async def callback(
     state: str | None = Query(default=None),
     error: str | None = Query(default=None),
 ) -> HTMLResponse:
-    """Google redirects here. Exchange code → token → save → bounce back to UI."""
+    """Google redirects here. Exchange code → token → save → bounce back to UI.
+
+    **Audit S1.14** — state is HMAC-verified and cross-checked against
+    the csrf cookie set by /start. The cookie is HttpOnly + Secure +
+    SameSite=Lax, so:
+      - the bare state token leaked elsewhere can't complete the flow
+        (no cookie → 400);
+      - an attacker on another origin can't forge the cookie (Lax)
+        nor read it (HttpOnly).
+    """
     if error:
         return _html_done(error_msg=f"Google returned error: {error}")
     if not code or not state:
         raise HTTPException(status_code=400, detail="missing code or state")
-    pending = _PENDING_STATE.pop(state, None)
-    if pending is None:
-        raise HTTPException(status_code=400, detail="invalid or expired state")
+    csrf_cookie = request.cookies.get(_CSRF_COOKIE)
+    pending = _verify_state(state, csrf_cookie=csrf_cookie)
     account = pending["account"]
     # Audit S1.3 defence-in-depth — re-clamp at consumption time too.
     return_to = _safe_return_to(pending.get("return_to") or "/app/channels")
@@ -367,7 +499,7 @@ async def callback(
     logger.info("oauth: stored token account=%s refresh=%s", account, has_refresh)
 
     return _html_done(success=True, account=account, return_to=return_to,
-                      has_refresh=has_refresh)
+                      has_refresh=has_refresh, _clear_csrf=True)
 
 
 @router.get("/status")
@@ -404,6 +536,7 @@ def _html_done(
     account: str = "",
     return_to: str = "/app/channels",
     has_refresh: bool = False,
+    _clear_csrf: bool = False,
 ) -> HTMLResponse:
     """Tiny self-contained completion page that auto-bounces the user
     back to the studio. Avoids loading the full Next.js bundle for this
@@ -464,4 +597,10 @@ def _html_done(
   </style>
 </head><body><main>{body}</main></body></html>
 """
+    if _clear_csrf:
+        resp = HTMLResponse(content=html, status_code=status_code)
+        # Audit S1.14 — clear the one-shot OAuth csrf cookie on flow
+        # completion so a stale value can't be re-used.
+        resp.delete_cookie(_CSRF_COOKIE, path="/api/oauth/")
+        return resp
     return HTMLResponse(content=html, status_code=status_code)
