@@ -256,5 +256,28 @@ class TestWhoamiEndpoint(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(body["is_admin"])
 
 
+class TestCookieNameDistinctFromOAuthSession(unittest.TestCase):
+    """Audit S1.20 — the PIN cookie name MUST NOT collide with the
+    Google-OAuth session cookie ``yt_session`` set by web/server.py.
+    Pre-fix both auth flows used ``yt_session`` with different HMAC
+    formats so a user authenticated via both would silently overwrite
+    the other's cookie on every set, leading to 401 loops as one
+    verifier rejected the other's signature shape."""
+
+    def test_cookie_name_is_yt_pin_session(self) -> None:
+        from control.routes.auth_pin import COOKIE_NAME
+        self.assertEqual(COOKIE_NAME, "yt_pin_session")
+        self.assertNotEqual(COOKIE_NAME, "yt_session")
+
+    def test_web_server_session_cookie_unchanged(self) -> None:
+        # Sanity: web/server.py's OAuth session cookie stays
+        # ``yt_session`` (the canonical user-identity cookie consumed
+        # by web-next/middleware.ts). The fix renames the PIN one,
+        # not the OAuth one.
+        import importlib
+        web_server = importlib.import_module("web.server")
+        self.assertEqual(web_server.SESSION_COOKIE, "yt_session")
+
+
 if __name__ == "__main__":
     unittest.main()

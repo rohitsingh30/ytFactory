@@ -24,7 +24,9 @@ Wire-up:
   ``Depends(require_pin)`` once enabled.
 
 Cookie design:
-- Name: ``yt_session``
+- Name: ``yt_pin_session`` (distinct from the Google-OAuth session
+  cookie ``yt_session`` set by web/server.py to avoid the silent
+  401 loop documented in audit S1.20).
 - Value: ``HMAC_SHA256(secret, "issued=<unix_ts>")``
   → no DB lookup; rotate by changing ``YTFACTORY_SESSION_SECRET``.
 - Lifetime: 7 days (configurable via ``YTFACTORY_SESSION_TTL_S``).
@@ -50,7 +52,13 @@ router = APIRouter(prefix="/api/auth")
 PIN_ENV = "YTFACTORY_OPERATOR_PIN"
 SECRET_ENV = "YTFACTORY_SESSION_SECRET"
 TTL_ENV = "YTFACTORY_SESSION_TTL_S"
-COOKIE_NAME = "yt_session"
+# Audit S1.20 — distinct cookie name from web/server.py's
+# ``yt_session`` (the Google-OAuth user session). Pre-fix BOTH auth
+# flows used ``yt_session`` with different HMAC formats so a user
+# authenticated via both would silently overwrite the other's cookie
+# on every set, leading to 401 loops as one verifier rejected the
+# other's signature shape.
+COOKIE_NAME = "yt_pin_session"
 
 # Process-local fallback — generated once if no env secret is set so dev
 # sessions work but don't survive restart. Production SHOULD set the env.
@@ -108,13 +116,13 @@ def _verify_token(token: str | None) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def require_pin(yt_session: str | None = Cookie(default=None)) -> None:
+def require_pin(yt_pin_session: str | None = Cookie(default=None)) -> None:
     """Raises 401 unless a valid session cookie is present.
 
     No-op when no PIN is configured (dev convenience)."""
     if not auth_enabled():
         return
-    if not _verify_token(yt_session):
+    if not _verify_token(yt_pin_session):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="login required",
@@ -173,8 +181,8 @@ async def logout(response: Response) -> dict:
 
 
 @router.get("/whoami", response_model=WhoamiResponse)
-async def whoami(yt_session: str | None = Cookie(default=None)) -> WhoamiResponse:
-    logged_in = (not auth_enabled()) or _verify_token(yt_session)
+async def whoami(yt_pin_session: str | None = Cookie(default=None)) -> WhoamiResponse:
+    logged_in = (not auth_enabled()) or _verify_token(yt_pin_session)
     return WhoamiResponse(
         logged_in=logged_in,
         auth_required=auth_enabled(),

@@ -2379,15 +2379,15 @@ async def legacy_home() -> FileResponse:
     )
 
 
-@app.get("/admin")
-async def admin_page() -> FileResponse:
-    """Engineer mode: the operations console. Same content as /renders
-    today (KPIs, service health, log tails, exit codes). Hidden from the
-    consumer surface; reachable from the header link."""
-    return FileResponse(
-        Path(__file__).resolve().parent / "static" / "renders.html",
-        headers={"Cache-Control": "no-cache"},
-    )
+# Audit S1.19 — there used to be a duplicate ``@app.get("/admin")``
+# here that served renders.html (the operator/engineer dashboard)
+# WITH NO AUTH CHECK. Starlette resolves duplicate routes in
+# registration order — the first one (line ~2007 above, admin-only)
+# always won, but that meant the duplicate was dead code one
+# refactor away from accidentally exposing the page unauthenticated.
+# The duplicate has been removed; operators reach the renders
+# dashboard via the canonical ``/renders`` route (line ~2580 below)
+# which is itself fenced via the auth_middleware allow-list.
 
 
 # ---- /renders dashboard data (P1.1 — 2026-05-09) -------------------------
