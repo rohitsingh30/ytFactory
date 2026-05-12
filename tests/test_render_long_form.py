@@ -736,6 +736,25 @@ class FinalMuxTests(unittest.TestCase):
         self.assertIn("copy", args)
         self.assertIn("amix=inputs=2", " ".join(map(str, args)))
 
+    def test_narration_leg_runs_through_loudnorm(self):
+        # Regression — pre-fix, quiet TTS providers (Cloud Run
+        # Chatterbox, Higgs Audio) produced renders the user reported
+        # as "no audio" (-32 dB mean). Single-pass loudnorm at
+        # I=-16 LUFS on the narration leg brings every TTS provider
+        # to a consistent floor so the YAML's audio_narration_db
+        # behaves predictably across providers.
+        with local_tempdir() as tmp:
+            args = self._mux_args(tmp)
+        joined = " ".join(map(str, args))
+        self.assertIn("loudnorm=I=-16:TP=-1.5:LRA=11", joined,
+                      "narration leg must run through loudnorm before "
+                      "the volume() trim — see 2026-05-12 audio post-mortem")
+        # And it must apply to the narration input ([1:a]), not to
+        # music ([2:a]) — auto-gaining the music bed is a known
+        # antipattern that pumps up music volume in narration gaps.
+        self.assertIn("[1:a]loudnorm=", joined)
+        self.assertNotIn("[2:a]loudnorm=", joined)
+
     def test_watermark_only_overlay(self):
         with local_tempdir() as tmp:
             wm = write_big(tmp / "wm.png")

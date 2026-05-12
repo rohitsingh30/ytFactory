@@ -1498,8 +1498,21 @@ def final_mux(
             "final_mux: pass either captions_ass OR caption_cues, not both"
         )
 
+    # Pre-amp narration with single-pass loudnorm so the level reaching
+    # the mix is independent of TTS source amplitude. Cloud Run TTS
+    # providers (Chatterbox cloned from sarah.wav, Higgs Audio,
+    # Indic-Parler) routinely emit audio 15-25 dB quieter than the
+    # F5/Kokoro laptop fallbacks. Pre-fix, a 30-min mystoriesanimated
+    # render landed at mean_volume=-32 dB / max_volume=-12 dB — the
+    # user reported "no audio" because narration was inaudible on
+    # phone speakers. Loudnorm at -16 LUFS (YouTube spoken-word
+    # target) brings every TTS provider to a consistent floor; the
+    # subsequent ``volume={narration_db}dB`` then trims relative to
+    # that floor, so the channel YAML's audio_narration_db setting
+    # keeps its original "trim around the canonical narration level"
+    # meaning. See docs/audio_loudnorm.md for the post-mortem.
     a_flt = (
-        f"[1:a]volume={narration_db}dB[narr];"
+        f"[1:a]loudnorm=I=-16:TP=-1.5:LRA=11,volume={narration_db}dB[narr];"
         f"[2:a]volume={music_db}dB[bed];"
         f"[narr][bed]amix=inputs=2:duration=first:dropout_transition=2[a]"
     )

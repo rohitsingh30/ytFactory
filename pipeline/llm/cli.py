@@ -147,10 +147,67 @@ _DEFAULT_MODEL_BY_STAGE: dict[str, str] = {
 }
 
 
+# Per-stage output-token budget for the SDK backends (Azure
+# `max_completion_tokens`, Anthropic `max_tokens`).
+#
+# Why this exists: both SDK clients defaulted to 4096 output tokens —
+# Azure via the deployment's implicit cap, Anthropic via a hardcoded
+# `max_tokens=4096` in `_call_anthropic_sdk`. A 30-min long-form
+# rewrite expects ~4500 narration words plus a sectioned panels JSON
+# wrapper — well past 4096 tokens of prose. The 2026-05-12 render
+# (job 8413e79d) requested 30 min and got back a 2289-word script
+# (≈17 min) because the response truncated mid-stream. Pin per-stage
+# so the long stages have headroom while the short stages stay
+# conservative (cheap + fast).
+#
+# Override per-stage at runtime via ``YTFACTORY_MAX_TOKENS_<STAGE>``
+# (e.g. ``YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM=16000``).
+_DEFAULT_MAX_TOKENS_BY_STAGE: dict[str, int] = {
+    # Long-form rewrite: 30-min script ~ 4500 words ~ 6500 prose
+    # tokens, plus the sectioned + panels JSON envelope. 12k gives
+    # ~50% headroom over the worst-case 30-min ask without being
+    # absurd; pushes to 16k via env if a future channel wants 60-min.
+    "rewrite_long_form": 12000,
+    # Shorts rewrite + cast + prompts run on much shorter outputs;
+    # the 4096 default has been fine for ~6 months of production.
+    "rewrite": 4096,
+    "cast": 4096,
+    "prompts": 4096,
+    "critic": 4096,
+    "audio_critic": 4096,
+    "imitate_analyze": 4096,
+    "imitate_apply": 4096,
+}
+
+# Floor for any stage we haven't pinned explicitly. Keeps the old
+# behaviour (4096 default) for any caller that passes a stage name
+# we haven't classified yet.
+_FALLBACK_MAX_TOKENS = 4096
+
+
 def model_for(stage: str) -> str:
     """Return the tier alias (haiku/sonnet/opus) for a pipeline stage."""
     env_key = f"YTFACTORY_MODEL_{stage.upper()}"
     return os.environ.get(env_key) or _DEFAULT_MODEL_BY_STAGE.get(stage, "opus")
+
+
+def max_tokens_for(stage: str | None) -> int:
+    """Return the SDK-backend output-token budget for a pipeline stage.
+
+    Single source of truth so tests + dispatcher agree. Env-overridable
+    per stage so a runaway long-form prompt can be bumped without a
+    code change.
+    """
+    if not stage:
+        return _FALLBACK_MAX_TOKENS
+    env_key = f"YTFACTORY_MAX_TOKENS_{stage.upper()}"
+    raw = os.environ.get(env_key)
+    if raw:
+        try:
+            return max(256, int(raw))
+        except ValueError:
+            pass
+    return _DEFAULT_MAX_TOKENS_BY_STAGE.get(stage, _FALLBACK_MAX_TOKENS)
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +676,15 @@ def _call_azure_openai(
     kwargs: dict[str, Any] = {
         "model": deployment,
         "messages": [{"role": "user", "content": user_prompt}],
+        # Cap output tokens per stage. Without this, Azure deployments
+        # default to ~4096 → long-form rewrite truncates the script
+        # mid-stream. See _DEFAULT_MAX_TOKENS_BY_STAGE for the table
+        # and the 2026-05-12 17-min-vs-30-min post-mortem (job
+        # 8413e79d). Azure accepts `max_tokens` for gpt-4o (chat
+        # completions API); reasoning-model deployments (o1 / o3)
+        # would need `max_completion_tokens` instead — bridge that
+        # if/when the opus tier moves to a reasoning deployment.
+        "max_tokens": max_tokens_for(stage),
     }
     if output_json:
         if json_schema is not None:
@@ -747,7 +813,11 @@ def _call_anthropic_sdk(
     try:
         resp = client.messages.create(
             model=model_id,
-            max_tokens=4096,
+            # Stage-aware output budget — long-form rewrite needs ~12k,
+            # everything else stays at the conservative 4096. Pre-fix
+            # this was hardcoded 4096 and silently truncated 30-min
+            # scripts. See _DEFAULT_MAX_TOKENS_BY_STAGE.
+            max_tokens=max_tokens_for(stage),
             messages=[{"role": "user", "content": user_prompt}],
         )
     except Exception as e:

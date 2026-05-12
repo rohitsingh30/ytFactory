@@ -451,5 +451,159 @@ class CallLlmAliasTest(unittest.TestCase):
         self.assertIs(call_llm, call_claude_cli)
 
 
+class MaxTokensForTest(unittest.TestCase):
+    """Pin the per-stage output-token budget table.
+
+    Regression — the 2026-05-12 mystoriesanimated 30-min render came
+    back at 17 min (2289-word script) because both SDK adapters
+    defaulted to 4096 max output tokens. ``max_tokens_for("rewrite_long_form")``
+    must now be high enough to fit a 30-min sectioned script (~6500
+    prose tokens + JSON envelope overhead).
+    """
+
+    def setUp(self) -> None:
+        self._saved = {
+            k: os.environ.pop(k, None)
+            for k in [
+                "YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM",
+                "YTFACTORY_MAX_TOKENS_REWRITE",
+                "YTFACTORY_MAX_TOKENS_CAST",
+                "YTFACTORY_MAX_TOKENS_CUSTOM_STAGE",
+            ]
+            if k in os.environ
+        }
+
+    def tearDown(self) -> None:
+        for k in [
+            "YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM",
+            "YTFACTORY_MAX_TOKENS_REWRITE",
+            "YTFACTORY_MAX_TOKENS_CAST",
+            "YTFACTORY_MAX_TOKENS_CUSTOM_STAGE",
+        ]:
+            os.environ.pop(k, None)
+        for k, v in self._saved.items():
+            if v is not None:
+                os.environ[k] = v
+
+    def test_long_form_rewrite_gets_at_least_8k_tokens(self) -> None:
+        # 4500-word 30-min script ≈ 6500 prose tokens + JSON wrapper.
+        # Cap below 8k risks truncation again.
+        self.assertGreaterEqual(
+            llm_cli.max_tokens_for("rewrite_long_form"),
+            8000,
+            "rewrite_long_form must allow ≥8k output tokens to avoid "
+            "truncating 30-min scripts (the 2026-05-12 17-min-vs-30-min bug)",
+        )
+
+    def test_short_stages_stay_at_4096_default(self) -> None:
+        # Conservative default for everything we haven't bumped on
+        # purpose — keeps spend predictable.
+        self.assertEqual(llm_cli.max_tokens_for("rewrite"), 4096)
+        self.assertEqual(llm_cli.max_tokens_for("cast"), 4096)
+        self.assertEqual(llm_cli.max_tokens_for("prompts"), 4096)
+
+    def test_unknown_stage_falls_back_to_4096(self) -> None:
+        self.assertEqual(llm_cli.max_tokens_for("totally_new_stage"), 4096)
+
+    def test_none_stage_falls_back_to_4096(self) -> None:
+        self.assertEqual(llm_cli.max_tokens_for(None), 4096)
+
+    def test_env_override_per_stage(self) -> None:
+        os.environ["YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM"] = "16000"
+        self.assertEqual(llm_cli.max_tokens_for("rewrite_long_form"), 16000)
+
+    def test_env_override_clamped_to_minimum(self) -> None:
+        # Even if a hostile env sets 0, we floor at 256 so the call
+        # doesn't error out with "max_tokens must be positive".
+        os.environ["YTFACTORY_MAX_TOKENS_REWRITE"] = "0"
+        self.assertEqual(llm_cli.max_tokens_for("rewrite"), 256)
+
+    def test_env_override_invalid_int_falls_back_to_default(self) -> None:
+        os.environ["YTFACTORY_MAX_TOKENS_REWRITE"] = "not_a_number"
+        self.assertEqual(llm_cli.max_tokens_for("rewrite"), 4096)
+
+
+class MaxTokensWiredIntoBackendsTest(unittest.TestCase):
+    """The dispatcher's max_tokens_for(stage) value must reach BOTH SDK
+    backends — Azure as ``max_tokens`` and Anthropic as ``max_tokens``.
+    Regression: pre-fix, Azure had no token cap (deployment default
+    4096) and Anthropic hardcoded 4096. Both truncated 30-min long-form
+    scripts."""
+
+    def setUp(self) -> None:
+        self._saved = _clear_backend_env()
+        os.environ["AZURE_OPENAI_ENDPOINT"] = "https://x.openai.azure.com"
+        os.environ["AZURE_OPENAI_API_KEY"] = "sk-azure"
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant"
+
+        self._saved_openai = sys.modules.get("openai")
+        self._fake_az = MagicMock(name="AzureClient")
+        self._fake_az.chat.completions.create = MagicMock()
+        self._fake_az.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content="hi"))],
+            usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+        )
+        fake_openai = types.ModuleType("openai")
+        fake_openai.AzureOpenAI = MagicMock(return_value=self._fake_az)  # type: ignore[attr-defined]
+        sys.modules["openai"] = fake_openai
+
+        self._saved_anthropic = sys.modules.get("anthropic")
+        self._fake_ant = MagicMock(name="AnthropicClient")
+        self._fake_ant.messages.create = MagicMock()
+        block = MagicMock(type="text", text="hi")
+        self._fake_ant.messages.create.return_value = MagicMock(
+            content=[block], usage=MagicMock(input_tokens=1, output_tokens=1),
+        )
+        fake_anthropic = types.ModuleType("anthropic")
+        fake_anthropic.Anthropic = MagicMock(return_value=self._fake_ant)  # type: ignore[attr-defined]
+        sys.modules["anthropic"] = fake_anthropic
+
+    def tearDown(self) -> None:
+        if self._saved_openai is not None:
+            sys.modules["openai"] = self._saved_openai
+        else:
+            sys.modules.pop("openai", None)
+        if self._saved_anthropic is not None:
+            sys.modules["anthropic"] = self._saved_anthropic
+        else:
+            sys.modules.pop("anthropic", None)
+        _clear_backend_env()
+        _restore_env(self._saved)
+
+    def test_azure_passes_stage_max_tokens(self) -> None:
+        llm_cli._call_azure_openai(
+            "x", output_json=False, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite_long_form",
+        )
+        kwargs = self._fake_az.chat.completions.create.call_args.kwargs
+        self.assertEqual(
+            kwargs.get("max_tokens"),
+            llm_cli.max_tokens_for("rewrite_long_form"),
+            "Azure backend must pass max_tokens=max_tokens_for(stage) so "
+            "long-form rewrite gets the bumped budget",
+        )
+
+    def test_anthropic_passes_stage_max_tokens(self) -> None:
+        llm_cli._call_anthropic_sdk(
+            "x", output_json=False, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite_long_form",
+        )
+        kwargs = self._fake_ant.messages.create.call_args.kwargs
+        self.assertEqual(
+            kwargs.get("max_tokens"),
+            llm_cli.max_tokens_for("rewrite_long_form"),
+            "Anthropic backend must pass max_tokens=max_tokens_for(stage) "
+            "instead of the old hardcoded 4096",
+        )
+
+    def test_azure_default_stage_uses_fallback(self) -> None:
+        llm_cli._call_azure_openai(
+            "x", output_json=False, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite",
+        )
+        kwargs = self._fake_az.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs.get("max_tokens"), 4096)
+
+
 if __name__ == "__main__":
     unittest.main()

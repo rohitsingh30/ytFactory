@@ -273,6 +273,29 @@ def find_related_tests(fd: FileDiff) -> list[Path]:
         dotted = fd.dotted_module
         if dotted:
             patterns.append(rf"(from {re.escape(dotted)} import|import {re.escape(dotted)}\b)")
+            # Tests routinely import a leaf module by its parent package
+            # — `from pipeline.llm import cli as llm_cli` rather than
+            # `from pipeline.llm.cli import …`. The dotted-only pattern
+            # above misses that, which is why the 2026-05-12 cli.py edit
+            # showed "no related test file found" despite
+            # tests/test_llm_dispatcher.py + tests/test_pipeline_llm.py
+            # exercising it. Add a `from <parent> import … <stem> …`
+            # pattern that catches both bare and aliased forms.
+            if "." in dotted and fd.path.name != "__init__.py":
+                parent_dotted, _, stem = dotted.rpartition(".")
+                # Match `from <parent> import …` lines that mention the
+                # stem either bare (`import cli`), aliased (`import cli
+                # as llm_cli`), or in a multi-import list (`import a, cli,
+                # b`). git grep operates line-by-line so `.*` is safe;
+                # we use `(^|[^A-Za-z0-9_])` and `([^A-Za-z0-9_]|$)` as
+                # word-boundary equivalents because git's ERE does NOT
+                # honour `\b` after a `*` quantifier (verified
+                # 2026-05-12 — the seemingly-correct ``.*\bcli\b``
+                # silently matched zero files in production).
+                patterns.append(
+                    rf"from {re.escape(parent_dotted)} import "
+                    rf".*[^A-Za-z0-9_]?{re.escape(stem)}([^A-Za-z0-9_]|$)"
+                )
         # Path-based reference (Posix-style — that's what the repo uses).
         path_str = str(fd.path)
         patterns.append(re.escape(path_str))

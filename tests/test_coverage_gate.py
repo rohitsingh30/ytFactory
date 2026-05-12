@@ -400,6 +400,28 @@ class FindRelatedTestsTests(unittest.TestCase):
         )
         self.assertEqual(self.gate.find_related_tests(fd), [])
 
+    def test_python_leaf_module_imported_via_parent_package(self):
+        """Regression — pre-fix the discovery only matched
+        ``from pipeline.llm.cli import …`` style imports, missing the
+        far more common ``from pipeline.llm import cli`` style
+        (which both ``test_llm_dispatcher.py`` and
+        ``test_pipeline_llm.py`` use). Result: any change to
+        ``pipeline/llm/cli.py`` showed "no related test file found"
+        and the gate refused to run, even though 46 tests covered
+        the changed lines. The 2026-05-12 max_tokens fix surfaced
+        this gap."""
+        fd = self.gate.FileDiff(
+            path=Path("pipeline/llm/cli.py"),
+            is_python=True,
+        )
+        related = self.gate.find_related_tests(fd)
+        related_strs = [str(p) for p in related]
+        # Both well-known cli.py exercisers must surface.
+        self.assertIn("tests/test_llm_dispatcher.py", related_strs,
+                      f"discovery missed test_llm_dispatcher.py: {related_strs}")
+        self.assertIn("tests/test_pipeline_llm.py", related_strs,
+                      f"discovery missed test_pipeline_llm.py: {related_strs}")
+
 
 class MeasureTypescriptTests(unittest.TestCase):
     """measure_typescript handles the React-component soft-pass

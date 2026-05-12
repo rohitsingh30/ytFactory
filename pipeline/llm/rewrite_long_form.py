@@ -123,6 +123,30 @@ CRAFT RULES that drive watch-time on long-form (NON-NEGOTIABLE):
   environment, the lighting. Avoid abstract / metaphor scenes; the
   image generator can't render abstraction.
 
+- CHARACTER CONSISTENCY (this is the #1 long-form quality bug — fix it
+  in your output, not in render):
+    * Decide ONE character spec for the protagonist (and named
+      supporting cast) BEFORE writing any panel. A character spec is
+      a 1-2 sentence physical description: age range (e.g. "30s"),
+      gender presentation, hair (length + colour), skin tone, build,
+      clothing palette, and any signature prop. Channel context above
+      may already define a "Recurring character" — when present, USE
+      THAT EXACTLY as the protagonist spec; do not invent a new one.
+    * In every panel scene that features that character, repeat the
+      WHOLE character spec verbatim at the start of the scene
+      description. Yes, repeat the same words across all 24 panels.
+      The image generator has no memory between panels — if you
+      describe the protagonist as "a young child" in panel 2 and "an
+      elderly man" in panel 5, you WILL get a young child and an
+      elderly man, not the same person at two ages. This is
+      non-negotiable.
+    * If the story spans years, keep the character spec the same
+      anyway — viewers tolerate a flat-art protagonist who looks the
+      same age throughout much better than a protagonist who morphs
+      between random ages every panel.
+    * Landscape / inanimate panels (no people) don't need the
+      character spec.
+
 OUTPUT: ONE JSON object matching the structure above. No prose
 preface, no markdown fence. Just the object.
 """
