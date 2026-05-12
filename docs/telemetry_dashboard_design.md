@@ -121,6 +121,58 @@ the time go" panels. Add new render stage names to the whitelist as
 they're introduced; do NOT relax the predicate to "any event with
 duration_ms".
 
+## Dual-source rule (added 2026-05-12 round 5)
+
+Telemetry-stream views (Cloud Logging `ytfactory.event` records)
+miss three classes of failure that operators care about:
+
+* **Dispatch failures** — `gcloud run jobs execute` rejected the
+  worker (quota exceeded, IAM denied, malformed env). The worker
+  never started → no `obs.render_envelope` opened → no events
+  emitted. The job is in Firestore with `status=failed,
+  stage=dispatch`, but invisible to `/api/telemetry/renders`.
+* **Cancelled jobs** — operator cancelled before the worker grabbed
+  the task. Same blindspot.
+* **Pre-envelope crashes** — worker booted but crashed during
+  bootstrap (config missing, schema drift, broken proposal) before
+  `obs.render_envelope()` opened the parent span.
+
+The 2026-05-12 backfill found **8 of 50 historical jobs** were
+dispatch failures invisible to the telemetry view — a 16% blindspot
+that made the dashboard structurally lie about success rate.
+
+**Rule:** every operator dashboard MUST have at least one view
+sourced from the **control-plane source of truth** (Firestore
+`jobs` collection) alongside the telemetry-derived views. The
+control-plane view is the **default landing tab** — it's the only
+one that answers "did my job run at all?" honestly. Implementation:
+`/api/telemetry/jobs` (Firestore-backed) sees every job. Per-row
+`stages` array is synthesised from the doc's `timeline` field via
+`_synthesize_stage_durations()` so historical jobs (predating any
+telemetry plumbing) render the same horizontal stacked-bar
+waterfall as Cloud-Logging-backed renders — full backfill, not
+just a status badge.
+
+## Tabs over scrolling for ≥4-section dashboards (added 2026-05-12 round 5)
+
+Five+ sections in a single column trigger one network poll each on
+mount and expensive recharts renders for charts the operator may
+never look at. Tabs scope active polling to the visible tab AND
+let the operator's eye land on the question they came to answer
+without scrolling past four cards first.
+
+**Rule:** any operator dashboard with ≥4 logically distinct
+sections (e.g. Jobs / Renders / Stage latency / Services / LLM
+costs / Errors / Activity / Open in GCP) ships as tabs, not a
+single column. Tab default matches the most-asked operator
+question — for `/app/telemetry` that's Jobs (status of submitted
+work), NOT Activity (sparkline of event counts).
+
+A permanent header section ABOVE the tabs is fine when the data
+is genuinely cross-cutting (e.g. the "Overview" total-events /
+success-rate cards). Don't over-use this — anything operator-
+specific belongs IN a tab.
+
 ## Pre-flight checklist for new operator dashboards
 
 Before shipping a dashboard panel, answer:
@@ -140,15 +192,25 @@ Before shipping a dashboard panel, answer:
    `cloud.health.sweep` outnumbers real work 20:1, your aggregate
    is meaningless. Apply a render-pipeline whitelist before
    aggregating.
+5. **Does at least one view source from the control-plane source of
+   truth (Firestore / Postgres / wherever the work was *enqueued*)?**
+   Telemetry-only dashboards miss dispatch failures, cancellations,
+   and pre-envelope crashes — see "Dual-source rule" above.
+6. **Tabs or single column?** ≥4 distinct sections → tabs. The
+   default tab matches the most-asked operator question, not
+   chronological order of when the panels were built.
 
 ## Reference
 
-* Live endpoints: `/api/telemetry/renders`, `/api/telemetry/stage_latency`
-* Live UI: `/app/telemetry` → Stage Latency, Recent Renders sections
+* Live endpoints: `/api/telemetry/renders`, `/api/telemetry/stage_latency`,
+  `/api/telemetry/jobs`, `/api/telemetry/llm_costs`
+* Live UI: `/app/telemetry` → Jobs (default) / Renders / Stage Latency /
+  Services / LLM cost / Errors / Activity / Open in GCP tabs
 * Implementation: `control/routes/telemetry_routes.py`,
-  `web-next/app/app/telemetry/{renders,stage-latency}-section.tsx`
-* Tests: `tests/test_routes_telemetry_api.py::TestStageLatency`,
-  `TestRenders`, `_seed_full_render`
+  `web-next/app/app/telemetry/{renders,stage-latency,jobs,llm-costs}-section.tsx`,
+  `web-next/app/app/telemetry/page.tsx` (tabs layout)
+* Tests: `tests/test_routes_telemetry_api.py::{TestStageLatency,
+  TestRenders, TestJobsEndpoint, TestLLMCosts, TestSynthesizeStageDurations}`
 * Cross-link: `docs/telemetry.md` (architecture / data flow)
 * Memory pointer: `feedback_telemetry_dashboard_two_round_blindspot.md`
-  §"2026-05-12 round 4"
+  §"2026-05-12 round 4", `feedback_telemetry_dashboard_design.md`

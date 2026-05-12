@@ -166,6 +166,55 @@ spam is back, double-check that conftest's between-test cleanup
 calls `obs.reset_for_tests()` and that the `_INSTRUMENTS.clear()`
 line is still present in `reset_for_tests`.
 
+## Recipe: render-worker crashes with `AttributeError: 'NonRecordingSpan' object has no attribute 'status'`
+
+Class-of-bug: an OTel span helper inside `pipeline/observability/`
+is reading a span attribute that exists only on `RecordingSpan`,
+not on `NonRecordingSpan`. The SDK returns NonRecordingSpan during
+the brief Cloud Run cold-start window before instrumentation
+finishes booting; any `.status` / `.attributes` / `.events` /
+`.start_time` / `.end_time` / `.kind` / `.context` / `.parent` /
+`.resource` read raises `AttributeError` and crashes the worker
+mid-render.
+
+**Pinned fix already in place for `_close_span`** (`commit 2d6333f`,
+2026-05-12) — drop the read, call `set_status(Status(StatusCode.ERROR))`
+unconditionally on the failure path. NonRecordingSpan's `set_status`
+is a no-op; RecordingSpan's is idempotent.
+
+**For NEW span helpers** (anywhere that wraps `tracer().start_span`):
+
+```python
+# Bad — works only on RecordingSpan:
+if not success and span.status.status_code != StatusCode.ERROR:
+    span.set_status(Status(StatusCode.ERROR))
+
+# Good — works on both:
+if not success:
+    try:
+        span.set_status(Status(StatusCode.ERROR))
+    except Exception:
+        pass  # telemetry must never block the pipeline
+```
+
+Use only the methods the OTel `Span` ABC guarantees:
+`get_span_context()`, `set_attribute()`, `set_attributes()`,
+`set_status()`, `add_event()`, `update_name()`, `is_recording()`,
+`record_exception()`, `end()`. Anything else needs
+`getattr(span, "attr", None)` defensive read OR a call-pattern only.
+
+The original Cloud Logging trace from the 2026-05-12 incident is
+worth keeping for grep:
+
+```
+File "pipeline/observability/telemetry.py", line 335, in _close_span
+  if not success and span.status.status_code != StatusCode.ERROR:
+AttributeError: 'NonRecordingSpan' object has no attribute 'status'
+```
+
+See `feedback_otel_nonrecording_span_status_crash.md` for the
+generalised rule.
+
 ## Recipe: figure out the slowest stage in a render
 
 **Fastest path** (added 2026-05-12): open `/app/telemetry` →

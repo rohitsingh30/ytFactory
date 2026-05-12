@@ -452,6 +452,48 @@ gcloud run services logs tail ytfactory-tts-chatterbox \
   `web-next/app/app/telemetry/{renders,stage-latency}-section.tsx`.
   Pinned by 6 endpoint tests in
   `tests/test_routes_telemetry_api.py::TestStageLatency, TestRenders`.
+- **2026-05-12 (round 5) — Firestore backfill + tabbed UI + crash fix.**
+  Round 4 panels surfaced data only for renders that emitted
+  `obs.timed()` events. The Cloud Logging path missed three failure
+  classes: dispatch failures (gcloud / IAM / quota rejected the
+  worker), cancelled jobs, and pre-envelope crashes. The 2026-05-12
+  backfill found **8 of 50 historical jobs** invisible to the
+  telemetry view — a 16% blindspot that made the dashboard
+  structurally lie about success rate. Fix:
+    * **`GET /api/telemetry/jobs?hours=N&limit=M&status=...&channel=...`**
+      — Firestore-backed (control-plane source of truth). Sees every
+      job submitted including dispatch failures. Per-row `stages`
+      array synthesised via `_synthesize_stage_durations()` from
+      the doc's `timeline` field so historical jobs render the same
+      stage waterfall as Cloud-Logging-backed renders. ``hours=0``
+      = all-time (no time filter; capped by limit). Default landing
+      tab on `/app/telemetry`.
+    * **`GET /api/telemetry/llm_costs?hours=N`** — token usage
+      grouped by tier (small / medium / large) and backend
+      (cli / azure_openai / anthropic_sdk). Backend split is the
+      early-warning signal for cost regressions when the dispatcher
+      routes to a paid SDK instead of the free CLI.
+    * **Tabbed `/app/telemetry`** — single-column sections refactored
+      into 8 tabs (Jobs / Renders / Stage latency / Services / LLM
+      cost / Errors / Activity / Open in GCP). Permanent Overview
+      header above the tabs. Default tab = Jobs (most-asked operator
+      question), NOT Activity (sparkline). See
+      `docs/telemetry_dashboard_design.md` § "Dual-source rule" +
+      "Tabs over scrolling" for the rules formalised this round.
+    * **PIPELINE-BUG fixed mid-round (`commit 2d6333f`):** the new
+      Jobs view exposed 4 cloud renders crashing with
+      `'NonRecordingSpan' object has no attribute 'status'`. Source:
+      `pipeline/observability/telemetry.py::_close_span` was reading
+      `.status.status_code` to avoid a redundant `set_status` call
+      on the success path — but `NonRecordingSpan` (returned by the
+      OTel SDK during the cold-start instrumentation gap) has no
+      `.status` attribute. Fix: drop the read, call `set_status`
+      unconditionally on failure (no-op on NonRecording, idempotent
+      on Recording). Pinned by
+      `tests/test_obs_telemetry.py::TestTimedSurvivesNonRecordingSpan`.
+      See `feedback_otel_nonrecording_span_status_crash.md` for the
+      generalised "never read RecordingSpan-only attributes inside
+      span helpers" rule.
 
 ## Operational rules
 
