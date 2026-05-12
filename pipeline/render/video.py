@@ -648,6 +648,20 @@ def _maybe_emit_long_form_progress(
     ``[5/5] final mux``. Map each to the closest worker timeline pill
     so the user sees live progress instead of staring at an opaque
     ``compose: real-mode``.
+
+    Done markers (added 2026-05-13 for stage-overlap support):
+    long_form.py's parallel path emits ``[1/5] tts done X.Ys`` AND
+    ``[2/5] video prep done X.Ys`` so the timeline can mark each
+    substage's pill done independently — without these, the
+    cloud-worker walker would have to cascade-mark earlier pills
+    done when a later one starts (which is wrong when stages overlap).
+
+    The done events are forwarded as ``progress_cb("<stage>_done", msg)``
+    so :func:`_lf_advance_timeline` (in the cloud worker) recognises
+    them via the ``_done`` suffix and marks the pill done without
+    cascading. Any worker that doesn't understand the suffix gracefully
+    treats them as a no-op (the legacy cascade-on-start path still
+    works for older deployments).
     """
     s = line.rstrip("\r\n")
     if not s.startswith("[") or "/5]" not in s:
@@ -666,7 +680,23 @@ def _maybe_emit_long_form_progress(
         5: "compose",
     }
     stage = stage_map.get(idx, "compose")
+
+    # Detect explicit done markers from long_form.py's parallel path.
+    # The first significant token after the bracket is "tts done", "video
+    # prep done", "panels done", "video done", or similar — the
+    # heuristic is "the word ``done`` appears as a standalone token within
+    # the first ~30 chars of the body".
+    if _LF_DONE_TOKEN_RE.search(msg[:60]):
+        progress_cb(f"{stage}_done", msg or f"long-form stage {idx}/5 done")
+        return
+
     progress_cb(stage, msg or f"long-form stage {idx}/5")
+
+
+# Standalone ``done`` token within the first part of the line — matches
+# "tts done 12.4s", "video prep done 5.1s", "panels done", "video → ...
+# done", etc. without false-positiving on "down" / "abandoned" / etc.
+_LF_DONE_TOKEN_RE = re.compile(r"\bdone\b")
 
 
 __all__ = [

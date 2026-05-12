@@ -314,6 +314,119 @@ class StreamSubprocessTeeTest(unittest.TestCase):
         self.assertEqual([s for s, _ in calls], ["tts", "images"])
 
 
+class MaybeEmitLongFormProgressDoneMarkersTest(unittest.TestCase):
+    """Pin :func:`_maybe_emit_long_form_progress` recognition of the
+    new explicit done markers (added 2026-05-13 for stage-overlap).
+
+    The renderer's parallel path emits ``[1/5] tts done X.Ys`` AND
+    ``[2/5] video prep done X.Ys`` AFTER the corresponding stage
+    finishes. The classifier must forward these as
+    ``("<stage>_done", msg)`` so the cloud-worker walker can mark the
+    pill done WITHOUT cascading any other pill.
+
+    Backwards-compat: legacy lines like ``[1/5] narration N chunks →
+    narration.wav`` continue to be classified as running events on
+    the same stage (no false-positive on the standalone ``done``
+    token because the legacy line doesn't contain it).
+    """
+
+    def test_tts_done_marker_emits_tts_done_event(self) -> None:
+        calls: list[tuple[str, str]] = []
+        def cb(stage: str, msg: str) -> None:
+            calls.append((stage, msg))
+        _video._maybe_emit_long_form_progress(
+            "[1/5] tts done 12.4s — 25 chunks → narration.wav 600.0s",
+            cb,
+        )
+        self.assertEqual(len(calls), 1)
+        stage, msg = calls[0]
+        self.assertEqual(stage, "tts_done")
+        self.assertIn("12.4s", msg)
+
+    def test_video_prep_done_marker_emits_images_done_event(self) -> None:
+        calls: list[tuple[str, str]] = []
+        def cb(stage: str, msg: str) -> None:
+            calls.append((stage, msg))
+        _video._maybe_emit_long_form_progress(
+            "[2/5] video prep done 5.1s (panel_stills)",
+            cb,
+        )
+        self.assertEqual(len(calls), 1)
+        stage, msg = calls[0]
+        self.assertEqual(stage, "images_done")
+        self.assertIn("5.1s", msg)
+
+    def test_video_done_marker_emits_images_done_event(self) -> None:
+        calls: list[tuple[str, str]] = []
+        def cb(stage: str, msg: str) -> None:
+            calls.append((stage, msg))
+        _video._maybe_emit_long_form_progress(
+            "[2/5] video → video.mp4 600.0s",
+            cb,
+        )
+        # No "done" token on this line — it's a running/info marker,
+        # not a done marker. The classifier must NOT promote it.
+        self.assertEqual(len(calls), 1)
+        stage, msg = calls[0]
+        self.assertEqual(stage, "images")  # NOT images_done
+
+    def test_legacy_running_lines_still_emit_running_events(self) -> None:
+        """Backwards-compat: legacy lines from older renderers that
+        don't contain the standalone ``done`` token MUST be classified
+        as running events, not done events."""
+        calls: list[tuple[str, str]] = []
+        def cb(stage: str, msg: str) -> None:
+            calls.append((stage, msg))
+        _video._maybe_emit_long_form_progress(
+            "[1/5] chunked TTS via cloudrun_chatterbox", cb,
+        )
+        _video._maybe_emit_long_form_progress(
+            "[1/5] narration 25 chunks → narration.wav 600.0s",
+            cb,
+        )
+        _video._maybe_emit_long_form_progress(
+            "[2/5] image_panels: 12 panels → 1920x1080 30fps", cb,
+        )
+        self.assertEqual([s for s, _ in calls], ["tts", "tts", "images"])
+
+    def test_compose_done_emits_compose_done_event(self) -> None:
+        calls: list[tuple[str, str]] = []
+        def cb(stage: str, msg: str) -> None:
+            calls.append((stage, msg))
+        _video._maybe_emit_long_form_progress(
+            "[5/5] mux done 7.2s", cb,
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "compose_done")
+
+    def test_no_match_when_no_bracket_marker(self) -> None:
+        """Lines without the ``[N/5]`` shape must NOT trigger any
+        callback even if they contain ``done``."""
+        calls: list[tuple[str, str]] = []
+        def cb(stage: str, msg: str) -> None:
+            calls.append((stage, msg))
+        _video._maybe_emit_long_form_progress(
+            "trim done in 1.2s", cb,
+        )
+        _video._maybe_emit_long_form_progress(
+            "[done] beat 3 of 7", cb,
+        )
+        self.assertEqual(calls, [])
+
+    def test_done_token_must_be_a_word_boundary(self) -> None:
+        """``done`` must match as a standalone word — not as a
+        substring of ``download`` / ``abandoned`` / etc."""
+        calls: list[tuple[str, str]] = []
+        def cb(stage: str, msg: str) -> None:
+            calls.append((stage, msg))
+        _video._maybe_emit_long_form_progress(
+            "[2/5] image download in progress…", cb,
+        )
+        # No "done" word boundary → running event, not done.
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "images")
+
+
 class RenderLongFormErrorSurfaceTest(unittest.TestCase):
     """Pin that the failure-surface helper produces the right
     operator-actionable message format."""

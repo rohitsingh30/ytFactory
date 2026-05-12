@@ -609,28 +609,50 @@ class LfAdvanceTimelineTests(unittest.TestCase):
         self.assertEqual(self._stage_status(timeline, "images"), "pending")
 
     def test_full_long_form_walk_marks_done_with_real_elapsed(self):
-        """End-to-end: rewrite → narrate (alias→tts) → images → compose,
-        each transition marks the prior with accurate elapsed-s."""
+        """End-to-end: rewrite → narrate (alias→tts) → images → compose.
+
+        Pre-2026-05-13: every transition cascade-marked the prior pill
+        done. Post-2026-05-13: ``tts`` and ``images`` are siblings in
+        :data:`_LF_OVERLAPPING_SUBSTAGES` so the cascade SKIPS them
+        when the next stage is ALSO overlap-eligible (sibling running
+        in parallel must not falsely mark its sibling done). Cascade
+        DOES fire when the next stage is downstream of the overlap
+        region (``compose``) — by then both overlap branches are
+        guaranteed finished even if the renderer didn't emit explicit
+        done events (older renderer / safety net).
+        """
         timeline = self._seed_timeline()
         substage_t0 = {"rewrite": 1000.0}
 
         timeline, _ = self.ep._lf_advance_timeline(
             timeline, substage_t0, "narrate", "tts starting", now=1100.0,
         )
-        # rewrite done · 100.0s; tts running.
+        # rewrite done · 100.0s; tts running. (rewrite is NOT in
+        # the overlap set so it cascades normally.)
         self.assertEqual(self._stage_msg(timeline, "rewrite"), "100.0s")
         self.assertEqual(self._stage_status(timeline, "tts"), "running")
         self.assertIn("tts", substage_t0)
 
+        # Images starts while TTS is still running. Both are in the
+        # overlap set → tts must REMAIN running (the parallel-overlap
+        # property). Pre-2026-05-13 this would have stamped tts as
+        # "done · 200.0s" — wrong when the renderer is actually
+        # running both stages in parallel.
         timeline, _ = self.ep._lf_advance_timeline(
             timeline, substage_t0, "images", "image_panels", now=1300.0,
         )
-        self.assertEqual(self._stage_msg(timeline, "tts"), "200.0s")
+        self.assertEqual(self._stage_status(timeline, "tts"), "running")
+        self.assertEqual(self._stage_msg(timeline, "tts"), "tts starting")
         self.assertEqual(self._stage_status(timeline, "images"), "running")
 
+        # Compose starts. Compose is DOWNSTREAM of the overlap region
+        # (rewrite → {tts, images} → compose), so by the time it fires
+        # both tts and images must be done in process even if no
+        # explicit done event arrived. Cascade fires here.
         timeline, _ = self.ep._lf_advance_timeline(
             timeline, substage_t0, "compose", "muxing", now=1500.0,
         )
+        self.assertEqual(self._stage_msg(timeline, "tts"), "400.0s")
         self.assertEqual(self._stage_msg(timeline, "images"), "200.0s")
         self.assertEqual(self._stage_status(timeline, "compose"), "running")
 
@@ -660,6 +682,210 @@ class LfAdvanceTimelineTests(unittest.TestCase):
             timeline, substage_t0, "compose", "caption burn", now=1400.0,
         )
         self.assertEqual(substage_t0["compose"], first_t0)
+
+
+class LfAdvanceTimelineParallelTests(unittest.TestCase):
+    """Pin the stage-overlap-aware behaviour of
+    :func:`_lf_advance_timeline` (added 2026-05-13).
+
+    The new contract:
+
+    * Two siblings in :data:`_LF_OVERLAPPING_SUBSTAGES` (``tts`` and
+      ``images``) can BOTH be in ``running`` simultaneously without
+      one cascading the other to ``done``.
+    * Explicit ``<key>_done`` events (e.g. ``tts_done``,
+      ``images_done``) mark the corresponding pill ``done`` with the
+      message body as the elapsed-time text and DO NOT touch any
+      other pill.
+    * When a downstream non-overlapping pill (``compose``) starts
+      while overlap-eligible pills are still ``running``, the
+      cascade DOES fire on them — by then they're guaranteed
+      finished even if no explicit done event was emitted (graceful
+      downgrade for older renderers).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ep = _load_entrypoint()
+
+    def _seed_timeline(self) -> list[dict]:
+        from copy import deepcopy
+        timeline = self.ep._empty_timeline()
+        timeline = self.ep._set_stage(
+            timeline, "rewrite", "running", "long-form rewriter authoring envelope",
+        )
+        timeline = self.ep._set_stage(
+            timeline, "cast", "done", "skipped — long-form has no cast stage",
+        )
+        timeline = self.ep._set_stage(
+            timeline, "asr", "done",
+            "skipped — captions aligned from authored TTS chunk timings",
+        )
+        return deepcopy(timeline)
+
+    @staticmethod
+    def _stage(timeline: list[dict], key: str) -> dict | None:
+        for s in timeline:
+            if s.get("stage") == key:
+                return s
+        return None
+
+    def test_overlapping_set_constants_shape(self):
+        """Defends against accidental shape change to the overlap
+        set — the implementation behaviour above ALL hinges on this
+        constant. The cloud worker's behaviour stays consistent with
+        the renderer's emit shape only as long as both agree on which
+        substages can run in parallel."""
+        self.assertEqual(
+            self.ep._LF_OVERLAPPING_SUBSTAGES, frozenset({"tts", "images"})
+        )
+
+    def test_tts_running_then_images_running_both_running_simultaneously(self):
+        """The core overlap property: ``tts`` and ``images`` both in
+        ``running`` after the renderer fires sequential ``running``
+        events for them."""
+        timeline = self._seed_timeline()
+        substage_t0 = {"rewrite": 1000.0}
+
+        # tts starts.
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "tts", "chunked TTS via cloudrun_chatterbox",
+            now=1100.0,
+        )
+        # images starts a moment later (parallel branch dispatched).
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "images", "image_panels",
+            now=1100.5,
+        )
+
+        tts = self._stage(timeline, "tts")
+        images = self._stage(timeline, "images")
+        self.assertEqual(tts["status"], "running")
+        self.assertEqual(images["status"], "running")
+        # The TTS msg must NOT have been clobbered with "X.Ys" (the
+        # cascade-marker shape) — that would mean images-running
+        # accidentally cascaded TTS.
+        self.assertEqual(tts["msg"], "chunked TTS via cloudrun_chatterbox")
+        self.assertEqual(images["msg"], "image_panels")
+
+    def test_explicit_tts_done_event_marks_only_tts(self):
+        """``progress_cb("tts_done", "12.4s")`` from the renderer's
+        parallel path must mark ONLY the tts pill done — must NOT
+        touch images / compose / rewrite."""
+        timeline = self._seed_timeline()
+        substage_t0 = {"rewrite": 1000.0}
+
+        # Both tts and images currently running (overlap in flight).
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "tts", "chunked TTS", now=1100.0,
+        )
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "images", "image_panels", now=1101.0,
+        )
+        # tts finishes first → renderer emits explicit done event.
+        timeline, resolved = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "tts_done", "12.4s", now=1112.4,
+        )
+
+        tts = self._stage(timeline, "tts")
+        images = self._stage(timeline, "images")
+        self.assertEqual(tts["status"], "done")
+        self.assertEqual(tts["msg"], "12.4s")
+        # images stays running — overlap branch still in flight.
+        self.assertEqual(images["status"], "running")
+        self.assertEqual(images["msg"], "image_panels")
+        # Resolved key for the closure's Firestore write.
+        self.assertEqual(resolved, "tts")
+
+    def test_explicit_images_done_event_marks_only_images(self):
+        timeline = self._seed_timeline()
+        substage_t0 = {"rewrite": 1000.0}
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "tts", "chunked TTS", now=1100.0,
+        )
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "images", "image_panels", now=1101.0,
+        )
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "images_done", "5.1s", now=1106.1,
+        )
+
+        tts = self._stage(timeline, "tts")
+        images = self._stage(timeline, "images")
+        self.assertEqual(images["status"], "done")
+        self.assertEqual(images["msg"], "5.1s")
+        self.assertEqual(tts["status"], "running")  # still in flight
+
+    def test_done_event_for_unknown_substage_is_silently_ignored(self):
+        """Defence-in-depth: ``progress_cb("typo_done", ...)`` from a
+        future renderer with a typo MUST NOT crash the closure or
+        corrupt the timeline."""
+        timeline = self._seed_timeline()
+        substage_t0 = {"rewrite": 1000.0}
+
+        # No exception, no timeline mutation beyond the
+        # already-pre-marked seed.
+        timeline_after, resolved = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "lkjsdf_done", "garbage", now=1200.0,
+        )
+        # Pills unchanged.
+        self.assertEqual(
+            self._stage(timeline_after, "rewrite")["status"], "running"
+        )
+        self.assertEqual(
+            self._stage(timeline_after, "tts")["status"], "pending"
+        )
+        # Resolved is the (sans-suffix) key the renderer named, even
+        # though it doesn't exist in the order — best-effort.
+        self.assertEqual(resolved, "lkjsdf")
+
+    def test_alias_resolution_works_on_done_events(self):
+        """``narrate_done`` should be aliased to ``tts_done`` so the
+        legacy ``narrate`` substage emits with the same shape — even
+        though long_form.py only emits ``tts_done`` today, third-
+        party renderers may still use ``narrate``."""
+        timeline = self._seed_timeline()
+        substage_t0 = {"rewrite": 1000.0, "tts": 1100.0}
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "narrate", "tts running", now=1100.0,
+        )
+        timeline, resolved = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "narrate_done", "8.2s", now=1108.2,
+        )
+        self.assertEqual(resolved, "tts")
+        self.assertEqual(self._stage(timeline, "tts")["status"], "done")
+        self.assertEqual(self._stage(timeline, "tts")["msg"], "8.2s")
+
+    def test_compose_starting_cascades_overlapping_pills_to_done(self):
+        """Even though tts and images are overlap-eligible, when
+        ``compose`` (downstream) starts while either is still
+        running, the cascade DOES fire on them — by then both are
+        guaranteed finished in process even if the renderer didn't
+        emit explicit done events. Graceful downgrade for older
+        renderers that don't emit the new markers."""
+        timeline = self._seed_timeline()
+        substage_t0 = {"rewrite": 1000.0}
+
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "tts", "chunked TTS", now=1100.0,
+        )
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "images", "image_panels", now=1101.0,
+        )
+        # Compose starts WITHOUT explicit done events for tts/images
+        # (e.g. older renderer).
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "compose", "muxing", now=1500.0,
+        )
+
+        tts = self._stage(timeline, "tts")
+        images = self._stage(timeline, "images")
+        compose = self._stage(timeline, "compose")
+        self.assertEqual(tts["status"], "done")
+        self.assertEqual(tts["msg"], "400.0s")  # 1500.0 - 1100.0
+        self.assertEqual(images["status"], "done")
+        self.assertEqual(images["msg"], "399.0s")  # 1500.0 - 1101.0
+        self.assertEqual(compose["status"], "running")
 
 
 if __name__ == "__main__":  # pragma: no cover

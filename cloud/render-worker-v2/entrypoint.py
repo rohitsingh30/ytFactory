@@ -700,6 +700,35 @@ _RENDERER_SUBSTAGES: tuple[str, ...] = ("tts", "asr", "images", "compose")
 _LF_SUBSTAGES_ORDER: tuple[str, ...] = ("rewrite", "tts", "images", "compose")
 _LF_SUBSTAGE_ALIASES: dict[str, str] = {"narrate": "tts"}
 
+# Stage-overlap support (added 2026-05-13). When the renderer's
+# parallel path emits an explicit done marker (``[1/5] tts done X.Ys``,
+# ``[2/5] video prep done X.Ys``), :func:`_maybe_emit_long_form_progress`
+# in ``pipeline/render/video.py`` forwards it as ``progress_cb("<key>_done", msg)``
+# (e.g. ``("tts_done", "12.4s")``). The walker recognises the
+# ``_done`` suffix and marks the corresponding pill done WITHOUT
+# cascading any later pills to running.
+#
+# Pre-overlap (sequential renderer): when a later substage starts,
+# the cascade marks earlier pills done. Two pills CANNOT both be in
+# ``running`` because the renderer processes them strictly in order.
+#
+# Post-overlap (parallel renderer): TTS and images both emit
+# ``running`` events near-simultaneously. Cascading on later-start
+# would falsely mark TTS done the moment images starts (TTS is still
+# in flight). The fix:
+#   1. Substages that have an explicit done marker pair (TTS / images)
+#      are NEVER cascade-marked done by a later substage starting.
+#      They wait for their own ``_done`` event (or the final-cleanup
+#      loop in ``_main_from_firestore``'s ``for sub in
+#      _LF_SUBSTAGES_ORDER`` block, which handles graceful downgrade
+#      from older renderers that don't emit explicit done markers).
+#   2. Substages that don't have a done marker pair (rewrite, before
+#      stage-overlap landed: tts/images too) keep the old cascade
+#      behaviour as backwards-compat — older renderer images that
+#      don't emit ``[1/5] tts done`` still get the TTS pill flipped
+#      to done when the images pill starts running.
+_LF_OVERLAPPING_SUBSTAGES: frozenset[str] = frozenset({"tts", "images"})
+
 
 def _lf_advance_timeline(
     timeline: list[dict],
@@ -722,15 +751,21 @@ def _lf_advance_timeline(
     Walking rules:
       * Resolve aliases first (``narrate`` → ``tts``) so the dashboard's
         7-pill timeline doesn't need a separate row.
-      * Coerce unknown stages to ``compose`` (defence-in-depth) so the
-        user still sees progress on the umbrella pill.
-      * For every prior pill in :data:`_LF_SUBSTAGES_ORDER` BEFORE the
-        resolved one: mark "done" ONLY if it's currently ``running``
-        AND we actually saw it begin (its key is in ``substage_t0``).
-        Pills pre-marked "done · skipped" (cast / asr-when-authored)
-        keep their pre-mark; pills that genuinely never ran (e.g. asr
-        on a whisper-aligned long-form where we lack telemetry) stay
-        "pending" rather than lying.
+      * **Done events**: a stage key with the ``_done`` suffix
+        (e.g. ``tts_done`` / ``images_done`` from the renderer's
+        parallel path) marks the corresponding pill ``done`` with the
+        message as the elapsed-time text and DOES NOT cascade or
+        change any other pill.
+      * **Running events**: coerce unknown stages to ``compose``
+        (defence-in-depth) so the user still sees progress on the
+        umbrella pill.
+      * **Cascade on later-start**: for every prior pill in
+        :data:`_LF_SUBSTAGES_ORDER` BEFORE the resolved one, mark
+        "done" ONLY if it's currently ``running`` AND we actually saw
+        it begin (its key is in ``substage_t0``) AND it is NOT in
+        :data:`_LF_OVERLAPPING_SUBSTAGES` (those wait for explicit
+        done events). Pills pre-marked "done · skipped" (cast /
+        asr-when-authored) keep their pre-mark.
 
     Pre-2026-05-12 the inline closure unconditionally cascaded prior
     pills to "done · —" the moment the FIRST progress event arrived
@@ -739,7 +774,35 @@ def _lf_advance_timeline(
     The user saw "5 / 7 stages complete · 71%" 20 s into a 30-min
     render, with images/tts/asr all stamped "done" before any actual
     work had happened.
+
+    Post-2026-05-13 the cascade also exempts ``tts`` and ``images``
+    from being marked done by a later-OVERLAPPING-substage start —
+    they wait for their own explicit done events (or the final-cleanup
+    safety net in ``_main_from_firestore``) so the parallel-overlap
+    path can legitimately have BOTH ``tts`` and ``images`` in
+    ``running`` at the same time without the walker forcing one into
+    ``done``. When the resolved stage is DOWNSTREAM of the overlap
+    region (``compose``), the cascade is allowed to fire on
+    overlapping pills too — by then they're guaranteed done in
+    process even if no explicit done event arrived (e.g. from an
+    older renderer that doesn't emit the new markers).
     """
+    # Done events: ``progress_cb("<substage>_done", "X.Ys")`` from
+    # :func:`_maybe_emit_long_form_progress`. Mark the pill done and
+    # exit — DO NOT change any other pill, DO NOT cascade.
+    if stage.endswith("_done"):
+        target = stage[:-len("_done")]
+        target = _LF_SUBSTAGE_ALIASES.get(target, target)
+        if target in _LF_SUBSTAGES_ORDER:
+            timeline = _set_stage(
+                timeline, target, "done",
+                msg or "done",
+            )
+            return timeline, target
+        # Unknown done — silently ignore (defence-in-depth; better
+        # than crashing the closure on a typo'd marker).
+        return timeline, target
+
     resolved = _LF_SUBSTAGE_ALIASES.get(stage, stage)
     if resolved not in _LF_SUBSTAGES_ORDER:
         resolved = "compose"
@@ -753,6 +816,20 @@ def _lf_advance_timeline(
         if prior_status in (None, "done"):
             continue
         if prior not in substage_t0:
+            continue
+        # Stage-overlap pillar (2026-05-13): TTS and images can both
+        # legitimately be running simultaneously while either is in
+        # flight. Don't cascade-mark the prior overlapping pill done
+        # WHEN the new substage is ALSO an overlapping sibling — they
+        # run in parallel by design. When the new substage is
+        # downstream of the overlap region (e.g. compose), cascading
+        # is correct: compose strictly depends on every overlap branch
+        # having finished, so any still-running overlap pill must in
+        # fact be done by the time the cascade fires.
+        if (
+            prior in _LF_OVERLAPPING_SUBSTAGES
+            and resolved in _LF_OVERLAPPING_SUBSTAGES
+        ):
             continue
         prior_t0 = substage_t0[prior]
         timeline = _set_stage(
