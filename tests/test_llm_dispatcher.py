@@ -306,6 +306,62 @@ class AzureBackendTest(unittest.TestCase):
         # deployments reject ALL response_format values).
         self.assertNotIn("response_format", retry_kwargs)
 
+    def test_max_tokens_failure_retries_with_max_completion_tokens(self) -> None:
+        # Exact prod failure 2026-05-12: gpt-5.3-chat (and o-series
+        # reasoning deployments in general) reject ``max_tokens`` and
+        # demand ``max_completion_tokens``. We retry once with the key
+        # swapped — same value, same intent. The original 502 cascade
+        # (Reddit-403 → LLM-500 → 502) was directly caused by NOT
+        # retrying this.
+        self._fake_client.chat.completions.create.side_effect = [
+            Exception(
+                "Error code: 400 - {'error': {'message': "
+                "\"Unsupported parameter: 'max_tokens' is not supported "
+                "with this model. Use 'max_completion_tokens' instead.\", "
+                "'type': 'invalid_request_error', 'param': 'max_tokens', "
+                "'code': 'unsupported_parameter'}}"
+            ),
+            self._make_resp('{"items": [{"topic": "Cool topic"}]}'),
+        ]
+        out = llm_cli._call_azure_openai(
+            "brainstorm", output_json=True, json_schema=None,
+            model="haiku", timeout_s=30, stage="discover_brainstorm",
+        )
+        self.assertEqual(out, {"items": [{"topic": "Cool topic"}]})
+        self.assertEqual(self._fake_client.chat.completions.create.call_count, 2)
+
+        first_kwargs = self._fake_client.chat.completions.create.call_args_list[0].kwargs
+        retry_kwargs = self._fake_client.chat.completions.create.call_args_list[1].kwargs
+        # Original call had max_tokens; retry has max_completion_tokens
+        # with the SAME value. response_format is preserved.
+        self.assertIn("max_tokens", first_kwargs)
+        self.assertNotIn("max_completion_tokens", first_kwargs)
+        self.assertNotIn("max_tokens", retry_kwargs)
+        self.assertIn("max_completion_tokens", retry_kwargs)
+        self.assertEqual(
+            retry_kwargs["max_completion_tokens"], first_kwargs["max_tokens"],
+        )
+        self.assertEqual(retry_kwargs["response_format"], first_kwargs["response_format"])
+
+    def test_max_tokens_retry_failure_surfaces_with_retry_label(self) -> None:
+        # If the retry also fails (e.g. content filter rejects), the
+        # error message must name the retry that was attempted so the
+        # operator can tell whether the original or the retry blew up.
+        self._fake_client.chat.completions.create.side_effect = [
+            Exception(
+                "Unsupported parameter: 'max_tokens' is not supported "
+                "with this model. Use 'max_completion_tokens' instead."
+            ),
+            Exception("content filter triggered"),
+        ]
+        with self.assertRaises(llm_cli.ClaudeCLIError) as ctx:
+            llm_cli._call_azure_openai(
+                "x", output_json=True, json_schema=None,
+                model="haiku", timeout_s=30, stage="discover_brainstorm",
+            )
+        self.assertIn("post-retry=max_completion_tokens", str(ctx.exception))
+        self.assertIn("content filter", str(ctx.exception))
+
     def test_other_exceptions_propagate_as_claude_cli_error(self) -> None:
         self._fake_client.chat.completions.create.side_effect = \
             Exception("rate limit exceeded")

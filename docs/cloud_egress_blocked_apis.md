@@ -17,22 +17,21 @@ Cloud Run. Reddit is the confirmed case (egress-IP block on
 typically have similar gates. The 403 is silent — no error in the
 laptop dev loop, regression only surfaces in production.
 
-## Mitigation: open-source Pullpush + optional Reddit OAuth (2026-05-11)
+## Mitigation: open-source Pullpush + (planned) Reddit OAuth (2026-05-12)
 
-`pipeline/sources/reddit_api.py` now auto-selects between three
-backends, so the Cloud Run egress block is no longer a hard wall:
+`pipeline/sources/reddit_api.py` now ships a backend dispatcher, so the
+Cloud Run egress block is no longer a hard wall:
 
 ```
-1. OAuth         → oauth.reddit.com   (requires REDDIT_CLIENT_ID + _SECRET)
-2. Pullpush      → api.pullpush.io    (open-source, no auth, hours-delayed)
-3. Anonymous     → www.reddit.com     (laptop only; 403s on Cloud Run)
+1. OAuth         → oauth.reddit.com   (NOT YET IMPLEMENTED — see below)
+2. Pullpush      → api.pullpush.io    (open-source, no auth, hours-delayed)  ← SHIPPED
+3. Anonymous     → www.reddit.com     (laptop only; 403s on Cloud Run)       ← SHIPPED
 ```
 
 **Selection logic** (`_pick_backend()`):
 
 ```
 if REDDIT_FETCH_BACKEND env explicitly set        → use it (oauth|pullpush|anon)
-elif REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET set  → "oauth"
 elif K_SERVICE env set (Cloud Run runtime marker) → "pullpush"  ← AUTOMATIC
 else                                              → "anon"
 ```
@@ -41,15 +40,49 @@ else                                              → "anon"
 registration required. The cloud worker / `ytfactory-web` detect
 `K_SERVICE=...` (Cloud Run sets this on every container) and route
 to Pullpush automatically. The only user-visible difference from
-the OAuth path is freshness: Pullpush is archival (hours-delayed),
-so a Reddit URL the user pasted within the last few hours might
-not be indexed yet — in which case `fetch_post_by_url` raises and
-the caller degrades to user-typed `topic`/`notes`.
+the (future) OAuth path is freshness: Pullpush is archival
+(hours-delayed), so a Reddit URL the user pasted within the last few
+hours might not be indexed yet — in which case `fetch_post_by_url`
+raises `RedditFetchError` and the caller degrades to user-typed
+`topic`/`notes`.
 
-### When to register a Reddit script-app on top of this
+> ⚠ **OAuth is not yet implemented.** `_fetch_via_oauth` and
+> `_fetch_post_via_oauth` raise `NotImplementedError` with a message
+> pointing at this doc. Critically, **`_pick_backend()` does NOT
+> auto-select `oauth` from the presence of `REDDIT_CLIENT_ID` /
+> `REDDIT_CLIENT_SECRET`** — if it did, an operator who provisions
+> those secrets to "make prod faster" would actually regress prod
+> from "Pullpush works" to a hard 502. The only way to activate
+> the OAuth path is the explicit `REDDIT_FETCH_BACKEND=oauth` env
+> var, and even then the dispatcher raises NotImplementedError with
+> a clear pointer here. When OAuth is implemented and smoke-tested,
+> flip the precedence so secrets-presence auto-picks it.
 
-Register only if you need *real-time freshness* (≤ a few minutes
-old). The cloud-side recipe stays the same:
+### Pullpush widening cascade
+
+Pullpush is hours-delayed and many archived AITA-style posts have
+`selftext == "[removed]"` (Reddit moderates them after the fact, the
+archive preserves the moderation marker). To avoid handing the
+discover route an empty list when the strict requested timeframe is
+mostly removed posts, `_fetch_via_pullpush` widens automatically:
+
+```
+requested timeframe (e.g. "day" → 24h)
+  → "week"  (7d)
+    → "month" (30d)
+```
+
+It stops as soon as it has `limit` usable items, dedupes by
+`post_id` so a wider window doesn't return the same post twice, and
+records the actual window used in `metadata["pullpush_window"]` /
+`metadata["pullpush_after"]` so the UI can label the source honestly
+("Pullpush · top week" when day came up empty).
+
+### When to ship the OAuth backend
+
+Implement only if you need *real-time freshness* (≤ a few minutes
+old) — Pullpush's hours-delay otherwise covers every shipped use
+case. Recipe sketch when the time comes:
 
 ```
 1. https://www.reddit.com/prefs/apps → create "script" app.
@@ -60,12 +93,20 @@ old). The cloud-side recipe stays the same:
        --member="serviceAccount:tts-runner@ytfactory-prod-v2.iam.gserviceaccount.com" \
        --role=roles/secretmanager.secretAccessor
    done
-4. gcloud run jobs update     ytfactory-render-worker-v2 --update-secrets=REDDIT_CLIENT_ID=...,REDDIT_CLIENT_SECRET=...
-   gcloud run services update ytfactory-web              --update-secrets=REDDIT_CLIENT_ID=...,REDDIT_CLIENT_SECRET=...
+4. Implement _fetch_via_oauth + _fetch_post_via_oauth in
+   pipeline/sources/reddit_api.py (currently NotImplementedError).
+5. Bind secrets to BOTH:
+     gcloud run jobs update     ytfactory-render-worker-v2 --update-secrets=REDDIT_CLIENT_ID=...,REDDIT_CLIENT_SECRET=...
+     gcloud run services update ytfactory-web              --update-secrets=REDDIT_CLIENT_ID=...,REDDIT_CLIENT_SECRET=...
+6. Flip _pick_backend() precedence: when REDDIT_CLIENT_ID + _SECRET
+   are both set AND oauth is implemented, return "oauth" before the
+   K_SERVICE → pullpush rule.
+7. Set REDDIT_FETCH_BACKEND=oauth on the canary container, smoke,
+   then unset (so the precedence rule takes over).
 ```
 
-Once the secrets are bound, `_pick_backend()` returns `"oauth"` and
-the Pullpush backend is bypassed automatically.
+Once shipped, set the env-explicit override during validation, then
+remove it so the auto-pick kicks in.
 
 ### Forcing a backend explicitly
 

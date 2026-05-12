@@ -717,6 +717,69 @@ class TestLlmTopicItems(unittest.TestCase):
             items = _llm_topic_items("rhymetimejunction", DiscoverRequest(), count=5)
         self.assertEqual([it.topic for it in items], ["Same", "Other"])
 
+    def test_failure_path_logs_at_warning_level(self) -> None:
+        # Exception during LLM call must surface at WARNING (not INFO)
+        # so cloud log scans pick it up alongside the Reddit-403 line
+        # when both legs of the discover feed are dead.
+        with patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm", side_effect=RuntimeError("boom")):
+            with self.assertLogs("control.routes.discover_routes", level="WARNING") as cm:
+                items = _llm_topic_items("hindutavaanimated", DiscoverRequest())
+        self.assertEqual(items, [])
+        joined = "\n".join(cm.output)
+        self.assertIn("LLM brainstorm raised", joined)
+        self.assertIn("boom", joined)
+
+    def test_non_json_string_logs_warning(self) -> None:
+        with patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm", return_value="not valid json {{{"):
+            with self.assertLogs("control.routes.discover_routes", level="WARNING") as cm:
+                items = _llm_topic_items("hindutavaanimated", DiscoverRequest())
+        self.assertEqual(items, [])
+        self.assertIn("non-JSON", "\n".join(cm.output))
+
+    def test_non_dict_result_logs_warning(self) -> None:
+        with patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm", return_value=["not", "a", "dict"]):
+            with self.assertLogs("control.routes.discover_routes", level="WARNING") as cm:
+                items = _llm_topic_items("hindutavaanimated", DiscoverRequest())
+        self.assertEqual(items, [])
+        self.assertIn("non-dict", "\n".join(cm.output))
+
+    def test_items_field_not_a_list_logs_warning(self) -> None:
+        with patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm",
+                   return_value={"items": "should-be-a-list"}):
+            with self.assertLogs("control.routes.discover_routes", level="WARNING") as cm:
+                items = _llm_topic_items("hindutavaanimated", DiscoverRequest())
+        self.assertEqual(items, [])
+        self.assertIn("not a list", "\n".join(cm.output))
+
+    def test_empty_items_array_logs_warning(self) -> None:
+        # The ACTUAL silent-failure mode that cost us hours on
+        # 2026-05-12 — Azure honours response_format strictly and
+        # returns ``{"items": []}`` rather than raising.
+        with patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm", return_value={"items": []}):
+            with self.assertLogs("control.routes.discover_routes", level="WARNING") as cm:
+                items = _llm_topic_items("mystoriesanimated", DiscoverRequest())
+        self.assertEqual(items, [])
+        self.assertIn("empty 'items'", "\n".join(cm.output))
+
+    def test_all_items_discarded_logs_warning(self) -> None:
+        # Items came back but every one is malformed (no topic field).
+        # Surfaces typo-class bugs (schema field renamed, etc).
+        result = {"items": [
+            {"hook": "no topic field 1"},
+            {"hook": "no topic field 2"},
+        ]}
+        with patch("control.routes.discover_routes._llm_disabled", return_value=False), \
+             patch("pipeline.llm.cli.call_llm", return_value=result):
+            with self.assertLogs("control.routes.discover_routes", level="WARNING") as cm:
+                items = _llm_topic_items("hindutavaanimated", DiscoverRequest())
+        self.assertEqual(items, [])
+        self.assertIn("all were", "\n".join(cm.output))
+
 
 class TestBuildFeed(unittest.TestCase):
     def test_mystoriesanimated(self) -> None:

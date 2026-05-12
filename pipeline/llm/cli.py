@@ -705,14 +705,36 @@ def _call_azure_openai(
     except Exception as e:
         # On a `response_format`-related rejection (older deployments
         # don't support either json_schema or json_object), retry once
-        # WITHOUT response_format. Any other failure → ClaudeCLIError.
+        # WITHOUT response_format.
+        # On a `max_tokens`-vs-`max_completion_tokens` rejection
+        # (gpt-5.x / o-series reasoning deployments require the latter,
+        # gpt-4o accepts the former — we can't tell at config time
+        # which deployment Azure has wired up), retry once with the
+        # token cap key swapped. This is the same self-healing pattern
+        # the docstring promised for "if/when the opus tier moves to
+        # a reasoning deployment" (see _DEFAULT_MAX_TOKENS_BY_STAGE
+        # comment) — the moment finally arrived 2026-05-12 when
+        # gpt-5.3-chat started rejecting `max_tokens`.
+        # Any other failure → ClaudeCLIError.
         msg = str(e)
+        retry_label: str | None = None
+
         if (
+            "max_tokens" in msg
+            and "max_completion_tokens" in msg
+            and "max_tokens" in kwargs
+        ):
+            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+            retry_label = "max_completion_tokens"
+        elif (
             output_json
             and "response_format" in msg
             and "response_format" in kwargs
         ):
             kwargs.pop("response_format", None)
+            retry_label = "no_response_format"
+
+        if retry_label:
             try:
                 resp = client.chat.completions.create(**kwargs)
             except Exception as e2:  # noqa: BLE001
@@ -720,9 +742,9 @@ def _call_azure_openai(
                            duration_ms=int((time.time() - t0) * 1000),
                            job_id=job_id,
                            metadata={**tlm_meta, "error": str(e2)[:200],
-                                     "retry": "no_response_format"})
+                                     "retry": retry_label})
                 raise ClaudeCLIError(
-                    f"azure_openai chat error (post-retry): {e2}"
+                    f"azure_openai chat error (post-retry={retry_label}): {e2}"
                 ) from e2
         else:
             _tlm.track("llm_call", category="llm", success=False,

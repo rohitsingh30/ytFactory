@@ -586,10 +586,15 @@ def _fetch_source(kind: str, ref: str) -> dict | None:
         # ref is a full Reddit post URL or permalink. Routes through
         # pipeline.sources.reddit_api.fetch_post_by_url which auto-picks
         # the best backend:
-        #   1. OAuth (oauth.reddit.com) when REDDIT_CLIENT_ID + _SECRET set.
-        #   2. Pullpush (api.pullpush.io) when running on Cloud Run
-        #      without OAuth — open-source Pushshift fork, no auth,
-        #      hours-delayed archival data.
+        #   1. OAuth (oauth.reddit.com) — NOT YET IMPLEMENTED. Honored
+        #      only via explicit REDDIT_FETCH_BACKEND=oauth env (raises
+        #      NotImplementedError until the fetcher lands).
+        #   2. Pullpush (api.pullpush.io) — auto-selected on Cloud Run
+        #      (K_SERVICE env present). Open-source Pushshift fork, no
+        #      auth, hours-delayed archival data. Raises
+        #      RedditFetchError when the post isn't yet archived (post
+        #      < a few hours old) — caller (this function's caller)
+        #      catches and degrades to user-typed topic/notes.
         #   3. Anonymous JSON (works on laptop, 403s on Cloud Run).
         # See docs/cloud_egress_blocked_apis.md and
         # pipeline/sources/reddit_api.py::_pick_backend for the full

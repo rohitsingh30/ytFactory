@@ -440,18 +440,47 @@ def _llm_topic_items(channel: str, req: DiscoverRequest, *, count: int = LLM_BRA
             stage="discover_brainstorm",
         )
     except Exception as e:  # noqa: BLE001
-        logger.info("LLM brainstorm unavailable for %s: %s", channel, e)
+        # Bumped from INFO → WARNING (2026-05-12). When this is the
+        # only reason discover 502s (Reddit native also failed), we
+        # need to see it in the cloud log scan, not just in INFO-level
+        # debug streams.
+        logger.warning(
+            "LLM brainstorm raised for %s (variant=%s niche=%s): %s",
+            channel, req.variant, req.niche_key, e,
+        )
         return []
 
     if isinstance(result, str):
         try:
             result = json.loads(result)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "LLM brainstorm returned non-JSON string for %s: %s "
+                "(first 200 chars: %r)",
+                channel, e, result[:200],
+            )
             return []
     if not isinstance(result, dict):
+        logger.warning(
+            "LLM brainstorm returned non-dict result for %s: type=%s",
+            channel, type(result).__name__,
+        )
         return []
     raw_items = result.get("items") or []
     if not isinstance(raw_items, list):
+        logger.warning(
+            "LLM brainstorm 'items' field is not a list for %s: type=%s",
+            channel, type(raw_items).__name__,
+        )
+        return []
+    if not raw_items:
+        # Common silent failure mode: Azure honours response_format and
+        # returns ``{"items": []}`` rather than raising. Without this
+        # log line the only symptom is a 502 with no upstream cause.
+        logger.warning(
+            "LLM brainstorm returned empty 'items' for %s (variant=%s niche=%s)",
+            channel, req.variant, req.niche_key,
+        )
         return []
 
     label_bits = [f"LLM · {summary.label}"] if summary else ["LLM"]
@@ -485,6 +514,14 @@ def _llm_topic_items(channel: str, req: DiscoverRequest, *, count: int = LLM_BRA
         ))
         if len(out) >= count:
             break
+    if raw_items and not out:
+        # Items existed but every one was malformed / duplicate / empty.
+        # Surfaces typo-class bugs (e.g. schema field renamed) loudly.
+        logger.warning(
+            "LLM brainstorm produced %d raw items for %s but all were "
+            "discarded as malformed/duplicate (sample: %r)",
+            len(raw_items), channel, raw_items[0] if raw_items else None,
+        )
     return out
 
 
