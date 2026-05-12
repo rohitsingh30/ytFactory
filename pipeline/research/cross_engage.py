@@ -119,9 +119,29 @@ def _load_registry() -> dict[str, dict[str, Any]]:
         return {}
 
 
+def load_registry() -> dict[str, dict[str, Any]]:
+    """Public alias for ``_load_registry``.
+
+    Audit S1.9 — cross-module callers (``web/server.py::youtube_auth_status``)
+    were reaching into the underscore-prefixed helper, which is brittle:
+    a refactor that renames or restructures the registry storage would
+    silently break those importers. The public alias gives external
+    callers a stable name; the underscore version stays as the internal
+    in-module entry point so existing tests that monkey-patch
+    ``cross_engage._load_registry`` keep working.
+    """
+    return _load_registry()
+
+
 def _save_registry(reg: dict[str, dict[str, Any]]) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CHANNEL_IDS_PATH.write_text(json.dumps(reg, indent=2, sort_keys=True))
+
+
+def save_registry(reg: dict[str, dict[str, Any]]) -> None:
+    """Public alias for ``_save_registry`` — see ``load_registry`` for
+    the rationale (audit S1.9)."""
+    _save_registry(reg)
 
 
 def resolve_channel_id(account: str, *, force: bool = False) -> dict[str, Any]:

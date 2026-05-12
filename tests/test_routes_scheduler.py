@@ -70,6 +70,9 @@ class TestSchedulerRoutes(unittest.IsolatedAsyncioTestCase):
         app = _make_app()
         transport = httpx.ASGITransport(app=app)
         mock_state = {"last_tick": "2026-01-01", "queue_depth": 0}
+        # Audit S1.9 — the route now calls scheduler.read_state() (public
+        # alias). Patch the underscore-prefixed helper so the alias body
+        # actually executes (read_state -> _read_state, exercising both).
         with patch("control.scheduler_routes.scheduler._read_state", return_value=mock_state):
             with patch.dict(os.environ, {"YTFACTORY_AGENT_TOKEN": "test-token"}):
                 async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -79,6 +82,16 @@ class TestSchedulerRoutes(unittest.IsolatedAsyncioTestCase):
                     )
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json(), mock_state)
+
+    async def test_legacy_public_read_state_alias_exists(self) -> None:
+        """Audit S1.9 — pin the legacy ``control.scheduler.read_state``
+        public alias so cross-module callers have a stable name. The
+        underscore version stays as the in-module entry point.
+        """
+        from control import scheduler as _legacy
+        with patch.object(_legacy, "_read_state", return_value={"hi": 1}) as m:
+            self.assertEqual(_legacy.read_state(), {"hi": 1})
+            m.assert_called_once_with()
 
     async def test_tick_no_token_env_503(self) -> None:
         env = {k: v for k, v in os.environ.items() if k != "YTFACTORY_AGENT_TOKEN"}

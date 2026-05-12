@@ -5418,7 +5418,10 @@ async def youtube_auth_status() -> dict:
     from pipeline.research import cross_engage as _ce
 
     accounts = _ce.list_sibling_accounts()
-    registry = _ce._load_registry()
+    # Audit S1.9 — use public load_registry alias rather than the
+    # underscore-prefixed _load_registry, which is the in-module
+    # entry point.
+    registry = _ce.load_registry()
     out = []
     for a in accounts:
         s = _upload.inspect_token_status(a)

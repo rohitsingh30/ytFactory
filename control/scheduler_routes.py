@@ -41,4 +41,5 @@ async def scheduler_tick(authorization: str | None = Header(None)) -> dict:
 async def scheduler_state(authorization: str | None = Header(None)) -> dict:
     """Read-only view of scheduler state for the operator UI."""
     _require_auth(authorization)
-    return scheduler._read_state()
+    # Audit S1.9 — public read_state alias.
+    return scheduler.read_state()

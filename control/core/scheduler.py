@@ -224,6 +224,20 @@ def _read_state() -> dict:
     return (snap.to_dict() or {}) if snap.exists else {}
 
 
+def read_state() -> dict:
+    """Public alias for ``_read_state``.
+
+    Audit S1.9 — cross-module callers (``control/routes/scheduler_routes.py``)
+    were reaching into the underscore-prefixed helper, which is brittle:
+    a refactor that renames or restructures the state-read path would
+    silently break those importers. The public alias gives external
+    callers a stable name; the underscore version stays as the internal
+    in-module entry point so existing tests that monkey-patch
+    ``scheduler._read_state`` keep working.
+    """
+    return _read_state()
+
+
 def _save_state(state: dict) -> None:
     if _backend() == "memory":
         _MEM_STATE.clear()

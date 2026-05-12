@@ -154,6 +154,11 @@ def _read_state() -> dict:
     return (snap.to_dict() or {}) if snap.exists else {}
 
 
+def read_state() -> dict:
+    """Public alias for ``_read_state`` — see audit S1.9."""
+    return _read_state()
+
+
 def _save_state(state: dict) -> None:
     if _backend() == "memory":
         _MEM_STATE.clear()
