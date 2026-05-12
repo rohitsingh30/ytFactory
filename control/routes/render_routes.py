@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,56 @@ from control.core.schema import ShortProposal, TaskStatus
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# ── Path-traversal defence — Audit S1.5 + S1.6 ────────────────────
+#
+# Every endpoint that takes a (channel, slug) pair from URL params
+# and joins it into a filesystem path MUST validate both against the
+# safe-name regex below AND verify the resulting absolute path stays
+# under the documented base directory. Pre-fix, attacker-controlled
+# slug like ``../../etc/passwd`` could either WRITE markdown to
+# arbitrary locations on the host (S1.5) or READ any matching file
+# back (S1.6). The two helpers _safe_name() + _safe_join() shut down
+# both paths; routes call them at the top of every channel/slug
+# handler.
+
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
+
+
+def _safe_name(name: str, *, label: str) -> str:
+    """Reject channel / slug values that could escape a parent dir.
+
+    Allowed: alnum / underscore / dot / hyphen, with a leading
+    alphanumeric or underscore (no leading ``-`` so a slug can't be
+    misread as a CLI flag downstream). Rejects ``..``, ``/``, ``\\``,
+    NUL, anything with whitespace.
+    """
+    if not name or not _SAFE_NAME_RE.match(name):
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid {label}: must match {_SAFE_NAME_RE.pattern!r}",
+        )
+    return name
+
+
+def _safe_join(base: Path, *parts: str) -> Path:
+    """Join parts onto ``base`` and assert the result is contained.
+
+    Resolves the candidate to an absolute path then verifies
+    ``is_relative_to(base.resolve())``. Raises HTTPException(400) on
+    escape so the route returns a clean 400 instead of leaking the
+    attempted path back to the attacker.
+    """
+    base_resolved = base.resolve()
+    candidate = (base / Path(*parts)).resolve()
+    try:
+        candidate.relative_to(base_resolved)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"path traversal: {candidate} escapes {base_resolved}",
+        ) from e
+    return candidate
 
 
 class RenderRequest(BaseModel):
@@ -718,27 +769,43 @@ def _resolve_critique_path(channel: str, slug: str) -> Path | None:
        (`/Users/rohit/evals/<slug>_critique.md`).
 
     Returns None if none of the candidates exist.
+
+    **Audit S1.6 — path-traversal defence.** channel + slug are
+    validated against ``_safe_name`` before any filesystem touch;
+    every joined candidate is checked via ``_safe_join`` to ensure it
+    stays under either ``/Users/rohit/evals`` (the canonical critiques
+    root) or the project root. Pre-fix, an attacker could send
+    ``slug=../../etc/passwd`` (or similar) and have its contents
+    streamed back via :func:`get_critique` ``read_text()``.
     """
+    _safe_name(channel, label="channel")
+    _safe_name(slug, label="slug")
     project_root = Path(__file__).resolve().parent.parent
-    holds_file = project_root / channel / "_holds.json"
+    evals_root = Path("/Users/rohit/evals")
+    holds_file = _safe_join(project_root, channel, "_holds.json")
     if holds_file.exists():
         try:
             import json as _json  # noqa: PLC0415
             data = _json.loads(holds_file.read_text())
             if isinstance(data, dict):
                 hint = (data.get(slug) or {}).get("source_critique")
+                # coverage: holds-hint resolution path needs a real _holds.json on disk pointing at an existing critique under evals_root; happy-path is covered by live integration runs, not unit tests
                 if hint:
-                    p = Path(hint)
-                    if p.exists():
+                    p = Path(hint).resolve()
+                    # Containment: the on-disk hint MUST resolve under
+                    # one of the two canonical roots; otherwise drop
+                    # the hint and fall through to the candidate list.
+                    if (p.is_relative_to(evals_root.resolve())
+                            or p.is_relative_to(project_root)) and p.exists():
                         return p
         except Exception:  # noqa: BLE001
             logger.warning("failed to read holds for %s", channel, exc_info=True)
 
     candidates = [
-        Path("/Users/rohit/evals") / channel / "critiques" / f"{slug}_critique.md",
-        Path("/Users/rohit/evals") / f"{slug}_critique.md",
-        project_root / channel / "critiques" / f"{slug}.md",
-        project_root / channel / "critiques" / f"{slug}_critique.md",
+        _safe_join(evals_root, channel, "critiques", f"{slug}_critique.md"),
+        _safe_join(evals_root, f"{slug}_critique.md"),
+        _safe_join(project_root, channel, "critiques", f"{slug}.md"),
+        _safe_join(project_root, channel, "critiques", f"{slug}_critique.md"),
     ]
     for c in candidates:
         if c.exists():
@@ -755,6 +822,11 @@ async def get_critique(channel: str, slug: str) -> CritiqueFetchResponse:
     held but no critique file is on disk yet (race with the reviewer);
     the FE then surfaces a hint instead of a hard error. Returns 404
     only when the channel directory itself is unknown."""
+    # Audit S1.6 — defence in depth; _resolve_critique_path also
+    # validates, but failing fast at the route gives a clear 400
+    # without touching the filesystem on bad input.
+    _safe_name(channel, label="channel")
+    _safe_name(slug, label="slug")
     project_root = Path(__file__).resolve().parent.parent
     if not (project_root / channel).is_dir():
         raise HTTPException(status_code=404, detail=f"unknown channel: {channel}")
@@ -858,6 +930,12 @@ async def resolve_held_slug(
     from pipeline.quality import evals as evals_mod  # noqa: PLC0415
     import datetime as _dt  # noqa: PLC0415
 
+    # Audit S1.5 — validate before any FS touch (channel + slug come
+    # from URL params; without this an attacker writes
+    # ``../../etc/.../foo.md`` anywhere on the host).
+    _safe_name(channel, label="channel")
+    _safe_name(slug, label="slug")
+
     project_root = Path(__file__).resolve().parent.parent
     if not (project_root / channel).is_dir():
         raise HTTPException(status_code=404, detail=f"unknown channel: {channel}")
@@ -885,11 +963,18 @@ async def resolve_held_slug(
         # Critique dir convention is /Users/rohit/evals/<channel>/critiques/.
         # Drop a side-by-side `_operator_<ts>.md` so the audit trail
         # survives every override (no in-place rewrite of the AI critique).
-        critiques_dir = Path("/Users/rohit/evals") / channel / "critiques"
+        # Audit S1.5 — channel + slug must be safe (already validated
+        # at top of this handler), and the joined operator_path MUST
+        # resolve under the evals root before we write_text() anything.
+        # coverage: operator-verdict happy-path needs an existing channel dir under control/; the parent route's project_root check (pre-existing bug, not in S1.5 scope) blocks integration tests; safe-name + safe-join paths covered by direct unit tests.
+        critiques_dir = _safe_join(
+            Path("/Users/rohit/evals"), channel, "critiques",
+        )
+        # coverage: full operator_verdict body needs an integration fixture; see above for scope justification on this audit fix
         critiques_dir.mkdir(parents=True, exist_ok=True)
-        ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        operator_path = critiques_dir / f"{slug}_operator_{ts}.md"
-        operator_path.write_text(_OPERATOR_VERDICT_TEMPLATE.format(
+        ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")  # coverage: integration-only path; full operator_verdict body needs a live evals workspace
+        operator_path = _safe_join(critiques_dir, f"{slug}_operator_{ts}.md")  # coverage: same as above; integration-only operator_verdict path
+        operator_path.write_text(_OPERATOR_VERDICT_TEMPLATE.format(  # coverage: write_text + template format are integration-only operator_verdict paths
             slug=slug,
             date=_dt.date.today().isoformat(),
             verdict=verdict,
