@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -29,11 +30,15 @@ from pathlib import Path
 from typing import Iterable
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-EVALS_ROOT = Path("/Users/rohit/evals")
+EVALS_ROOT = Path(os.environ.get("YTFACTORY_EVALS_ROOT", "/Users/rohit/evals"))
 
+# Audit D3.10 — scrollpulse was listed despite its render-config YAML
+# (pipeline/channels/scrollpulse.yaml) not existing on disk; the channel
+# is held out of rotation (in_rotation: false in pipeline/channels.yaml,
+# per audit T1.1). Removed here too so the eval surface stays in lockstep
+# with the active production channel set.
 KNOWN_PROJECTS = ("mystoriesanimated", "cosmosdecoded", "historyrecapped",
-                  "hindutavaanimated", "sportsrecapped", "rhymetimejunction",
-                  "scrollpulse")
+                  "hindutavaanimated", "sportsrecapped", "rhymetimejunction")
 
 # Verdict thresholds per /Users/rohit/evals/SCHEMA.md.
 VERDICT_SHIP = "SHIP"

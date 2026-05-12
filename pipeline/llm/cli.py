@@ -218,10 +218,10 @@ def max_tokens_for(stage: str | None) -> int:
 # works against any Azure deployment naming scheme.
 #
 # Defaults are the conservative cost choices (gpt-4o-mini for the cheap
-# tiers, gpt-4o for opus). The live ytfactory-prod-v2 deployment ships
-# only ``gpt-5.3-chat`` (set via ``AZURE_OPENAI_MODEL``), which then
-# overrides every tier — call sites pick the tier and the env decides
-# the deployment.
+# tiers, gpt-4o for opus). Production deployments routinely override the
+# generic alias via ``AZURE_OPENAI_MODEL`` so call sites pick the tier
+# and the env decides the deployment (e.g. set
+# ``AZURE_OPENAI_MODEL=gpt-5.4-chat`` to route every Azure call there).
 _AZURE_TIER_DEFAULTS: dict[str, str] = {
     "haiku":  "gpt-4o-mini",
     "sonnet": "gpt-4o-mini",
@@ -250,10 +250,16 @@ _azure_deployment = _azure_model_for
 # Anthropic SDK model IDs. Override per-tier via env. Unknown tier
 # names pass through verbatim — lets call sites that already know the
 # concrete model id (e.g. ``model="claude-opus-4-7"``) keep working.
+#
+# Audit Q2.13 — opus pinned to claude-opus-4-7 (2026-05 GA) so the
+# Anthropic SDK call site matches the laptop CLI's actual model. Older
+# 4-5 was a stale default from the initial dispatcher land. Operators
+# who want a specific minor revision still override via
+# ``ANTHROPIC_MODEL_OPUS=claude-opus-4-5-20250605`` etc.
 _ANTHROPIC_TIER_DEFAULTS: dict[str, str] = {
     "haiku":  "claude-haiku-4-5",
     "sonnet": "claude-sonnet-4-5",
-    "opus":   "claude-opus-4-5",
+    "opus":   "claude-opus-4-7",
 }
 
 

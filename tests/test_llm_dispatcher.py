@@ -134,7 +134,10 @@ class TierMappingTest(unittest.TestCase):
     def test_anthropic_default_per_tier(self) -> None:
         self.assertEqual(llm_cli._anthropic_model_for("haiku"),  "claude-haiku-4-5")
         self.assertEqual(llm_cli._anthropic_model_for("sonnet"), "claude-sonnet-4-5")
-        self.assertEqual(llm_cli._anthropic_model_for("opus"),   "claude-opus-4-5")
+        # Audit Q2.13 — opus default bumped to claude-opus-4-7
+        # (2026-05 GA) so the SDK call site matches the laptop CLI's
+        # actual model.
+        self.assertEqual(llm_cli._anthropic_model_for("opus"),   "claude-opus-4-7")
 
     def test_anthropic_unknown_tier_passes_through(self) -> None:
         # Lets call sites pass a literal model id.
