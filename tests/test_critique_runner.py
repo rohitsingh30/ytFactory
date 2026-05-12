@@ -408,6 +408,43 @@ class RunAgentTurnTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 7)
         self.assertIn("boom on stderr", result.stderr_tail)
 
+    def test_watchdog_kills_silently_blocked_agent(self):
+        """Regression — pre-fix the timeout was checked INSIDE the
+        readline() loop, which only runs when readline() returns. A
+        claude subprocess that opens an interactive prompt and waits
+        for input forever (no stdout output) blocked the runner for
+        24 hours past the 30-min timeout (real incident, 2026-05-12,
+        critique 63651d8d). The watchdog Timer must fire even when
+        stdout never produces a line."""
+        # Snippet sleeps far longer than our test timeout, prints
+        # nothing. A pre-fix runner would hang here forever; the
+        # watchdog must terminate it within ~timeout_s.
+        argv = [
+            sys.executable, "-c",
+            "import time; time.sleep(120)",
+        ]
+        t0 = time.time()
+        with mock.patch.object(agent_mod, "_argv_for_agent", return_value=argv):
+            result = agent_mod.run_agent_turn(
+                agent_mod.AGENT_CLAUDE, "PROMPT",
+                repo_root=Path.cwd(), timeout_s=2,
+            )
+        elapsed = time.time() - t0
+        # Should finish within timeout_s + a small grace — definitely
+        # not 120 s of sleep. Allow up to 10 s for CI noise + the
+        # 5 s wait+kill+reap cycle in the finally block.
+        self.assertLess(
+            elapsed, 12,
+            f"watchdog failed to fire — turn ran for {elapsed:.1f}s "
+            "instead of being killed at 2s",
+        )
+        self.assertEqual(result.action, "failed")
+        # Cause is logged into stderr_tail so the runner has something
+        # actionable for the chat panel + does not silently retry.
+        self.assertIn("[runner-watchdog]", result.stderr_tail,
+                      "watchdog kill must annotate stderr_tail with cause")
+        self.assertIn("killed after 2s", result.stderr_tail)
+
 
 # ---------------------------------------------------------------------------
 # Tests for runner.py — claim, gate failure loop, happy push

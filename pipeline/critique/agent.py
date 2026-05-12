@@ -33,6 +33,7 @@ import os
 import re
 import shlex
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Iterable
@@ -313,6 +314,37 @@ def run_agent_turn(
 
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
+    timed_out = threading.Event()
+
+    # Watchdog kills the agent subprocess if it exceeds timeout_s.
+    #
+    # Pre-fix the timeout was checked INSIDE the readline() loop
+    # (`if (time.time() - t0) > timeout_s: proc.kill()`). That misses
+    # the most common stuck-agent pattern: claude opens an
+    # interactive prompt, prints nothing, and waits for input forever
+    # — readline() blocks on the read syscall and the timeout check
+    # never executes. The 2026-05-12 critique-runner post-mortem
+    # caught one such hang that survived 24 hours past the 30-min
+    # timeout. The watchdog runs in a daemon thread, fires
+    # unconditionally after timeout_s seconds, and kills the
+    # subprocess; that closes proc.stdout, readline() returns "",
+    # and the main loop exits cleanly. Cancelled in the finally
+    # block so a fast-exiting agent doesn't get killed retroactively.
+    def _watchdog_kill() -> None:
+        if proc.poll() is None:
+            timed_out.set()
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+            logger.warning(
+                "agent turn timed out after %ds, killing pid=%s",
+                timeout_s, proc.pid,
+            )
+
+    watchdog = threading.Timer(timeout_s, _watchdog_kill)
+    watchdog.daemon = True
+    watchdog.start()
 
     # Drain stdout line-by-line so on_stdout_line fires in real time.
     # stderr we read at the end (lower-priority for chat display).
@@ -332,11 +364,8 @@ def run_agent_turn(
                     on_stdout_line(line.rstrip("\n"))
                 except Exception:  # noqa: BLE001
                     logger.warning("on_stdout_line callback raised", exc_info=True)
-            if (time.time() - t0) > timeout_s:
-                proc.kill()
-                logger.warning("agent turn timed out after %ds, killing", timeout_s)
-                break
     finally:
+        watchdog.cancel()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -354,6 +383,15 @@ def run_agent_turn(
 
     # Decide the action. Prefer the agent's self-reported summary;
     # fall back to "failed" on non-zero exit OR missing summary.
+    # A watchdog-triggered kill always lands here as a "failed" turn
+    # (proc.kill() → exit code != 0) — record the cause in the
+    # stderr tail so the runner doesn't loop on a stuck-class agent.
+    if timed_out.is_set() and not stderr.strip().startswith("[runner-watchdog]"):
+        stderr = (
+            f"[runner-watchdog] agent turn killed after {timeout_s}s "
+            f"(no progress on stdout — likely stuck waiting for "
+            f"interactive input)\n{stderr}"
+        )
     if exit_code != 0:
         action = "failed"
     elif summary is None:

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Auto-start the critique-runner daemon on user login.
+
+  The runner is a laptop-side daemon (per docs/critique_chat.md): it
+  needs git push access + a configured Claude/Copilot CLI, neither of
+  which a Cloud Run container has. So it stays on the laptop — but
+  forgetting to `make critique-runner` after every reboot meant the
+  dashboard's "Start critique" button silently sat in `queued` while
+  the user wondered why nothing happened. (Real incident, 2026-05-12 —
+  user got "wtf" frustrated and the previous runner had ALSO been
+  hung for 24 hours past its 30-min agent-turn timeout. Both are fixed
+  now: this plist makes start-on-boot automatic; the agent.py
+  watchdog Timer prevents another silent hang.)
+
+  Install (once):
+    cp control/com.ytfactory.critique-runner.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.ytfactory.critique-runner.plist
+
+  Verify:
+    launchctl list | grep ytfactory.critique-runner
+    tail -f ~/.config/ytfactory/critique-runner.log
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.ytfactory.critique-runner.plist
+    rm ~/Library/LaunchAgents/com.ytfactory.critique-runner.plist
+
+  Also see the parallel control/com.ytfactory.laptop-agent.plist
+  pattern this is modelled on (same KeepAlive + ThrottleInterval).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ytfactory.critique-runner</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>cd /Users/rohit/ytFactory &amp;&amp; PYTHONPATH=. /Users/rohit/ytFactory/.venv/bin/python -u scripts/critique_runner.py --log-level=INFO</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Restart on crash; the runner has its own per-loop error
+         handling but a hard SIGSEGV / OOM should bring it back. -->
+    <key>KeepAlive</key>
+    <true/>
+    <!-- Don't thrash if it keeps dying. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/rohit/.config/ytfactory/critique-runner.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/rohit/.config/ytfactory/critique-runner.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/rohit</string>
+        <!-- PATH must include node + claude + gcloud + git locations
+             so the agent subprocess can actually run them. -->
+        <key>PATH</key>
+        <string>/Users/rohit/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- ADC config dir for Firestore auth. -->
+        <key>CLOUDSDK_CONFIG</key>
+        <string>/Users/rohit/.config/gcloud</string>
+        <!-- Default Firestore project (matches the runner's hardcoded
+             fallback in scripts/critique_runner.py). -->
+        <key>GOOGLE_CLOUD_PROJECT</key>
+        <string>ytfactory-prod-v2</string>
+    </dict>
+</dict>
+</plist>
