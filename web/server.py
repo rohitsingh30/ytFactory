@@ -1647,9 +1647,55 @@ async def _perf_headers_middleware(request, call_next):
     total = f"total;dur={dur_ms:.1f}"
     response.headers["Server-Timing"] = f"{existing}, {total}" if existing else total
 
+    # Audit S1.23 — security headers.
+    # Defence-in-depth headers on every response. CSP turns any
+    # surviving XSS surface into a non-takeover (script-src 'self'
+    # blocks the inline-script sink); X-Frame-Options blocks
+    # clickjacking; HSTS pins HTTPS for the cookie-bearing window;
+    # Referrer-Policy stops leaking dashboard URLs to off-host
+    # resources; X-Content-Type-Options blocks MIME-sniff XSS.
+    # Each header sets only when not already present so per-route
+    # overrides win (e.g. a specific page that needs a stricter CSP
+    # can set its own).
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        # 'unsafe-inline' on style is needed for the legacy
+        # inline-styled dashboards; tighten when those move to a
+        # stylesheet. 'self' for img + media covers our own GCS
+        # signed URLs because they're proxied through this host;
+        # blob: covers <video src=URL.createObjectURL(...)> in the
+        # dashboard preview chip.
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob: https:; "
+        "media-src 'self' blob: https:; "
+        "connect-src 'self' https://*.googleapis.com https://*.run.app; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self' https://accounts.google.com; "
+        "object-src 'none'",
+    )
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains",
+    )
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "geolocation=(), microphone=(), camera=()",
+    )
+
     # Browser caching for dashboard-class GETs only.
+    # Audit Q2.39 — guard with status_code < 400 so transient
+    # auth blips don't get cached for 10s + stale-while-revalidate=60s
+    # in the browser (the pre-fix mode left users staring at stuck
+    # 401s after a re-login).
     if (
         request.method == "GET"
+        and response.status_code < 400
         and any(request.url.path.startswith(p) for p in _CACHEABLE_GET_PREFIXES)
         and "Cache-Control" not in response.headers
     ):
