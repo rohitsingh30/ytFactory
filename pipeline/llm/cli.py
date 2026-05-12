@@ -401,7 +401,35 @@ def _call_claude_cli_subprocess(
     Identical to the pre-dispatcher behaviour. Kept private so the
     public entry point can dispatch on backend without breaking the
     existing pure-CLI test surface.
+
+    **Audit T1.4 — token-cap asymmetry with SDK backends.** The
+    Anthropic CLI (``claude -p``) does NOT expose a ``--max-tokens``
+    flag — the only output-size lever it offers is ``--max-budget-usd``
+    (a soft dollar cap, surfaced via ``budget_usd`` here). The SDK
+    backends (``_call_azure_openai`` and ``_call_anthropic_sdk``)
+    DO honour ``max_tokens_for(stage)``; the CLI cannot. To keep
+    observability symmetric we surface the would-be cap in telemetry
+    metadata and, when the caller didn't pass an explicit non-default
+    budget, scale ``--max-budget-usd`` by the stage's max_tokens so
+    the dollar cap at least roughly matches the token cap the SDK
+    backends would apply (formula: ``max_tokens × $75/MTok × 5x``,
+    using the worst-case opus output rate × 5 for input + safety
+    margin). Operators can override either dimension via env:
+    ``YTFACTORY_MAX_TOKENS_<STAGE>`` or per-call ``budget_usd=``.
     """
+    cap_tokens = max_tokens_for(stage)
+    # Audit T1.4: derive a per-stage budget cap when the caller
+    # accepted the default. Conservative formula: cap_tokens at the
+    # opus output rate ($75/MTok) × 5 to cover input + safety margin.
+    # This ensures stages that bumped max_tokens above the SDK-backend
+    # default of 4096 (e.g. rewrite_long_form @ 12k) get a budget
+    # ceiling that won't truncate mid-rewrite. SDK backends apply a
+    # HARD cap on max_completion_tokens; the CLI dollar cap is SOFT
+    # (model can refuse mid-stream once budget is exhausted) — the
+    # asymmetry is documented in the docstring + surfaced in telemetry.
+    if budget_usd == DEFAULT_BUDGET_USD:
+        derived_budget = max(DEFAULT_BUDGET_USD, cap_tokens * 75 / 1_000_000 * 5)
+        budget_usd = round(derived_budget, 4)
     cmd: list[str] = [
         CLAUDE_BIN,
         "-p",
@@ -441,6 +469,11 @@ def _call_claude_cli_subprocess(
         "schema": json_schema is not None,
         "tools": list(allowed_tools or []),
         "stage": stage or _infer_stage_from_model(model),
+        # Audit T1.4: surface the would-be max_tokens cap for symmetry
+        # with the SDK backends, even though the CLI can't enforce it
+        # natively. Plus the derived dollar cap that approximates it.
+        "max_tokens_requested": cap_tokens,
+        "budget_usd_cap": budget_usd,
     }
     t0 = time.time()
     try:

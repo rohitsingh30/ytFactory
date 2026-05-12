@@ -661,5 +661,96 @@ class MaxTokensWiredIntoBackendsTest(unittest.TestCase):
         self.assertEqual(kwargs.get("max_tokens"), 4096)
 
 
+class CliSubprocessMaxTokensTest(unittest.TestCase):
+    """Audit T1.4 — the CLI subprocess can't pass --max-tokens (the
+    Anthropic CLI doesn't expose it), but we must (1) surface the
+    requested cap in telemetry so the dashboard sees it symmetric
+    with the SDK backends, and (2) scale --max-budget-usd to roughly
+    match so a long-form rewrite isn't dollar-capped at the default
+    when the SDK backends would have allowed 12-32k tokens."""
+
+    def setUp(self) -> None:
+        self._saved = _clear_backend_env()
+
+    def tearDown(self) -> None:
+        _restore_env(self._saved)
+
+    def _make_envelope_proc(self, payload_str: str) -> MagicMock:
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = ('{"is_error": false, "result": "' + payload_str
+                       + '", "usage": {"input_tokens": 10, "output_tokens": 5}}')
+        proc.stderr = ""
+        return proc
+
+    def test_long_form_stage_scales_budget_above_default(self) -> None:
+        # rewrite_long_form has max_tokens_for=12000 → derived budget
+        # must exceed the default $2.00 cap so long-form prompts aren't
+        # silently dollar-capped at the haiku-tier default.
+        derived_budget_args: list[str] = []
+        with patch("subprocess.run",
+                   return_value=self._make_envelope_proc("hi")) as mock_run:
+            llm_cli._call_claude_cli_subprocess(
+                "long-form prompt",
+                output_json=False,
+                model="opus",
+                stage="rewrite_long_form",
+            )
+            cmd = mock_run.call_args.args[0]
+        # Find --max-budget-usd <value> in the cmd.
+        idx = cmd.index("--max-budget-usd")
+        budget_str = cmd[idx + 1]
+        derived_budget_args.append(budget_str)
+        budget_val = float(budget_str)
+        self.assertGreater(
+            budget_val, llm_cli.DEFAULT_BUDGET_USD,
+            f"long-form stage should scale --max-budget-usd above "
+            f"the {llm_cli.DEFAULT_BUDGET_USD} default; got {budget_val}",
+        )
+
+    def test_explicit_budget_kwarg_not_overridden(self) -> None:
+        # When the caller passes a non-default budget_usd, the
+        # subprocess must honour it as-is (operator override).
+        with patch("subprocess.run",
+                   return_value=self._make_envelope_proc("hi")) as mock_run:
+            llm_cli._call_claude_cli_subprocess(
+                "x",
+                output_json=False,
+                model="opus",
+                stage="rewrite_long_form",
+                budget_usd=99.99,
+            )
+            cmd = mock_run.call_args.args[0]
+        idx = cmd.index("--max-budget-usd")
+        self.assertEqual(cmd[idx + 1], "99.99")
+
+    def test_telemetry_records_max_tokens_requested(self) -> None:
+        # Audit T1.4 — even though the CLI can't enforce the cap, the
+        # would-be max_tokens MUST land in telemetry metadata so the
+        # dashboard sees per-stage budgets symmetric with SDK backends.
+        captured: list[dict] = []
+        from pipeline.llm import cli as cli_mod
+
+        def fake_track(*_a, **kwargs):
+            captured.append(kwargs.get("metadata") or {})
+
+        with patch.object(cli_mod._tlm, "track", side_effect=fake_track), \
+             patch("subprocess.run",
+                   return_value=self._make_envelope_proc("hi")):
+            cli_mod._call_claude_cli_subprocess(
+                "x", output_json=False, model="opus",
+                stage="rewrite_long_form",
+            )
+        # Pick up the success track call's metadata.
+        success_metas = [m for m in captured if "max_tokens_requested" in m]
+        self.assertTrue(success_metas, "expected max_tokens_requested in CLI metadata")
+        self.assertEqual(
+            success_metas[0]["max_tokens_requested"],
+            llm_cli.max_tokens_for("rewrite_long_form"),
+        )
+        self.assertGreater(success_metas[0]["budget_usd_cap"],
+                           llm_cli.DEFAULT_BUDGET_USD)
+
+
 if __name__ == "__main__":
     unittest.main()
