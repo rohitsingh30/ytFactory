@@ -708,7 +708,27 @@ def emit(job: Job, event: StageEvent) -> None:
         try:
             q.put_nowait(event)
         except asyncio.QueueFull:
-            pass
+            # Audit Q2.42 — pre-fix the QueueFull drop was silent.
+            # Faster-than-drain producers caused random missed events
+            # in the dashboard's per-stage waterfall with no signal
+            # for the operator. Now record a structured telemetry
+            # event so the dashboard's "drops" panel can surface
+            # the throughput problem.
+            try:
+                tlm.track(
+                    "sse_event_dropped",
+                    category="http",
+                    success=False,
+                    metadata={
+                        "job_id": job.job_id,
+                        "stage": event.stage,
+                        "queue_max": q.maxsize,
+                        "queue_qsize": q.qsize(),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                # Telemetry must never break the producer path.
+                pass
     _persist_job(job)
 
 
