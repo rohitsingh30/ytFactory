@@ -43,7 +43,7 @@ gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --project="${PROJECT}" \
   --region="${REGION}" \
-  --service-account="tts-runner@${PROJECT}.iam.gserviceaccount.com" \
+  --service-account="image-runner@${PROJECT}.iam.gserviceaccount.com" \
   --gpu=1 \
   --gpu-type=nvidia-l4 \
   --no-gpu-zonal-redundancy \

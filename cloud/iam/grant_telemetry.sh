@@ -11,8 +11,22 @@
 #                                     grants this by default but we set
 #                                     it explicitly for clarity)
 #
-# All ytFactory cloud services run as ``tts-runner@<project>`` so a
-# single project-level grant covers every service in one go.
+# **Audit S1.21 — pre-fix every ytFactory Cloud Run service ran as
+# the single ``tts-runner@`` SA. Post-fix each service category gets
+# its own SA. This script still grants the OTel roles to ``tts-runner``
+# (the TTS containers' SA, kept for back-compat), but is no longer the
+# whole story. Every per-service SA needs the same grant — use the
+# companion script instead:**
+#
+#   bash cloud/iam/grant_per_service_telemetry.sh
+#
+# That script grants OTel roles to every per-service SA (tts-runner,
+# image-runner, render-runner, web-runner, weights-runner,
+# cobalt-runner, stats-refresh-runner, web-next-runner). See
+# docs/iam_per_service.md for the full mapping.
+#
+# This script remains for the narrow case where only the TTS-flavour
+# OTel grant needs (re-)applying.
 #
 # Required env (defaults match prod):
 #   GCP_PROJECT       ytfactory-prod-v2

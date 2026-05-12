@@ -54,7 +54,7 @@ gcloud run jobs deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --project="${PROJECT}" \
   --region="${REGION}" \
-  --service-account="tts-runner@${PROJECT}.iam.gserviceaccount.com" \
+  --service-account="weights-runner@${PROJECT}.iam.gserviceaccount.com" \
   --execution-environment=gen2 \
   --memory=32Gi --cpu=8 \
   --max-retries=1 \

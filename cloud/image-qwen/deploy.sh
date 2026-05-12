@@ -26,7 +26,7 @@ gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --project="${PROJECT}" \
   --region="${REGION}" \
-  --service-account="tts-runner@${PROJECT}.iam.gserviceaccount.com" \
+  --service-account="image-runner@${PROJECT}.iam.gserviceaccount.com" \
   --gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy \
   --no-cpu-throttling --memory=24Gi --cpu=8 \
   --concurrency=1 --max-instances=2 --min-instances=0 \

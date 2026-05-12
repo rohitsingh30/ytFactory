@@ -39,7 +39,7 @@ gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --project="${PROJECT}" \
   --region="${REGION}" \
-  --service-account="tts-runner@${PROJECT}.iam.gserviceaccount.com" \
+  --service-account="render-runner@${PROJECT}.iam.gserviceaccount.com" \
   --execution-environment=gen2 \
   --memory=8Gi --cpu=4 \
   --concurrency=4 \

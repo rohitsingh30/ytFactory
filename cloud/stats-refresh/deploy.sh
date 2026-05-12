@@ -41,7 +41,7 @@ REPO="ytfactory-tts"
 JOB="ytfactory-stats-refresh"
 TAG="${TAG:-$(date +%Y%m%d-%H%M%S)}"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${JOB}:${TAG}"
-RUNTIME_SA="tts-runner@${PROJECT}.iam.gserviceaccount.com"
+RUNTIME_SA="stats-refresh-runner@${PROJECT}.iam.gserviceaccount.com"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"

@@ -37,7 +37,7 @@ gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --project="${PROJECT}" \
   --region="${REGION}" \
-  --service-account="tts-runner@${PROJECT}.iam.gserviceaccount.com" \
+  --service-account="cobalt-runner@${PROJECT}.iam.gserviceaccount.com" \
   --memory=2Gi \
   --cpu=2 \
   --cpu-boost \

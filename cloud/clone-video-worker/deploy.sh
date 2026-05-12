@@ -116,7 +116,7 @@ gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --project="${PROJECT}" \
   --region="${REGION}" \
-  --service-account="tts-runner@${PROJECT}.iam.gserviceaccount.com" \
+  --service-account="web-runner@${PROJECT}.iam.gserviceaccount.com" \
   --memory=4Gi \
   --cpu=2 \
   --cpu-boost \

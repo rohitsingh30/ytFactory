@@ -249,5 +249,133 @@ class TestOtelCopyLandsBeforeCmd(unittest.TestCase):
         )
 
 
+# Audit S1.21 — per-service runtime-SA mapping. Pre-fix every Cloud Run
+# service ran as a single ``tts-runner@`` SA (least-privilege violation:
+# a compromised image-flux2-klein container had full TTS bucket access).
+# Post-fix each service category gets its own SA — see
+# docs/iam_per_service.md for the full rationale + role grants.
+EXPECTED_RUNTIME_SA = {
+    # service-dir-name (relative to cloud/) -> per-service SA prefix
+    "tts-chatterbox":      "tts-runner",
+    "tts-cosyvoice":       "tts-runner",
+    "tts-f5":              "tts-runner",
+    "tts-higgs":           "tts-runner",
+    "tts-indicf5":         "tts-runner",
+    "tts-indicparler":     "tts-runner",
+    "image-flux2-klein":   "image-runner",
+    "image-hidream":       "image-runner",
+    "image-qwen":          "image-runner",
+    "image-z-image-turbo": "image-runner",
+    "render-worker-v2":    "render-runner",
+    "editing-agent":       "render-runner",
+    "web-server":          "web-runner",
+    "clone-video-worker":  "web-runner",
+    "web-next":            "web-next-runner",
+    "weights-staging":     "weights-runner",
+    "cobalt-api":          "cobalt-runner",
+    "stats-refresh":       "stats-refresh-runner",
+}
+
+_SA_LINE_RE = re.compile(
+    r'--service-account=(?P<q>"|\')?(?P<value>[^"\'\s\\]+)(?P=q)?'
+)
+_RUNTIME_SA_VAR_RE = re.compile(
+    r'^RUNTIME_SA=(?P<q>"|\')?(?P<value>[^"\'\s\\]+)(?P=q)?',
+    re.MULTILINE,
+)
+
+
+class TestServiceAccountIsolation(unittest.TestCase):
+    """Audit S1.21 — every cloud/<svc>/deploy.sh must pin the per-service
+    SA category documented in docs/iam_per_service.md. A non-TTS
+    service falling back to ``tts-runner@`` is now a test failure.
+    """
+
+    def _resolved_sa(self, deploy_sh: Path) -> str | None:
+        """Extract the SA prefix the deploy.sh resolves to.
+
+        Two patterns supported:
+          1. Inline:   ``--service-account="<sa>@${PROJECT}..."``
+          2. Variable: ``RUNTIME_SA="<sa>@${PROJECT}..."`` then
+                       ``--service-account="${RUNTIME_SA}"``
+        Returns the SA prefix (everything before ``@``) or None if the
+        deploy script has no service-account binding (some scripts are
+        sub-commands, not full deploys).
+        """
+        text = deploy_sh.read_text()
+        m = _SA_LINE_RE.search(text)
+        if not m:
+            return None
+        value = m.group("value")
+        if value.startswith("${RUNTIME_SA}") or value == "${RUNTIME_SA}":
+            mv = _RUNTIME_SA_VAR_RE.search(text)
+            if not mv:
+                return None
+            value = mv.group("value")
+        # Strip any leading ${...} that wasn't fully expanded above.
+        if "@" not in value:
+            return None
+        return value.split("@", 1)[0]
+
+    def test_every_deploy_sh_uses_documented_per_service_sa(self) -> None:
+        offenders: list[str] = []
+        unmapped: list[str] = []
+        for svc_dir in sorted(CLOUD_DIR.iterdir()):
+            if not svc_dir.is_dir():
+                continue
+            if svc_dir.name in {"_shared", "_bench", "iam"}:
+                continue
+            deploy_sh = svc_dir / "deploy.sh"
+            if not deploy_sh.exists():
+                continue
+            sa = self._resolved_sa(deploy_sh)
+            if sa is None:
+                # Script doesn't pin an SA (e.g. helper-only scripts).
+                continue
+            expected = EXPECTED_RUNTIME_SA.get(svc_dir.name)
+            if expected is None:
+                unmapped.append(
+                    f"{svc_dir.name}: deploy.sh pins SA {sa!r} but is not in "
+                    f"EXPECTED_RUNTIME_SA — add it to docs/iam_per_service.md "
+                    f"and to this test's mapping."
+                )
+                continue
+            if sa != expected:
+                offenders.append(
+                    f"{svc_dir.name}: deploy.sh pins {sa!r}, expected {expected!r} "
+                    f"per docs/iam_per_service.md (audit S1.21)."
+                )
+        msg_parts = []
+        if offenders:
+            msg_parts.append("Service-account drift:\n  " + "\n  ".join(offenders))
+        if unmapped:
+            msg_parts.append("Unmapped services:\n  " + "\n  ".join(unmapped))
+        self.assertFalse(msg_parts, "\n\n".join(msg_parts))
+
+    def test_no_non_tts_service_uses_tts_runner_sa(self) -> None:
+        """Belt-and-braces fail-fast for the specific S1.21 regression:
+        a non-TTS deploy.sh referencing tts-runner@ would re-introduce
+        the very vulnerability the audit flagged.
+        """
+        offenders: list[str] = []
+        for svc_dir in sorted(CLOUD_DIR.iterdir()):
+            if not svc_dir.is_dir():
+                continue
+            if svc_dir.name in {"_shared", "_bench", "iam"}:
+                continue
+            deploy_sh = svc_dir / "deploy.sh"
+            if not deploy_sh.exists():
+                continue
+            sa = self._resolved_sa(deploy_sh)
+            if sa == "tts-runner" and not svc_dir.name.startswith("tts-"):
+                offenders.append(
+                    f"{svc_dir.name}/deploy.sh pins tts-runner@ — "
+                    f"non-TTS services must use a per-service SA "
+                    f"(see docs/iam_per_service.md, audit S1.21)."
+                )
+        self.assertEqual(offenders, [],
+                         "tts-runner@ leak:\n  " + "\n  ".join(offenders))
+
+
 if __name__ == "__main__":
     unittest.main()
