@@ -69,29 +69,33 @@ def traced(
         sig = inspect.signature(fn)
         span_name = name or f"{fn.__module__}.{fn.__name__}"
 
+        # Audit Q2.10 — pre-fix this returned the same sync wrapper for
+        # every callable, including ``async def`` ones. Wrapping an
+        # awaitable with ``with timed(): return fn(*args, **kwargs)``
+        # closed the span the moment the coroutine object was returned
+        # (microseconds), recording near-zero latency for the actual
+        # async work that ran later when the caller awaited it. No
+        # async stages were decorated as of 2026-05-12 so no metric
+        # was wrong yet — but the next ``@traced async def`` would
+        # silently regress the dashboard's stage_duration_ms histogram.
+        if inspect.iscoroutinefunction(fn):
+
+            @functools.wraps(fn)
+            async def async_wrapper(*args, **kwargs):
+                metadata: dict[str, Any] = dict(extra_metadata or {})
+                if capture_list:
+                    metadata.update(_capture_args(sig, capture_list, args, kwargs))
+                with timed(span_name, category=category, metadata=metadata):
+                    return await fn(*args, **kwargs)
+
+            async_wrapper.__wrapped__ = fn  # type: ignore[attr-defined]
+            return async_wrapper
+
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             metadata: dict[str, Any] = dict(extra_metadata or {})
             if capture_list:
-                try:
-                    bound = sig.bind_partial(*args, **kwargs)
-                    for arg_name in capture_list:
-                        if arg_name not in bound.arguments:
-                            continue
-                        v = bound.arguments[arg_name]
-                        if isinstance(v, _PRIMITIVE):
-                            metadata[arg_name] = v
-                        elif v is None:
-                            continue
-                        else:
-                            # Coerce to a short string so we don't blow
-                            # span attribute size limits.
-                            metadata[arg_name] = str(v)[:200]
-                except (TypeError, ValueError):
-                    # Argument binding failed (e.g. caller passed a
-                    # non-matching shape) — span still opens, just
-                    # without auto-metadata.
-                    pass
+                metadata.update(_capture_args(sig, capture_list, args, kwargs))
             with timed(span_name, category=category, metadata=metadata):
                 return fn(*args, **kwargs)
 
@@ -99,6 +103,31 @@ def traced(
         return wrapper
 
     return decorator
+
+
+def _capture_args(sig: inspect.Signature, capture_list: list[str],
+                  args: tuple, kwargs: dict) -> dict[str, Any]:
+    """Bind args against ``sig`` and extract only the primitive values
+    listed in ``capture_list``. Non-primitives are coerced to short
+    strings so we don't blow span attribute size limits. Binding
+    failures (caller passed mismatched shape) silently fall through —
+    the span still opens, just without auto-metadata."""
+    out: dict[str, Any] = {}
+    try:
+        bound = sig.bind_partial(*args, **kwargs)
+    except (TypeError, ValueError):
+        return out
+    for arg_name in capture_list:
+        if arg_name not in bound.arguments:
+            continue
+        v = bound.arguments[arg_name]
+        if isinstance(v, _PRIMITIVE):
+            out[arg_name] = v
+        elif v is None:
+            continue
+        else:
+            out[arg_name] = str(v)[:200]
+    return out
 
 
 __all__ = ["traced"]

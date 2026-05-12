@@ -237,7 +237,14 @@ class ExporterBundle:
     log_processor: Optional[BatchLogRecordProcessor]
 
     span_inmemory: Optional[InMemorySpanExporter] = None
-    log_inmemory: Optional[InMemoryLogExporter] = None
+    # Audit Q2.8 — pre-fix this was annotated as
+    # ``Optional[InMemoryLogExporter]`` for a name that's never
+    # imported. ``from __future__ import annotations`` hides it as
+    # a string reference and silently works until you call
+    # ``typing.get_type_hints(ExporterBundle)``, which then explodes
+    # with ``NameError: InMemoryLogExporter``. The actual runtime
+    # type assigned to this field is the bounded-ring shadow buffer.
+    log_inmemory: Optional["BoundedInMemoryLogRecordExporter"] = None
     metric_reader_inmemory: Optional[InMemoryMetricReader] = None
     shadow_log_processor: Optional[SimpleLogRecordProcessor] = None
 

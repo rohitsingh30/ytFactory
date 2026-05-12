@@ -30,7 +30,26 @@ if TYPE_CHECKING:  # type-only — never imported at runtime in worker contexts
     from fastapi import Request, Response
 
 
-_CARRY_KEYS = ("channel", "slug", "job_id", "niche", "account")
+# Audit Q2.11 — pre-fix this set was missing ``render_kind``,
+# ``render_mode``, ``run_id``, and ``user``. The dashboard's
+# trace-filter UI lets the operator slice by these keys, but for
+# HTTP spans (web routes, auto-instrumented FastAPI handlers) the
+# attribute was never set → those slices returned empty results
+# even when the same trace had the attr on a non-HTTP child span.
+# Adding them here means the FastAPI middleware promotes them onto
+# the HTTP server span at request time, matching the per-render
+# envelope's set in :func:`pipeline.observability.context.render_envelope`.
+_CARRY_KEYS = (
+    "channel",
+    "slug",
+    "job_id",
+    "niche",
+    "account",
+    "render_kind",
+    "render_mode",
+    "run_id",
+    "user",
+)
 
 
 async def attach_identity_attrs(

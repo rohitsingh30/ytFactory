@@ -240,5 +240,26 @@ class TestBuildExporters(unittest.TestCase):
         self.assertIsNotNone(b.log_inmemory)
 
 
+class TestExporterBundleTypeHints(unittest.TestCase):
+    """Audit Q2.8 — ``ExporterBundle`` has ``from __future__ import
+    annotations`` active so all field annotations are stringified.
+    Pre-fix the ``log_inmemory: Optional[InMemoryLogExporter]`` field
+    referenced a name that was never imported. The bug is silent
+    until you call ``typing.get_type_hints(ExporterBundle)`` (which
+    eagerly resolves every string annotation), at which point it
+    raises ``NameError``. This blocks introspection-based tooling
+    (FastAPI docs, dataclass-validator, etc) that reaches for
+    ``get_type_hints`` on the bundle.
+    """
+
+    def test_get_type_hints_resolves_without_nameerror(self) -> None:
+        import typing
+        # Pre-fix this raised:
+        #   NameError: name 'InMemoryLogExporter' is not defined.
+        # Post-fix the annotation points at the real BoundedInMemoryLogRecordExporter.
+        hints = typing.get_type_hints(exporters.ExporterBundle)
+        self.assertIn("log_inmemory", hints)
+
+
 if __name__ == "__main__":
     unittest.main()
