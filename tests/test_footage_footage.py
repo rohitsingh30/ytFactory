@@ -35,9 +35,15 @@ def _fake_run_factory(
     trim_returncode: int = 0,
     intro_returncode: int = 0,
     concat_returncode: int = 0,
-    probe_stdout: str = "10.0\n",
+    probe_stdout: str = "120.0\n",
 ):
-    """Return a subprocess.run side_effect that creates output files."""
+    """Return a subprocess.run side_effect that creates output files.
+
+    Audit Q2.30 — default probe_stdout bumped from 10.0 → 120.0 so
+    tests using ``in_s=10..15`` clips don't trip the new in/out vs
+    source-duration validation. Override per-test when a specific
+    duration is needed.
+    """
     calls: list[list] = []
 
     def fake_run(cmd, *args, **kwargs):
@@ -512,6 +518,73 @@ class TestFetchClip(unittest.TestCase):
     def test_equal_in_out_raises(self):
         with self.assertRaises(ValueError):
             self._run_fetch("https://www.youtube.com/watch?v=dQw4w9WgXcQ", 10.0, 10.0)
+
+    def test_audit_q230_in_s_past_source_duration_raises(self):
+        """Audit Q2.30 — pre-fix `-ss 200 -t 10` on a 180s source
+        produced 0 frames; output mp4 existed but was empty.
+        Now refuse upfront with a clear error.
+        """
+        fake_run = _fake_run_factory(probe_stdout="180.0\n")
+        with patch("pipeline.footage.footage._download_source", return_value=self.src), \
+             patch("pipeline.footage.footage._has_audio_stream", return_value=True), \
+             patch("subprocess.run", side_effect=fake_run):
+            with self.assertRaises(ValueError) as ctx:
+                fetch_clip(
+                    url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    in_s=200.0, out_s=210.0,
+                    out_path=self.out,
+                    cache_dir=self.root / "sources",
+                )
+        self.assertIn("at or past source duration", str(ctx.exception))
+
+    def test_audit_q230_out_s_well_past_source_duration_raises(self):
+        """out_s far past src_dur (>0.1s tolerance) → refused."""
+        fake_run = _fake_run_factory(probe_stdout="180.0\n")
+        with patch("pipeline.footage.footage._download_source", return_value=self.src), \
+             patch("pipeline.footage.footage._has_audio_stream", return_value=True), \
+             patch("subprocess.run", side_effect=fake_run):
+            with self.assertRaises(ValueError) as ctx:
+                fetch_clip(
+                    url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    in_s=170.0, out_s=200.0,
+                    out_path=self.out,
+                    cache_dir=self.root / "sources",
+                )
+        self.assertIn("exceeds source duration", str(ctx.exception))
+
+    def test_audit_q230_out_s_within_tolerance_clamped(self):
+        """out_s slightly past src_dur (<0.1s, e.g. one-frame rounding)
+        → clamped to source duration, render proceeds."""
+        fake_run = _fake_run_factory(probe_stdout="180.0\n")
+        with patch("pipeline.footage.footage._download_source", return_value=self.src), \
+             patch("pipeline.footage.footage._has_audio_stream", return_value=True), \
+             patch("subprocess.run", side_effect=fake_run):
+            result = fetch_clip(
+                url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                in_s=170.0, out_s=180.05,  # 0.05s past src_dur — tolerated
+                out_path=self.out,
+                cache_dir=self.root / "sources",
+            )
+        # Clamp succeeds; clip exists.
+        self.assertIsInstance(result, FootageClip)
+
+    def test_audit_q230_unknown_source_duration_skips_check(self):
+        """If ffprobe returns 0 duration (unknown), the validation
+        falls through — backward-compatible with sources whose
+        duration ffprobe can't determine."""
+        fake_run = _fake_run_factory(probe_stdout="0.0\n")
+        with patch("pipeline.footage.footage._download_source", return_value=self.src), \
+             patch("pipeline.footage.footage._has_audio_stream", return_value=True), \
+             patch("subprocess.run", side_effect=fake_run):
+            # in_s=200 would fail with known duration; but probe_stdout=0
+            # → src_dur=0 → check skipped.
+            result = fetch_clip(
+                url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                in_s=200.0, out_s=210.0,
+                out_path=self.out,
+                cache_dir=self.root / "sources",
+            )
+        self.assertIsInstance(result, FootageClip)
 
     def test_no_audio_stream(self):
         fake_run = _fake_run_factory()

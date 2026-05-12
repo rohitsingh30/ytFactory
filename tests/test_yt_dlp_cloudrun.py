@@ -11,6 +11,7 @@ Tests exercise: pipeline/footage/yt_dlp_cloudrun.py
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -93,6 +94,78 @@ class TestLocalFallbackGlobScope(unittest.TestCase):
                         **self._common_kwargs(absolute_output),
                     )
             self.assertEqual(p, tdp / "vid.mp4")
+
+
+class TestPerChunkReadTimeout(unittest.TestCase):
+    """Audit Q2.32 — pre-fix ``resp.iter_content(...)`` had NO read
+    deadline. A slow-trickle server (or a stalled connection
+    mid-body) could hang for the full request envelope. Now bound
+    per-chunk wait via YTFACTORY_YTDLP_CHUNK_READ_TIMEOUT_S.
+    """
+
+    def setUp(self):
+        # Stash + clear env so each test starts fresh.
+        self._saved = os.environ.pop("YTFACTORY_YTDLP_CHUNK_READ_TIMEOUT_S", None)
+
+    def tearDown(self):
+        if self._saved is not None:
+            os.environ["YTFACTORY_YTDLP_CHUNK_READ_TIMEOUT_S"] = self._saved
+
+    def _make_resp(self, chunks_with_delays):
+        """Stub Response whose iter_content yields chunks separated by
+        the configured per-chunk delays (seconds).
+        """
+        import time as _t
+
+        class _Resp:
+            status_code = 200
+            text = ""
+            headers = {"X-Ytdlp-Filename": "out.mp4"}
+
+            def iter_content(self_inner, chunk_size=64 * 1024):
+                for chunk, delay in chunks_with_delays:
+                    if delay:
+                        _t.sleep(delay)
+                    yield chunk
+
+        return _Resp()
+
+    def test_stall_between_chunks_raises_failed(self):
+        os.environ["YTFACTORY_YTDLP_CHUNK_READ_TIMEOUT_S"] = "0.05"
+        chunks = [(b"first-bytes", 0.0), (b"second-bytes", 0.2)]
+        resp = self._make_resp(chunks)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out.mp4"
+            with patch("requests.post", return_value=resp), \
+                 patch.object(_mod, "_id_token", return_value=None), \
+                 patch.object(_mod, "_service_url",
+                              return_value="https://example.com"):
+                with self.assertRaises(_mod.CloudRunYtDlpFailed) as ctx:
+                    _mod.download(
+                        url="https://x", output_path=out,
+                        format_string=None, audio_only=False,
+                        audio_ext="mp3", sections=None,
+                        extra_args=None, fallback_to_local=False,
+                    )
+            self.assertIn("body stalled", str(ctx.exception))
+
+    def test_no_stall_succeeds(self):
+        os.environ["YTFACTORY_YTDLP_CHUNK_READ_TIMEOUT_S"] = "10"
+        chunks = [(b"hello", 0.0), (b"world", 0.001)]
+        resp = self._make_resp(chunks)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out.mp4"
+            with patch("requests.post", return_value=resp), \
+                 patch.object(_mod, "_id_token", return_value=None), \
+                 patch.object(_mod, "_service_url",
+                              return_value="https://example.com"):
+                p = _mod.download(
+                    url="https://x", output_path=out,
+                    format_string=None, audio_only=False,
+                    audio_ext="mp3", sections=None,
+                    extra_args=None, fallback_to_local=False,
+                )
+            self.assertEqual(p.read_bytes(), b"helloworld")
 
 
 if __name__ == "__main__":

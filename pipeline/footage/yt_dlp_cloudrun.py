@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -201,11 +202,31 @@ def download(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     bytes_written = 0
+    # Audit Q2.32 — per-chunk read timeout. Pre-fix
+    # ``resp.iter_content(...)`` had NO read deadline. A slow-trickle
+    # server (or a stalled connection mid-body) could keep us reading
+    # one byte at a time for the full timeout_s + 30 envelope. Now we
+    # bound per-chunk wait to ``YTFACTORY_YTDLP_CHUNK_READ_TIMEOUT_S``
+    # (default 60 s) by tracking elapsed time between chunks; on
+    # stall, raise CloudRunYtDlpFailed so the wrapper falls back to
+    # local yt-dlp (or surfaces to the operator).
+    chunk_timeout_s = float(
+        os.environ.get("YTFACTORY_YTDLP_CHUNK_READ_TIMEOUT_S", "60")
+    )
     with out_path.open("wb") as fh:
+        last_chunk_at = time.time()
         for chunk in resp.iter_content(chunk_size=64 * 1024):
+            now = time.time()
+            if (now - last_chunk_at) > chunk_timeout_s:
+                out_path.unlink(missing_ok=True)
+                raise CloudRunYtDlpFailed(
+                    f"cloud yt-dlp body stalled: no chunk in "
+                    f"{chunk_timeout_s:.0f}s ({bytes_written} bytes received)"
+                )
             if chunk:
                 fh.write(chunk)
                 bytes_written += len(chunk)
+                last_chunk_at = now
 
     if bytes_written == 0:
         out_path.unlink(missing_ok=True)

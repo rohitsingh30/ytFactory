@@ -272,6 +272,30 @@ def fetch_clip(
 
     src = _download_source(url, cache_dir)
     src_has_audio = _has_audio_stream(src)
+    # Audit Q2.30 — validate (in_s, out_s) against the source
+    # duration BEFORE running ffmpeg. Pre-fix ``-ss 200 -t 10`` on a
+    # 180s source produced 0 frames; the output mp4 existed but was
+    # empty (or 1 frame), and downstream compose then failed with a
+    # cryptic "stream is empty" or silently included a 0-second clip.
+    # Now refuse upfront with a clear error pointing at the bad
+    # shotlist entry.
+    src_dur = _ffprobe_duration(src)
+    if src_dur > 0 and in_s >= src_dur:
+        raise ValueError(
+            f"in_s ({in_s:.2f}s) is at or past source duration "
+            f"({src_dur:.2f}s) for {url!r} — clip would be empty."
+        )
+    if src_dur > 0 and out_s > src_dur:
+        # Tolerate small float rounding (one frame at 24 fps ≈ 0.042s)
+        # but refuse a clearly-wrong window.
+        if (out_s - src_dur) > 0.1:
+            raise ValueError(
+                f"out_s ({out_s:.2f}s) exceeds source duration "
+                f"({src_dur:.2f}s) for {url!r} — shorten the window."
+            )
+        # Clamp to source duration so ffmpeg still emits a valid clip.
+        out_s = src_dur
+        duration = out_s - in_s
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # 9:16 letterbox with blurred fill (Instagram / TikTok sports edit
