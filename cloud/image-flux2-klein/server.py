@@ -49,7 +49,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -171,8 +171,18 @@ class GenerateIn(BaseModel):
     # FLUX.2 klein is guidance-distilled; guidance_scale is fixed at
     # ~1.0 by training (the BFL model card uses 1.0 in its example).
     # We accept guidance_scale to keep the API stable across providers
-    # but clamp it to [1.0, 1.0] server-side. Negative prompts have no
-    # effect on guidance-distilled pipelines so we don't expose one.
+    # but clamp it to 1.0 server-side via field_validator. Negative
+    # prompts have no effect on guidance-distilled pipelines so we
+    # don't expose one.
+    #
+    # Audit Q2.67 — pre-fix this used `Field(1.0, ge=1.0, le=1.0)`
+    # which rejects (422) any value other than exactly 1.0. The
+    # docstring above said "clamp", and the dispatcher YAML
+    # `image_provider: cloudrun_flux2_klein` clients shipping
+    # the documented "stable API" guidance_scale=1.0 still got 422s
+    # from float-rounding (1.0000001 != 1.0). Now soft-clamp via
+    # field_validator: any inbound value is silently coerced to 1.0,
+    # matching the "stable API across providers" doc claim.
     aspect: str = Field("9:16")
     width: int | None = None
     height: int | None = None
@@ -180,10 +190,16 @@ class GenerateIn(BaseModel):
     # experimentation (lower = faster but lower quality, higher =
     # marginal quality gain at 2× cost).
     steps: int = Field(4, ge=2, le=8)
-    guidance_scale: float = Field(1.0, ge=1.0, le=1.0)  # locked
+    guidance_scale: float = Field(1.0)  # clamped via validator below
     seed: int | None = None
     output: str = "inline"  # "inline" | "gcs"
     gcs_object_prefix: str | None = None
+
+    @field_validator("guidance_scale", mode="before")
+    @classmethod
+    def _clamp_guidance(cls, v):
+        # Coerce any inbound value to FLUX.2 klein's locked 1.0.
+        return 1.0
 
 
 @app.get("/readyz")

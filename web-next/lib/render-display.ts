@@ -22,7 +22,11 @@
 
 export type Aspect = "16:9" | "9:16" | "1:1" | "4:5";
 
-export type RenderKindLabel = "long-form" | "short" | null;
+// Audit Q2.52 — pre-fix this was just "long-form" | "short" | null;
+// codebase supports `sports_doc` too, which dropped through the
+// kindLabel check and the kind chip never appeared on the preview
+// header for sports docs. Add the missing variant.
+export type RenderKindLabel = "long-form" | "short" | "sports doc" | null;
 
 const VALID_ASPECTS: ReadonlySet<string> = new Set(["16:9", "9:16", "1:1", "4:5"]);
 
@@ -51,6 +55,11 @@ export function deriveAspect(
   const raw = (spec?.aspect_ratio as string | undefined)?.trim();
   if (raw && VALID_ASPECTS.has(raw)) return raw as Aspect;
 
+  // Audit Q2.52 — sports_doc spec without aspect_ratio defaults
+  // to 16:9 (matches pipeline/render/sports_doc.py output).
+  const k = (spec?.kind as string | undefined)?.trim();
+  if (k === "sports_doc" || k === "long_form") return "16:9";
+
   const overrides = proposal?.channel_overrides as Record<string, unknown> | undefined;
   const lk = (overrides?.length_kind as string | undefined)?.trim();
   if (lk === "long") return "16:9";
@@ -73,6 +82,10 @@ export function deriveKindLabel(
   const k = (spec?.kind as string | undefined)?.trim();
   if (k === "long_form") return "long-form";
   if (k === "short") return "short";
+  // Audit Q2.52 — sports_doc was previously dropping through; map
+  // it explicitly to "sports doc" + 16:9 aspect (handled in
+  // deriveAspect below).
+  if (k === "sports_doc") return "sports doc";
   return null;
 }
 

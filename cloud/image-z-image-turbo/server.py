@@ -26,7 +26,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -130,11 +130,21 @@ class GenerateIn(BaseModel):
     # diffusers parlance). Range 4-12 for experimentation.
     steps: int = Field(9, ge=4, le=12)
     # Z-Image-Turbo is CFG-distilled — guidance_scale=0.0 disables
-    # classifier-free guidance entirely. Server-side clamp.
-    guidance_scale: float = Field(0.0, ge=0.0, le=0.0)  # locked
+    # classifier-free guidance entirely. Audit Q2.67 — pre-fix this
+    # used ``Field(0.0, ge=0.0, le=0.0)`` which REJECTED (422) any
+    # value other than exactly 0.0; floats round-tripping through
+    # JSON could fail (e.g. 0.0000001 != 0.0). Now soft-clamp via
+    # field_validator: any inbound value is silently coerced to 0.0.
+    guidance_scale: float = Field(0.0)  # clamped via validator below
     seed: int | None = None
     output: str = "inline"
     gcs_object_prefix: str | None = None
+
+    @field_validator("guidance_scale", mode="before")
+    @classmethod
+    def _clamp_guidance(cls, v):
+        # Coerce any inbound value to Z-Image-Turbo's locked 0.0.
+        return 0.0
 
 
 @app.get("/readyz")

@@ -1749,6 +1749,10 @@ from control.routes.oauth_web_routes import router as _control_oauth_web_router
 from control.routes.render_routes import router as _control_render_router
 from control.routes.scheduler_routes import router as _control_scheduler_router
 from control.routes.script_jobs_routes import router as _control_script_jobs_router
+# Audit Q2.45 — song_sample_routes was previously only mounted in
+# control/server_dev.py (laptop dev), so /api/songs/* returned 404
+# in prod. Now mounted in the prod web app too.
+from control.routes.song_sample_routes import router as _control_song_sample_router
 from control.routes.state_routes import router as _control_state_router
 from control.routes.telemetry_routes import router as _control_telemetry_router
 from control.routes.voices_routes import router as _control_voices_router
@@ -5672,6 +5676,8 @@ app.include_router(_control_oauth_web_router)
 app.include_router(_control_render_router)
 app.include_router(_control_scheduler_router)
 app.include_router(_control_script_jobs_router)
+# Audit Q2.45 — song_sample_routes mounted in prod (was dev-only).
+app.include_router(_control_song_sample_router)
 app.include_router(_control_state_router)
 app.include_router(_control_telemetry_router)
 app.include_router(_control_voices_router)

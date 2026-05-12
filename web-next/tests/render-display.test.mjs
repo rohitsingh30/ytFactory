@@ -77,11 +77,25 @@ test("deriveKindLabel — short → 'short'", () => {
   assert.equal(deriveKindLabel({ kind: "short" }), "short");
 });
 
+test("deriveKindLabel — sports_doc → 'sports doc' (audit Q2.52)", () => {
+  // Pre-fix this returned null, dropping the kind chip on every
+  // sports-doc preview header.
+  assert.equal(deriveKindLabel({ kind: "sports_doc" }), "sports doc");
+});
+
 test("deriveKindLabel — unknown / null → null", () => {
-  assert.equal(deriveKindLabel({ kind: "sports_doc" }), null);
+  assert.equal(deriveKindLabel({ kind: "mystery_kind" }), null);
   assert.equal(deriveKindLabel({}), null);
   assert.equal(deriveKindLabel(null), null);
   assert.equal(deriveKindLabel(undefined), null);
+});
+
+test("deriveAspect — sports_doc spec defaults to 16:9 (audit Q2.52)", () => {
+  assert.equal(deriveAspect({ kind: "sports_doc" }, null), "16:9");
+});
+
+test("deriveAspect — long_form spec defaults to 16:9", () => {
+  assert.equal(deriveAspect({ kind: "long_form" }, null), "16:9");
 });
 
 test("deriveKindLabel — whitespace in kind is trimmed", () => {

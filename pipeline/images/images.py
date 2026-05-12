@@ -391,6 +391,35 @@ _PROVIDER_CAPABILITIES: dict[str, dict] = {
             "cloudrun_z_image_turbo; same cold-load WIP caveat."
         ),
     },
+    # Audit Q2.66 — pipeline/images/images_cloudrun.py ships per-model
+    # wrappers _generate_cloudrun_qwen_image + _generate_cloudrun_hidream
+    # but they were missing from this capabilities table, so
+    # validate_provider_config returned "unknown image_provider" → the
+    # wrappers were unreachable from the dispatcher. Add them here so
+    # operators can opt in via image_provider=cloudrun_qwen_image /
+    # cloudrun_hidream in their channel YAML.
+    "cloudrun_qwen_image": {
+        "native_dim": (1024, 1024),
+        "max_dim": (1664, 1664),
+        "step_range": (1, 50),
+        "vertical_9_16_safe": True,
+        "description": (
+            "Qwen VL image model via Cloud Run (future / bench lane). "
+            "Generally exploratory — not on the production path. See "
+            "cloud/image-qwen/server.py for the runtime."
+        ),
+    },
+    "cloudrun_hidream": {
+        "native_dim": (1024, 1024),
+        "max_dim": (1536, 1536),
+        "step_range": (1, 50),
+        "vertical_9_16_safe": True,
+        "description": (
+            "HiDream image model via Cloud Run (future / bench lane). "
+            "Generally exploratory — not on the production path. See "
+            "cloud/image-hidream/server.py for the runtime."
+        ),
+    },
 }
 
 

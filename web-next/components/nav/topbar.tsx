@@ -91,13 +91,19 @@ export function TopBar() {
       </nav>
 
       <div className="ml-auto flex items-center gap-1.5">
-        {/* Search */}
+        {/* Search — Audit Q2.50: pre-fix this was a decorative
+            <input> with no state/handler. Until search infra
+            exists, mark disabled so the operator's hover-tooltip
+            tells them what's actually true. */}
         <div className="relative hidden md:block">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
             type="search"
-            placeholder="Search renders, channels…"
-            className="h-8 w-72 rounded-md border border-border bg-surface pl-8 pr-12 text-[12px] outline-none placeholder:text-muted-foreground focus:border-border-strong"
+            placeholder="Search (coming soon)…"
+            disabled
+            aria-disabled="true"
+            title="Global search isn't wired up yet — track ETA in the project's roadmap."
+            className="h-8 w-72 rounded-md border border-border bg-surface pl-8 pr-12 text-[12px] outline-none placeholder:text-muted-foreground focus:border-border-strong disabled:cursor-not-allowed disabled:opacity-60"
           />
           <kbd className="pointer-events-none absolute right-2 top-1/2 flex h-5 -translate-y-1/2 items-center rounded border border-border bg-background px-1.5 font-mono text-[10px] text-muted-foreground">
             ⌘K
@@ -111,8 +117,20 @@ export function TopBar() {
           </Link>
         </Button>
 
-        <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Notifications">
-          <Bell className="h-3.5 w-3.5" />
+        {/* Notifications — Audit Q2.50: pre-fix this had no
+            onClick. Wire to /app/jobs (recent renders) since
+            that's the closest "notification surface" today. */}
+        <Button
+          asChild
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          aria-label="Recent renders"
+          title="Recent renders + completion alerts"
+        >
+          <Link href="/app/jobs">
+            <Bell className="h-3.5 w-3.5" />
+          </Link>
         </Button>
         <Button
           variant="ghost"
