@@ -19,6 +19,7 @@ import os
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch, MagicMock, call
 
 
@@ -258,6 +259,22 @@ class TestDecodeIdToken(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestExchangeCode(unittest.TestCase):
+    """Audit S1.1 — _decode_id_token now uses
+    google.oauth2.id_token.verify_oauth2_token to crypto-verify the
+    JWT signature against Google's JWKS. Tests mock the verify call
+    so they don't need a live Google-signed token; the verify mock
+    returns the claims dict directly (matching the real lib's
+    contract on success)."""
+
+    def _mock_verify(self, claims: dict) -> Any:
+        """Return a context manager that mocks the
+        google.oauth2.id_token.verify_oauth2_token call to return
+        ``claims``. Use as ``with self._mock_verify({...}) as m:``."""
+        return patch(
+            "google.oauth2.id_token.verify_oauth2_token",
+            return_value=claims,
+        )
+
     def test_success(self):
         from pipeline.auth.identity import exchange_code
         claims = {
@@ -270,7 +287,8 @@ class TestExchangeCode(unittest.TestCase):
         resp.status_code = 200
         resp.json.return_value = {"id_token": _jwt(claims)}
         with patch.dict(os.environ, _env_with_client()), \
-             patch("httpx.post", return_value=resp):
+             patch("httpx.post", return_value=resp), \
+             self._mock_verify(claims):
             result = exchange_code("fake-code")
         self.assertEqual(result["email"], "user@example.com")
         self.assertEqual(result["name"], "Test User")
@@ -303,7 +321,8 @@ class TestExchangeCode(unittest.TestCase):
         resp.status_code = 200
         resp.json.return_value = {"id_token": _jwt({"email_verified": True})}
         with patch.dict(os.environ, _env_with_client()), \
-             patch("httpx.post", return_value=resp):
+             patch("httpx.post", return_value=resp), \
+             self._mock_verify({"email_verified": True}):
             with self.assertRaises(RuntimeError) as ctx:
                 exchange_code("code")
         self.assertIn("email", str(ctx.exception))
@@ -315,10 +334,50 @@ class TestExchangeCode(unittest.TestCase):
         resp.status_code = 200
         resp.json.return_value = {"id_token": _jwt(claims)}
         with patch.dict(os.environ, _env_with_client()), \
-             patch("httpx.post", return_value=resp):
+             patch("httpx.post", return_value=resp), \
+             self._mock_verify(claims):
             with self.assertRaises(RuntimeError) as ctx:
                 exchange_code("code")
         self.assertIn("NOT verified", str(ctx.exception))
+
+    def test_invalid_signature_raises_runtime_error(self):
+        # Audit S1.1 — pre-fix, a tampered id_token would silently
+        # decode and the unverified claims would be trusted. Now the
+        # google-auth lib's signature failure must surface as a
+        # RuntimeError so the OAuth flow rejects it.
+        from pipeline.auth.identity import exchange_code
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"id_token": _jwt({"email": "u@x.com"})}
+        with patch.dict(os.environ, _env_with_client()), \
+             patch("httpx.post", return_value=resp), \
+             patch(
+                "google.oauth2.id_token.verify_oauth2_token",
+                side_effect=ValueError("Could not verify token signature."),
+             ):
+            with self.assertRaises(RuntimeError) as ctx:
+                exchange_code("code")
+        self.assertIn("verification failed", str(ctx.exception))
+
+    def test_wrong_audience_raises_runtime_error(self):
+        # Audit S1.1 — token minted for a different OAuth client must
+        # be rejected. google-auth raises ValueError("Token has wrong
+        # audience ...").
+        from pipeline.auth.identity import exchange_code
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"id_token": _jwt({"email": "u@x.com"})}
+        with patch.dict(os.environ, _env_with_client()), \
+             patch("httpx.post", return_value=resp), \
+             patch(
+                "google.oauth2.id_token.verify_oauth2_token",
+                side_effect=ValueError(
+                    "Token has wrong audience attacker-client",
+                ),
+             ):
+            with self.assertRaises(RuntimeError) as ctx:
+                exchange_code("code")
+        self.assertIn("verification failed", str(ctx.exception))
 
 
 # ---------------------------------------------------------------------------

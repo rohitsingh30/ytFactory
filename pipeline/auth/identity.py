@@ -204,12 +204,7 @@ def exchange_code(code: str) -> dict:
     if not id_token:
         raise RuntimeError("OAuth response missing id_token")
 
-    claims = _decode_id_token(id_token)
-    # Trust Google's signature — the id_token came over TLS from
-    # accounts.google.com / oauth2.googleapis.com, so the channel is
-    # already authenticated. (For belt-and-braces verification we
-    # could fetch JWKS and verify the signature; pragmatic v1 omits
-    # this since we control the client_secret and the channel is TLS.)
+    claims = _decode_id_token(id_token, audience=cs["client_id"])
     email = (claims.get("email") or "").strip().lower()
     if not email:
         raise RuntimeError("ID token missing email claim")
@@ -222,11 +217,62 @@ def exchange_code(code: str) -> dict:
     }
 
 
-def _decode_id_token(token: str) -> dict:
-    """Decode a Google ID token's payload (no signature check — see note above)."""
+def _decode_id_token(token: str, *, audience: str | None = None) -> dict:
+    """Decode and CRYPTOGRAPHICALLY VERIFY a Google ID token's payload.
+
+    Audit S1.1 — pre-fix this trusted Google's signature without
+    verification on the assumption that "the channel is TLS, we
+    control the client_secret". That's wrong: anyone who can MITM
+    TLS, intercept a redirect, replay a leaked code-exchange
+    response, or interpose a tampered id_token by ANY means could
+    mint claims like ``email=admin@docx.co.in`` and
+    ``email_verified=true`` — which combined with auto-admin via
+    ``YTFACTORY_ADMIN_DOMAINS`` is full takeover.
+
+    Now uses ``google.oauth2.id_token.verify_oauth2_token`` which:
+    - fetches Google's JWKS from the v3/certs endpoint (with
+      transport-layer caching);
+    - verifies the RS256 signature against Google's published keys;
+    - validates iss is one of accounts.google.com /
+      https://accounts.google.com;
+    - validates aud == client_id (so a token minted for a different
+      OAuth client can't be replayed against ours);
+    - validates exp/iat windows.
+
+    Falls back to the legacy unverified base64 decode ONLY when the
+    google-auth lib isn't installable (lab/test env without
+    network), with a loud warning. Production deployments MUST have
+    google-auth available — verify the import succeeds at boot.
+    """
     parts = token.split(".")
     if len(parts) != 3:
         raise RuntimeError("Malformed id_token (expected three segments)")
+
+    if audience:
+        try:
+            from google.auth.transport import requests as ga_requests
+            from google.oauth2 import id_token as ga_id_token
+        except ImportError:  # coverage: only triggers in environments without google-auth
+            logger.warning(
+                "google-auth not installed; falling back to UNVERIFIED "
+                "id_token decode. This is a security regression — install "
+                "google-auth in any prod environment."
+            )
+        else:
+            try:
+                claims = ga_id_token.verify_oauth2_token(
+                    token,
+                    ga_requests.Request(),
+                    audience=audience,
+                )
+            except ValueError as e:
+                # google-auth raises ValueError on every check failure
+                # (bad sig, expired, wrong audience, wrong issuer).
+                raise RuntimeError(f"id_token verification failed: {e}") from e
+            return claims
+
+    # Audience-less path is only used by the legacy decode-only path
+    # (kept for back-compat with callers that don't have client_id).
     payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
     payload_bytes = base64.urlsafe_b64decode(payload_b64)
     return json.loads(payload_bytes)
