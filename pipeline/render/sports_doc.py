@@ -67,6 +67,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -812,20 +813,114 @@ def _main_impl(args) -> int:
     speed, atempo = _apply_tone(lf, tone)
     print(f"[tts ] tone={tone} speed={speed} atempo={atempo}")
 
-    # ----- Stage 1: TTS ----------------------------------------------------
-    print(f"[1/7] chunked TTS via {lf.get('tts_provider')}…")
-    narration_wav, chunks = synth_long_narration(
-        text=text,
-        voice_id=lf["tts_voice"],
-        cache_dir=cache_dir,
-        atempo=atempo,
-        chunk_target_chars=int(lf.get("tts_chunk_target_chars", 380)),
-        join_silence_s=float(lf.get("tts_chunk_join_silence_s", 0.35)),
-        provider=str(lf.get("tts_provider", "f5_tts")),
-        speed=speed,
-        ref_audio_text=lf.get("tts_ref_text"),
+    # ----- Stage 1+3 with overlap (added 2026-05-13) ----------------------
+    # Source downloads + ffmpeg trims for every footage_plan entry are
+    # independent of TTS — they only need URL + in_s + out_s, all
+    # pre-known from the rewrite-time footage plan. Kick them off on a
+    # worker thread BEFORE awaiting chunked TTS so the slow yt-dlp +
+    # libx264 work overlaps with the slow cloud TTS work on the wall
+    # clock. Gated on :func:`pipeline.stage_overlap.gpu_safe_to_overlap`
+    # — when TTS provider is local (f5_tts / kokoro), falls back to
+    # the pre-overlap sequential path so Metal contention can't surface.
+    out_w, out_h = lf.get("output_resolution", [1920, 1080])
+    fps = int(lf.get("output_fps", 30))
+    grade_cfg = lf.get("visual_grade") or {}
+    grade_filter = grade_cfg.get("filter") if grade_cfg.get("enabled") else None
+    sources_dir = channel_dir / lf.get("footage_dir", "footage/sources")
+    tts_provider = str(lf.get("tts_provider", "f5_tts"))
+
+    # Collect every footage entry we'll ever need to prep — match
+    # clips, talking heads, archival, ALL b-roll (anchored + filler).
+    # _gather_overlays may filter some out post-whisper, but pre-
+    # prepping them is cheap-to-skip cached work later.
+    raw_footage_entries: list[dict] = []
+    for arr_name in ("match_footage", "talking_heads", "archival_footage", "b_roll"):
+        raw_footage_entries.extend(fp.get(arr_name, []))
+
+    from pipeline.stage_overlap import StageOverlap, gpu_safe_to_overlap  # noqa: PLC0415
+    overlap_safe, overlap_reason = gpu_safe_to_overlap(
+        tts_provider=tts_provider,
+        image_provider=None,  # sports_doc has no diffusion image gen
     )
-    narration_dur = _probe_duration(narration_wav)
+
+    def _prep_raw_entries(entries: list[dict]) -> dict[str, Path]:
+        """Run download + trim for every footage_plan entry once.
+        Returns a {entry_id: clip_path} dict so the post-overlay
+        gather can match by id without re-running the work."""
+        result: dict[str, Path] = {}
+        for entry in entries:
+            cid = entry["id"]
+            if cid in result:
+                continue
+            result[cid] = _prep_footage_clip(
+                entry, sources_dir, cache_dir,
+                out_w, out_h, fps, grade_filter,
+            )
+        return result
+
+    print(f"[1/7] chunked TTS via {lf.get('tts_provider')}…")
+    if overlap_safe and not args.tts_only and raw_footage_entries:
+        print(f"[overlap] {overlap_reason} — kicking off footage prep "
+              f"({len(raw_footage_entries)} entries) in parallel with TTS")
+    elif args.tts_only:
+        pass
+    else:
+        print(f"[overlap] disabled: {overlap_reason} — running stages sequentially")
+
+    clips_by_id: dict[str, Path] = {}
+    used_overlap = False
+    tts_t0 = time.time()
+    if overlap_safe and not args.tts_only and raw_footage_entries:
+        used_overlap = True
+        with StageOverlap(
+            label="sports_doc-footage_prep",
+            max_workers=1,
+            log=True,
+        ) as overlap:
+            footage_prep_fut = overlap.submit(
+                "footage_prep",
+                _prep_raw_entries,
+                raw_footage_entries,
+            )
+
+            narration_wav, chunks = synth_long_narration(
+                text=text,
+                voice_id=lf["tts_voice"],
+                cache_dir=cache_dir,
+                atempo=atempo,
+                chunk_target_chars=int(lf.get("tts_chunk_target_chars", 380)),
+                join_silence_s=float(lf.get("tts_chunk_join_silence_s", 0.35)),
+                provider=tts_provider,
+                speed=speed,
+                ref_audio_text=lf.get("tts_ref_text"),
+            )
+            narration_dur = _probe_duration(narration_wav)
+            tts_done_s = time.time() - tts_t0
+            print(f"[1/7] tts done {tts_done_s:.1f}s — {len(chunks)} chunks → "
+                  f"{narration_wav.name} {narration_dur:.1f}s ({narration_dur/60:.1f} min)")
+
+            clips_by_id = footage_prep_fut.result()
+            footage_done_s = time.time() - tts_t0
+            print(f"[3/7] footage prep done {footage_done_s:.1f}s "
+                  f"({len(clips_by_id)} clips)")
+    else:
+        narration_wav, chunks = synth_long_narration(
+            text=text,
+            voice_id=lf["tts_voice"],
+            cache_dir=cache_dir,
+            atempo=atempo,
+            chunk_target_chars=int(lf.get("tts_chunk_target_chars", 380)),
+            join_silence_s=float(lf.get("tts_chunk_join_silence_s", 0.35)),
+            provider=tts_provider,
+            speed=speed,
+            ref_audio_text=lf.get("tts_ref_text"),
+        )
+        narration_dur = _probe_duration(narration_wav)
+        tts_done_s = time.time() - tts_t0
+        print(f"[1/7] tts done {tts_done_s:.1f}s — {len(chunks)} chunks → "
+              f"{narration_wav.name} {narration_dur:.1f}s ({narration_dur/60:.1f} min)")
+
+    # Backwards-compat: keep the legacy "[1/7] narration ..." banner.
     print(f"[1/7] narration {len(chunks)} chunks → {narration_wav.name} {narration_dur:.1f}s ({narration_dur/60:.1f} min)")
 
     if args.tts_only:
@@ -836,7 +931,7 @@ def _main_impl(args) -> int:
     # Subsequent stages (whisper alignment, footage trim, mux) don't need
     # F5; previously it leaked through to those stages and contributed to
     # Metal aborts on long renders. No-op when provider != f5_tts.
-    if str(lf.get("tts_provider", "f5_tts")) == "f5_tts":
+    if tts_provider == "f5_tts":
         from pipeline.preflight import reset_mlx_state  # noqa: PLC0415
         reset_mlx_state(drop_f5=True, label="sports-doc stage-1 TTS")
 
@@ -874,19 +969,32 @@ def _main_impl(args) -> int:
         return 0
 
     # ----- Stage 3: Trim every footage clip --------------------------------
-    out_w, out_h = lf.get("output_resolution", [1920, 1080])
-    fps = int(lf.get("output_fps", 30))
-    grade_cfg = lf.get("visual_grade") or {}
-    grade_filter = grade_cfg.get("filter") if grade_cfg.get("enabled") else None
-    sources_dir = channel_dir / lf.get("footage_dir", "footage/sources")
-
+    # When the parallel branch ran (overlap_safe), every clip is
+    # already on disk in clips_by_id keyed by entry["id"]. Match by id
+    # for the per-array lists — falls back to inline _prep_footage_clip
+    # for any entry missed by the parallel branch (e.g. _gather_overlays
+    # surfaced a NEW b-roll entry after whisper, or the overlap path
+    # was skipped entirely).
     def _prep_all(arr: list[dict]) -> list[Path]:
-        return [
-            _prep_footage_clip(e, sources_dir, cache_dir, out_w, out_h, fps, grade_filter)
-            for e in arr
-        ]
+        out: list[Path] = []
+        for e in arr:
+            cid = e["id"]
+            if cid in clips_by_id:
+                out.append(clips_by_id[cid])
+            else:
+                clip = _prep_footage_clip(
+                    e, sources_dir, cache_dir,
+                    out_w, out_h, fps, grade_filter,
+                )
+                clips_by_id[cid] = clip
+                out.append(clip)
+        return out
 
-    print(f"[3/7] preparing footage clips (out={out_w}x{out_h}@{fps}, grade={'on' if grade_filter else 'off'})…")
+    if used_overlap:
+        print(f"[3/7] dispatching footage clips from overlap cache "
+              f"(out={out_w}x{out_h}@{fps}, grade={'on' if grade_filter else 'off'})…")
+    else:
+        print(f"[3/7] preparing footage clips (out={out_w}x{out_h}@{fps}, grade={'on' if grade_filter else 'off'})…")
     match_clips = _prep_all(match_clips_meta)
     talking_clips = _prep_all(talking_heads_meta)
     archival_clips = _prep_all(archival_meta)
