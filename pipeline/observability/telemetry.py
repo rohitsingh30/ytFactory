@@ -160,11 +160,26 @@ def track(
             job_id=job_id,
             metadata=metadata,
         )
+        # Audit T1.12 — thread channel + slug + render_kind from the
+        # active RenderContext into the metric attributes so Cloud
+        # Monitoring per-channel / per-render-kind rollups work.
+        # Pre-fix metric_attrs only carried event/category/success →
+        # every counter aggregated globally and the dashboard had no
+        # way to slice by channel.
+        ctx = current_context()
         metric_attrs = {
             "event": event,
             "category": category,
             "success": str(bool(success)).lower(),
         }
+        if ctx.channel:
+            metric_attrs["channel"] = ctx.channel
+        if ctx.slug:
+            metric_attrs["slug"] = ctx.slug
+        if ctx.render_kind:
+            metric_attrs["render_kind"] = ctx.render_kind
+        if job_id:
+            metric_attrs["job_id"] = job_id
         _counter().add(1, attributes=metric_attrs)
         if duration_ms is not None:
             _histogram().record(int(duration_ms), attributes=metric_attrs)
@@ -312,11 +327,22 @@ class _TimerHandle:
 
 def _close_span(span, handle: _TimerHandle, start_ns: int, *, success: bool) -> None:
     duration_ms = int((time.perf_counter_ns() - start_ns) / 1_000_000)
+    # Audit T1.12 — same channel/slug/render_kind threading as in
+    # track(). The context is whatever the call site's render envelope
+    # set (or the obs.ctx() block); empty when the span runs outside
+    # a render envelope (one-off CLI tools).
+    ctx = current_context()
     metric_attrs = {
         "event": handle._event,
         "category": handle._category,
         "success": str(bool(success)).lower(),
     }
+    if ctx.channel:
+        metric_attrs["channel"] = ctx.channel
+    if ctx.slug:
+        metric_attrs["slug"] = ctx.slug
+    if ctx.render_kind:
+        metric_attrs["render_kind"] = ctx.render_kind
     try:
         _counter().add(1, attributes=metric_attrs)
         _histogram().record(duration_ms, attributes=metric_attrs)

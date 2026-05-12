@@ -111,5 +111,93 @@ class TestTimedSurvivesNonRecordingSpan(unittest.TestCase):
             obs_t.tracer = original
 
 
+class TestMetricAttrsCarryRenderContext(unittest.TestCase):
+    """Audit T1.12 — track() and timed() must thread channel + slug +
+    render_kind from the active RenderContext into metric_attrs so
+    Cloud Monitoring can per-channel rollup. Pre-fix the metric path
+    only carried event/category/success → every counter aggregated
+    globally."""
+
+    def setUp(self) -> None:
+        obs.reset_for_tests()
+        obs.init_in_memory()
+
+    def tearDown(self) -> None:
+        obs.reset_for_tests()
+
+    def test_track_metric_attrs_include_context_fields(self) -> None:
+        from unittest.mock import patch as _patch
+        from pipeline.observability import telemetry as obs_t
+
+        captured: list[dict] = []
+        fake_counter = MagicMock()
+        fake_counter.add = MagicMock(side_effect=lambda v, attributes: captured.append(dict(attributes)))
+        with _patch.object(obs_t, "_counter", return_value=fake_counter):
+            with obs.ctx(channel="historyrecapped", slug="aita-001",
+                         render_kind="long_form"):
+                obs.track("something_happened", category="render", success=True)
+
+        self.assertTrue(captured)
+        attrs = captured[0]
+        self.assertEqual(attrs.get("channel"), "historyrecapped")
+        self.assertEqual(attrs.get("slug"), "aita-001")
+        self.assertEqual(attrs.get("render_kind"), "long_form")
+        self.assertEqual(attrs.get("event"), "something_happened")
+
+    def test_track_metric_attrs_omit_unset_context_fields(self) -> None:
+        from unittest.mock import patch as _patch
+        from pipeline.observability import telemetry as obs_t
+
+        captured: list[dict] = []
+        fake_counter = MagicMock()
+        fake_counter.add = MagicMock(side_effect=lambda v, attributes: captured.append(dict(attributes)))
+        with _patch.object(obs_t, "_counter", return_value=fake_counter):
+            # No context envelope — fields stay unset.
+            obs.track("ambient_event", category="cron", success=True)
+
+        attrs = captured[0]
+        # Channel / slug / render_kind absent → not in metric attrs
+        # (so cloud monitoring doesn't bucket as "channel=None").
+        self.assertNotIn("channel", attrs)
+        self.assertNotIn("slug", attrs)
+        self.assertNotIn("render_kind", attrs)
+
+    def test_timed_metric_attrs_include_context_fields(self) -> None:
+        from unittest.mock import patch as _patch
+        from pipeline.observability import telemetry as obs_t
+
+        captured: list[dict] = []
+        fake_counter = MagicMock()
+        fake_counter.add = MagicMock(side_effect=lambda v, attributes: captured.append(dict(attributes)))
+        fake_hist = MagicMock()
+        with _patch.object(obs_t, "_counter", return_value=fake_counter), \
+             _patch.object(obs_t, "_histogram", return_value=fake_hist):
+            with obs.ctx(channel="cosmosdecoded", slug="lhc-discovery",
+                         render_kind="long_form"):
+                with obs.timed("tts_synth", category="tts"):
+                    pass
+
+        self.assertTrue(captured)
+        attrs = captured[0]
+        self.assertEqual(attrs.get("channel"), "cosmosdecoded")
+        self.assertEqual(attrs.get("slug"), "lhc-discovery")
+        self.assertEqual(attrs.get("render_kind"), "long_form")
+
+
+    def test_track_metric_attrs_include_job_id(self) -> None:
+        from unittest.mock import patch as _patch
+        from pipeline.observability import telemetry as obs_t
+
+        captured: list[dict] = []
+        fake_counter = MagicMock()
+        fake_counter.add = MagicMock(side_effect=lambda v, attributes: captured.append(dict(attributes)))
+        with _patch.object(obs_t, "_counter", return_value=fake_counter):
+            obs.track("from_a_job", category="render",
+                      success=True, job_id="abc-123")
+
+        attrs = captured[0]
+        self.assertEqual(attrs.get("job_id"), "abc-123")
+
+
 if __name__ == "__main__":
     unittest.main()
