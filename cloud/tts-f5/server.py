@@ -137,8 +137,31 @@ def _ref_audio_to_path(ref_b64: str) -> Path:
     laptop client posts the same ref WAV twice in a row. Keeping it
     because the saving on disk-IO across a 200-chunk render is non-zero
     and the code is trivial.
+
+    **Audit Q2.19** — chatterbox + indicf5 both validate that the
+    decoded blob is at least 44 bytes (a valid WAV header) and rooted
+    at ``RIFF``; F5 + Higgs were missed in the 2026-05-10 hardening
+    pass. Without this guard, F5TTS.infer() crashes deep inside
+    torchaudio with an unhelpful "stream is empty" error 30s into the
+    call instead of a clear 400 to the laptop client right away.
     """
+    if not ref_b64:
+        raise ValueError(
+            "empty ref_audio_b64 — F5 is a voice-cloning model and requires "
+            "a base64-encoded reference WAV."
+        )
     raw = base64.b64decode(ref_b64)
+    if len(raw) < 44:
+        raise ValueError(
+            f"ref_audio_b64 decoded to {len(raw)} bytes — too small to be a "
+            "valid WAV (header is 44 bytes). Likely an empty / corrupted "
+            "base64 string from the client."
+        )
+    if raw[:4] != b"RIFF":
+        raise ValueError(
+            "ref_audio_b64 doesn't start with 'RIFF' — not a WAV file. "
+            "Encode the source WAV via base64.standard_b64encode(open(p,'rb').read())."
+        )
     sha = hashlib.sha256(raw).hexdigest()[:16]
     path = _REF_DIR / f"{sha}.wav"
     if not path.exists():

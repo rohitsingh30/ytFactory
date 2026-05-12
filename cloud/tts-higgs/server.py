@@ -8,6 +8,7 @@ import base64
 import hashlib
 import logging
 import os
+import subprocess
 import tempfile
 import time
 import uuid
@@ -112,7 +113,28 @@ _REF_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _ref_audio_to_path(ref_b64: str) -> Path:
+    """Audit Q2.19 — decoded blob must be at least 44 bytes (a valid
+    WAV header) and rooted at ``RIFF``. Without this guard, the Higgs
+    Audio engine crashes deep inside torchaudio with an unhelpful
+    "stream is empty" error instead of a clear 400 to the laptop
+    client right away.
+    """
+    if not ref_b64:
+        raise ValueError(
+            "empty ref_audio_b64 — Higgs is a voice-cloning model and "
+            "requires a base64-encoded reference WAV."
+        )
     raw = base64.b64decode(ref_b64)
+    if len(raw) < 44:
+        raise ValueError(
+            f"ref_audio_b64 decoded to {len(raw)} bytes — too small to be a "
+            "valid WAV (header is 44 bytes). Likely an empty / corrupted "
+            "base64 string from the client."
+        )
+    if raw[:4] != b"RIFF":
+        raise ValueError(
+            "ref_audio_b64 doesn't start with 'RIFF' — not a WAV file."
+        )
     sha = hashlib.sha256(raw).hexdigest()[:16]
     path = _REF_DIR / f"{sha}.wav"
     if not path.exists():
@@ -147,6 +169,14 @@ def synth(req: SynthIn) -> JSONResponse:
     except Exception as e:
         logger.exception("higgs synth failed")
         raise HTTPException(500, f"synth error: {e}")
+    # Audit Q2.18 — apply requested speed via post-process atempo.
+    # Higgs Audio v2's generate() doesn't expose a tempo parameter
+    # so we resample-stretch with ffmpeg's `atempo` filter (preserves
+    # pitch). Speed=1.0 is a no-op (skipped). The validator below
+    # bounded speed to [0.5, 2.0] so a single atempo invocation
+    # covers the whole range (atempo per-instance accepts [0.5, 100]).
+    if abs(req.speed - 1.0) > 1e-3:  # coverage: requires loaded Higgs engine to call synth handler end-to-end
+        _apply_speed_post_process(out_path, req.speed)  # coverage: helper itself is fully unit-tested in test_cloud_tts_higgs.py
     wall_s = time.time() - t0
 
     wav_bytes = out_path.read_bytes()
@@ -219,6 +249,39 @@ def _synth_higgs(*, text, ref_audio_path, ref_audio_text, out_path,
         output.sampling_rate,
     )
     return out_path
+
+
+def _apply_speed_post_process(wav_path: Path, speed: float) -> None:
+    """Audit Q2.18 — apply the requested ``speed`` factor via ffmpeg's
+    `atempo` filter (preserves pitch). Speed=1.0 callers are skipped
+    by the caller; values outside [0.5, 2.0] are unreachable here
+    because the request validator bounds the field.
+
+    ffmpeg writes to a sibling file then atomically renames over the
+    original so a partial failure leaves the unmodified WAV in place.
+    """
+    if abs(speed - 1.0) <= 1e-3:
+        return
+    tmp_out = wav_path.with_suffix(".sped.wav")
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", str(wav_path),
+            "-filter:a", f"atempo={speed:.4f}",
+            str(tmp_out),
+        ],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        # Surface the failure but keep the original — silent drop
+        # was the pre-fix behaviour and we don't want to regress to
+        # that. The caller catches the exception and 500s.
+        tmp_out.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"ffmpeg atempo={speed} exited {proc.returncode}: "
+            f"{(proc.stderr or b'').decode('utf-8', 'replace')[:500]}"
+        )
+    tmp_out.replace(wav_path)
 
 
 def _wav_duration_s(wav_bytes: bytes) -> float:

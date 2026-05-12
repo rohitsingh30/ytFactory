@@ -192,12 +192,18 @@ class TestPostSynth(unittest.TestCase):
             with self.assertRaises(_mod.CloudRunUnavailable):
                 _mod._post_synth({"model": "f5", "text": "text"})
 
-    def test_5_consecutive_429s_re_raises_http_error(self):
-        """5 consecutive 429s: attempts 1-4 retry, attempt 5 re-raises HTTPError."""
+    def test_5_consecutive_429s_raises_cloudrun_unavailable(self):
+        """Audit Q2.20 — 5 consecutive 429s: attempts 1-4 retry,
+        attempt 5 used to re-raise HTTPError (which the wrappers
+        DON'T catch — they only catch CloudRunUnavailable). A
+        rate-limited render then crashed entirely instead of falling
+        back to local F5/Kokoro. Post-fix the burnout converts to
+        CloudRunUnavailable so the local fallback path engages.
+        """
         side_effects = [_http_error(429)] * 5
         with patch("urllib.request.urlopen", side_effect=side_effects), \
              patch("time.sleep"):
-            with self.assertRaises(urllib.error.HTTPError):
+            with self.assertRaises(_mod.CloudRunUnavailable):
                 _mod._post_synth({"model": "f5", "text": "text"})
 
     def test_5xx_not_429_503_raises_immediately(self):

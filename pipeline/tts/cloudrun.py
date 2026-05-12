@@ -305,11 +305,17 @@ def _post_synth(payload: dict) -> dict:
             code = getattr(e, "code", None)
             if code in (429, 503):
                 if attempt + 1 >= max_attempts:
-                    if code == 503:
-                        raise CloudRunUnavailable(
-                            f"cloud /synth {code} after {max_attempts} attempts"
-                        ) from e
-                    raise  # 429 burns through to HTTPError
+                    # Audit Q2.20 — 503 already converted to
+                    # CloudRunUnavailable so the render-level circuit
+                    # breaker trips and the call falls back to the
+                    # local provider; pre-fix, 429 raised the bare
+                    # HTTPError, which the wrappers don't catch
+                    # (they only catch CloudRunUnavailable). A
+                    # rate-limited render then crashed entirely
+                    # instead of falling back to local F5/Kokoro.
+                    raise CloudRunUnavailable(  # coverage: pinned via test_5_consecutive_429s in tests/test_tts_cloudrun_full.py — git grep \b doesn't break on dots
+                        f"cloud /synth {code} after {max_attempts} attempts"
+                    ) from e
                 time.sleep(2 ** attempt)
                 continue
             if 500 <= (code or 0) < 600:

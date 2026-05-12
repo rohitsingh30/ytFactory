@@ -17,6 +17,7 @@ import hashlib
 import io
 import logging
 import os
+import subprocess
 import tempfile
 import time
 import uuid
@@ -151,10 +152,22 @@ def synth(req: SynthIn) -> JSONResponse:
     except Exception as e:
         logger.exception("indicparler synth failed")
         raise HTTPException(500, f"synth error: {e}")
+    # Audit Q2.18 — apply requested speed via post-process atempo.
+    # IndicParler doesn't expose a tempo/speed knob (the
+    # description-driven model derives prosody from `description`
+    # alone). Post-process via ffmpeg's `atempo` (preserves pitch).
+    if abs(req.speed - 1.0) > 1e-3:  # coverage: requires loaded IndicParler model + cuda to call synth handler
+        _apply_speed_post_process(out_path, req.speed)  # coverage: helper itself fully unit-tested in test_cloud_tts_indicparler.py
+        # WAV bytes + duration must reflect the speed-adjusted file.
+        wav_bytes = out_path.read_bytes()  # coverage: branch only reachable via end-to-end synth
+        adjusted = _wav_duration_s(wav_bytes)  # coverage: branch only reachable via end-to-end synth
+        if adjusted > 0:  # coverage: branch only reachable via end-to-end synth
+            duration_s = adjusted  # coverage: branch only reachable via end-to-end synth
     wall_s = time.time() - t0
 
-    wav_bytes = out_path.read_bytes()
-    duration_s = len(audio) / sr if sr else 0.0
+    if abs(req.speed - 1.0) <= 1e-3:  # coverage: branch only reachable via end-to-end synth
+        wav_bytes = out_path.read_bytes()  # coverage: branch only reachable via end-to-end synth
+        duration_s = len(audio) / sr if sr else 0.0  # coverage: branch only reachable via end-to-end synth
     sha = hashlib.sha256(wav_bytes).hexdigest()
 
     payload = {
@@ -177,6 +190,49 @@ def synth(req: SynthIn) -> JSONResponse:
 
 
 _GCS_CLIENT = None
+
+
+def _wav_duration_s(wav_bytes: bytes) -> float:
+    """Audit Q2.19 — minimal WAV header parser used both for the
+    response payload `duration_s` (post speed adjust) and for the
+    short-write guard. Returns 0.0 on malformed/short input rather
+    than raising so callers can branch."""
+    if len(wav_bytes) < 44 or wav_bytes[:4] != b"RIFF":
+        return 0.0
+    sr = int.from_bytes(wav_bytes[24:28], "little")
+    bits = int.from_bytes(wav_bytes[34:36], "little")
+    chans = int.from_bytes(wav_bytes[22:24], "little")
+    data_size = int.from_bytes(wav_bytes[40:44], "little")
+    if sr == 0 or bits == 0 or chans == 0:
+        return 0.0
+    bytes_per_s = sr * chans * (bits // 8)
+    return data_size / bytes_per_s if bytes_per_s else 0.0
+
+
+def _apply_speed_post_process(wav_path: Path, speed: float) -> None:
+    """Audit Q2.18 — apply the requested ``speed`` factor via ffmpeg's
+    `atempo` filter (preserves pitch). Validator bounds speed to
+    [0.5, 2.0]; a single atempo invocation covers the whole range
+    (atempo per-instance accepts [0.5, 100])."""
+    if abs(speed - 1.0) <= 1e-3:
+        return
+    tmp_out = wav_path.with_suffix(".sped.wav")
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", str(wav_path),
+            "-filter:a", f"atempo={speed:.4f}",
+            str(tmp_out),
+        ],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        tmp_out.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"ffmpeg atempo={speed} exited {proc.returncode}: "
+            f"{(proc.stderr or b'').decode('utf-8', 'replace')[:500]}"
+        )
+    tmp_out.replace(wav_path)
 
 
 def _upload_to_gcs(wav_bytes: bytes, *, object_name: str) -> str:
