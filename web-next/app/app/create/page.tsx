@@ -53,6 +53,7 @@ import {
   type VoiceInfo,
 } from "@/lib/api";
 import type { ChannelSummary, CustomizationField, CustomizationSchema, NicheDoc } from "@/lib/types";
+import { buildChannelOverrides, resolveLengthSeconds } from "@/lib/render-payload";
 import { cn } from "@/lib/utils";
 
 // Lazy-loaded heavy panels — only fetched when the user actually opens
@@ -223,31 +224,14 @@ export default function CreatePage() {
     try {
       const topic = String(values.topic ?? "").trim();
       const notes = String(values.notes ?? "").trim();
-      // Length is now form-bound (short / long), not seconds. The renderer
-      // gets a sensible default per kind; per-niche YAML can refine.
-      const length_kind = String(values.length_kind ?? "short");
-      const long_minutes = Number(values.length_minutes ?? 30);
-      const length_s = length_kind === "long" ? Math.max(1, long_minutes) * 60 : 55;
       const source_kind = String(values.source_kind ?? "auto");
       const source_ref = String(values.source_ref ?? "").trim() || null;
-
-      // Pull only the user-facing knobs the renderer cares about into
-      // channel_overrides — everything in here is forwarded to make_short
-      // via --override key=value (see pipeline/render/shorts.py::cli_main).
-      // Skip empty strings / undefined so the YAML default keeps winning
-      // when the user didn't touch a field.
-      const channel_overrides: Record<string, unknown> = {};
-      const passthrough = [
-        "voice", "music_bed", "captions_density", "visibility", "schedule_at",
-        "audio_mode", "song_style", "song_vocal_gender", "song_model",
-        "visual_source",
-      ] as const;
-      for (const k of passthrough) {
-        const v = values[k];
-        if (v === undefined || v === null) continue;
-        if (typeof v === "string" && v.trim() === "") continue;
-        channel_overrides[k] = v;
-      }
+      // `length_s` is the proposal's typed length field; ALL other
+      // user picks (including `length_kind`) flow into channel_overrides
+      // via the schema-driven passthrough — see
+      // web-next/lib/render-payload.ts for the contract.
+      const length_s = resolveLengthSeconds(values);
+      const channel_overrides = buildChannelOverrides(values, schema);
 
       const result = await renderApi.enqueue({
         channel: picked,

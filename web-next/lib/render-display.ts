@@ -27,12 +27,22 @@ export type RenderKindLabel = "long-form" | "short" | null;
 const VALID_ASPECTS: ReadonlySet<string> = new Set(["16:9", "9:16", "1:1", "4:5"]);
 
 /**
+ * Threshold (seconds) above which an un-tagged proposal is treated
+ * as long-form for preview purposes. Mirrors
+ * pipeline/render/spec.py::_LONG_FORM_THRESHOLD_S.
+ */
+const LONG_FORM_THRESHOLD_S = 120;
+
+/**
  * Resolve the preview aspect ratio. Priority:
  *   1. spec.aspect_ratio (the worker-resolved RenderSpec).
  *   2. proposal.channel_overrides.length_kind (form fallback) —
- *      "long" → 16:9, anything else → 9:16. Used in the
+ *      "long" → 16:9, "short" → 9:16. Used in the
  *      pending → dispatching window before the spec lands.
- *   3. Default 9:16 (the historical Shorts default).
+ *   3. proposal.length_s threshold (defense in depth — if a future
+ *      form drop loses `length_kind` again, the seconds field on the
+ *      typed proposal still drives the right preview).
+ *   4. Default 9:16 (the historical Shorts default).
  */
 export function deriveAspect(
   spec: Record<string, unknown> | null | undefined,
@@ -44,6 +54,11 @@ export function deriveAspect(
   const overrides = proposal?.channel_overrides as Record<string, unknown> | undefined;
   const lk = (overrides?.length_kind as string | undefined)?.trim();
   if (lk === "long") return "16:9";
+  if (lk === "short") return "9:16";
+
+  const lenRaw = proposal?.length_s ?? overrides?.length_s;
+  const len = typeof lenRaw === "number" ? lenRaw : Number(lenRaw);
+  if (Number.isFinite(len) && len > LONG_FORM_THRESHOLD_S) return "16:9";
 
   return "9:16";
 }

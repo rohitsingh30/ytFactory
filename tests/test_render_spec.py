@@ -197,6 +197,82 @@ def test_explicit_length_kind_short_overrides_long_length_s():
     assert spec.aspect_ratio == "9:16"
 
 
+def test_form_length_kind_long_in_channel_overrides_resolves_16_9():
+    """REGRESSION 2026-05-12: pin the contract the /create wizard
+    relies on. After the schema-driven passthrough fix
+    (web-next/lib/render-payload.ts), every long-form submit sends
+    ``channel_overrides.length_kind = "long"`` alongside the typed
+    ``length_s`` field. The renderer MUST resolve both kind and
+    aspect from that signal even when YAML defaults disagree.
+
+    Pre-2026-05-12 the form dropped ``length_kind`` from the
+    passthrough list and only sent ``length_s``. The backend's
+    ``_infer_kind`` still picked the right kind via the length_s
+    threshold, but the frontend's pre-spec PlayerCard fallback
+    couldn't see it → preview lied with "9:16 · auto-loop" for
+    the entire dispatching window. The fix lands BOTH signals.
+    Pin both here so a future passthrough drift surfaces as a
+    failing backend test, not just a JS test.
+    """
+    spec = build_spec(
+        {
+            "channel": "mystoriesanimated",
+            "format": "aita_animated",
+            "length_s": 1800,
+            "channel_overrides": {"length_kind": "long"},
+        },
+        channel_yaml_path=REPO_ROOT / "pipeline/channels/mystoriesanimated.yaml",
+        variant_yaml_path=REPO_ROOT
+        / "pipeline/variants/mystoriesanimated/aita_animated.yaml",
+    )
+
+    assert spec.kind == RenderKind.LONG_FORM
+    assert spec.aspect_ratio == "16:9"
+
+
+def test_form_length_kind_long_without_length_s_resolves_16_9():
+    """Defense-in-depth: even if a future refactor drops length_s
+    entirely from the proposal payload, length_kind alone in
+    channel_overrides must still drive the kind+aspect resolution.
+    """
+    spec = build_spec(
+        {
+            "channel": "mystoriesanimated",
+            "format": "aita_animated",
+            # NO length_s at top level — only the form's length_kind.
+            "channel_overrides": {"length_kind": "long"},
+        },
+        channel_yaml_path=REPO_ROOT / "pipeline/channels/mystoriesanimated.yaml",
+        variant_yaml_path=REPO_ROOT
+        / "pipeline/variants/mystoriesanimated/aita_animated.yaml",
+    )
+
+    assert spec.kind == RenderKind.LONG_FORM
+    assert spec.aspect_ratio == "16:9"
+
+
+def test_form_length_s_only_resolves_long_via_threshold():
+    """Defense-in-depth: the OPPOSITE drop — if a future refactor
+    drops length_kind from the form payload (the actual 2026-05-12
+    regression!), length_s alone must still get us to long-form.
+    """
+    spec = build_spec(
+        {
+            "channel": "mystoriesanimated",
+            "format": "aita_animated",
+            "length_s": 1800,
+            # NO channel_overrides.length_kind — simulates the pre-fix
+            # form state where length_kind was dropped.
+        },
+        channel_yaml_path=REPO_ROOT / "pipeline/channels/mystoriesanimated.yaml",
+        variant_yaml_path=REPO_ROOT
+        / "pipeline/variants/mystoriesanimated/aita_animated.yaml",
+    )
+
+    assert spec.kind == RenderKind.LONG_FORM
+    assert spec.aspect_ratio == "16:9"
+
+
 # ---------------------------------------------------------------------------
 # audio_mode=song threads through
 # ---------------------------------------------------------------------------

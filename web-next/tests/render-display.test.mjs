@@ -171,3 +171,53 @@ test("REGRESSION 2026-05-12: long_form spec must not render 9:16", () => {
   assert.notEqual(out.aspect, "9:16");
   assert.match(out.frameClass, /aspect-video/);
 });
+
+test("deriveAspect — defense-in-depth: length_s>120 alone flips to 16:9", () => {
+  // The actual 2026-05-12 prod regression: the form dropped
+  // length_kind on submit, so during the pending → dispatching
+  // window the proposal had ONLY `length_s = 1800` (the typed root
+  // field) and no channel_overrides.length_kind. The fix added a
+  // third fallback layer that reads proposal.length_s directly so
+  // even if length_kind drops AGAIN in a future refactor, the
+  // preview still flips to 16:9. Pin that layer.
+  assert.equal(deriveAspect(null, { length_s: 1800 }), "16:9");
+  assert.equal(deriveAspect(null, { length_s: 121 }), "16:9");
+});
+
+test("deriveAspect — threshold boundary: length_s=120 stays 9:16", () => {
+  // _LONG_FORM_THRESHOLD_S in pipeline/render/spec.py is "> 120",
+  // not ">= 120". Don't drift.
+  assert.equal(deriveAspect(null, { length_s: 120 }), "9:16");
+  assert.equal(deriveAspect(null, { length_s: 55 }), "9:16");
+});
+
+test("deriveAspect — length_s string is coerced (proposal arrives via JSON)", () => {
+  // Defense against the proposal payload coming back from the API
+  // with length_s stringified — Pydantic v2's strict JSON mode used
+  // to do this on certain routes. Number(...) coerces safely.
+  assert.equal(deriveAspect(null, { length_s: "1800" }), "16:9");
+  assert.equal(deriveAspect(null, { length_s: "55" }), "9:16");
+});
+
+test("deriveAspect — length_kind=long beats length_s=55 (explicit user pick wins)", () => {
+  // length_kind is the higher-priority fallback. Pin the ordering
+  // so a future refactor doesn't accidentally swap priorities.
+  assert.equal(
+    deriveAspect(null, { channel_overrides: { length_kind: "long" }, length_s: 55 }),
+    "16:9",
+  );
+});
+
+test("deriveAspect — length_kind=short beats length_s=1800 (explicit user pick wins)", () => {
+  // Opposite direction: user explicitly picked short, so don't let
+  // a stray length_s flip it back.
+  assert.equal(
+    deriveAspect(null, { channel_overrides: { length_kind: "short" }, length_s: 1800 }),
+    "9:16",
+  );
+});
+
+test("deriveAspect — non-numeric length_s falls through to default", () => {
+  assert.equal(deriveAspect(null, { length_s: "not-a-number" }), "9:16");
+  assert.equal(deriveAspect(null, { length_s: NaN }), "9:16");
+});

@@ -18,7 +18,21 @@ Adding (or removing) a form input is a **single declarative edit** in
 below picks it up automatically:
 
 - **Form UI** — already reads the schema via
-  `/api/channels/<ch>/customization_schema`.
+  `/api/channels/<ch>/customization_schema`. The form's `submit()`
+  handler runs the picks through
+  `web-next/lib/render-payload.ts::buildChannelOverrides(values, schema)`,
+  which walks `schema.fields` and includes every key in the request's
+  `channel_overrides` automatically — no hand-maintained passthrough.
+  Reserved at the top level: `topic`, `notes`, `source_kind`,
+  `source_ref`, `format`, `length_s` (typed `ShortProposal` fields).
+  Form-internal scaffolding: `length_minutes` (computed into `length_s`
+  and dropped). Adding a new `CustomizationField` flows through to
+  `channel_overrides` automatically. Pinned by
+  `web-next/tests/render-payload.test.mjs` (19 tests including an
+  EXTENSIBILITY case that asserts a synthetic NEW descriptor flows).
+  Skipping this helper and hand-rolling a passthrough list was the
+  2026-05-12 long-form-preview-shows-9:16 regression — see
+  [[form-passthrough-schema-driven]].
 - **SHORT path** — `pipeline/render/shorts.py:_apply_form_overrides`
   delegates to `pipeline.render.input_registry.apply_overrides`,
   which walks the descriptor list and writes each `cfg_target`.

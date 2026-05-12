@@ -223,9 +223,23 @@ function PlayerCard({ job, src }: { job: Job | null; src: string | null }) {
               {!job ? (
                 <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
               ) : job.status === "failed" || job.status === "cancelled" ? (
-                <div className="text-center text-[12px] text-muted-foreground">
-                  <X className="mx-auto mb-2 h-4 w-4" />
-                  No preview
+                // Surface the error text inline so the user knows WHY
+                // a render failed without having to crack open Cloud
+                // Logging. The backend writes it via _update_job(...,
+                // error=...) in cloud/render-worker-v2/entrypoint.py;
+                // _doc_to_view forwards it as job.error.
+                <div className="max-h-full overflow-auto px-4 py-3 text-left text-[11px] text-muted-foreground">
+                  <div className="mb-1 flex items-center gap-1.5 text-rose-300">
+                    <X className="h-3.5 w-3.5" />
+                    <span className="font-medium">{job.status === "failed" ? "Render failed" : "Cancelled"}</span>
+                  </div>
+                  {job.error ? (
+                    <pre className="whitespace-pre-wrap break-words font-mono text-[10px] leading-snug">
+                      {job.error}
+                    </pre>
+                  ) : (
+                    <span>No error message reported.</span>
+                  )}
                 </div>
               ) : (
                 <div className="text-center text-[12px] text-muted-foreground">

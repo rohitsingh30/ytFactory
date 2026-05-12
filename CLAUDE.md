@@ -2,7 +2,7 @@
 
 This file is loaded into every Claude Code session that runs in this repo.
 It collects durable, project-wide rules. Channel-specific rules live under
-`<channel>/learnings/`, cross-channel rules under `docs/`.
+`docs/channel-learnings/<channel>/`, cross-channel rules under `docs/`.
 
 ---
 
@@ -18,9 +18,9 @@ worth remembering, persist it in **BOTH** of these places — never just one:
    rule is visible to the user, teammates, and any other tool/agent.
    Pick the right home:
    - **Cross-channel rule** → `docs/<topic>.md` and link from each
-     affected channel's `learnings/channel.md`.
-   - **Channel-specific rule** → `<channel>/learnings/<topic>.md`,
-     linked from that channel's `learnings/channel.md`.
+     affected channel's `docs/channel-learnings/<channel>/channel.md`.
+   - **Channel-specific rule** → `docs/channel-learnings/<channel>/<topic>.md`,
+     linked from that channel's `docs/channel-learnings/<channel>/channel.md`.
    - **Pipeline-internal mechanic** → inline comment / docstring in
      the owning module, or a section in `docs/architecture.md`.
 
@@ -89,19 +89,21 @@ it exists as automatic fallback only. ~10× speedup for English long-form,
 ### Per-channel routing (2026-05-06 reality)
 
 - **English channels** (16 YAMLs across mystoriesanimated /
-  historyrecapped / sportstoriesanimated / cosmosdecoded / airecap /
+  historyrecapped / sportsrecapped / cosmosdecoded /
   rhymetimejunction): `tts_provider: cloudrun_chatterbox` → falls
   back to local F5-TTS on cloud failure.
-- **Hindi channel** (`hindutavaanimated`): `tts_provider: kokoro`
-  with `hf_alpha` voice (the only on-laptop Hindi). Cloud option
-  `cloudrun_indicparler` exists; better Hindi models being researched.
+- **Hindi channel** (`hindutavaanimated`): default
+  `tts_provider: cloudrun_indicf5` (AI4Bharat F5-tuned, voice-clone);
+  `cloudrun_indicparler` available as alt for description-driven
+  voices. Local fallback is `kokoro hf_alpha` (the only on-laptop
+  Hindi voice).
 
 ### Where to find what
 
 - **Top-level Cloud Run TTS runbook:** `docs/cloudrun_tts.md`
 - **Higgs Audio v2 specifics + PierrunoYT mirror post-mortem:** `docs/cloudrun_higgs.md`
 - **Per-channel routing table:** `docs/tts_stack.md`
-- **Container code:** `cloud/tts-{f5,higgs,chatterbox,cosyvoice,indicparler}/`
+- **Container code:** `cloud/tts-{f5,higgs,chatterbox,cosyvoice,indicparler,indicf5}/`
 - **Laptop client + auto-fallback:** `pipeline/tts/cloudrun.py`
 - **Hindi research (in progress):** `docs/research/hindi_tts_2026.md`
 
@@ -109,12 +111,13 @@ it exists as automatic fallback only. ~10× speedup for English long-form,
 
 Established by user: "for laptop we keep F5 for all and kokoro for
 hindutavaanimated; for cloud — all chatterbox; for hindi —
-indicparler today, better models being researched."
+indicf5 today (with indicparler available for description-driven
+voices)."
 
 | Cloud provider fails → | Local fallback |
 |---|---|
 | `cloudrun_chatterbox` / `cloudrun_f5` / `cloudrun_higgs` / `cloudrun_cosyvoice` | local `f5_tts` (sarah.wav) |
-| `cloudrun_indicparler` | local `kokoro hf_alpha` |
+| `cloudrun_indicf5` / `cloudrun_indicparler` | local `kokoro hf_alpha` |
 
 Implemented in `pipeline/tts/cloudrun.py::_synth_cloudrun_*`. Set
 `CLOUDRUN_TTS_DISABLE_FALLBACK=1` in tests to hard-error instead.
@@ -137,8 +140,11 @@ GPU-bound image generation runs on **Cloud Run + NVIDIA L4** in
 
 - **Every channel/variant declaring image gen** (16 YAMLs) now uses
   `image_provider: cloudrun_flux2_klein` — FLUX.2 [klein] 4B
-  (Apache 2.0, BFL Jan 2026) on Cloud Run NVIDIA L4 with
-  `--min-instances=1` (always-warm container).
+  (Apache 2.0, BFL Jan 2026) on Cloud Run NVIDIA L4. Default deploy
+  is `--min-instances=0` (cold-load tolerant); ops can flip to
+  `--min-instances=1` (always-warm) for production via
+  `gcloud run services update --min-instances=1` if cold-load
+  latency becomes the bottleneck.
 - **One exception:** `mystoriesanimated/variants/tifu.yaml` stays
   on `image_provider: mflux` (legacy Flux Schnell, low priority).
 - **Falls back to local `z_image_turbo` (mflux)** on cloud failure
