@@ -973,15 +973,31 @@ def _main_impl(args) -> int:
             cmd += ["-i", str(png)]
             extra_inputs += 1
 
-    # Audio filter — narration + music with simple ducking.
-    # For v1 we don't sidechain-key the music; we just mix at the configured
-    # dBs and rely on per-talking-head volume tweaks in Phase 2. The raw
-    # commentator/match audio from the embedded clips comes through the
-    # composed.mp4 stream (which already has audio from concat-demuxing).
+    # Audio filter — narration + music + clip audio with simple ducking.
+    #
+    # Audit T1.16 — pre-fix this only mixed [1:a] (narration) and
+    # [2:a] (music). The composed.mp4 at input 0 has audio from
+    # concat-demuxing the source clips (commentator/match audio),
+    # but [0:a] was never referenced → every commentator clip's
+    # audio dropped from the final mux. Now [0:a] is mixed in too,
+    # at the configured clip_audio_db (defaults to a quiet -18 dB
+    # so it sits under narration). Set ``audio_clip_db: 0`` in the
+    # channel YAML's long_form: block to leave clip audio at its
+    # source level.
+    #
+    # Audit T1.17 — narration runs through single-pass loudnorm
+    # (mirroring long_form.py's bfbbec1 fix) so cloud TTS providers
+    # (Chatterbox / Higgs / IndicF5) reach the YouTube spoken-word
+    # target before the per-channel narration_db trim applies.
+    # Pre-fix the user reported inaudible narration on cloud renders;
+    # the same regression would recur on every sports doc rendered
+    # against a cloud TTS service without this guard.
+    cb = float(lf.get("audio_clip_db", -18.0))
     a_flt = (
-        f"[1:a]volume={nb}dB[narr];"
+        f"[0:a]volume={cb}dB[clips];"
+        f"[1:a]loudnorm=I=-16:TP=-1.5:LRA=11,volume={nb}dB[narr];"
         f"[2:a]volume={mb}dB[bed];"
-        f"[narr][bed]amix=inputs=2:duration=first:dropout_transition=2[a]"
+        f"[clips][narr][bed]amix=inputs=3:duration=first:dropout_transition=2[a]"
     )
 
     # Video filter chain — overlay watermark, caption PNGs, lower-thirds.

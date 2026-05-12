@@ -571,7 +571,14 @@ class MainEntrypointTests(unittest.TestCase):
             final_cmd = ff.call_args_list[-1].args[0]
             full_filter = final_cmd[final_cmd.index("-filter_complex") + 1]
             self.assertIn("overlay=x=W-w", full_filter)
-            self.assertIn("amix=inputs=2", full_filter)
+            # Audit T1.16 — amix now includes [0:a] (clip audio) so
+            # commentator/match audio from the embedded clips reaches
+            # the mux. Pre-fix only narration + music were mixed.
+            self.assertIn("amix=inputs=3", full_filter)
+            self.assertIn("[0:a]", full_filter)
+            # Audit T1.17 — narration runs through loudnorm before
+            # the per-channel volume trim.
+            self.assertIn("loudnorm", full_filter)
             self.assertTrue((paths.long_form / "doc.mp4").exists())
 
     def test_main_full_pipeline_disabled_visual_layers_synth_music_and_cli_main(self):
@@ -614,8 +621,15 @@ class MainEntrypointTests(unittest.TestCase):
             card.assert_not_called()
             lt.assert_not_called()
             final_cmd = ff.call_args_list[-1].args[0]
-            self.assertIn("[1:a]volume", final_cmd[final_cmd.index("-filter_complex") + 1])
-            self.assertNotIn("overlay", final_cmd[final_cmd.index("-filter_complex") + 1])
+            filt = final_cmd[final_cmd.index("-filter_complex") + 1]
+            # Audit T1.16 + T1.17 — filter must include narration with
+            # loudnorm prefix (replaces the pre-fix [1:a]volume= shape)
+            # AND mix in [0:a] (clip audio from concat-demuxed source
+            # clips, previously dropped).
+            self.assertIn("loudnorm", filt)
+            self.assertIn("[0:a]", filt)
+            self.assertIn("amix=inputs=3", filt)
+            self.assertNotIn("overlay", filt)
 
             with patch.object(sd, "main", return_value=7) as main:
                 self.assertEqual(sd.cli_main(), 7)

@@ -591,11 +591,18 @@ def _burn_video(
     pad = max(0.0, narr_dur - silent_dur)
     base_video = scratch / "video_with_audio.mp4"
     print(f"[mux] silent={silent_dur:.2f}s narration={narr_dur:.2f}s pad={pad:.2f}s")
+    # Audit T1.17 — pre-amp narration with single-pass loudnorm so
+    # the level is independent of TTS source amplitude (cloud
+    # Chatterbox / Higgs / IndicF5 emit 15-25 dB quieter than F5/Kokoro
+    # and lacked this guard → "inaudible narration" regression on
+    # cloud renders, mirroring the long_form.py bfbbec1 fix).
     subprocess.run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(silent), "-i", str(narration_path),
-        "-filter_complex", f"[0:v]tpad=stop_mode=clone:stop_duration={pad:.3f}[vout]",
-        "-map", "[vout]", "-map", "1:a",
+        "-filter_complex",
+        f"[0:v]tpad=stop_mode=clone:stop_duration={pad:.3f}[vout];"
+        f"[1:a]loudnorm=I=-16:TP=-1.5:LRA=11[aout]",
+        "-map", "[vout]", "-map", "[aout]",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30",
         "-c:a", "aac", "-b:a", "192k",
         "-shortest", "-movflags", "+faststart",
@@ -670,11 +677,14 @@ def _mux_audio_no_captions(silent: Path, narration_path: Path, out_path: Path) -
     narr_dur = _dur(narration_path)
     pad = max(0.0, narr_dur - silent_dur)
     print(f"[mux] silent={silent_dur:.2f}s narration={narr_dur:.2f}s pad={pad:.2f}s (no captions)")
+    # Audit T1.17 — same loudnorm guard as the captioned mux above.
     subprocess.run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(silent), "-i", str(narration_path),
-        "-filter_complex", f"[0:v]tpad=stop_mode=clone:stop_duration={pad:.3f}[vout]",
-        "-map", "[vout]", "-map", "1:a",
+        "-filter_complex",
+        f"[0:v]tpad=stop_mode=clone:stop_duration={pad:.3f}[vout];"
+        f"[1:a]loudnorm=I=-16:TP=-1.5:LRA=11[aout]",
+        "-map", "[vout]", "-map", "[aout]",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30",
         "-c:a", "aac", "-b:a", "192k",
         "-shortest", "-movflags", "+faststart",
