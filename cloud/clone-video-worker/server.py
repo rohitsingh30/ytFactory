@@ -44,7 +44,29 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger("clone-video-worker")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+# ── OTel SDK boot ───────────────────────────────────────────────────
+# Per CLAUDE.md "every new Cloud Run service MUST init OTel". The
+# helper is COPY'd into the image by cloud/_shared/sync.sh +
+# add_otel_copy.sh; importing it lights up Cloud Trace + Cloud
+# Monitoring + Cloud Logging structured spans for every request +
+# every outbound HTTP call this service makes.
+try:
+    from otel_init import (  # type: ignore[import-not-found]
+        init as _otel_init,
+        instrument_fastapi as _otel_instrument_fastapi,
+        instrument_outbound_http as _otel_instrument_outbound,
+    )
+    _otel_init("clone-video-worker")
+    _otel_instrument_outbound()
+    _OTEL_OK = True
+except Exception:
+    _OTEL_OK = False
+
 app = FastAPI(title="ytfactory-clone-video-worker", version="2")
+
+
+if _OTEL_OK:
+    _otel_instrument_fastapi(app)
 
 
 @app.get("/healthz")

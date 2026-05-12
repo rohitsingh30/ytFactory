@@ -47,11 +47,33 @@ INLINE_LIMIT_BYTES = 5 * 1024 * 1024
 
 GCS_BUCKET = os.environ.get("GCS_BUCKET", "ytfactory-tts-io")
 
+# ── OTel SDK boot ───────────────────────────────────────────────────
+# Per CLAUDE.md "every new Cloud Run service MUST init OTel". The
+# helper is COPY'd into the image by cloud/_shared/sync.sh +
+# add_otel_copy.sh; importing it lights up Cloud Trace + Cloud
+# Monitoring + Cloud Logging structured spans for every request +
+# every outbound HTTP call this service makes.
+try:
+    from otel_init import (  # type: ignore[import-not-found]
+        init as _otel_init,
+        instrument_fastapi as _otel_instrument_fastapi,
+        instrument_outbound_http as _otel_instrument_outbound,
+    )
+    _otel_init("tts-f5")
+    _otel_instrument_outbound()
+    _OTEL_OK = True
+except Exception:
+    _OTEL_OK = False
+
 app = FastAPI(
     title="ytfactory-tts",
     version="1",
     description="TTS inference for ytFactory channels (F5 + Phase-3 models).",
 )
+
+
+if _OTEL_OK:
+    _otel_instrument_fastapi(app)
 
 
 # --------------------------------------------------------------------- schema
