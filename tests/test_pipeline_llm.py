@@ -96,6 +96,49 @@ class ParseInnerJsonFailureTest(unittest.TestCase):
             _parse_inner_json("{not actually json}")
 
 
+class ParseInnerJsonStringSafeBracketBalanceTest(unittest.TestCase):
+    """Audit Q2.16 — the bracket-balance counter must skip over JSON
+    string literals so an embedded ``"narration": "She said 'I'm
+    {done}.'"`` doesn't make depth go negative mid-string and
+    short-circuit the scan.
+    """
+
+    def test_braces_inside_string_literal_dont_break_extraction(self):
+        # Pre-fix, the depth counter would underflow at the literal
+        # '}' inside the narration value.
+        wrapped = (
+            "Some chatter before the JSON. "
+            '{"narration": "She said \'I\'m {done}.\'", "ok": true}'
+        )
+        out = _parse_inner_json(wrapped)
+        self.assertEqual(out["narration"], "She said 'I'm {done}.'")
+        self.assertIs(out["ok"], True)
+
+    def test_open_brace_inside_string_doesnt_inflate_depth(self):
+        wrapped = (
+            "{\"narration\": \"prefix {open without close\", \"k\": 1}"
+        )
+        out = _parse_inner_json(wrapped)
+        self.assertEqual(out["narration"], "prefix {open without close")
+        self.assertEqual(out["k"], 1)
+
+    def test_escaped_quote_inside_string_keeps_in_string_state(self):
+        # \" inside the string must NOT toggle in_string off prematurely.
+        # The '}' that follows is the real object terminator. Wrap with
+        # leading chatter so the fallback brace-balance scan is exercised
+        # (otherwise json.loads succeeds on the first try and the scan
+        # never runs).
+        wrapped = 'chatter\n{"a": "she said \\"hi\\"", "b": 7}'
+        out = _parse_inner_json(wrapped)
+        self.assertEqual(out["a"], 'she said "hi"')
+        self.assertEqual(out["b"], 7)
+
+    def test_array_with_string_braces_works(self):
+        wrapped = '[{"x": "{not} a key"}]'
+        out = _parse_inner_json(wrapped)
+        self.assertEqual(out, [{"x": "{not} a key"}])
+
+
 # ---- Additional coverage for backend selection and provider adapters ----
 
 import json

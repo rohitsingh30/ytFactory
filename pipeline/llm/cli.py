@@ -381,7 +381,14 @@ def call_claude_cli(
             and ``_ANTHROPIC_TIER_DEFAULTS``).
         timeout_s: Per-call timeout in seconds.
         budget_usd: Hard cost cap (passed to the cli backend; the SDK
-            backends rely on ``max_completion_tokens``).
+            backends instead cap output via the configured per-stage
+            output budget — see :func:`max_tokens_for` and
+            ``_DEFAULT_MAX_TOKENS_BY_STAGE``. Audit Q2.14 — pre-fix
+            this docstring claimed SDK backends rely on
+            ``max_completion_tokens``; that's only true for Azure
+            OpenAI's gpt-5.x / o1 / o3 reasoning deployments — the
+            Anthropic SDK uses ``max_tokens=``. The dispatch lives
+            in ``_call_azure_openai`` and ``_call_anthropic_sdk``).
         stage: Pipeline stage name recorded in telemetry.
 
     Returns:
@@ -634,15 +641,36 @@ def _parse_inner_json(text: str) -> dict | list:
         pass
 
     # Last resort: find the first {...} or [...] block.
+    # Audit Q2.16 — the bracket-balance counter must skip over JSON
+    # string literals so an embedded ``"narration": "She said 'I'm
+    # {done}.'"`` doesn't make depth go negative mid-string and short-
+    # circuit the scan. We track an in-string flag plus an escape flag
+    # so ``"foo \" {bar}"`` (an escaped quote inside a string) keeps
+    # the in-string state correctly.
     for opener, closer in (("{", "}"), ("[", "]")):
         i = s.find(opener)
         if i == -1:
             continue
         depth = 0
+        in_str = False
+        escape = False
         for j in range(i, len(s)):
-            if s[j] == opener:
+            ch = s[j]
+            if escape:
+                escape = False
+                continue
+            if in_str:
+                if ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+                continue
+            if ch == opener:
                 depth += 1
-            elif s[j] == closer:
+            elif ch == closer:
                 depth -= 1
                 if depth == 0:
                     candidate = s[i : j + 1]
