@@ -101,9 +101,17 @@ for df in "${ROOT}"/*/Dockerfile; do
             COPY_LINE="COPY ${helper} ./"
         fi
 
-        if grep -qE "^COPY (server|entrypoint)\.py" "${df}"; then
+        if grep -qE "^COPY ((cloud/[^/]+/)?(server|entrypoint))\.py" "${df}"; then
+            # Audit S1.10 — match BOTH per-service-dir context
+            # (`COPY server.py ./`) AND repo-root context
+            # (`COPY cloud/<svc>/server.py /workspace/server.py`).
+            # Pre-fix the regex was `^COPY (server|entrypoint)\.py`
+            # only, which silently fell through for repo-root
+            # services (render-worker-v2 / editing-agent / web-server),
+            # appending the OTel COPY AFTER CMD/ENTRYPOINT instead of
+            # right after the server-source COPY.
             awk -v line="${COPY_LINE}" '
-                /^COPY (server|entrypoint)\.py/ && !done { print; print line; done=1; next }
+                /^COPY ((cloud\/[^/]+\/)?(server|entrypoint))\.py/ && !done { print; print line; done=1; next }
                 { print }
                 END { if (!done) print line }
             ' "${df}" > "${df}.tmp"

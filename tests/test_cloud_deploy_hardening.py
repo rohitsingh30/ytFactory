@@ -195,5 +195,59 @@ class TestNoLeakyArgSecrets(unittest.TestCase):
         )
 
 
+class TestOtelCopyLandsBeforeCmd(unittest.TestCase):
+    """Audit S1.10 — every OTel helper COPY must land BEFORE the
+    CMD/ENTRYPOINT instruction so:
+
+      1. Build cache stays efficient (CMD invalidates cache for
+         later layers; helper bumps would force a re-CMD layer).
+      2. The Dockerfile reads conventionally — every other `COPY
+         <code>` line is above the CMD too.
+
+    Pre-fix the add_otel_copy.sh awk pattern only matched the
+    per-service-dir context (``^COPY server.py``); for repo-root
+    services (render-worker-v2 / editing-agent / web-server) the
+    OTel COPY lines fell through to the END-of-file branch and
+    landed AFTER the CMD/ENTRYPOINT.
+    """
+
+    def test_otel_helpers_copy_before_cmd_or_entrypoint(self) -> None:
+        helpers = ("otel_init.py", "cloud_run_json_exporter.py")
+        offenders: list[str] = []
+        for df in sorted(CLOUD_DIR.glob("*/Dockerfile")):
+            text = df.read_text()
+            lines = text.splitlines()
+            # First CMD or ENTRYPOINT line (whichever comes first).
+            cmd_line = None
+            for i, ln in enumerate(lines):
+                stripped = ln.lstrip()
+                if stripped.startswith("CMD ") or stripped.startswith(("ENTRYPOINT ", "ENTRYPOINT[")):
+                    cmd_line = i
+                    break
+            if cmd_line is None:
+                continue
+            for helper in helpers:
+                # Find the COPY for this helper, if any.
+                copy_line = None
+                for i, ln in enumerate(lines):
+                    if ln.lstrip().startswith("COPY") and helper in ln:
+                        copy_line = i
+                        break
+                if copy_line is None:
+                    continue
+                if copy_line >= cmd_line:
+                    rel = df.relative_to(REPO_ROOT)
+                    offenders.append(
+                        f"{rel}: COPY {helper} on line {copy_line + 1} "
+                        f"is AFTER CMD/ENTRYPOINT on line {cmd_line + 1}",
+                    )
+        self.assertEqual(
+            offenders, [],
+            "OTel helper COPYs must land before CMD/ENTRYPOINT to "
+            "preserve build-cache efficiency. See audit S1.10.\n"
+            "Offenders:\n  " + "\n  ".join(offenders),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

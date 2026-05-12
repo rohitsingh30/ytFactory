@@ -64,6 +64,16 @@ COPY control/         /workspace/control/
 # both whitelist these subdirs explicitly.
 COPY data/research/channel_assets/ /workspace/data/research/channel_assets/
 
+# OTel helpers — must land BEFORE the CMD so they're in the image
+# at runtime (and so a future re-build doesn't invalidate the CMD
+# layer cache when bumping the helpers). Audit S1.10 — pre-fix
+# add_otel_copy.sh's awk pattern only matched the per-service-dir
+# context (`^COPY server.py`), so for repo-root services these
+# COPY lines were appended AFTER CMD. The fix in
+# cloud/_shared/add_otel_copy.sh now matches both contexts.
+COPY cloud/web-server/otel_init.py /workspace/otel_init.py
+COPY cloud/web-server/cloud_run_json_exporter.py /workspace/cloud_run_json_exporter.py
+
 # data/research/youtube/ + data/research/analytics/ are NO LONGER baked
 # in. Pre-2026-05-10 they were committed to git and copied here, which
 # let a test-fixture leak silently corrupt prod for several deploys
@@ -91,7 +101,3 @@ WORKDIR /workspace
 
 # Cloud Run sets PORT; uvicorn binds to it.
 CMD ["sh", "-c", "uvicorn web.server:app --host 0.0.0.0 --port ${PORT:-8080}"]
-
-COPY cloud/web-server/otel_init.py /workspace/otel_init.py
-
-COPY cloud/web-server/cloud_run_json_exporter.py /workspace/cloud_run_json_exporter.py
