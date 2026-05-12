@@ -290,11 +290,13 @@ def _wav_concat_with_silence(wavs: list[Path], silence_s: float, out_wav: Path) 
         "-c:a", "pcm_s16le", str(silence_wav),
     ])
     list_txt = out_wav.parent / "_concat_list.txt"
+    # Audit Q2.25 — concat demuxer single-quote escape.
+    from ._concat_safe import concat_file_line  # noqa: PLC0415
     lines: list[str] = []
     for i, w in enumerate(wavs):
         if i > 0:
-            lines.append(f"file '{silence_wav.resolve()}'")
-        lines.append(f"file '{w.resolve()}'")
+            lines.append(concat_file_line(silence_wav.resolve()))
+        lines.append(concat_file_line(w.resolve()))
     list_txt.write_text("\n".join(lines))
     _ffmpeg([
         "-f", "concat", "-safe", "0", "-i", str(list_txt),
@@ -776,8 +778,10 @@ def build_video_track(
         run_parallel(pending_jobs, label="trim")
 
     # Concat-demux. Re-encoding sidestepped because all clips share params.
+    # Audit Q2.25 — concat demuxer single-quote escape.
+    from ._concat_safe import concat_file_line  # noqa: PLC0415
     list_txt = cache_dir / "_concat_clips.txt"
-    list_txt.write_text("\n".join(f"file '{p.resolve()}'" for p in clip_paths))
+    list_txt.write_text("\n".join(concat_file_line(p.resolve()) for p in clip_paths))
     video_path = cache_dir / "video.mp4"
     _ffmpeg([
         "-f", "concat", "-safe", "0", "-i", str(list_txt),
@@ -805,7 +809,10 @@ def build_video_track(
             "-t", f"{have - tail_s}", "-i", str(video_path),
             "-c", "copy", str(head_clip),
         ])
-        list_txt.write_text(f"file '{head_clip.resolve()}'\nfile '{slow_clip.resolve()}'")
+        list_txt.write_text(
+            concat_file_line(head_clip.resolve()) + "\n"
+            + concat_file_line(slow_clip.resolve())
+        )
         _ffmpeg([
             "-f", "concat", "-safe", "0", "-i", str(list_txt),
             "-c", "copy", str(video_path),

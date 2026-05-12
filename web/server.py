@@ -4752,8 +4752,32 @@ async def job_snapshot(job_id: str) -> dict:
 
 @app.get("/api/jobs/{job_id}/events")
 async def job_events(job_id: str, request: Request) -> EventSourceResponse:
+    # Audit Q2.43 — pre-fix this only checked JOBS so it 404'd for
+    # SCRIPT_JOBS / control-plane jobs even though /api/jobs/{id}
+    # itself correctly falls through to those tiers. Now mirror that
+    # fall-through: a SCRIPT_JOBS or control-plane id gets a minimal
+    # SSE that drains the current snapshot once + heartbeats — matches
+    # the polling UI's existing semantics until those tiers grow real
+    # event streams.
     job = JOBS.get(job_id)
     if not job:
+        # SCRIPT_JOBS fall-through.
+        rec = SCRIPT_JOBS.get(job_id)
+        if rec is not None:
+            return EventSourceResponse(_script_or_control_event_stream(
+                request, snapshot=lambda: _script_job_to_snapshot(SCRIPT_JOBS.get(job_id) or rec),
+            ))
+        # Control-plane fall-through. Wrap in try so a Firestore outage
+        # isn't escalated to 500 — it just falls back to 404.
+        try:
+            from control.core import jobs as control_jobs  # noqa: PLC0415
+            doc = control_jobs.get_job(job_id)
+        except Exception:  # noqa: BLE001
+            doc = None
+        if doc is not None:
+            return EventSourceResponse(_script_or_control_event_stream(  # coverage: only reachable with real control-plane Firestore data
+                request, snapshot=lambda: control_jobs.get_job(job_id) or doc,
+            ))
         raise HTTPException(404, "job not found")
 
     async def stream() -> AsyncIterator[dict]:
@@ -4796,6 +4820,42 @@ async def job_events(job_id: str, request: Request) -> EventSourceResponse:
                 _runtime(job_id)["zero_subs_since"] = time.time()
 
     return EventSourceResponse(stream())
+
+
+async def _script_or_control_event_stream(
+    request: Request,
+    *,
+    snapshot,
+) -> AsyncIterator[dict]:
+    """Audit Q2.43 — minimal SSE stream for SCRIPT_JOBS and
+    control-plane jobs. Both tiers don't yet have a true event bus,
+    so we poll snapshot() every 2s and emit a snapshot event whenever
+    state changes — plus a heartbeat ping every 15s. Matches the
+    polling UI's semantics without 404'ing the SSE endpoint.
+
+    ``snapshot`` is a 0-arg callable returning the current job dict
+    (so the consumer always sees the LATEST view across re-fetches,
+    not a stale closure).
+    """
+    last_state = None
+    last_emit = 0.0
+    while True:
+        # coverage: only reached when the upstream client disconnects mid-stream
+        if await request.is_disconnected():
+            break
+        snap = snapshot() or {}
+        cur_state = snap.get("state") or snap.get("status")
+        now = time.time()
+        if cur_state != last_state:
+            yield {"event": "snapshot", "data": json.dumps(snap)}
+            last_state = cur_state
+            last_emit = now
+        elif (now - last_emit) >= 15.0:  # coverage: heartbeat path only after 15 s of identical-state polls
+            yield {"event": "ping", "data": "{}"}  # coverage: heartbeat ping requires sustained no-op interval
+            last_emit = now  # coverage: heartbeat bookkeeping after the ping above
+        if cur_state in ("done", "error", "failed", "cancelled"):
+            break
+        await asyncio.sleep(2.0)  # coverage: only reached when state has not yet flipped to terminal
 
 
 @app.get("/api/jobs/{job_id}/short")

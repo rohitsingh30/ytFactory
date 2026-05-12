@@ -423,8 +423,11 @@ def fetch_clip(
             raise RuntimeError(f"black intro generation failed (exit {result.returncode})")
 
         concat_list = out_path.parent / f"{out_path.stem}_concat.txt"
+        # Audit Q2.25 — concat demuxer single-quote escape.
+        from pipeline.render._concat_safe import concat_file_line  # noqa: PLC0415
         concat_list.write_text(
-            f"file '{intro_path.name}'\nfile '{broadcast_path.name}'\n"
+            concat_file_line(intro_path.name) + "\n"
+            + concat_file_line(broadcast_path.name) + "\n"
         )
         # Re-encode on concat (not -c copy) because the intro PTS
         # baseline can desync with the broadcast otherwise — small

@@ -583,7 +583,9 @@ def _build_filler_video(
         i += 1
 
     list_txt = cache_dir / "_filler_concat.txt"
-    list_txt.write_text("\n".join(f"file '{p.resolve()}'" for p in sequence))
+    # Audit Q2.25 — concat demuxer single-quote escape.
+    from ._concat_safe import concat_file_line  # noqa: PLC0415
+    list_txt.write_text("\n".join(concat_file_line(p.resolve()) for p in sequence))
     raw = cache_dir / "_filler_raw.mp4"
     _ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_txt), "-c", "copy", str(raw)])
     # Trim to exactly target_dur_s.
@@ -628,7 +630,9 @@ def _overlay_clip_on_filler(
         parts.append(tail)
 
     list_txt = cache_dir / f"_ov_list_{at_s:.2f}.txt"
-    list_txt.write_text("\n".join(f"file '{p.resolve()}'" for p in parts))
+    # Audit Q2.25 — concat demuxer single-quote escape.
+    from ._concat_safe import concat_file_line  # noqa: PLC0415
+    list_txt.write_text("\n".join(concat_file_line(p.resolve()) for p in parts))
     _ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_txt), "-c", "copy", str(out)])
     for p in (head, tail):
         p.unlink(missing_ok=True)
@@ -706,7 +710,9 @@ def _splice_overlays_batch(
         list(pool.map(_materialise, range(len(plan))))
 
     list_txt = cache_dir / "_splice_list.txt"
-    list_txt.write_text("\n".join(f"file '{p.resolve()}'" for p in parts))
+    # Audit Q2.25 — concat demuxer single-quote escape.
+    from ._concat_safe import concat_file_line  # noqa: PLC0415
+    list_txt.write_text("\n".join(concat_file_line(p.resolve()) for p in parts))
     out = cache_dir / "spliced.mp4"
     _ffmpeg([
         "-f", "concat", "-safe", "0", "-i", str(list_txt),
