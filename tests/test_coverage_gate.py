@@ -422,6 +422,57 @@ class FindRelatedTestsTests(unittest.TestCase):
         self.assertIn("tests/test_pipeline_llm.py", related_strs,
                       f"discovery missed test_pipeline_llm.py: {related_strs}")
 
+    def test_audit_q256_stem_substring_in_other_symbol_does_not_match(self):
+        """Audit Q2.56 — pre-fix the parent-package regex used
+        ``[^A-Za-z0-9_]?<stem>`` (optional leading non-word) so
+        ``from pipeline.llm import call_claude_cli`` falsely matched
+        stem ``cli`` because `.*` greedily consumed ``call_claude_``
+        and the optional `?` matched zero chars. False-positive test
+        discovery → tests credited as "related" to modules they
+        didn't actually exercise. Now the boundary char is required.
+        """
+        # Build a temp tests/ subtree with a single test file that
+        # imports a SUBSTRING-overlapping symbol (call_claude_cli) but
+        # NOT the actual `cli` module — discovery for fd=cli.py must
+        # NOT include this file.
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            fake_root = Path(td)
+            fake_tests = fake_root / "tests"
+            fake_tests.mkdir()
+            (fake_tests / "test_substring_overlap.py").write_text(
+                "from pipeline.llm import call_claude_cli\n"
+            )
+            (fake_root / "pipeline" / "llm").mkdir(parents=True)
+            (fake_root / "pipeline" / "__init__.py").write_text("")
+            (fake_root / "pipeline" / "llm" / "__init__.py").write_text("")
+            (fake_root / "pipeline" / "llm" / "cli.py").write_text("def f(): pass\n")
+
+            # git init + add so git-grep can find the test file.
+            import subprocess
+            subprocess.run(["git", "init", "-q"], cwd=fake_root, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "t@t"], cwd=fake_root, check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "t"], cwd=fake_root, check=True,
+            )
+            subprocess.run(["git", "add", "-A"], cwd=fake_root, check=True)
+            subprocess.run(
+                ["git", "commit", "-qm", "init"], cwd=fake_root, check=True,
+            )
+
+            with mock.patch.object(self.gate, "REPO_ROOT", fake_root):
+                fd = self.gate.FileDiff(
+                    path=Path("pipeline/llm/cli.py"),
+                    is_python=True,
+                )
+                related = self.gate.find_related_tests(fd)
+            related_strs = [str(p) for p in related]
+            # The substring-overlap test file must NOT be matched.
+            self.assertNotIn("tests/test_substring_overlap.py", related_strs,
+                             f"false-positive discovery: {related_strs}")
+
 
 class MeasureTypescriptTests(unittest.TestCase):
     """measure_typescript handles the React-component soft-pass

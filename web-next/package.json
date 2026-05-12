@@ -5,10 +5,12 @@
   "scripts": {
     "predev": "node scripts/predev-guard.mjs",
     "dev": "next dev -p 3000",
+    "prebuild": "npm run typecheck",
     "build": "next build",
     "start": "next start -p 3000",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types 'tests/**/*.test.mjs' 'tests/**/*.test.ts'"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.2",

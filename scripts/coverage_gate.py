@@ -292,9 +292,27 @@ def find_related_tests(fd: FileDiff) -> list[Path]:
                 # honour `\b` after a `*` quantifier (verified
                 # 2026-05-12 — the seemingly-correct ``.*\bcli\b``
                 # silently matched zero files in production).
+                #
+                # Audit Q2.56 — pre-fix the leading non-word class was
+                # optional (``[^A-Za-z0-9_]?``), which let
+                # ``from pipeline.llm import call_claude_cli`` match
+                # stem ``cli`` (because `.*` greedily consumed
+                # ``call_claude_`` and the optional `?` then matched
+                # zero chars). False-positive test discovery → tests
+                # were credited as "related" to modules they didn't
+                # actually exercise. Now require the boundary char
+                # (drop the `?`) so the stem must start at a real
+                # word break.
                 patterns.append(
                     rf"from {re.escape(parent_dotted)} import "
-                    rf".*[^A-Za-z0-9_]?{re.escape(stem)}([^A-Za-z0-9_]|$)"
+                    rf".*[^A-Za-z0-9_]{re.escape(stem)}([^A-Za-z0-9_]|$)"
+                )
+                # ALSO match the case where stem is the FIRST imported
+                # symbol (no leading non-word char between `import ` and
+                # the stem). Without this, `from pkg import stem` would
+                # be missed by the boundary-required pattern above.
+                patterns.append(
+                    rf"from {re.escape(parent_dotted)} import {re.escape(stem)}([^A-Za-z0-9_]|$)"
                 )
         # Path-based reference (Posix-style — that's what the repo uses).
         path_str = str(fd.path)

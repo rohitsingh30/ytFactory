@@ -56,31 +56,43 @@ def isolate_research_dirs(request, tmp_path, monkeypatch):
 
     # Imports kept inside the fixture so a test failing to import
     # pipeline.research.* doesn't take the whole suite down.
+    #
+    # **Audit Q2.59** — pre-fix every block here caught bare
+    # ``Exception`` which silently swallowed monkey-patch failures
+    # (e.g. typo in attribute name). The "safety belt" then no-op'd
+    # and the test ran against the REAL ``data/research/youtube/``
+    # cache, which is exactly the regression this fixture was built
+    # to prevent. Now ONLY ImportError is silenced — every other
+    # exception (AttributeError from monkeypatch.setattr, etc) is
+    # surfaced as a test failure so the gap is visible.
     try:
         from pipeline.research import youtube as _yt
+    except ImportError:
+        pass
+    else:
         monkeypatch.setattr(_yt, "YOUTUBE_DIR", youtube_dir, raising=False)
         # The provider-aware cache also keeps an in-process LRU; flush
         # it so a previous test's reads can't leak forward.
         if hasattr(_yt, "_READ_CACHE"):
             _yt._READ_CACHE.clear()
-    except Exception:
-        pass
 
     try:
         from pipeline.research import channel_assets as _ca
+    except ImportError:
+        pass
+    else:
         monkeypatch.setattr(_ca, "ASSETS_DIR", assets_dir, raising=False)
         monkeypatch.setattr(_ca, "YOUTUBE_DIR", youtube_dir, raising=False)
-    except Exception:
-        pass
 
     # Also point the aggregator's local copy of YOUTUBE_DIR at the same
     # tmp dir so build_videos / build_channels don't accidentally read
     # the real cache.
     try:
         from pipeline.research import aggregator as _agg
-        monkeypatch.setattr(_agg, "YOUTUBE_DIR", youtube_dir, raising=False)
-    except Exception:
+    except ImportError:
         pass
+    else:
+        monkeypatch.setattr(_agg, "YOUTUBE_DIR", youtube_dir, raising=False)
 
     # Make absolutely sure no test accidentally hits the cloud bucket.
     monkeypatch.delenv("YTFACTORY_STATE_BUCKET", raising=False)

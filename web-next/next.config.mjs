@@ -7,10 +7,15 @@ const nextConfig = {
   // the <!DOCTYPE>/<html>/<body> wrappers on Cloud Run (locally fine,
   // remotely broken — likely a streaming-flush bug in the standalone
   // server's HTTP write path on alpine). next start works.
+  // Audit Q2.55 — pre-fix the comment claimed "Type safety is
+  // enforced via `npm run typecheck`" but the npm `build` script
+  // didn't actually run tsc — prod builds could ship with hook-rule
+  // violations and unused imports. Now `prebuild` runs both
+  // `typecheck` and `lint` (see package.json). ESLint stays off
+  // here because the false-positive jsx-no-undef-on-hoisted-helpers
+  // is a real productivity tax during dev — the lint pass runs
+  // explicitly via `npm run lint` instead.
   eslint: {
-    // Type safety is enforced via `npm run typecheck`. ESLint adds false-positive
-    // jsx-no-undef diagnostics for hoisted helper components defined later in
-    // the same file. Skip during prod builds.
     ignoreDuringBuilds: true,
   },
   // The /api/* proxy with auth-token injection lives in
