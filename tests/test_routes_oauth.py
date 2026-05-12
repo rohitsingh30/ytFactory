@@ -378,6 +378,78 @@ class TestLoadToken(unittest.TestCase):
                     result = load_token("myaccount")
         self.assertIsNone(result)
 
+    def test_load_splices_client_secret_from_oauth_client(self) -> None:
+        # Audit S1.13 — the persisted token blob no longer carries
+        # client_secret (so a Firestore read leak doesn't expose
+        # project credentials). load_token must splice it back in
+        # from the canonical _client() config so consumers see a
+        # complete blob.
+        token_data = {"token": "abc", "account": "myaccount"}  # no client_secret
+        mock_path = MagicMock(spec=Path)
+        mock_path.exists.return_value = True
+        mock_path.read_text.return_value = json.dumps(token_data)
+        mock_secret = MagicMock(spec=Path)
+        mock_secret.exists.return_value = False
+        with patch("control.routes.oauth_web_routes._firestore_doc", return_value=None), \
+             patch("control.routes.oauth_web_routes._file_path", return_value=mock_path), \
+             patch("control.routes.oauth_web_routes._secret_mount_path",
+                   return_value=mock_secret), \
+             patch("control.routes.oauth_web_routes._client",
+                   return_value={"client_id": "spliced-cid",
+                                 "client_secret": "spliced-csecret",
+                                 "redirect_uris": []}):
+            result = load_token("myaccount")
+        self.assertEqual(result["token"], "abc")
+        self.assertEqual(result["client_id"], "spliced-cid")
+        self.assertEqual(result["client_secret"], "spliced-csecret")
+
+    def test_load_does_not_overwrite_existing_client_secret(self) -> None:
+        # Defence in depth: if a legacy token blob still carries
+        # client_secret (from before the audit fix), load_token must
+        # NOT clobber it with whatever _client() returns.
+        token_data = {
+            "token": "abc",
+            "client_id": "legacy-cid",
+            "client_secret": "legacy-csecret",
+        }
+        mock_path = MagicMock(spec=Path)
+        mock_path.exists.return_value = True
+        mock_path.read_text.return_value = json.dumps(token_data)
+        mock_secret = MagicMock(spec=Path)
+        mock_secret.exists.return_value = False
+        with patch("control.routes.oauth_web_routes._firestore_doc", return_value=None), \
+             patch("control.routes.oauth_web_routes._file_path", return_value=mock_path), \
+             patch("control.routes.oauth_web_routes._secret_mount_path",
+                   return_value=mock_secret), \
+             patch("control.routes.oauth_web_routes._client",
+                   return_value={"client_id": "spliced-cid",
+                                 "client_secret": "spliced-csecret",
+                                 "redirect_uris": []}):
+            result = load_token("myaccount")
+        # Legacy values preserved.
+        self.assertEqual(result["client_id"], "legacy-cid")
+        self.assertEqual(result["client_secret"], "legacy-csecret")
+
+    def test_load_tolerates_oauth_client_unavailable(self) -> None:
+        # When _client() is unavailable (e.g. dev env without the
+        # OAuth client config), load_token must not crash; just
+        # return the blob without the spliced fields.
+        token_data = {"token": "abc"}
+        mock_path = MagicMock(spec=Path)
+        mock_path.exists.return_value = True
+        mock_path.read_text.return_value = json.dumps(token_data)
+        mock_secret = MagicMock(spec=Path)
+        mock_secret.exists.return_value = False
+        with patch("control.routes.oauth_web_routes._firestore_doc", return_value=None), \
+             patch("control.routes.oauth_web_routes._file_path", return_value=mock_path), \
+             patch("control.routes.oauth_web_routes._secret_mount_path",
+                   return_value=mock_secret), \
+             patch("control.routes.oauth_web_routes._client",
+                   side_effect=RuntimeError("client config missing")):
+            result = load_token("myaccount")
+        self.assertEqual(result["token"], "abc")
+        self.assertNotIn("client_secret", result)
+
 
 class TestHtmlDone(unittest.TestCase):
     def test_success(self) -> None:

@@ -216,21 +216,47 @@ def save_token(account: str, payload: dict[str, Any]) -> None:
 
 
 def load_token(account: str) -> dict[str, Any] | None:
+    """Read the persisted token blob for ``account`` and splice in
+    the project-wide client_id + client_secret from the canonical
+    OAuth client config. Audit S1.13 — the token blob in Firestore
+    intentionally omits ``client_secret`` so a leaked Firestore read
+    doesn't leak the project credentials; this read-time splice keeps
+    downstream consumers (pipeline.upload.upload's Credentials
+    construction) seeing a complete blob.
+
+    Returns None if no token is persisted for the account.
+    """
+    raw: dict[str, Any] | None = None
     doc = _firestore_doc(account)
     if doc is not None:
         snap = doc.get()
         if snap.exists:
-            return snap.to_dict()
-    p = _file_path(account)
-    if p.exists():
-        return json.loads(p.read_text())
-    sp = _secret_mount_path(account)
-    if sp.exists():
+            raw = snap.to_dict()
+    if raw is None:
+        p = _file_path(account)
+        if p.exists():
+            raw = json.loads(p.read_text())
+    if raw is None:
+        sp = _secret_mount_path(account)
+        if sp.exists():
+            try:
+                raw = json.loads(sp.read_text())
+            except (OSError, json.JSONDecodeError):
+                return None
+    if raw is None:
+        return None
+    # Splice project credentials at READ time. Defensive: only inject
+    # when the field is missing (so ops can manually override per-token
+    # in dev), and tolerate _client() being unavailable (e.g. in tests
+    # that haven't configured the client secret env).
+    if "client_secret" not in raw or "client_id" not in raw:
         try:
-            return json.loads(sp.read_text())
-        except (OSError, json.JSONDecodeError):
-            return None
-    return None
+            cs = _client()
+            raw.setdefault("client_id", cs.get("client_id"))
+            raw.setdefault("client_secret", cs.get("client_secret"))
+        except Exception:  # noqa: BLE001 — missing client config in tests is OK
+            pass
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -321,8 +347,16 @@ async def callback(
         "token": tok.get("access_token"),
         "refresh_token": tok.get("refresh_token"),
         "token_uri": "https://oauth2.googleapis.com/token",
+        # Audit S1.13 — DO NOT persist client_id/client_secret on the
+        # per-account token doc. They're project-wide credentials,
+        # not user data; persisting them in Firestore (or the laptop
+        # JSON) means anyone with read access to oauth_tokens/<account>
+        # walks away with the OAuth client secret. Consumers that need
+        # them (load_token + the pipeline.upload.upload Credentials
+        # constructor) splice them in at READ time from the canonical
+        # _client() config — see load_token below.
         "client_id": cs["client_id"],
-        "client_secret": cs["client_secret"],
+        # client_secret intentionally OMITTED (audit S1.13).
         "scopes": (tok.get("scope") or SCOPES).split(),
         "expiry": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(expires_at)),
         "universe_domain": "googleapis.com",
