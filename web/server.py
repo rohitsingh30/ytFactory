@@ -5401,6 +5401,23 @@ async def youtube_auth_start(account: str) -> dict:
     Idempotent on a per-account basis — calling twice while a flow is
     in flight returns the existing URL instead of starting a duplicate
     (which would just hit "Address already in use" anyway).
+
+    **Audit T1.20 — Cloud Run hard-stop.** This endpoint uses a
+    blocking subprocess.Popen + threading.Thread to spawn a
+    local-server OAuth flow on localhost:8089. That has THREE
+    independent failures on Cloud Run:
+
+      - no display, so the browser-based OAuth dance can't complete;
+      - no localhost callback reachable from the operator's browser;
+      - the Cloud Run revision is per-request (default scaling), so
+        the subprocess spawned by request N is killed before request
+        N+1 (the poll) lands.
+
+    On Cloud Run we now refuse with a clear 501 pointing to the
+    proper web-OAuth endpoint at ``/api/oauth/start?account=<account>``
+    (the public-callback flow added in :mod:`control.routes.oauth_web_routes`)
+    so the operator gets routed to the working path instead of
+    hanging on a process that's about to die.
     """
     import re as _re
     import subprocess
@@ -5408,6 +5425,17 @@ async def youtube_auth_start(account: str) -> dict:
     from datetime import datetime, timezone
 
     from pipeline.research import cross_engage as _ce
+
+    if os.environ.get("K_SERVICE"):
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                f"localhost-OAuth flow does not work on Cloud Run "
+                f"(no display, no callback host). Use the web OAuth "
+                f"flow instead: GET /api/oauth/start?account={account} "
+                f"(see control/routes/oauth_web_routes.py)."
+            ),
+        )
 
     if account not in _ce.list_sibling_accounts() and account not in (
         "default",
