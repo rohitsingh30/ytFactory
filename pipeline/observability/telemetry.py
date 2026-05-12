@@ -332,8 +332,23 @@ def _close_span(span, handle: _TimerHandle, start_ns: int, *, success: bool) -> 
             f"ytfactory.meta.{k}",
             v if isinstance(v, (str, bool, int, float)) else str(v)[:1024],
         )
-    if not success and span.status.status_code != StatusCode.ERROR:
-        span.set_status(Status(StatusCode.ERROR))
+    if not success:
+        # Idempotent on real RecordingSpans (the underlying SDK
+        # tracks status internally). Safe on NonRecordingSpan too —
+        # ``set_status`` is defined as a no-op on the base class. We
+        # used to read ``span.status.status_code`` before calling
+        # ``set_status`` to avoid a redundant write, but that READ
+        # raises ``AttributeError: 'NonRecordingSpan' object has no
+        # attribute 'status'`` when the OTel SDK isn't fully
+        # initialised (which the cloud render-worker hits during the
+        # ~1s window before instrumentation finishes booting). Four
+        # production renders crashed with that AttributeError on
+        # 2026-05-12; the read is gone now, the unconditional
+        # ``set_status`` covers both cases.
+        try:
+            span.set_status(Status(StatusCode.ERROR))
+        except Exception:  # noqa: BLE001
+            pass
     span.end()
 
     try:
