@@ -169,7 +169,13 @@ async def login(body: LoginRequest, request: Request, response: Response) -> dic
         max_age=_ttl_s(),
         httponly=True,
         samesite="lax",
-        secure=os.environ.get("YTFACTORY_COOKIE_SECURE", "0") == "1",
+        # Audit S1.24 — default Secure=True so the cookie isn't sent
+        # over plain HTTP. Pre-fix the default was "0" (i.e. Secure=False)
+        # which differed from the OAuth-session cookie (Secure=True
+        # default in pipeline.auth.identity). Set
+        # YTFACTORY_COOKIE_SECURE=0 explicitly for laptop dev over
+        # http://localhost.
+        secure=(os.environ.get("YTFACTORY_COOKIE_SECURE", "1") != "0"),
     )
     return {"logged_in": True, "auth_required": True}
 

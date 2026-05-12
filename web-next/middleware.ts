@@ -56,12 +56,93 @@ export function middleware(req: NextRequest) {
   if (!enabled) return NextResponse.next();
 
   const session = req.cookies.get("yt_session")?.value;
-  if (session) return NextResponse.next();
+  // Audit S1.25 — verify cookie validity, not just presence. Pre-fix
+  // any attacker sending ``Cookie: yt_session=anything`` bypassed
+  // this edge gate (backend still validated, but SSR pages would
+  // render before the API rejected the call). We re-implement the
+  // HMAC scheme from pipeline/auth/identity.py here at the edge so
+  // unauthenticated requests get redirected to /login BEFORE any
+  // SSR happens.
+  if (session && (await verifySessionCookie(session))) {
+    return NextResponse.next();
+  }
 
   const url = req.nextUrl.clone();
   url.pathname = "/login";
   url.searchParams.set("next", req.nextUrl.pathname + req.nextUrl.search);
   return NextResponse.redirect(url);
+}
+
+
+/**
+ * Edge-side HMAC verifier matching the cookie format produced by
+ * `pipeline/auth/identity.py::sign_session`:
+ *
+ *   `<email>|<issued_unix_ts>|<base64url_no_pad_hmac_sha256_sig>`
+ *
+ * Returns true iff:
+ *   - the cookie has exactly 3 `|`-separated segments,
+ *   - the HMAC-SHA256(secret, "email|issued") matches the trailing sig
+ *     in constant time, and
+ *   - the issued timestamp is within YT_SESSION_TTL_S (default 7 days).
+ *
+ * Returns false on any failure (so the caller redirects to /login).
+ *
+ * Secret comes from `YTFACTORY_SESSION_SECRET` — the SAME env the
+ * backend uses. If the env is absent (deploy misconfig) we fail
+ * closed by returning false → redirect to /login. The backend then
+ * returns 503 for the API call and the operator sees a clear error.
+ */
+async function verifySessionCookie(cookie: string): Promise<boolean> {
+  const parts = cookie.split("|");
+  if (parts.length !== 3) return false;
+  const [email, issuedStr, sigB64] = parts;
+  if (!email || !issuedStr || !sigB64) return false;
+  const issued = Number.parseInt(issuedStr, 10);
+  if (!Number.isFinite(issued)) return false;
+  const ttlSec = Number.parseInt(
+    process.env.YT_SESSION_TTL_S ?? "604800", 10,
+  );
+  if (Date.now() / 1000 - issued > ttlSec) return false;
+
+  const secret = process.env.YTFACTORY_SESSION_SECRET;
+  if (!secret) return false;
+  try {
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      "raw",
+      enc.encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const expectedRaw = await crypto.subtle.sign(
+      "HMAC",
+      key,
+      enc.encode(`${email}|${issuedStr}`),
+    );
+    const expected = base64UrlEncodeNoPad(new Uint8Array(expectedRaw));
+    return constantTimeEqual(expected, sigB64);
+  } catch {
+    return false;
+  }
+}
+
+
+function base64UrlEncodeNoPad(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
 }
 
 export const config = {

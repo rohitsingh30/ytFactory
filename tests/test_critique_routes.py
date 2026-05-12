@@ -140,14 +140,20 @@ class CritiqueStartTests(unittest.TestCase):
         # would have already validated). The endpoint accepts and
         # mints the doc with `agent@m2m.ytfactory` as created_by so
         # Firestore rules + ownership queries still see a real uid.
-        app = _build_app(fake_user_email=None)
-        client = TestClient(app)
-        with self._patch()[0], self._patch()[1], self._patch()[2]:
-            r = client.post(
-                "/api/jobs/j1/critique/start",
-                json={"agent": "claude"},
-                headers={"Authorization": "Bearer ops-token-xyz"},
-            )
+        # Audit S1.18 — _require_auth_email now compares the bearer
+        # against YTFACTORY_AGENT_TOKEN before granting the sentinel,
+        # so the test must set that env to the matching token.
+        import os
+        with mock.patch.dict(os.environ,
+                             {"YTFACTORY_AGENT_TOKEN": "ops-token-xyz"}):
+            app = _build_app(fake_user_email=None)
+            client = TestClient(app)
+            with self._patch()[0], self._patch()[1], self._patch()[2]:
+                r = client.post(
+                    "/api/jobs/j1/critique/start",
+                    json={"agent": "claude"},
+                    headers={"Authorization": "Bearer ops-token-xyz"},
+                )
         self.assertEqual(r.status_code, 200, r.text)
         body = r.json()
         self.assertTrue(body["created"])
@@ -155,6 +161,24 @@ class CritiqueStartTests(unittest.TestCase):
         set_call = self.fake_collection.document.return_value.set
         doc = set_call.call_args.args[0]
         self.assertEqual(doc["created_by"], "agent@m2m.ytfactory")
+
+    def test_rejects_bearer_with_wrong_token(self):
+        # Audit S1.18 — pre-fix any Bearer header would let the M2M
+        # sentinel branch fire (trusting the middleware to have
+        # validated). Now we re-validate here so a token that
+        # doesn't match YTFACTORY_AGENT_TOKEN gets 401, not 200.
+        import os
+        with mock.patch.dict(os.environ,
+                             {"YTFACTORY_AGENT_TOKEN": "real-token"}):
+            app = _build_app(fake_user_email=None)
+            client = TestClient(app)
+            with self._patch()[0], self._patch()[1], self._patch()[2]:
+                r = client.post(
+                    "/api/jobs/j1/critique/start",
+                    json={"agent": "claude"},
+                    headers={"Authorization": "Bearer wrong-token"},
+                )
+        self.assertEqual(r.status_code, 401)
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ Design + state machine documented in
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import time
@@ -124,17 +125,35 @@ def _require_auth_email(request: Request) -> str:
     can create + own critiques for ops work without needing a
     Google OAuth session. The runtime SA on cloud (K_SERVICE) is
     handled the same way.
+
+    **Audit S1.18 — defence in depth on the M2M branch.** Pre-fix
+    we returned the sentinel email any time the request had a
+    Bearer header OR K_SERVICE was set, trusting the middleware to
+    have validated the bearer upstream. If middleware ever
+    regressed (e.g. a refactor accepting "Bearer anything" without
+    compare_digest), the M2M sentinel would be reachable
+    unauthenticated. We now re-validate the bearer against
+    ``YTFACTORY_AGENT_TOKEN`` here in constant time before returning
+    the sentinel. K_SERVICE (Cloud Run runtime) trust is preserved
+    because IAM upstream already gated that path.
     """
     email = getattr(request.state, "user_email", None)
     if email:
         return email
     # M2M / cloud-runtime path: middleware accepted the bearer (or
-    # the K_SERVICE bypass) but didn't populate user_email. Use a
-    # stable sentinel so created_by_uid is deterministic and the
-    # doc still has an owner Firebase rules can match against.
-    auth_header = request.headers.get("authorization", "")
-    if auth_header.startswith("Bearer ") or os.environ.get("K_SERVICE"):
+    # the K_SERVICE bypass) but didn't populate user_email.
+    if os.environ.get("K_SERVICE"):
         return "agent@m2m.ytfactory"
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        # Audit S1.18 — actually verify the token here, not just trust
+        # that middleware did. compare_digest fends off byte-level
+        # timing attacks the way control/core/auth.py::require_agent
+        # does for its own routes.
+        expected = (os.environ.get("YTFACTORY_AGENT_TOKEN") or "").strip()
+        presented = auth_header.split(" ", 1)[1].strip()
+        if expected and hmac.compare_digest(presented, expected):
+            return "agent@m2m.ytfactory"
     raise HTTPException(status_code=401, detail="sign-in required")
 
 

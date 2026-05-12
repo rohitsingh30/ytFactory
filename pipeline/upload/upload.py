@@ -392,8 +392,19 @@ def _persist_token(account: str, blob_json: str, tp: Path) -> None:
     is_secret_mount = str(tp).startswith(str(SECRETS_ROOT))
     if not is_secret_mount:
         # Laptop dev path — straight file write.
+        # Audit S1.12 — chmod 0600 so the cached refresh token isn't
+        # world-readable on multi-user boxes (default umask is 0022 →
+        # 0644). setup_x_credentials.py already does this; the YouTube
+        # path was the only auth-token writer that didn't.
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         tp.write_text(blob_json)
+        try:
+            os.chmod(tp, 0o600)
+        except OSError:  # coverage: defensive — some filesystems reject chmod (e.g. bind mounts)
+            # On filesystems that don't honour POSIX perms (e.g. some
+            # bind mounts) chmod can fail; the write itself is still
+            # the actionable bit.
+            pass
         return
 
     # Cloud — mount is read-only. Add a new Secret Manager version.
@@ -792,6 +803,12 @@ def _authenticate_impl(account: str = "default", *, interactive: bool = True) ->
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     tp.write_text(creds.to_json())
+    # Audit S1.12 — chmod 0600 so the cached refresh token isn't
+    # world-readable on multi-user laptops (default umask = 0644).
+    try:
+        os.chmod(tp, 0o600)
+    except OSError:  # coverage: defensive — some filesystems reject chmod (e.g. bind mounts)
+        pass
     print(f"[upload] cached refresh token → {tp}")
     return creds
 
