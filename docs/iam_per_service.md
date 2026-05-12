@@ -37,11 +37,37 @@ bash cloud/iam/grant_per_service_telemetry.sh
 #    These are NOT yet scripted — operator runs each `gcloud projects
 #    add-iam-policy-binding` manually because the role list per SA
 #    is small (1-3 grants) and the prod state needs eyeballs.
+#
+# 3b. (2026-05-13 add-on) Grant the deploying user `roles/iam.serviceAccountUser`
+#     on each new SA — without this, `gcloud run jobs deploy` fails with
+#     `Permission 'iam.serviceAccounts.actAs' denied on service account
+#     <sa>@<project>.iam.gserviceaccount.com`. The error message does
+#     NOT distinguish "SA doesn't exist" from "you can't actAs it"
+#     so it's worth running step 1 first to rule out the former.
+#
+#       gcloud iam service-accounts add-iam-policy-binding \
+#         render-runner@ytfactory-prod-v2.iam.gserviceaccount.com \
+#         --member="user:rohittomar@docx.co.in" \
+#         --role="roles/iam.serviceAccountUser" \
+#         --project=ytfactory-prod-v2
 
 # 4. Redeploy each service with bash cloud/<svc>/deploy.sh —
 #    every deploy script already pins the right per-service SA
 #    per audit S1.21.
 ```
+
+## Provisioning state (2026-05-13)
+
+| SA                       | Created | OTel roles | Specific roles | Notes |
+|--------------------------|---------|------------|----------------|-------|
+| `tts-runner`             | ✅      | ✅         | ✅ (pre-existing) | legacy SA — full role set inherited |
+| `image-runner`           | ✅ 05-13 | ✅        | ⚠️ pending      | needs storage.objectViewer on weights bucket |
+| `render-runner`          | ✅ 05-13 | ✅        | ✅ 05-13       | secretAccessor + datastore.user + storage.objectAdmin + run.invoker + iam.serviceAccountTokenCreator + cloudtasks.enqueuer |
+| `web-runner`             | ✅ 05-13 | ✅        | ⚠️ pending      | needs secretAccessor + secretVersionAdder + datastore.user + run.invoker |
+| `weights-runner`         | ✅ 05-13 | ✅        | ⚠️ pending      | needs HF_HOME bucket write |
+| `cobalt-runner`          | ✅ 05-13 | ✅        | ⚠️ none needed | network-egress only; no GCS/Firestore |
+| `stats-refresh-runner`   | ✅ 05-13 | ✅        | ⚠️ pending      | YouTube API key secret access + GCS write |
+| `web-next-runner`        | ✅ pre-S1.21 | ✅    | ✅ (pre-existing) | static-asset Next.js shell |
 
 ## Roles per SA (beyond the universal OTel grant from step 2)
 

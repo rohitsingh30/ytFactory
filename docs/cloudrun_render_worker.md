@@ -93,6 +93,33 @@ If your Azure project has a `gpt-5.3-chat` deployment (per
 `README.md`), point the right tier at it:
 `AZURE_OPENAI_MODEL_OPUS=gpt-5-3-chat`.
 
+### `AZURE_OPENAI_TOKEN_PARAM` (recommended in production)
+
+gpt-5.x / o1 / o3 reasoning deployments require
+`max_completion_tokens` and reject `max_tokens` outright (Azure 400
+`unsupported_parameter`). gpt-4o + chat-completions accept the
+opposite. The dispatcher auto-detects via swap-retry on first
+failure AND caches per-deployment for the rest of the process — so
+**no code change is needed when Azure swaps a deployment under us**.
+Setting this env upfront just skips the discovery cost on the
+first call:
+
+```bash
+# gpt-5.x deployment (default in deploy.sh):
+AZURE_OPENAI_TOKEN_PARAM=max_completion_tokens
+
+# Legacy gpt-4o deployment:
+AZURE_OPENAI_TOKEN_PARAM=max_tokens
+
+# Mid-migration / unknown:
+# leave unset; dispatcher discovers + caches.
+```
+
+`cloud/render-worker-v2/deploy.sh` defaults to
+`max_completion_tokens` (matches `gpt-5.3-chat`). Override per-deploy
+by exporting before invoking. See `docs/llm_max_tokens.md` §
+"2026-05-13 update" for the full design.
+
 ## Render modes
 
 | Mode | What runs |
@@ -256,6 +283,33 @@ DESTRUCTIVE on this revision shape — it COLLAPSES every env not
 named in the flag. Lost the entire Azure + CLOUDRUN_*_URL set during
 v3 → v4. Always inspect the env after the command and re-add anything
 missing. See `docs/cloud_run_set_secrets_destructive.md`.
+
+## Subprocess debug surface (2026-05-13)
+
+The worker shells out to `python -m pipeline.render.long_form` for
+long-form renders (and to `pipeline.render.shorts` for shorts). All
+subprocess output is now:
+
+1. **Tee'd to the parent's stdout** — Cloud Run captures it into
+   Cloud Logging in real time. `gcloud logging read` against this
+   JOB's execution surfaces every log line as it flows.
+2. **Captured to `/tmp/render/<job_id>/long_form_renderer.log`** —
+   for offline forensic analysis if the cloud logs are aggregated
+   or batched.
+3. **Smart-tail on failure** — if the subprocess exits non-zero, the
+   worker's `RuntimeError` surface searches the log for the LAST
+   `Traceback (most recent call last):` block and surfaces it
+   HEAD-first, so the actionable `ErrorClass: message` line is
+   immediately visible (not buried below 200 lines of OTel JSON
+   noise from the subprocess's exit-time metric flush).
+
+If you see "Subprocess error:" in a Firestore error field, that's
+the new shape (post-`b0ce095`). The legacy "Last 25 log lines:" was
+the buggy shape that drowned the diagnostic in JSON.
+
+See `docs/cloud_run_job_subprocess_debugging.md` for the full
+post-mortem and the auditable rule for new subprocess-spawning
+JOBs.
 
 ## Files
 

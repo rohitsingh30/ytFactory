@@ -164,7 +164,100 @@ assert max_tokens_for("totally_new_stage") == 4096   # safe default
 ```
 
 Pin: `tests/test_llm_dispatcher.py::MaxTokensForTest` (8 cases) +
-`MaxTokensWiredIntoBackendsTest` (3 cases).
+`MaxTokensWiredIntoBackendsTest` (3 cases) +
+`AzureBackendTest::test_max_tokens_failure_retries_with_max_completion_tokens`
++ `::test_token_param_cache_avoids_retry_on_subsequent_calls` +
+`::test_env_token_param_skips_discovery_first_call` (and 7 sibling
+cases — see memory `feedback_llm_sdk_max_tokens.md` for the full list).
+
+## 2026-05-13 update — per-deployment cache + AZURE_OPENAI_TOKEN_PARAM env
+
+The 2026-05-12 auto-retry from commit `e600e22` correctly recovered
+from `Unsupported parameter: 'max_tokens'` by swapping to
+`max_completion_tokens` and retrying. But it paid the round-trip
+cost on **every** LLM call, since the cache wasn't persisted across
+calls. A 30-min long-form render does 25+ Azure calls — each
+fail-then-retried, costing ~600 ms × 25 + 25 spurious 400s in the
+telemetry dashboard.
+
+Commit `f948538` (2026-05-13) layered three improvements on top:
+
+### Per-deployment process cache
+
+```python
+# pipeline/llm/cli.py
+_AZURE_TOKEN_PARAM_BY_DEPLOYMENT: dict[str, str] = {}
+
+def _azure_token_param(deployment: str) -> str:
+    """Return `max_tokens` or `max_completion_tokens` — whichever
+    this Azure deployment expects.
+
+    Resolution order:
+      1. ``AZURE_OPENAI_TOKEN_PARAM`` env (forces a specific param,
+         skips runtime discovery — recommended in production).
+      2. Process cache (populated by previous swap-retry).
+      3. Default ``max_tokens`` (the historical chat-completions key).
+    """
+```
+
+The cache is warmed by:
+- Successful first-try → caches whichever key was used
+- Successful swap-retry → caches the swapped key
+
+So the **second** call to a deployment in the same process picks the
+right key on the first try. No round-trip wasted.
+
+### `AZURE_OPENAI_TOKEN_PARAM` env override
+
+Set to `max_completion_tokens` (gpt-5.x / o1 / o3 reasoning
+deployments) or `max_tokens` (gpt-4o + chat-completions models) to
+**skip discovery entirely**. Recommended in production where the
+deployment is fixed and known.
+
+`cloud/render-worker-v2/deploy.sh` now bakes this into
+`--set-env-vars`:
+
+```bash
+AZURE_OPENAI_TOKEN_PARAM="${AZURE_OPENAI_TOKEN_PARAM:-max_completion_tokens}"
+```
+
+Override per-deploy by exporting before invoking:
+
+```bash
+AZURE_OPENAI_TOKEN_PARAM=max_tokens bash cloud/render-worker-v2/deploy.sh
+```
+
+The env wins over the cache, so an operator-pinned value is
+authoritative even if a stale cache contradicts (the cache is also
+**not polluted** when env is set — verified by
+`AzureBackendTest::test_remember_skipped_when_env_override_set`).
+
+### Symmetric reverse swap
+
+If env or cache pinned `max_completion_tokens` but the deployment
+actually wants `max_tokens` (operator flipped `AZURE_OPENAI_MODEL`
+back to gpt-4o without updating the param env), the swap-retry
+handles the reverse direction too. Without this, every call would
+hard-fail until the operator noticed.
+
+### Telemetry
+
+`token_param` lands in `_tlm.track("llm_call", ...)` metadata so the
+dashboard's per-call drill-down shows which key Azure actually used.
+Useful when debugging "why is this tier slow / why did this stage
+hit a limit".
+
+### How to choose the env value
+
+| Deployment | `AZURE_OPENAI_TOKEN_PARAM` |
+|---|---|
+| `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`, anything pre-2026 | `max_tokens` |
+| `gpt-5.x`, `gpt-5.3-chat`, `o1*`, `o3*` (reasoning) | `max_completion_tokens` |
+| Unknown / mid-migration | unset (let discovery do its job) |
+
+The cache + env layered design means agents never have to hardcode
+the answer — leave the env unset and the cache learns it on the
+first call. Set the env in production purely as a perf optimisation.
 
 ## Cross-references
 

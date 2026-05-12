@@ -195,11 +195,19 @@ except Exception as e:
 
 | Mode | When | Where signals go |
 |---|---|---|
-| `gcp` | Cloud Run (auto when `K_SERVICE` set) | Cloud Trace + Cloud Monitoring + Cloud Logging |
+| `gcp` | Cloud Run (auto when `K_SERVICE` OR `CLOUD_RUN_JOB` OR `CLOUD_RUN_EXECUTION` set — services AND jobs) | Cloud Trace + Cloud Monitoring + Cloud Logging |
 | `otlp` | Self-hosted collector (opt-in) | OTLP HTTP collector |
 | `console` | Local dev (auto when not pytest, not Cloud Run) | stdout / stderr |
 | `inmemory` | Tests (auto when `PYTEST_CURRENT_TEST` set) | OTel in-memory exporters; readable via the dashboard's `read_events()` shim |
 | `none` | Performance-critical scripts | nothing |
+
+> **2026-05-13 update:** Cloud Run **JOBs** do NOT set `K_SERVICE`
+> (only services do — JOBs set `CLOUD_RUN_JOB` +
+> `CLOUD_RUN_EXECUTION`). Pre-fix, the resolver only checked
+> `K_SERVICE`, so render-worker-v2 (a JOB) silently fell through to
+> "console" mode and `ConsoleMetricExporter` flooded stdout every
+> 60 s. See `docs/cloud_run_job_subprocess_debugging.md` for the
+> full post-mortem and the centralised `_on_cloud_run()` helper.
 
 ## How to instrument new code
 

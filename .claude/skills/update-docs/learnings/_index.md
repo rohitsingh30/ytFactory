@@ -5,6 +5,19 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
 
 ## CLASS-OF-BUG (rule changes to SKILL.md)
 
+- 2026-05-13 — **Cloud-Run-shape assumptions baked into helpers
+  silently break in JOB context.** Multiple `K_SERVICE`-only checks
+  in `pipeline/observability/` + 15 per-service `cloud/<svc>/otel_init.py`
+  copies fell through to "console" exporter mode in render-worker-v2
+  (a Cloud Run JOB) because JOBs set `CLOUD_RUN_JOB`/`CLOUD_RUN_EXECUTION`
+  not `K_SERVICE`. Sibling pattern to 2026-05-11
+  `feedback_otel_init_copy_path_per_context.md` (per-context Dockerfile
+  COPY paths) — both are "auto-patch helper assumed one Cloud Run shape".
+  Sweep recipe shipped in `docs/cloud_run_job_subprocess_debugging.md`:
+  `grep -rn "K_SERVICE" pipeline/ cloud/ scripts/ --include='*.py' --include='*.sh' | grep -v "CLOUD_RUN_JOB\|CLOUD_RUN_EXECUTION"`
+  — every hit is a candidate for `_on_cloud_run()` normalisation.
+  Memory: `feedback_cloud_run_job_subprocess_debug.md`.
+
 - 2026-05-12 — **`/update-docs` runs were stranding their own output
   unstaged.** Audit caught 16 modified + 1 new file (full prior run's
   output: composite-index findings, action-cardinality fixes, slim-
