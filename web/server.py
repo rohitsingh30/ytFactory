@@ -1692,6 +1692,7 @@ from control.routes.burner_routes import router as _control_burner_router
 from control.routes.channels_routes import router as _control_channels_router
 from control.routes.cloud_routes import router as _control_cloud_router
 from control.routes.clone_video_routes import router as _control_clone_video_router
+from control.routes.critique_routes import router as _control_critique_router
 from control.routes.dashboard_routes import router as _control_dashboard_router
 from control.routes.discover_routes import router as _control_discover_router
 from control.routes.music_routes import router as _control_music_router
@@ -5533,6 +5534,7 @@ app.include_router(_control_burner_router)
 app.include_router(_control_channels_router)
 app.include_router(_control_cloud_router)
 app.include_router(_control_clone_video_router)
+app.include_router(_control_critique_router)
 app.include_router(_control_dashboard_router)
 app.include_router(_control_discover_router)
 app.include_router(_control_music_router)

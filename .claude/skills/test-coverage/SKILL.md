@@ -183,7 +183,7 @@ After the per-file passes, run:
 Plus:
 ```bash
 cd web-next && npx tsc --noEmit
-cd web-next && node --test tests/**/*.test.mjs    # if any
+cd web-next && node --test 'tests/*.test.mjs'    # if any
 ```
 
 Print a compact report:
