@@ -26,6 +26,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest import mock
+from unittest.mock import patch
 
 from pipeline.critique import agent as agent_mod
 from pipeline.critique import messages as msg_mod
@@ -1303,6 +1304,143 @@ class StageAndCommitDiagnosticTests(unittest.TestCase):
             self.assertIn("git commit failed", err)
             self.assertIn("rc=", err)
             self.assertIn(str(repo), err)
+        finally:
+            subprocess.run(["rm", "-rf", str(repo)], check=False)
+
+
+class ProcessOneCritiqueAbandonedAndStopTests(unittest.TestCase):
+    """Audit Q2.2 + Q2.4 — ``process_one_critique`` must not park the
+    runner forever when the user abandons the conversation, and must
+    bail promptly on ``stop_event.set()`` even from inside the inner
+    no-unseen-user-message poll loop.
+    """
+
+    def _stub_client_with_critique(self, critique_id: str = "c1") -> _FakeFirestoreClient:
+        client = _FakeFirestoreClient()
+        client.collection("critiques").document(critique_id).set({
+            "status": runner_mod.STATUS_QUEUED,
+            "channel": "test", "slug": "s1", "video_path": "/tmp/x.mp4",
+            "script_path": "/tmp/x.json", "created_at": time.time(),
+        })
+        return client
+
+    def _config(self, repo: Path, *, abandoned_s: float, poll_s: float = 0.001):
+        # Patch git-add helpers to no-ops so process_one_critique can
+        # enter its main loop without needing a real repo with a git
+        # remote.
+        return runner_mod.RunnerConfig(
+            repo_root=repo, push_remote="origin", push_branch="main",
+            poll_interval_s=poll_s,
+            abandoned_after_no_user_msg_s=abandoned_s,
+        )
+
+    def test_abandoned_critique_releases_to_queued(self):
+        repo, _ = _make_clean_repo(with_remote=False)
+        try:
+            critique_id = "c-abandoned"
+            client = self._stub_client_with_critique(critique_id)
+            cfg = self._config(repo, abandoned_s=0.05, poll_s=0.005)
+            with patch.object(runner_mod, "_isolate_pre_existing_dirt", return_value=False), \
+                 patch.object(runner_mod, "claim_critique", return_value=True):
+                runner_mod.process_one_critique(client, critique_id, cfg)
+            doc = client.collection("critiques").document(critique_id).get()
+            self.assertEqual(doc.to_dict()["status"], runner_mod.STATUS_QUEUED)
+            self.assertIn("abandoned_at", doc.to_dict())
+        finally:
+            subprocess.run(["rm", "-rf", str(repo)], check=False)
+
+    def test_stop_event_in_inner_loop_releases_to_queued(self):
+        repo, _ = _make_clean_repo(with_remote=False)
+        try:
+            critique_id = "c-stop"
+            client = self._stub_client_with_critique(critique_id)
+            cfg = self._config(repo, abandoned_s=60.0, poll_s=0.005)
+            stop_event = threading.Event()
+
+            def _set_after_short_delay() -> None:
+                time.sleep(0.05)
+                stop_event.set()
+
+            t = threading.Thread(target=_set_after_short_delay, daemon=True)
+            t.start()
+            with patch.object(runner_mod, "_isolate_pre_existing_dirt", return_value=False), \
+                 patch.object(runner_mod, "claim_critique", return_value=True):
+                runner_mod.process_one_critique(
+                    client, critique_id, cfg, stop_event=stop_event,
+                )
+            t.join(timeout=2.0)
+            doc = client.collection("critiques").document(critique_id).get()
+            # Released back to queued so another runner can pick up.
+            self.assertEqual(doc.to_dict()["status"], runner_mod.STATUS_QUEUED)
+        finally:
+            subprocess.run(["rm", "-rf", str(repo)], check=False)
+
+    def test_user_message_fed_resets_abandoned_clock(self):
+        """Audit Q2.2 — when a user message arrives, the abandoned-clock
+        resets. Pinning the ``last_user_msg_at = time.time()`` line.
+        """
+        repo, _ = _make_clean_repo(with_remote=False)
+        try:
+            critique_id = "c-user-msg"
+            client = self._stub_client_with_critique(critique_id)
+            # Add a user message to the messages subcollection.
+            messages_col = client.collection("critiques").document(critique_id).collection("messages")
+            messages_col.document("m1").set({
+                "role": msg_mod.ROLE_USER, "text": "fix the audio please",
+                "created_at": time.time(),
+            })
+            cfg = self._config(repo, abandoned_s=60.0, poll_s=0.005)
+            seen_messages: list[str] = []
+            with patch.object(runner_mod, "_isolate_pre_existing_dirt", return_value=False), \
+                 patch.object(runner_mod, "claim_critique", return_value=True), \
+                 patch.object(
+                     runner_mod, "process_user_message",
+                     return_value=(runner_mod.STATUS_DONE, {"ok": True}, 0),
+                 ):
+                runner_mod.process_one_critique(
+                    client, critique_id, cfg,
+                    on_message_seen=seen_messages.append,
+                )
+            # The user message was consumed → on_message_seen called →
+            # status flipped to DONE (not abandoned/queued).
+            doc = client.collection("critiques").document(critique_id).get()
+            self.assertEqual(doc.to_dict()["status"], runner_mod.STATUS_DONE)
+            self.assertEqual(seen_messages, ["m1"])
+        finally:
+            subprocess.run(["rm", "-rf", str(repo)], check=False)
+
+
+class RunForeverStopEventTests(unittest.TestCase):
+    """Audit Q2.4 — ``run_forever`` propagates stop_event to
+    ``process_one_critique``. Pinning the new threaded-call site.
+    """
+
+    def test_run_forever_passes_stop_event_to_process_one_critique(self):
+        repo, _ = _make_clean_repo(with_remote=False)
+        try:
+            client = _FakeFirestoreClient()
+            client.collection("critiques").document("c1").set({
+                "status": runner_mod.STATUS_QUEUED,
+                "channel": "ch", "slug": "s", "video_path": "/x.mp4",
+                "script_path": "/x.json", "created_at": time.time(),
+            })
+            cfg = runner_mod.RunnerConfig(
+                repo_root=repo, push_remote="origin", push_branch="main",
+                poll_interval_s=0.01,
+            )
+            stop_event = threading.Event()
+            captured: dict = {}
+
+            def _fake_process(c, critique_id, config, *, stop_event=None,
+                              on_message_seen=None):
+                captured["stop_event"] = stop_event
+                stop_event.set()  # bail run_forever after this call
+
+            with patch.object(runner_mod, "process_one_critique",
+                              side_effect=_fake_process):
+                runner_mod.run_forever(client, cfg, stop_event=stop_event)
+
+            self.assertIs(captured.get("stop_event"), stop_event)
         finally:
             subprocess.run(["rm", "-rf", str(repo)], check=False)
 

@@ -75,6 +75,12 @@ class RunnerConfig:
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
     poll_interval_s: float = 2.0
     hostname: str = socket.gethostname()
+    # Audit Q2.2 — abandoned-user-message timeout. If no role=user
+    # message arrives within this window, the runner releases the
+    # critique back to ``queued`` so a stuck/abandoned conversation
+    # doesn't park the runner forever (single-claim semantics piles
+    # every other queued critique up behind it).
+    abandoned_after_no_user_msg_s: float = 30 * 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -763,6 +769,7 @@ def process_one_critique(
     config: RunnerConfig,
     *,
     on_message_seen: Callable[[str], None] | None = None,
+    stop_event: threading.Event | None = None,
 ) -> None:
     """Drive a single critique from claim → terminal status.
 
@@ -775,6 +782,17 @@ def process_one_critique(
     The stash is restored in a try/finally so the user's working
     tree comes back intact regardless of whether the critique
     succeeded, failed, or crashed.
+
+    **Audit Q2.2** — if no role=user message arrives within
+    ``config.abandoned_after_no_user_msg_s`` (default 30 min), the
+    critique is released back to ``queued`` so a stuck/abandoned
+    conversation doesn't park the runner forever.
+
+    **Audit Q2.4** — ``stop_event`` is checked inside the inner
+    poll loop too, not just by ``run_forever``. SIGTERM during the
+    abandoned-user wait now flips status back to queued and exits
+    cleanly within one ``poll_interval_s`` instead of hanging until
+    launchd's grace period elapses and SIGKILL fires.
     """
     if not claim_critique(client, critique_id, hostname=config.hostname):
         logger.info("critique %s already claimed by another runner", critique_id)
@@ -824,7 +842,14 @@ def process_one_critique(
             last_user = [m for m in existing if m.role == msg_mod.ROLE_USER][-1]
             seen_message_ids.discard(last_user.message_id)
 
+        last_user_msg_at = time.time()
         while True:
+            # Audit Q2.4 — bail promptly on shutdown signal.
+            if stop_event is not None and stop_event.is_set():
+                # Release the claim back to queued so another runner
+                # (or a relaunch) can pick this critique up.
+                _set_critique_status(client, critique_id, STATUS_QUEUED)
+                return
             # Re-read parent so a status flip from the browser (cancel)
             # bails us out promptly.
             parent_snap = parent_ref.get()
@@ -841,9 +866,24 @@ def process_one_critique(
                 if m.role == msg_mod.ROLE_USER and m.message_id not in seen_message_ids
             ]
             if not unseen_user:
-                time.sleep(config.poll_interval_s)
+                # Audit Q2.2 — abandoned-user timeout.
+                if (time.time() - last_user_msg_at) > config.abandoned_after_no_user_msg_s:
+                    logger.info(
+                        "critique %s abandoned (no user msg for %.0fs); releasing to queued",
+                        critique_id, config.abandoned_after_no_user_msg_s,
+                    )
+                    _set_critique_status(
+                        client, critique_id, STATUS_QUEUED,
+                        extra={"abandoned_at": time.time()},
+                    )
+                    return
+                if stop_event is not None:
+                    stop_event.wait(timeout=config.poll_interval_s)
+                else:
+                    time.sleep(config.poll_interval_s)
                 continue
             next_msg = unseen_user[0]
+            last_user_msg_at = time.time()
             if on_message_seen is not None:
                 on_message_seen(next_msg.message_id)
 
@@ -905,7 +945,10 @@ def run_forever(
             continue
         snap = queued[0]
         try:
-            process_one_critique(client, snap.id, config)
+            # Audit Q2.4 — pass through to the inner loop so SIGTERM
+            # bails between user-message polls, not just between
+            # whole critiques.
+            process_one_critique(client, snap.id, config, stop_event=stop_event)
         except Exception:  # noqa: BLE001
             logger.exception("critique %s blew up — marking failed", snap.id)
             try:
