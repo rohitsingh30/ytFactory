@@ -599,6 +599,150 @@ class IsolatePreExistingDirtTests(unittest.TestCase):
         finally:
             subprocess.run(["rm", "-rf", str(repo)], check=False)
 
+    def test_isolate_raises_diagnostic_when_git_status_fails(self):
+        """`_isolate_pre_existing_dirt` must surface the diagnostic
+        message from `_git_failure_diag` (not just bare stderr) so the
+        chat panel error is actionable. Pre-fix, git status failing on
+        an `.git/index.lock` race produced "git status failed: ." —
+        the user couldn't tell what to do. The new error must include
+        the returncode + cwd + index-lock hint."""
+        not_a_repo = Path(tempfile.mkdtemp(prefix="not-a-repo-"))
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                runner_mod._isolate_pre_existing_dirt(
+                    not_a_repo, stash_label="t/no-repo",
+                )
+            err = str(ctx.exception)
+            # Must include returncode + cwd at minimum.
+            self.assertIn("rc=", err)
+            self.assertIn(str(not_a_repo), err)
+        finally:
+            subprocess.run(["rm", "-rf", str(not_a_repo)], check=False)
+
+
+class GitFailureDiagTests(unittest.TestCase):
+    """`_git_failure_diag` composes a useful error message even when
+    git's stderr is empty. Pre-fix the runner reported
+    ``"git status failed: ."`` (an unactionable empty stderr collapsed
+    against the f-string's trailing period) for `.git/index.lock`
+    races against a concurrent commit. Established 2026-05-12 after
+    the d7abfdd7 critique surfaced the empty-stderr case."""
+
+    def _make_proc(
+        self, *, returncode: int = 1, stdout: str = "", stderr: str = "",
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=["git", "status"],
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    def test_includes_returncode_and_cwd(self):
+        proc = self._make_proc(returncode=128, stderr="fatal: not a git repo")
+        msg = runner_mod._git_failure_diag("git status", proc, Path("/tmp/x"))
+        self.assertIn("rc=128", msg)
+        self.assertIn("/tmp/x", msg)
+        self.assertIn("fatal: not a git repo", msg)
+
+    def test_empty_stderr_surfaces_index_lock_hint(self):
+        # The actual class of bug from 2026-05-12 — git exits non-zero
+        # with both streams empty. Pre-fix this produced "git status
+        # failed: ." which told the user nothing.
+        proc = self._make_proc(returncode=128, stdout="", stderr="")
+        msg = runner_mod._git_failure_diag("git status", proc, Path("/tmp/x"))
+        self.assertIn("rc=128", msg)
+        self.assertIn(".git/index.lock", msg,
+                      "empty-stderr case must hint at the most "
+                      "common cause (concurrent git operation)")
+
+    def test_stdout_surfaces_when_stderr_empty(self):
+        proc = self._make_proc(returncode=1, stdout="some output", stderr="")
+        msg = runner_mod._git_failure_diag("git status", proc, Path("/tmp/x"))
+        self.assertIn("stdout: some output", msg)
+
+    def test_does_not_double_print_when_both_present(self):
+        proc = self._make_proc(returncode=1, stdout="out", stderr="err")
+        msg = runner_mod._git_failure_diag("git status", proc, Path("/tmp/x"))
+        self.assertIn("stderr: err", msg)
+        self.assertNotIn("stdout: out", msg,
+                         "stdout suppressed when stderr already speaks")
+
+
+class ParseToolUseChipTests(unittest.TestCase):
+    """`_parse_tool_use_chip` extracts an action chip from claude's
+    streaming stdout so the chat panel reflects per-tool progress
+    instead of sitting on a static "running claude…" for 5-15
+    minutes. Established 2026-05-12 after the user pinged
+    "running claude… just showing this?" while a real, productive
+    turn was 4 minutes deep into pipeline/compose.py exploration."""
+
+    def test_recognizes_read(self):
+        chip = runner_mod._parse_tool_use_chip(
+            "● Read(pipeline/compose.py)"
+        )
+        self.assertEqual(chip["action"], "file_read")
+        self.assertEqual(chip["text"], "reading pipeline/compose.py")
+
+    def test_recognizes_read_with_offset(self):
+        chip = runner_mod._parse_tool_use_chip(
+            "● Read(pipeline/compose.py:870)"
+        )
+        self.assertEqual(chip["action"], "file_read")
+        self.assertIn("pipeline/compose.py", chip["text"])
+
+    def test_recognizes_edit(self):
+        chip = runner_mod._parse_tool_use_chip(
+            "● Edit(pipeline/render/long_form.py)"
+        )
+        self.assertEqual(chip["action"], "file_edited")
+        self.assertEqual(chip["text"], "editing pipeline/render/long_form.py")
+
+    def test_recognizes_write(self):
+        chip = runner_mod._parse_tool_use_chip(
+            "● Write(tests/test_foo.py)"
+        )
+        self.assertEqual(chip["action"], "file_edited")
+        self.assertIn("writing tests/test_foo.py", chip["text"])
+
+    def test_recognizes_bash(self):
+        chip = runner_mod._parse_tool_use_chip(
+            "● Bash(pytest -x -q)"
+        )
+        self.assertEqual(chip["action"], "agent_thinking")
+        self.assertEqual(chip["text"], "running pytest -x -q")
+
+    def test_recognizes_grep_glob(self):
+        for line, expect in [
+            ("● Grep(\"loudnorm\" in pipeline/)", "searching"),
+            ("● Glob(**/*.py)", "searching"),
+        ]:
+            chip = runner_mod._parse_tool_use_chip(line)
+            self.assertEqual(chip["action"], "file_read")
+            self.assertTrue(chip["text"].startswith(expect))
+
+    def test_ignores_plain_thinking_text(self):
+        # Pre-fix, EVERY line was treated as a chip candidate; that's
+        # what created the Firestore-write spam. Whitelist only.
+        for line in [
+            "Now I need to look at the long_form module…",
+            "Looking for the loudnorm filter chain.",
+            "● TodoWrite(...)",  # not in whitelist
+            "",
+            "  ",
+        ]:
+            self.assertIsNone(
+                runner_mod._parse_tool_use_chip(line),
+                f"non-tool-use line incorrectly produced a chip: {line!r}",
+            )
+
+    def test_truncates_overly_long_args(self):
+        long_arg = "echo " + ("x" * 500)
+        chip = runner_mod._parse_tool_use_chip(f"● Bash({long_arg})")
+        self.assertIsNotNone(chip)
+        self.assertLessEqual(len(chip["text"]), 240,
+                             "chip text must fit Firestore doc cap headroom")
+
 
 class ProcessUserMessageTests(unittest.TestCase):
     """End-to-end happy + sad path with a fake agent."""
@@ -805,6 +949,192 @@ class ProcessUserMessageTests(unittest.TestCase):
                     )
             self.assertEqual(next_status, "failed")
             self.assertIn("agent exit=137", extra["error"])
+        finally:
+            subprocess.run(["rm", "-rf", str(repo), str(remote) if remote else ""],
+                           check=False)
+
+    def test_streams_tool_use_lines_to_chat_as_chips(self):
+        """Regression — pre-fix the runner's `_on_line` callback was a
+        no-op (`return None`). The chat panel sat on a single
+        "running claude…" message for 5-15 minutes regardless of how
+        much progress claude made. Established 2026-05-12 after the
+        user pinged "running claude… just showing this?" while
+        claude was 4 minutes deep into productive exploration of
+        pipeline/compose.py.
+
+        The fix wires `_on_line` to write throttled action chips to
+        Firestore for every recognized tool-use line. This test
+        proves chips ACTUALLY land in the message subcollection."""
+        repo, remote = _make_clean_repo(with_remote=True)
+        client = _FakeFirestoreClient()
+        cfg = runner_mod.RunnerConfig(
+            repo_root=repo,
+            agent_timeout_s=30,
+            gate_timeout_s=30,
+            poll_interval_s=0.05,
+        )
+        try:
+            with self._patch_for_runner():
+                def fake_run_agent_turn(agent_kind, prompt, **kwargs):
+                    # Drive the streaming callback with realistic claude
+                    # tool-use output. We need 2 distinct chip TEXTS
+                    # spaced > _MIN_EMIT_INTERVAL_S apart so both pass
+                    # the throttle.
+                    cb = kwargs.get("on_stdout_line")
+                    self.assertIsNotNone(
+                        cb,
+                        "process_user_message must pass on_stdout_line "
+                        "to run_agent_turn",
+                    )
+                    cb("● Read(pipeline/compose.py)")
+                    # Force the throttle clock past the floor.
+                    time.sleep(runner_mod._MIN_STREAM_EMIT_INTERVAL_S + 0.1)
+                    cb("● Edit(pipeline/render/long_form.py)")
+                    # Plain prose must NOT produce a chip.
+                    cb("Now I need to verify the loudnorm filter chain…")
+                    return agent_mod.AgentTurnResult(
+                        action="need_more_info",
+                        text="needs clarification",
+                        summary={
+                            "type": "agent_summary",
+                            "action": "need_more_info",
+                            "files_changed": [],
+                            "tests_added": [],
+                            "rationale": "test",
+                            "follow_up_questions": ["which channel?"],
+                        },
+                        stdout_tail="", stderr_tail="",
+                        exit_code=0, duration_s=0.1,
+                    )
+                with mock.patch.object(agent_mod, "run_agent_turn",
+                                       side_effect=fake_run_agent_turn):
+                    runner_mod.process_user_message(
+                        client, "cid",
+                        {"agent": "claude", "channel": "test"},
+                        "x", cfg,
+                    )
+
+            messages = msg_mod.fetch_messages(client, "cid")
+            actions = [m.action for m in messages]
+            chip_texts = [m.text for m in messages if m.action]
+            # Original "running claude…" + the two streamed chips.
+            self.assertGreaterEqual(
+                len([a for a in actions
+                     if a in (msg_mod.ACTION_FILE_READ,
+                              msg_mod.ACTION_FILE_EDITED)]),
+                2,
+                f"streaming must produce ≥2 file_read/edited chips; got: {actions}",
+            )
+            self.assertTrue(
+                any("reading pipeline/compose.py" in t for t in chip_texts),
+                f"expected 'reading pipeline/compose.py' chip; got: {chip_texts}",
+            )
+            self.assertTrue(
+                any("editing pipeline/render/long_form.py" in t for t in chip_texts),
+                f"expected 'editing pipeline/render/long_form.py' chip; got: {chip_texts}",
+            )
+            self.assertFalse(
+                any("Now I need to verify" in t for t in chip_texts),
+                "plain prose must NOT produce a chip",
+            )
+        finally:
+            subprocess.run(["rm", "-rf", str(repo), str(remote) if remote else ""],
+                           check=False)
+
+    def test_streaming_callback_swallows_firestore_errors(self):
+        """If Firestore writes start failing mid-turn, the streaming
+        callback must NOT propagate — that would crash the agent
+        process and lose all context. The full stdout is still
+        captured in stdout_tail for debug. Established 2026-05-12
+        when we wired streaming."""
+        repo, remote = _make_clean_repo(with_remote=True)
+        client = _FakeFirestoreClient()
+        cfg = runner_mod.RunnerConfig(
+            repo_root=repo, agent_timeout_s=30, gate_timeout_s=30,
+            poll_interval_s=0.05,
+        )
+        # Make add_action_message blow up only on chip writes (text
+        # contains "reading"/"editing"/"running"), so the initial
+        # "running claude…" prelude still goes through.
+        original = msg_mod.add_action_message
+        def selective_break(client_, cid, action, *, text="", **kwargs):
+            if any(t in text for t in ("reading ", "editing ", "writing ", "running ")):
+                if "claude" in text:
+                    return original(client_, cid, action, text=text, **kwargs)
+                raise RuntimeError("firestore down")
+            return original(client_, cid, action, text=text, **kwargs)
+
+        try:
+            with self._patch_for_runner():
+                def fake_run_agent_turn(agent_kind, prompt, **kwargs):
+                    cb = kwargs.get("on_stdout_line")
+                    # Multiple lines — none should propagate.
+                    cb("● Read(pipeline/compose.py)")
+                    time.sleep(runner_mod._MIN_STREAM_EMIT_INTERVAL_S + 0.1)
+                    cb("● Edit(pipeline/render/long_form.py)")
+                    return agent_mod.AgentTurnResult(
+                        action="need_more_info", text="x", summary=None,
+                        stdout_tail="", stderr_tail="",
+                        exit_code=0, duration_s=0.01,
+                    )
+                with mock.patch.object(agent_mod, "run_agent_turn",
+                                       side_effect=fake_run_agent_turn), \
+                     mock.patch.object(msg_mod, "add_action_message",
+                                       side_effect=selective_break):
+                    # Must not raise even though every chip-write call fails.
+                    runner_mod.process_user_message(
+                        client, "cid",
+                        {"agent": "claude", "channel": "test"},
+                        "x", cfg,
+                    )
+        finally:
+            subprocess.run(["rm", "-rf", str(repo), str(remote) if remote else ""],
+                           check=False)
+
+
+    def test_streaming_throttle_drops_rapid_duplicates(self):
+        """Two chip-eligible lines emitted within _MIN_STREAM_EMIT_INTERVAL_S
+        must produce only ONE chip — Firestore writes are expensive.
+        Two identical chip texts (different lines, same parsed
+        result) emitted past the throttle window must still dedupe."""
+        repo, remote = _make_clean_repo(with_remote=True)
+        client = _FakeFirestoreClient()
+        cfg = runner_mod.RunnerConfig(
+            repo_root=repo, agent_timeout_s=30, gate_timeout_s=30,
+            poll_interval_s=0.05,
+        )
+        try:
+            with self._patch_for_runner():
+                def fake_run_agent_turn(agent_kind, prompt, **kwargs):
+                    cb = kwargs.get("on_stdout_line")
+                    # Two RAPID lines (no sleep) → second hits throttle.
+                    cb("● Read(pipeline/a.py)")
+                    cb("● Read(pipeline/b.py)")  # throttled out
+                    # Sleep past throttle, then send the SAME text →
+                    # second one hits the dedupe early-return.
+                    time.sleep(runner_mod._MIN_STREAM_EMIT_INTERVAL_S + 0.1)
+                    cb("● Read(pipeline/a.py)")  # deduped (same text as 1st)
+                    return agent_mod.AgentTurnResult(
+                        action="need_more_info", text="x", summary=None,
+                        stdout_tail="", stderr_tail="",
+                        exit_code=0, duration_s=0.01,
+                    )
+                with mock.patch.object(agent_mod, "run_agent_turn",
+                                       side_effect=fake_run_agent_turn):
+                    runner_mod.process_user_message(
+                        client, "cid",
+                        {"agent": "claude", "channel": "test"},
+                        "x", cfg,
+                    )
+
+            messages = msg_mod.fetch_messages(client, "cid")
+            read_chips = [m for m in messages
+                          if m.action == msg_mod.ACTION_FILE_READ]
+            self.assertEqual(
+                len(read_chips), 1,
+                f"throttle+dedupe must collapse 3 calls to 1 chip; "
+                f"got {len(read_chips)}: {[m.text for m in read_chips]}",
+            )
         finally:
             subprocess.run(["rm", "-rf", str(repo), str(remote) if remote else ""],
                            check=False)

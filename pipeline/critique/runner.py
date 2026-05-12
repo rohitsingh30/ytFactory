@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -138,6 +139,110 @@ def _set_critique_status(
 # ---------------------------------------------------------------------------
 
 
+# Tool-use lines that claude (`claude -p`) prints to stdout while it
+# runs. Format observed 2026-05-12 against claude CLI v2.1.139:
+#
+#     ● Read(pipeline/compose.py)
+#     ● Read(pipeline/compose.py:870)        ← optional :line
+#     ● Edit(pipeline/render/long_form.py)
+#     ● Write(tests/test_foo.py)
+#     ● Bash(pytest -x -q)
+#     ● Glob(**/*.py)
+#     ● Grep("loudnorm" in pipeline/)
+#
+# We only care about a small whitelist that maps cleanly to the chat
+# panel's existing action-chip palette (see
+# web-next/components/app/critique-chat-panel.tsx). Anything else
+# (TodoWrite, internal SDK chatter, plain-prose thinking) gets
+# dropped from chat — full stdout is still preserved in
+# AgentTurnResult.stdout_tail for debugging.
+_TOOL_USE_RE = re.compile(
+    r"^[\s●\*]+(?P<tool>Read|Edit|Write|Bash|Glob|Grep|MultiEdit)\((?P<arg>[^)]+)\)"
+)
+
+# Throttle floor for the streaming chip writer. Firestore charges per
+# write + has hard QPS limits per doc; 4 s gives the user feedback
+# every few seconds without saturating writes during a hot tool-use
+# burst (claude can emit 5-10 tool-use lines per second when reading
+# many small files). Module-level so tests can pin it.
+_MIN_STREAM_EMIT_INTERVAL_S = 4.0
+
+# Map claude tool name → chat-panel action chip + human-friendly verb.
+_TOOL_TO_CHIP: dict[str, tuple[str, str]] = {
+    "Read":      (msg_mod.ACTION_FILE_READ,    "reading"),
+    "Glob":      (msg_mod.ACTION_FILE_READ,    "searching"),
+    "Grep":      (msg_mod.ACTION_FILE_READ,    "searching"),
+    "Edit":      (msg_mod.ACTION_FILE_EDITED,  "editing"),
+    "MultiEdit": (msg_mod.ACTION_FILE_EDITED,  "editing"),
+    "Write":     (msg_mod.ACTION_FILE_EDITED,  "writing"),
+    "Bash":      (msg_mod.ACTION_AGENT_THINKING, "running"),
+}
+
+
+def _parse_tool_use_chip(line: str) -> dict | None:
+    """Return ``{action, text}`` for a recognised tool-use line, else None.
+
+    The chat panel renders these as labelled chips so the user sees
+    "reading pipeline/compose.py" / "editing pipeline/llm/cli.py" /
+    "running pytest -x -q" while claude works, instead of the
+    pre-fix "running claude…" sitting static for 5-15 minutes.
+
+    Established 2026-05-12 — see process_user_message::_on_line.
+    """
+    m = _TOOL_USE_RE.match(line)
+    if not m:
+        return None
+    tool = m.group("tool")
+    arg = m.group("arg").strip()
+    chip = _TOOL_TO_CHIP.get(tool)
+    if chip is None:
+        return None  # coverage: defence-in-depth — regex limits tools to whitelist keys
+    action, verb = chip
+    # Trim long Bash commands so the chat doesn't overflow Firestore's
+    # 1 MiB doc cap (already throttled, but defence in depth).
+    text = f"{verb} {arg}"[:240]
+    return {"action": action, "text": text}
+
+
+def _git_failure_diag(
+    cmd_label: str, proc: subprocess.CompletedProcess[str], cwd: Path,
+) -> str:
+    """Compose a diagnostic message for a failed git invocation.
+
+    Pre-fix the runner reported `f"git status failed: {proc.stderr.strip()}"`,
+    which collapses to ``"git status failed: "`` (or ``"git status failed: ."``
+    when the f-string's trailing period sticks) when git exits non-zero
+    with empty stderr — a real class of failures including
+    ``.git/index.lock`` races against a concurrent ``git commit`` from
+    another process. The result is a chat message the user CAN'T act
+    on. Bundle returncode + stdout + stderr + cwd so the next failure
+    has at least one usable signal.
+
+    Established 2026-05-12 after the d7abfdd7 critique surfaced the
+    empty-stderr case to a confused user — see
+    ``docs/critique_runner_ops.md`` § "Diagnosing stash_failed".
+    """
+    parts = [f"{cmd_label} failed (rc={proc.returncode})"]
+    stderr = (proc.stderr or "").strip()
+    stdout = (proc.stdout or "").strip()
+    if stderr:
+        parts.append(f"stderr: {stderr[:400]}")
+    if stdout and not stderr:
+        # Mention stdout only when stderr is empty so we don't
+        # double-print on the common case.
+        parts.append(f"stdout: {stdout[:400]}")
+    if not stderr and not stdout:
+        # Most likely cause: git's index.lock race against a
+        # concurrent git operation. Surface the hypothesis so the
+        # user knows what to check.
+        parts.append(
+            "no git output (likely .git/index.lock contention with "
+            "another git process — try again in a moment)"
+        )
+    parts.append(f"cwd: {cwd}")
+    return "; ".join(parts)
+
+
 def _isolate_pre_existing_dirt(repo_root: Path, *, stash_label: str) -> bool:
     """Stash any pre-existing dirty changes so the agent's diff is
     isolated from whatever the user was hand-editing. Returns True if
@@ -159,7 +264,7 @@ def _isolate_pre_existing_dirt(repo_root: Path, *, stash_label: str) -> bool:
         check=False,
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"git status failed: {proc.stderr.strip()}")
+        raise RuntimeError(_git_failure_diag("git status", proc, repo_root))
     if not proc.stdout.strip():
         return False  # tree was already clean
 
@@ -175,7 +280,8 @@ def _isolate_pre_existing_dirt(repo_root: Path, *, stash_label: str) -> bool:
     )
     if stash.returncode != 0:
         raise RuntimeError(
-            f"git stash failed: {stash.stderr.strip()}; refusing to start"
+            f"{_git_failure_diag('git stash push', stash, repo_root)}"
+            "; refusing to start"
         )
     logger.info("[runner] stashed pre-existing dirt as %r", stash_label)
     return True
@@ -365,13 +471,55 @@ def process_user_message(
         text=f"running {job_context.get('agent', 'agent')}…",
     )
 
+    # Streaming callback — surface claude's per-line stdout to the
+    # chat panel as throttled action chips so the user sees progress
+    # within seconds instead of a single "running claude…" sitting
+    # static for 5-15 minutes.
+    #
+    # Pre-fix this was a no-op (`return None`). Real claude turns
+    # interleave 30-100 tool-use lines (Read / Edit / Bash / Write)
+    # before producing the final summary; the user has zero feedback
+    # in the chat panel during that window. Established 2026-05-12
+    # after the user pinged "running claude… just showing this?"
+    # while a real, productive turn was 4 minutes deep into
+    # exploring pipeline/compose.py.
+    #
+    # Throttling — Firestore charges per write + has hard QPS limits
+    # per doc. We:
+    #   1. Parse only lines that match a tool-use signal (claude
+    #      prefixes them with the bullet ``●``); plain "thinking"
+    #      text is dropped from the chat (still captured in
+    #      stdout_tail for debug).
+    #   2. Coalesce duplicate signals (5 consecutive Read lines on
+    #      the same file → one chip).
+    #   3. Hard floor of 4 s between writes to the same critique
+    #      doc, regardless of signal count.
+    _stream_state = {
+        "last_emit_ts": 0.0,
+        "last_emit_text": "",
+    }
+
     def _on_line(line: str) -> None:
-        # Surface agent stdout as throttled "agent_thinking" chips.
-        # We don't push every line (that would saturate Firestore
-        # writes); instead the runner's main thread emits a single
-        # AGENT_FINISHED message at the end with the tail.
-        # This lambda is here purely as an extension hook for tests.
-        return None
+        try:
+            chip = _parse_tool_use_chip(line)
+            if chip is None:
+                return
+            now = time.time()
+            if (now - _stream_state["last_emit_ts"]) < _MIN_STREAM_EMIT_INTERVAL_S:
+                return
+            if chip["text"] == _stream_state["last_emit_text"]:
+                return
+            _stream_state["last_emit_ts"] = now
+            _stream_state["last_emit_text"] = chip["text"]
+            msg_mod.add_action_message(
+                client, critique_id,
+                action=chip["action"],
+                text=chip["text"],
+            )
+        except Exception:  # noqa: BLE001
+            # NEVER let a chat-streaming error break the agent turn.
+            # The full stdout is still captured in stdout_tail.
+            logger.warning("on_stdout_line emit failed", exc_info=True)
 
     turn = agent_mod.run_agent_turn(
         job_context.get("agent", agent_mod.AGENT_CLAUDE),
