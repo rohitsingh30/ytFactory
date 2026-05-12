@@ -102,7 +102,11 @@ after this command and re-add anything missing.
 ## Related
 
 - `docs/llm_orchestrator.md` — what runs on top of this dispatcher.
+- `docs/llm_max_tokens.md` — per-stage output-token cap. The dispatcher
+  reads `_DEFAULT_MAX_TOKENS_BY_STAGE` to keep long-form rewrite from
+  silently truncating at 4096 tokens. (2026-05-12)
 - `docs/prompt_validator_drift_invariant.md` — what the orchestrator
   catches when LLMs drift from validators.
 - `docs/cloudrun_render_worker.md` — the cloud worker that uses this.
-- Memory: `feedback_llm_backend_dispatcher.md`.
+- Memory: `feedback_llm_backend_dispatcher.md`,
+  `feedback_llm_sdk_max_tokens.md`.

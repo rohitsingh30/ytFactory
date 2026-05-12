@@ -242,10 +242,32 @@ bash cloud/web-next/deploy.sh     # picks up CritiqueChatPanel + JS SDK
 
 ### 4. Run the laptop daemon
 
+The runner is laptop-side BY DESIGN (it needs git push access — Cloud
+Run can't have GitHub creds). One-time setup auto-starts it on every
+login via launchd:
+
 ```bash
-make critique-runner
-# leave it running in a tmux pane / Activity Monitor
+cp control/com.ytfactory.critique-runner.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.ytfactory.critique-runner.plist
 ```
+
+Verify it's alive:
+
+```bash
+launchctl list | grep ytfactory.critique-runner
+pgrep -f scripts/critique_runner.py
+tail -f /Users/rohit/.config/ytfactory/critique-runner.log
+```
+
+For ad-hoc / debug runs only, the legacy entry point still works:
+
+```bash
+make critique-runner   # blocks the terminal — Ctrl-C to stop
+```
+
+**Operational runbook** (auto-start, watchdog, streaming chips, git
+diagnostics, recovery from a stuck claude subprocess):
+[`docs/critique_runner_ops.md`](./critique_runner_ops.md).
 
 That's it — open any finished render in the dashboard, type a
 critique, watch the agent fix it.

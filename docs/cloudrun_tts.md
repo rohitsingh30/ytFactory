@@ -797,4 +797,5 @@ gcloud beta quotas info describe \
 | `scripts/bench_tts_all_providers.py` | Audition harness — same script across all providers |
 | `docs/cloudrun_tts.md` | This file |
 | `docs/tts_stack.md` | Per-channel routing (laptop + cloud) |
+| `docs/cloud_tts_loudness.md` | **Required reading.** Cloud TTS providers emit 15-25 dB quieter than laptop fallbacks; renderers must `loudnorm` the narration leg before the YAML `volume()` trim or output reads as silent on phone speakers. (2026-05-12) |
 | `docs/long_form_model_inventory.md` | Local M2 Max model rules (still authoritative for local-only providers) |
