@@ -1057,6 +1057,18 @@ class MainBase(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(sys, "argv", argv))
             stack.enter_context(patch.object(render_long_form, "REPO_ROOT", tmp))
+            # Existing test contract: the wrappers (build_video_track /
+            # build_image_panels_video) are mocked, so the parallel
+            # overlap path (which calls _trim_shotlist_clips /
+            # _generate_panel_stills directly, bypassing the wrappers)
+            # would skip every mock and explode on the first missing
+            # source file. Disable overlap globally for the legacy
+            # MainBase fixture; new dedicated tests in
+            # tests/test_render_long_form_parallel.py exercise the
+            # overlap path with the new granular mock surface.
+            stack.enter_context(
+                patch.dict(os.environ, {"YTFACTORY_DISABLE_STAGE_OVERLAP": "1"})
+            )
             stack.enter_context(
                 patch.object(render_long_form, "_preflight_power_check", mocks["preflight"])
             )

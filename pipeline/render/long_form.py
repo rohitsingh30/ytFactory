@@ -604,7 +604,8 @@ def _trim_clip_letterbox(
     ])
 
 
-def build_image_panels_video(
+def _generate_panel_stills(
+    *,
     panels: list[dict[str, Any]],
     style_prefix: str,
     image_provider: str,
@@ -613,41 +614,20 @@ def build_image_panels_video(
     image_width: int,
     image_height: int,
     cache_dir: Path,
-    out_w: int = 1920,
-    out_h: int = 1080,
-    fps: int = 30,
-    crossfade_s: float = 1.5,
-    zoom_factor: float = 1.08,
-) -> Path:
-    """Path B render: comic-illustrated panels via Z-Image-Turbo + Ken Burns.
+) -> list[Path]:
+    """Render every panel still to disk. Independent of TTS — only
+    reads ``scene`` / ``seed_offset`` from each panel dict.
 
-    For each panel:
-      1. Generate the still via pipeline.images.generate (cached on disk).
-      2. Render a slow Ken-Burns video segment — zoom from 1.00x to
-         `zoom_factor` over the panel's `hold_s` duration.
-      3. Concat all segments with `xfade` cross-fades of `crossfade_s`
-         between adjacent panels.
-
-    Each `panel` dict expects keys:
-      - `scene` (str, required) — the descriptive scene prompt; the
-        long-form image_style_prefix is appended automatically.
-      - `hold_s` (float, optional, default 20) — how long to hold the panel.
-      - `seed_offset` (int, optional, default panel_index) — added to the
-        channel-level image_seed so each panel gets a distinct generation
-        but the channel stays consistent.
-
-    See learnings/long_form_visual_signature.md for the locked style prefix
-    and per-panel scene authoring rules (must explicitly name a small warm
-    light source — diffusion drops it otherwise).
+    Extracted from :func:`build_image_panels_video` so the orchestrator
+    can launch it on a :class:`pipeline.stage_overlap.StageOverlap`
+    worker BEFORE awaiting :func:`synth_long_narration`. See
+    ``docs/parallel_stage_overlap.md`` for the pattern.
     """
     from pipeline import images
 
     panel_dir = cache_dir / "panels"
     panel_dir.mkdir(parents=True, exist_ok=True)
-    seg_dir = cache_dir / "panel_segments"
-    seg_dir.mkdir(parents=True, exist_ok=True)
 
-    # Stage 1 — generate all panel stills (cached)
     panel_pngs: list[Path] = []
     for i, p in enumerate(panels):
         png = panel_dir / f"panel_{i:03d}.png"
@@ -668,16 +648,61 @@ def build_image_panels_video(
                 provider=image_provider,
             )
         panel_pngs.append(png)
+    return panel_pngs
 
-    # Stage 2 — Ken-Burns segment per panel (cached).
-    #
-    # zoompan's `d=N` semantics: it re-runs the zoom cycle every N output
-    # frames. Pairing `-loop 1 -t hold_s` (which produces a looping still
-    # at the demuxer's default ~25fps) with `d=hold_s*fps` causes a multi-
-    # plicative blow-up — the segment ends up ~150× too long. The fix is
-    # to FIRST drive the looped still up to our target fps, THEN run
-    # zoompan with `d=1` so it emits exactly one output frame per input
-    # frame and ramps `zoom` once across the whole clip.
+
+def _adjust_panel_holds_to_dur(
+    panels: list[dict[str, Any]],
+    *,
+    narration_dur_s: float,
+) -> None:
+    """Pad/scale every panel's ``hold_s`` IN PLACE so the total panel
+    duration matches ``narration_dur_s`` to within ±1s.
+
+    Behaviour identical to the inline math previously in :func:`main`
+    (pre-2026-05-13). Extracted so the parallel-overlap path can run
+    it AFTER the TTS branch yields ``dur`` but BEFORE
+    :func:`_assemble_panel_kenburns` consumes the adjusted holds.
+    """
+    if not panels:
+        return
+    total_panel_s = sum(float(p.get("hold_s", 20)) for p in panels)
+    if total_panel_s < narration_dur_s - 1.0:
+        shortfall = narration_dur_s - total_panel_s
+        extra_per_panel = shortfall / len(panels)
+        print(f"[2/5] panels total {total_panel_s:.1f}s < narration {narration_dur_s:.1f}s "
+              f"— extending each by {extra_per_panel:.1f}s to fill")
+        for p in panels:
+            p["hold_s"] = float(p.get("hold_s", 20)) + extra_per_panel
+    elif total_panel_s > narration_dur_s + 1.0:
+        scale = narration_dur_s / total_panel_s
+        print(f"[2/5] panels total {total_panel_s:.1f}s > narration {narration_dur_s:.1f}s "
+              f"— scaling holds by {scale:.3f}")
+        for p in panels:
+            p["hold_s"] = float(p.get("hold_s", 20)) * scale
+
+
+def _assemble_panel_kenburns(
+    *,
+    panel_pngs: list[Path],
+    panels: list[dict[str, Any]],
+    cache_dir: Path,
+    out_w: int,
+    out_h: int,
+    fps: int,
+    crossfade_s: float,
+    zoom_factor: float,
+) -> Path:
+    """Build per-panel Ken-Burns segments and xfade-concat into
+    ``video.mp4``. Extracted from :func:`build_image_panels_video`."""
+    seg_dir = cache_dir / "panel_segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+
+    if len(panel_pngs) != len(panels):
+        raise ValueError(
+            f"panel_pngs ({len(panel_pngs)}) and panels ({len(panels)}) length mismatch"
+        )
+
     seg_paths: list[tuple[Path, float]] = []
     for i, (png, p) in enumerate(zip(panel_pngs, panels)):
         hold_s = float(p.get("hold_s", 20))
@@ -700,7 +725,6 @@ def build_image_panels_video(
             ])
         seg_paths.append((seg, hold_s))
 
-    # Stage 3 — xfade chain. With N segments we run N-1 transitions.
     video_path = cache_dir / "video.mp4"
     if len(seg_paths) == 1:
         _ffmpeg(["-i", str(seg_paths[0][0]), "-c", "copy", str(video_path)])
@@ -733,20 +757,65 @@ def build_image_panels_video(
     return video_path
 
 
-def build_video_track(
-    shotlist: dict[str, Any],
-    sources_dir: Path,
+def build_image_panels_video(
+    panels: list[dict[str, Any]],
+    style_prefix: str,
+    image_provider: str,
+    image_seed: int,
+    image_steps: int,
+    image_width: int,
+    image_height: int,
     cache_dir: Path,
-    target_duration_s: float,
     out_w: int = 1920,
     out_h: int = 1080,
     fps: int = 30,
-    grade_filter: str | None = None,
+    crossfade_s: float = 1.5,
+    zoom_factor: float = 1.08,
 ) -> Path:
-    """Trim each shotlist clip, concat into one silent video.mp4.
+    """Path B render: comic-illustrated panels via Z-Image-Turbo + Ken Burns.
 
-    If concatenated duration < target_duration_s, the last clip is extended
-    by replaying its tail at 0.6x speed (slow-mo pad) until the gap closes.
+    Backwards-compatible thin wrapper that runs the two extracted halves
+    (:func:`_generate_panel_stills` then :func:`_assemble_panel_kenburns`)
+    sequentially. The orchestrator's parallel path (long-form ``main``)
+    calls the halves directly with a :class:`StageOverlap` between them
+    so stills generation overlaps with TTS chunked synthesis.
+    """
+    panel_pngs = _generate_panel_stills(
+        panels=panels,
+        style_prefix=style_prefix,
+        image_provider=image_provider,
+        image_seed=image_seed,
+        image_steps=image_steps,
+        image_width=image_width,
+        image_height=image_height,
+        cache_dir=cache_dir,
+    )
+    return _assemble_panel_kenburns(
+        panel_pngs=panel_pngs,
+        panels=panels,
+        cache_dir=cache_dir,
+        out_w=out_w,
+        out_h=out_h,
+        fps=fps,
+        crossfade_s=crossfade_s,
+        zoom_factor=zoom_factor,
+    )
+
+
+def _trim_shotlist_clips(
+    *,
+    shotlist: dict[str, Any],
+    sources_dir: Path,
+    cache_dir: Path,
+    out_w: int,
+    out_h: int,
+    fps: int,
+    grade_filter: str | None,
+) -> list[Path]:
+    """Trim every shotlist clip to its window — independent of TTS.
+
+    Extracted from :func:`build_video_track`. Internally still uses
+    :func:`pipeline.parallel.run_parallel` for per-clip ffmpeg fan-out.
     """
     clips = shotlist.get("clips") or []
     if not clips:
@@ -765,7 +834,6 @@ def build_video_track(
         if out.exists() and out.stat().st_size > 1024:
             continue
 
-        # Capture loop vars in default args so each closure binds its own values.
         def _job(src=src, in_s=float(clip["in_s"]), out_s=float(clip["out_s"]),
                  out=out, idx=i, total=len(clips)):
             print(f"[trim] {idx+1}/{total} {in_s:.1f}-{out_s:.1f}s of {src.name}")
@@ -777,8 +845,21 @@ def build_video_track(
         from pipeline.parallel import run_parallel
         run_parallel(pending_jobs, label="trim")
 
-    # Concat-demux. Re-encoding sidestepped because all clips share params.
-    # Audit Q2.25 — concat demuxer single-quote escape.
+    return clip_paths
+
+
+def _concat_and_pad(
+    *,
+    clip_paths: list[Path],
+    cache_dir: Path,
+    target_duration_s: float,
+    fps: int,
+) -> Path:
+    """Concat-demux trimmed clips and slow-mo-pad if shorter than target.
+
+    Extracted from :func:`build_video_track`. The ``target_duration_s``
+    parameter is the only TTS-derived input.
+    """
     from ._concat_safe import concat_file_line  # noqa: PLC0415
     list_txt = cache_dir / "_concat_clips.txt"
     list_txt.write_text("\n".join(concat_file_line(p.resolve()) for p in clip_paths))
@@ -788,12 +869,10 @@ def build_video_track(
         "-c", "copy", str(video_path),
     ])
 
-    # Pad to narration duration via slow-mo on the tail (only if short).
     have = _probe_duration(video_path)
     if have < target_duration_s - 1.0:
         gap = target_duration_s - have
         print(f"[pad ] video {have:.1f}s < target {target_duration_s:.1f}s — slow-mo pad {gap:.1f}s")
-        # Slow-mo last 60s at speed 60/(60+gap) so it stretches to fill
         tail_s = min(60.0, have - 1.0)
         slow_factor = tail_s / (tail_s + gap)
         slow_clip = cache_dir / "_tail_slow.mp4"
@@ -803,7 +882,6 @@ def build_video_track(
             "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
             "-pix_fmt", "yuv420p", str(slow_clip),
         ])
-        # New concat: original head + slow tail
         head_clip = cache_dir / "_head.mp4"
         _ffmpeg([
             "-t", f"{have - tail_s}", "-i", str(video_path),
@@ -819,6 +897,44 @@ def build_video_track(
         ])
 
     return video_path
+
+
+def build_video_track(
+    shotlist: dict[str, Any],
+    sources_dir: Path,
+    cache_dir: Path,
+    target_duration_s: float,
+    out_w: int = 1920,
+    out_h: int = 1080,
+    fps: int = 30,
+    grade_filter: str | None = None,
+) -> Path:
+    """Trim each shotlist clip, concat into one silent video.mp4.
+
+    Backwards-compatible thin wrapper that runs the two extracted halves
+    (:func:`_trim_shotlist_clips` then :func:`_concat_and_pad`)
+    sequentially. The orchestrator's parallel path (long-form ``main``)
+    calls the halves directly with a :class:`StageOverlap` between them
+    so clip trimming overlaps with TTS chunked synthesis.
+
+    If concatenated duration < target_duration_s, the last clip is extended
+    by replaying its tail at 0.6x speed (slow-mo pad) until the gap closes.
+    """
+    clip_paths = _trim_shotlist_clips(
+        shotlist=shotlist,
+        sources_dir=sources_dir,
+        cache_dir=cache_dir,
+        out_w=out_w,
+        out_h=out_h,
+        fps=fps,
+        grade_filter=grade_filter,
+    )
+    return _concat_and_pad(
+        clip_paths=clip_paths,
+        cache_dir=cache_dir,
+        target_duration_s=target_duration_s,
+        fps=fps,
+    )
 
 
 # ---------- music stage: ambient bed (synthetic placeholder) --------------
@@ -1835,20 +1951,174 @@ def _main_impl(args) -> int:
     if not text:
         raise SystemExit("narration JSON has neither 'narration' nor non-empty 'sections'")
 
-    print(f"[1/5] chunked TTS via {provider} voice={voice_id} speed={speed} atempo={atempo}…")
-    narration_wav, chunks = synth_long_narration(
-        text=text,
-        voice_id=voice_id,
-        cache_dir=cache_dir,
-        atempo=atempo,
-        chunk_target_chars=chunk_target_chars,
-        join_silence_s=join_silence_s,
-        speed=speed,
-        ref_audio_text=ref_audio_text,
-        provider=provider,
+    # ----------------------------------------------------------------
+    # Stage 1+2 with overlap (added 2026-05-13): kick off the
+    # duration-INDEPENDENT half of the video stage (panel stills
+    # generation OR shotlist clip trimming) on a worker thread BEFORE
+    # awaiting chunked TTS, so the two stages overlap on the wall
+    # clock. Gated on :func:`pipeline.stage_overlap.gpu_safe_to_overlap`
+    # — when either provider is local-GPU, falls back to the
+    # pre-overlap sequential path (which routes through the
+    # `build_image_panels_video` / `build_video_track` wrappers, so the
+    # legacy mock fixture in tests/test_render_long_form.py still
+    # pins them) so Metal contention can't surface (see
+    # ``feedback_gpu_one_render_at_a_time.md`` and
+    # ``docs/parallel_stage_overlap.md``).
+    # ----------------------------------------------------------------
+    out_w, out_h = lf.get("output_resolution", [1920, 1080])
+    fps = int(lf.get("output_fps", 30))
+    render_mode = (args.render_mode or lf.get("render_mode") or "archival_footage").strip()
+    PANEL_HARD_CAP = int(lf.get("panel_max_count", 24))
+    image_provider = lf.get("image_provider", "z_image_turbo")
+
+    # Resolve render-mode inputs (panels / shotlist) up-front so we can
+    # validate AND submit the dur-independent half before TTS starts.
+    panels: list[dict[str, Any]] = []
+    shotlist_path: Path | None = None
+    shotlist: dict[str, Any] = {}
+    sources_dir: Path | None = None
+    grade_filter: str | None = None
+    style_prefix: str = ""
+
+    if render_mode == "image_panels":
+        panels = list(script.get("panels") or [])
+        if not panels:
+            raise SystemExit(
+                f"render_mode=image_panels but narration JSON has no `panels` field.\n"
+                "Author per-panel scene strings (see learnings/long_form_visual_signature.md)\n"
+                "or switch render_mode to 'archival_footage'."
+            )
+        if len(panels) > PANEL_HARD_CAP:
+            raise SystemExit(
+                f"render_mode=image_panels with {len(panels)} panels exceeds "
+                f"PANEL_HARD_CAP={PANEL_HARD_CAP}.\n"
+                "Pure long-form image-panel runs hit Metal command-buffer "
+                "timeouts (see docs/long_form_model_inventory.md). Use "
+                "archival_footage for the bulk of the timeline and reserve "
+                "image gen for chapter cards / hero shots. Raise "
+                "long_form.panel_max_count in config.yaml only if you've "
+                "verified the new ceiling on a test render."
+            )
+        style_prefix = lf.get("image_style_prefix", "").strip().replace("\n", " ")
+    else:
+        shotlist_path = paths.shotlist_for(args.slug)
+        if not shotlist_path.exists():
+            raise SystemExit(
+                f"missing shotlist: {shotlist_path}\n"
+                "Long-form needs a shotlist with `clips: [{source, in_s, out_s}, ...]`\n"
+                "(or switch render_mode to 'image_panels')."
+            )
+        shotlist = json.loads(shotlist_path.read_text())
+        sources_dir = channel_dir / lf.get("footage_dir", "footage/long_sources")
+        grade_cfg = lf.get("visual_grade") or {}
+        grade_filter = grade_cfg.get("filter") if grade_cfg.get("enabled") else None
+        if args.no_grade:
+            grade_filter = None
+
+    from pipeline.stage_overlap import StageOverlap, gpu_safe_to_overlap  # noqa: PLC0415
+    overlap_image_provider = image_provider if render_mode == "image_panels" else None
+    overlap_safe, overlap_reason = gpu_safe_to_overlap(
+        tts_provider=provider,
+        image_provider=overlap_image_provider,
     )
-    from pipeline.probe import probe_duration  # noqa: PLC0415
-    dur = probe_duration(narration_wav)
+
+    print(f"[1/5] chunked TTS via {provider} voice={voice_id} speed={speed} atempo={atempo}…")
+    if overlap_safe and not args.tts_only:
+        print(f"[overlap] {overlap_reason} — kicking off video prep in parallel with TTS")
+    else:
+        print(f"[overlap] disabled: {overlap_reason} — running stages sequentially")
+
+    if render_mode == "image_panels":
+        print(f"[2/5] image_panels: {len(panels)} panels → {out_w}x{out_h} {fps}fps "
+              f"with Ken-Burns + cross-fade…")
+    else:
+        grade_label = "warm-firelight grade" if grade_filter else "no grade"
+        print(f"[2/5] archival_footage: trim {len(shotlist['clips'])} clips → "
+              f"{out_w}x{out_h} {fps}fps blurred letterbox + {grade_label}…")
+
+    panel_pngs: list[Path] = []
+    clip_paths: list[Path] = []
+    tts_t0 = time.time()
+    used_overlap = False
+    if overlap_safe and not args.tts_only:
+        used_overlap = True
+        with StageOverlap(
+            label=f"long_form-{render_mode}",
+            max_workers=1,
+            log=True,
+        ) as overlap:
+            video_prep_t0 = time.time()
+            if render_mode == "image_panels":
+                video_prep_fut = overlap.submit(
+                    "panel_stills",
+                    _generate_panel_stills,
+                    panels=panels,
+                    style_prefix=style_prefix,
+                    image_provider=image_provider,
+                    image_seed=int(lf.get("image_seed", 1944)),
+                    image_steps=int(lf.get("image_steps", 4)),
+                    image_width=int(lf.get("image_width", 1344)),
+                    image_height=int(lf.get("image_height", 768)),
+                    cache_dir=cache_dir,
+                )
+            else:
+                video_prep_fut = overlap.submit(
+                    "shotlist_trim",
+                    _trim_shotlist_clips,
+                    shotlist=shotlist,
+                    sources_dir=sources_dir,
+                    cache_dir=cache_dir,
+                    out_w=out_w, out_h=out_h, fps=fps,
+                    grade_filter=grade_filter,
+                )
+
+            narration_wav, chunks = synth_long_narration(
+                text=text,
+                voice_id=voice_id,
+                cache_dir=cache_dir,
+                atempo=atempo,
+                chunk_target_chars=chunk_target_chars,
+                join_silence_s=join_silence_s,
+                speed=speed,
+                ref_audio_text=ref_audio_text,
+                provider=provider,
+            )
+            from pipeline.probe import probe_duration  # noqa: PLC0415
+            dur = probe_duration(narration_wav)
+            tts_done_s = time.time() - tts_t0
+            print(f"[1/5] tts done {tts_done_s:.1f}s — {len(chunks)} chunks → "
+                  f"{narration_wav.name} {dur:.1f}s ({dur/60:.1f} min)")
+
+            if render_mode == "image_panels":
+                panel_pngs = video_prep_fut.result()
+            else:
+                clip_paths = video_prep_fut.result()
+            video_prep_done_s = time.time() - video_prep_t0
+            print(f"[2/5] video prep done {video_prep_done_s:.1f}s "
+                  f"({'panel_stills' if render_mode == 'image_panels' else 'shotlist_trim'})")
+    else:
+        narration_wav, chunks = synth_long_narration(
+            text=text,
+            voice_id=voice_id,
+            cache_dir=cache_dir,
+            atempo=atempo,
+            chunk_target_chars=chunk_target_chars,
+            join_silence_s=join_silence_s,
+            speed=speed,
+            ref_audio_text=ref_audio_text,
+            provider=provider,
+        )
+        from pipeline.probe import probe_duration  # noqa: PLC0415
+        dur = probe_duration(narration_wav)
+        tts_done_s = time.time() - tts_t0
+        print(f"[1/5] tts done {tts_done_s:.1f}s — {len(chunks)} chunks → "
+              f"{narration_wav.name} {dur:.1f}s ({dur/60:.1f} min)")
+
+    # Backwards-compat: keep the legacy "[1/5] narration ..." banner
+    # too. Older cloud-worker tail-readers (pre-2026-05-13) parse this
+    # to mark the TTS pill done; newer ones use the explicit done
+    # marker above. Emitting both costs nothing and gives graceful
+    # downgrade.
     print(f"[1/5] narration {len(chunks)} chunks → {narration_wav.name} {dur:.1f}s ({dur/60:.1f} min)")
 
     if args.tts_only:
@@ -1867,117 +2137,55 @@ def _main_impl(args) -> int:
     from pipeline.preflight import reset_mlx_state  # noqa: PLC0415
     reset_mlx_state(drop_f5=True, label="long-form stage-1 TTS")
 
-    # Stage 2 — video track. Two paths controlled by long_form.render_mode:
-    #   "image_panels" (Path B) — comic-illustrated Z-Image-Turbo panels with
-    #       Ken-Burns + cross-fade. Reads `panels: [{scene, hold_s, seed_offset}]`
-    #       from the narration JSON. Default for new sleep episodes.
-    #   "archival_footage" (Path A) — trim + letterbox + concat of source
-    #       clips listed in shotlist/<slug>.json with the warm-firelight grade.
-    #       Used for episodes that already have a curated shotlist.
-    out_w, out_h = lf.get("output_resolution", [1920, 1080])
-    fps = int(lf.get("output_fps", 30))
-    render_mode = (args.render_mode or lf.get("render_mode") or "archival_footage").strip()
-
-    # 2026-05-04: image_panels (z_image_turbo) caused Metal GPU command-buffer
-    # timeouts on the 89-panel run for western-front-1914-1918-sleep. Root
-    # causes (see docs/long_form_model_inventory.md):
-    #   1. F5-TTS-MLX (1.35 GB) stayed resident from stage 1 → ~5 GB MLX state
-    #      by the time image gen schedules its compute buffers — fixed above
-    #      at the renderer-stage boundary so BOTH branches benefit (2026-05-05).
-    #   2. Long pure-diffusion timelines fragment unified memory faster than
-    #      Metal's watchdog allows
-    #
-    # Fix at engineering level (not a hard ban — image renders are still
-    # available for limited / hybrid use):
-    #   (a) Cap the panel count. Pure 89-panel runs are out; <= panel_max_count
-    #       (configurable, default 24) is fine. Author shotlists for the rest.
-    #   (b) F5 drop is now unconditional above, so this stage starts on a
-    #       clean Metal heap regardless of render_mode.
-    PANEL_HARD_CAP = int(lf.get("panel_max_count", 24))
-
+    # Stage 2 (assembly) — Now that BOTH halves are ready, run the
+    # duration-DEPENDENT assembly. When overlap was used, the dur-
+    # independent half (stills/trim) is already on disk and we call
+    # only the assembly half. When sequential, route through the
+    # legacy wrappers so the existing test fixture (which mocks
+    # build_image_panels_video / build_video_track) continues to pin
+    # the call.
     if render_mode == "image_panels":
-        panels = script.get("panels") or []
-        if not panels:
-            raise SystemExit(
-                f"render_mode=image_panels but narration JSON has no `panels` field.\n"
-                "Author per-panel scene strings (see learnings/long_form_visual_signature.md)\n"
-                "or switch render_mode to 'archival_footage'."
+        _adjust_panel_holds_to_dur(panels, narration_dur_s=dur)
+        if used_overlap:
+            video_path = _assemble_panel_kenburns(
+                panel_pngs=panel_pngs,
+                panels=panels,
+                cache_dir=cache_dir,
+                out_w=out_w, out_h=out_h, fps=fps,
+                crossfade_s=float(lf.get("panel_crossfade_s", 1.5)),
+                zoom_factor=float(lf.get("panel_zoom_factor", 1.08)),
             )
-        if len(panels) > PANEL_HARD_CAP:
-            raise SystemExit(
-                f"render_mode=image_panels with {len(panels)} panels exceeds "
-                f"PANEL_HARD_CAP={PANEL_HARD_CAP}.\n"
-                "Pure long-form image-panel runs hit Metal command-buffer "
-                "timeouts (see docs/long_form_model_inventory.md). Use "
-                "archival_footage for the bulk of the timeline and reserve "
-                "image gen for chapter cards / hero shots. Raise "
-                "long_form.panel_max_count in config.yaml only if you've "
-                "verified the new ceiling on a test render."
+        else:
+            video_path = build_image_panels_video(
+                panels=panels,
+                style_prefix=style_prefix,
+                image_provider=image_provider,
+                image_seed=int(lf.get("image_seed", 1944)),
+                image_steps=int(lf.get("image_steps", 4)),
+                image_width=int(lf.get("image_width", 1344)),
+                image_height=int(lf.get("image_height", 768)),
+                cache_dir=cache_dir,
+                out_w=out_w, out_h=out_h, fps=fps,
+                crossfade_s=float(lf.get("panel_crossfade_s", 1.5)),
+                zoom_factor=float(lf.get("panel_zoom_factor", 1.08)),
             )
-        # F5 already dropped at the renderer-stage boundary above; nothing
-        # more to do here. Image gen starts on a clean Metal heap regardless
-        # of which branch we're in.
-        # Auto-pad hold_s if total panel duration < narration duration.
-        total_panel_s = sum(float(p.get("hold_s", 20)) for p in panels)
-        if total_panel_s < dur - 1.0:
-            shortfall = dur - total_panel_s
-            extra_per_panel = shortfall / len(panels)
-            print(f"[2/5] panels total {total_panel_s:.1f}s < narration {dur:.1f}s "
-                  f"— extending each by {extra_per_panel:.1f}s to fill")
-            for p in panels:
-                p["hold_s"] = float(p.get("hold_s", 20)) + extra_per_panel
-        elif total_panel_s > dur + 1.0:
-            # If panels exceed narration, scale them down proportionally so the
-            # final mux's -shortest still trims to narration end.
-            scale = dur / total_panel_s
-            print(f"[2/5] panels total {total_panel_s:.1f}s > narration {dur:.1f}s "
-                  f"— scaling holds by {scale:.3f}")
-            for p in panels:
-                p["hold_s"] = float(p.get("hold_s", 20)) * scale
-        print(f"[2/5] image_panels: {len(panels)} panels → {out_w}x{out_h} {fps}fps "
-              f"with Ken-Burns + cross-fade…")
-        video_path = build_image_panels_video(
-            panels=panels,
-            style_prefix=lf.get("image_style_prefix", "").strip().replace("\n", " "),
-            image_provider=lf.get("image_provider", "z_image_turbo"),
-            image_seed=int(lf.get("image_seed", 1944)),
-            image_steps=int(lf.get("image_steps", 4)),
-            image_width=int(lf.get("image_width", 1344)),
-            image_height=int(lf.get("image_height", 768)),
-            cache_dir=cache_dir,
-            out_w=out_w, out_h=out_h, fps=fps,
-            crossfade_s=float(lf.get("panel_crossfade_s", 1.5)),
-            zoom_factor=float(lf.get("panel_zoom_factor", 1.08)),
-        )
     else:
-        shotlist_path = paths.shotlist_for(args.slug)
-        if not shotlist_path.exists():
-            raise SystemExit(
-                f"missing shotlist: {shotlist_path}\n"
-                "Long-form needs a shotlist with `clips: [{source, in_s, out_s}, ...]`\n"
-                "(or switch render_mode to 'image_panels')."
+        if used_overlap:
+            video_path = _concat_and_pad(
+                clip_paths=clip_paths,
+                cache_dir=cache_dir,
+                target_duration_s=dur,
+                fps=fps,
             )
-        shotlist = json.loads(shotlist_path.read_text())
-        # ``footage_dir`` is YAML-overridable (some channels store
-        # long-form sources in unconventional dirs). Default points at
-        # the canonical ``<channel>/footage/long_sources/`` location
-        # exposed via ``paths.footage_long_sources`` for new code.
-        sources_dir = channel_dir / lf.get("footage_dir", "footage/long_sources")
-        grade_cfg = lf.get("visual_grade") or {}
-        grade_filter = grade_cfg.get("filter") if grade_cfg.get("enabled") else None
-        if args.no_grade:
-            grade_filter = None
-        grade_label = "warm-firelight grade" if grade_filter else "no grade"
-        print(f"[2/5] archival_footage: trim {len(shotlist['clips'])} clips → "
-              f"{out_w}x{out_h} {fps}fps blurred letterbox + {grade_label}…")
-        video_path = build_video_track(
-            shotlist=shotlist,
-            sources_dir=sources_dir,
-            cache_dir=cache_dir,
-            target_duration_s=dur,
-            out_w=out_w, out_h=out_h, fps=fps,
-            grade_filter=grade_filter,
-        )
+        else:
+            video_path = build_video_track(
+                shotlist=shotlist,
+                sources_dir=sources_dir,
+                cache_dir=cache_dir,
+                target_duration_s=dur,
+                out_w=out_w, out_h=out_h, fps=fps,
+                grade_filter=grade_filter,
+            )
     video_dur = _probe_duration(video_path)
     print(f"[2/5] video → {video_path.name} {video_dur:.1f}s")
 
