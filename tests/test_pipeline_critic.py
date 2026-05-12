@@ -208,7 +208,12 @@ class CritiqueShortTest(unittest.TestCase):
             result = cr.critique_short(slug="slug", mp4_path=self.mp4, cache_dir=self.cache, out_dir=self.out)
         self.assertEqual(result["score"], 6)
         self.assertTrue((self.out / "slug.score.json").exists())
-        self.assertEqual(call.call_args.kwargs["allowed_tools"], ["Read", "Bash"])
+        # Audit S1.17 — critic must NOT have Bash. Pre-fix the call
+        # carried allowed_tools=["Read", "Bash"]; granting Bash to a
+        # vision-model evaluating frames was copy-paste residue from
+        # an earlier prototype that let the critic rm/curl/exfiltrate.
+        self.assertEqual(call.call_args.kwargs["allowed_tools"], ["Read"])
+        self.assertNotIn("Bash", call.call_args.kwargs["allowed_tools"])
         self.assertIs(call.call_args.kwargs["json_schema"], cr._CRITIC_SCHEMA)
 
     def test_non_dict_llm_output_raises(self):

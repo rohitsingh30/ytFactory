@@ -338,8 +338,11 @@ def critique_short(
         # emits only actionable findings instead of padding. Cuts output
         # tokens (~30% on observed runs) without losing per-frame detail.
         json_schema=_CRITIC_SCHEMA,
-        # Critic needs Read access to frames + beats.json.
-        allowed_tools=["Read", "Bash"],
+        # Audit S1.17 — critic only needs Read access to frames +
+        # beats.json. Pre-fix this also granted Bash, which would let
+        # the LLM rm/curl/exfiltrate during evaluation. Copy-paste
+        # residue from an earlier prototype; removed.
+        allowed_tools=["Read"],
         add_dirs=[frames_dir.resolve(), beats_path.parent.resolve()],
         timeout_s=600,
         budget_usd=1.5,
