@@ -235,16 +235,58 @@ def _atempo(in_wav: Path, out_wav: Path, factor: float) -> None:
     _ffmpeg(["-i", str(in_wav), "-filter:a", f"atempo={factor}", str(out_wav)])
 
 
+def _probe_wav_params(wav: Path) -> tuple[int, str]:
+    """Return (sample_rate, channel_layout) for the first audio stream
+    in ``wav``. Used by _wav_concat_with_silence to render the silence
+    joiner with matching params so concat-demuxer's -c copy doesn't
+    refuse the heterogeneous stream parameter set.
+
+    Audit T1.15 — pre-fix the silence wav was hardcoded to 44100 mono;
+    cloud Chatterbox / Higgs / IndicF5 routinely return 22050 Hz or
+    stereo, breaking the concat with "Non-monotonous DTS" errors or
+    forcing ffmpeg to refuse -c copy.
+    """
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=sample_rate,channel_layout,channels",
+            "-of", "default=nokey=1:noprint_wrappers=1",
+            str(wav),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    rate = 44100
+    layout = "mono"
+    if probe.returncode == 0:
+        lines = [ln.strip() for ln in (probe.stdout or "").splitlines() if ln.strip()]
+        # Output order matches the entries order: sample_rate, channels, channel_layout
+        if lines and lines[0].isdigit():
+            rate = int(lines[0])
+        # Prefer explicit channel_layout if present; else derive from channel count.
+        if len(lines) >= 3 and lines[2] and not lines[2].isdigit():
+            layout = lines[2]
+        elif len(lines) >= 2 and lines[1].isdigit():
+            n = int(lines[1])
+            layout = "mono" if n == 1 else ("stereo" if n == 2 else f"{n}c")
+    return rate, layout
+
+
 def _wav_concat_with_silence(wavs: list[Path], silence_s: float, out_wav: Path) -> None:
-    """Concat wavs with explicit silence joiners between."""
+    """Concat wavs with explicit silence joiners between.
+
+    Audit T1.15 — silence track is rendered with the SAME sample rate
+    + channel layout as the first input wav so concat-demuxer's
+    ``-c copy`` doesn't refuse the heterogeneous stream-parameter
+    set (cloud TTS providers don't always emit 44100/mono).
+    """
     if not wavs:
         raise ValueError("no wavs to concat")
-    # Build a filter graph: [0:a][1silence][1:a][2silence][2:a]...concat
-    # Simpler: render silence.wav once, then concat-demux.
+    rate, layout = _probe_wav_params(wavs[0])
     silence_wav = out_wav.parent / "_silence.wav"
     _ffmpeg([
         "-f", "lavfi", "-t", f"{silence_s}",
-        "-i", "anullsrc=r=44100:cl=mono",
+        "-i", f"anullsrc=r={rate}:cl={layout}",
         "-c:a", "pcm_s16le", str(silence_wav),
     ])
     list_txt = out_wav.parent / "_concat_list.txt"

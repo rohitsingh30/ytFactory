@@ -158,6 +158,72 @@ class EnvAndAdapterTests(unittest.TestCase):
             self.assertEqual(ff.call_count, 2)
             self.assertNotIn("_silence.wav", (tmp / "_concat_list.txt").read_text())
 
+    def test_wav_concat_silence_matches_input_sample_rate(self):
+        # Audit T1.15 — silence must be rendered at the same sample
+        # rate as the inputs so concat-demuxer's -c copy doesn't
+        # refuse the heterogeneous stream-parameter set. Cloud
+        # Chatterbox returns 22050 Hz mono, IndicF5 returns various
+        # rates; pre-fix this hardcoded 44100/mono and broke concat
+        # whenever inputs differed.
+        from unittest.mock import MagicMock
+        with local_tempdir() as tmp:
+            wavs = [write_wav(tmp / "a.wav"), write_wav(tmp / "b.wav")]
+            # Mock ffprobe to return 22050 Hz mono.
+            fake_probe = MagicMock()
+            fake_probe.returncode = 0
+            fake_probe.stdout = "22050\n1\nmono\n"
+            with patch.object(render_long_form, "_ffmpeg") as ff, \
+                 patch("subprocess.run", return_value=fake_probe):
+                render_long_form._wav_concat_with_silence(
+                    wavs, 0.25, tmp / "out.wav",
+                )
+            # First _ffmpeg call generates the silence wav. Its anullsrc
+            # spec MUST carry the probed rate, not 44100.
+            silence_call = ff.call_args_list[0].args[0]
+            cmd_str = " ".join(silence_call)
+            self.assertIn("anullsrc=r=22050", cmd_str)
+            self.assertNotIn("anullsrc=r=44100", cmd_str)
+
+    def test_probe_wav_params_falls_back_to_channels_count_when_layout_absent(self):
+        # Covers the channel_layout-empty fallback path: ffprobe didn't
+        # surface channel_layout for some odd containers, but channels
+        # count was reported. _probe_wav_params derives mono/stereo/Nc
+        # from the count.
+        from unittest.mock import MagicMock
+        with local_tempdir() as tmp:
+            wav = write_wav(tmp / "x.wav")
+            for n_channels, expected_layout in [
+                ("1", "mono"),
+                ("2", "stereo"),
+                ("6", "6c"),
+            ]:
+                with self.subTest(n_channels=n_channels):
+                    fake_probe = MagicMock()
+                    fake_probe.returncode = 0
+                    # Two-line output: rate + channels (no layout line).
+                    fake_probe.stdout = f"48000\n{n_channels}\n"
+                    with patch("subprocess.run", return_value=fake_probe):
+                        rate, layout = render_long_form._probe_wav_params(wav)
+                    self.assertEqual(rate, 48000)
+                    self.assertEqual(layout, expected_layout)
+
+
+    def test_wav_concat_silence_matches_stereo_layout(self):
+        from unittest.mock import MagicMock
+        with local_tempdir() as tmp:
+            wavs = [write_wav(tmp / "a.wav"), write_wav(tmp / "b.wav")]
+            fake_probe = MagicMock()
+            fake_probe.returncode = 0
+            fake_probe.stdout = "48000\n2\nstereo\n"
+            with patch.object(render_long_form, "_ffmpeg") as ff, \
+                 patch("subprocess.run", return_value=fake_probe):
+                render_long_form._wav_concat_with_silence(
+                    wavs, 0.25, tmp / "out.wav",
+                )
+            silence_call = ff.call_args_list[0].args[0]
+            cmd_str = " ".join(silence_call)
+            self.assertIn("anullsrc=r=48000:cl=stereo", cmd_str)
+
 
 # ---------------------------------------------------------------------------
 # synth_long_narration
