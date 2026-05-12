@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import hmac
 import os
 import re
 from typing import Any
@@ -79,7 +80,9 @@ def _require_auth(authorization: str | None) -> None:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "missing bearer token")
     token = authorization.removeprefix("Bearer ").strip()
-    if token != expected:
+    # Audit S1.16 — constant-time compare so an attacker can't byte-by-byte
+    # discover the token via response-time side channel.
+    if not hmac.compare_digest(token, expected):
         raise HTTPException(403, "invalid token")
 
 

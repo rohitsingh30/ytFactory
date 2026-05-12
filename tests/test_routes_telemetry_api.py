@@ -447,5 +447,38 @@ class TestLinks(_Base):
             os.environ.pop("GOOGLE_CLOUD_PROJECT", None)
 
 
+class TestRequireAuth(_Base):
+    """Audit S1.16 — token compare must use hmac.compare_digest, not '!='.
+    Asserting the failing-token branch returns 403 ensures the constant-time
+    compare path is exercised at runtime."""
+
+    def test_invalid_token_returns_403(self) -> None:
+        import os
+        os.environ["YTFACTORY_AGENT_TOKEN"] = "correct-token-value"
+        try:
+            r = self.client.get(
+                "/api/telemetry/overview",
+                headers={"Authorization": "Bearer wrong-token-value"},
+            )
+            self.assertEqual(r.status_code, 403)
+            self.assertIn("invalid token", r.text)
+        finally:
+            os.environ.pop("YTFACTORY_AGENT_TOKEN", None)
+
+    def test_valid_token_authorizes(self) -> None:
+        import os
+        os.environ["YTFACTORY_AGENT_TOKEN"] = "match-me"
+        try:
+            r = self.client.get(
+                "/api/telemetry/overview",
+                headers={"Authorization": "Bearer match-me"},
+            )
+            # Endpoint succeeds (or fails downstream for non-auth reasons).
+            self.assertNotEqual(r.status_code, 401)
+            self.assertNotEqual(r.status_code, 403)
+        finally:
+            os.environ.pop("YTFACTORY_AGENT_TOKEN", None)
+
+
 if __name__ == "__main__":
     unittest.main()
