@@ -130,6 +130,21 @@ card renderer — don't lowercase it for display, or the pill reads as
 - If we ever do, swap to PRAW with a registered app — the scraper is small
   enough that the swap is mechanical.
 
+## Cloud-side caveat: Reddit IP-blocks Cloud Run
+
+The unauthenticated `www.reddit.com/r/<sub>/<listing>.json` endpoint
+returns `403 Client Error: Blocked` from Cloud Run egress IPs
+(`asia-southeast1` confirmed). The cloud-side path runs through
+`pipeline/sources/reddit_api.py::_pick_backend()` instead, which
+auto-routes to the Pullpush archive when `K_SERVICE` env is set.
+
+Pullpush has its own quirks (Unix-int `after`, no `over_18` param,
+days-delayed, unreliable `?ids=` lookup) — see
+[`docs/pullpush_api_quirks.md`](./pullpush_api_quirks.md) before
+adding any new Pullpush call site, and
+[`docs/cloud_egress_blocked_apis.md`](./cloud_egress_blocked_apis.md)
+for the cross-cutting "egress-blocked" rule.
+
 ## Rendering Reddit cards
 
 See `pipeline/reddit_card.py`. Card kinds:

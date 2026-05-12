@@ -167,6 +167,23 @@ when the user clicks "Use this".
 * The endpoint **never** returns 422 for "unknown channel" any more —
   every channel is handled.
 
+### Both legs MUST log loudly when they fail (2026-05-12)
+
+When BOTH native source AND LLM brainstorm return empty, the user
+gets a 502 with no upstream cause unless each leg logs its own
+failure at WARNING. Pre-2026-05-12, `_llm_topic_items` had FOUR
+silent `return []` paths (raised exception, non-JSON string,
+non-dict result, empty `items` array, all-items-discarded). The
+2026-05-12 outage hid an Azure `gpt-5.3-chat` 400 ("Unsupported
+parameter: 'max_tokens'") behind those silent returns for an
+unknown duration.
+
+All four paths now log at WARNING with channel + variant + niche +
+the actual error string. The reference catch-and-degrade pattern
+is `pipeline/sources/reddit_api.py::_safe_native_items_for`. The
+cross-cutting rule lives at
+[`docs/fail_loud_fallback_paths.md`](./fail_loud_fallback_paths.md).
+
 ## Frontend wiring
 
 `web-next/lib/api.ts::discoverApi.{feed,pickOne}` accept an optional

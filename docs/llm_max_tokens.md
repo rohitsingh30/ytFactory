@@ -129,18 +129,30 @@ gcloud run jobs update ytfactory-render-worker-v2 \
   --update-env-vars=YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM=16000
 ```
 
-## Why max_tokens, not max_completion_tokens, on Azure
+## Why max_tokens, not max_completion_tokens, on Azure (with self-heal)
 
 The `openai` Python SDK accepts both for chat completions. Reasoning
-models (o1, o3) REQUIRE `max_completion_tokens` and reject
-`max_tokens`; gpt-4o and earlier accept either, with `max_tokens`
-being the canonical name. Our `opus` tier resolves to `gpt-4o` today.
+models (o1, o3, **and gpt-5.x as of 2026-05-12**) REQUIRE
+`max_completion_tokens` and reject `max_tokens`; gpt-4o and earlier
+accept either, with `max_tokens` being the canonical name.
 
-If the opus tier moves to a reasoning-model deployment, swap to
+**Self-healing retry (commit e600e22, 2026-05-12):**
+`_call_azure_openai` sends `max_tokens` first; on the specific 400
+("Unsupported parameter: 'max_tokens' is not supported with this
+model. Use 'max_completion_tokens' instead.") it retries once with
+the kwarg renamed (same value, same intent). Mirrors the existing
+`response_format` self-heal. No code change needed when a deployment
+silently moves to a reasoning family.
+
+This replaces the earlier prescription in this section ("swap to
 `max_completion_tokens` in `_call_azure_openai` (single-line change)
-— OR set the env var `AZURE_OPENAI_MODEL_OPUS=<reasoning-deploy>`
-and conditionally branch in the kwargs builder. The dispatcher is
-already structured for that branching.
+— OR set the env var") which **never actually landed in code**. The
+2026-05-12 prod incident hit the un-shipped path: `gpt-5.3-chat`
+became a reasoning deployment, every Azure call 400'd, the discover
+LLM brainstorm fallback silently returned `[]`, and the cascade-on-
+top of a Reddit-403 surfaced as a 502 on
+`/api/discover/mystoriesanimated`. See
+`feedback_doc_aspirational_claims.md` for the meta-pattern.
 
 ## Verification
 

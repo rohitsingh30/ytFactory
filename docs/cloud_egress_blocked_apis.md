@@ -187,6 +187,13 @@ wrapper pattern.
 
 ## Cross-references
 
+- [`docs/pullpush_api_quirks.md`](./pullpush_api_quirks.md) — concrete
+  Pullpush API receipts (Unix-int `after`, no `over_18`, days-delayed,
+  `?ids=` unreliable). Read before adding any new Pullpush call site.
+- [`docs/fail_loud_fallback_paths.md`](./fail_loud_fallback_paths.md) —
+  the cross-cutting rule that the discover route's LLM-fallback leg
+  MUST log loudly. The 2026-05-12 outage hid an Azure 400 behind
+  silent return-`[]` paths.
 - [`docs/discover_topic_generation.md`](./discover_topic_generation.md) —
   the dispatcher pattern (`_safe_native_items_for` + LLM blend).
 - [`docs/reddit_scraping.md`](./reddit_scraping.md) — Reddit JSON-API
