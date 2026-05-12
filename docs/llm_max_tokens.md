@@ -259,6 +259,119 @@ The cache + env layered design means agents never have to hardcode
 the answer — leave the env unset and the cache learns it on the
 first call. Set the env in production purely as a perf optimisation.
 
+## 2026-05-13 update — reasoning-token starvation + finish_reason auto-retry (commit `cc8bd4f`)
+
+The 2026-05-12 fix bumped long-form to 12000 max tokens and that worked
+for the original deployment. Then on 2026-05-13 a fresh 30-min long-form
+render (job `5e37f76b...`, "The mystery surrounding Britney Spears" /
+later "Leigh Occhi") failed with:
+
+```
+ClaudeCLIError: could not parse JSON from model output:
+{
+  "hook": "On the morning of August 27th, 1992...",
+  "thesis": "New investigative attention and emerging tips could
+             reshape what we think happened to     ← cut off mid-string
+```
+
+The error is **misleading**. The JSON wasn't malformed; it was
+**truncated**. Azure returned `finish_reason="length"` and silently
+chopped the response.
+
+### Why 12000 wasn't enough
+
+`max_completion_tokens` on **reasoning** deployments (gpt-5.x / o1 /
+o3) bills **invisible reasoning tokens** against the same budget as
+output. The reasoning trace never appears in the response — it's pure
+billing overhead — but it eats the cap.
+
+Observed on `gpt-5.3-chat` for a 30-min long-form rewrite call (default
+`reasoning_effort=high`):
+
+| stage of budget consumption     | tokens        |
+|---------------------------------|---------------|
+| reasoning (invisible)           | ~15-20k       |
+| target output (script + JSON)   | ~9k           |
+| **total needed**                | **~24-29k**   |
+| pre-fix budget                  | 12k → bust    |
+
+With a 12000 cap, reasoning ate the whole budget AND pushed past it,
+leaving a few hundred tokens of output that landed mid-string. The
+upstream `_parse_inner_json` then failed with the misleading "could
+not parse JSON" message.
+
+### Three fixes shipped (commit `cc8bd4f`, 2026-05-13)
+
+**1. Bumped per-stage defaults.** Long-form rewrite 12000 → 32000
+(reasoning ~20k + output ~9k + 30% margin); every other stage
+4096 → 8192 (small reasoning + small output, but 4k is still tight
+on reasoning deployments).
+
+**2. `finish_reason="length"` auto-retry.** After every Azure call,
+inspect `resp.choices[0].finish_reason`. If it's `"length"`, double
+the budget (capped at `_MAX_TOKEN_AUTO_BUMP_CEILING`, default 64000)
+and retry once. If it succeeds, the operator gets the script + a
+warning log naming the cap that bottomed out — they can then bump the
+permanent default via `YTFACTORY_MAX_TOKENS_<STAGE>` if it's a stage
+that consistently needs more.
+
+**3. Actionable error on persistent truncation.** If the doubled
+budget ALSO returns `finish_reason="length"` (or the doubled budget
+exceeds the ceiling and we never retried), surface a clear error
+instead of letting `_parse_inner_json` fail:
+
+```
+ClaudeCLIError: azure_openai stage=rewrite_long_form
+deployment=gpt-5.3-chat output truncated by max_completion_tokens=32000
+(finish_reason=length, completion_tokens=32000, reasoning_tokens=24500).
+Bump via env: YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM=64000.
+Reasoning deployments (gpt-5.x / o1 / o3) consume max_completion_tokens
+for INVISIBLE reasoning tokens — see docs/llm_max_tokens.md.
+```
+
+The error names the deployment, the cap that bottomed out, the
+reasoning-token count (so the operator can see whether to bump the
+budget OR turn down `reasoning_effort` — see
+[`docs/llm_reasoning_effort.md`](./llm_reasoning_effort.md)), and the
+exact env var to set.
+
+### Auto-bump ceiling env
+
+```bash
+# Allow the doubling retry to go to 128k (gpt-5.4 hard cap if/when shipped):
+gcloud run jobs update ytfactory-render-worker-v2 \
+  --region asia-southeast1 --project ytfactory-prod-v2 \
+  --update-env-vars=YTFACTORY_MAX_TOKENS_AUTO_BUMP_CEILING=128000
+```
+
+Default 64000 matches Azure gpt-5.x's typical per-deployment hard cap.
+Floor is `_FALLBACK_MAX_TOKENS` (4096) — invalid env values are
+silently ignored.
+
+### Pin tests
+
+`tests/test_llm_dispatcher.py`:
+- `test_finish_reason_length_auto_retries_with_doubled_budget`
+- `test_finish_reason_length_after_retry_raises_actionable_error`
+- `test_finish_reason_length_caps_at_auto_bump_ceiling`
+- `test_finish_reason_length_retry_failure_surfaces_actionable_error`
+
+### Why this matters more than the 2026-05-12 fix
+
+The 2026-05-12 fix solved the "schema validator passes truncated dict
+silently" case (where the dict was small enough to LOOK valid). The
+2026-05-13 fix solves the "JSON parse fails with misleading error"
+case (where the dict was big enough to be obviously broken but the
+upstream surface error pointed at the wrong layer).
+
+Combined, the long-form pipeline is now resilient against:
+- truncation that produces a syntactically valid but
+  semantically-short script (caught by section-count check upstream)
+- truncation that produces invalid JSON (caught by the auto-retry +
+  explicit error here)
+- reasoning-deployment migrations that change the budget arithmetic
+  (the 8x default headroom on long-form absorbs the swing)
+
 ## Cross-references
 
 - Pipeline source: `pipeline/llm/cli.py::max_tokens_for`,
@@ -267,5 +380,8 @@ first call. Set the env in production purely as a perf optimisation.
 - Backend dispatcher overview: `docs/llm_backend_dispatcher.md`
 - Per-stage model defaults (sister table): `_DEFAULT_MODEL_BY_STAGE`
   in `pipeline/llm/cli.py`
+- Reasoning-token cost optimization (slashes the budget pressure
+  this doc handles): [`docs/llm_reasoning_effort.md`](./llm_reasoning_effort.md)
 - Memory: `feedback_llm_sdk_max_tokens.md`
-- Original render that surfaced this: job `8413e79dfbc244c3b27a46271d95f46d`
+- Original render that surfaced the 2026-05-12 fix: job `8413e79dfbc244c3b27a46271d95f46d`
+- Render that surfaced the 2026-05-13 truncation handling: job `5e37f76b...` ("Leigh Occhi" mystoriesanimated long-form)

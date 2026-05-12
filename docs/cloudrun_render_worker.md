@@ -120,6 +120,50 @@ AZURE_OPENAI_TOKEN_PARAM=max_tokens
 by exporting before invoking. See `docs/llm_max_tokens.md` §
 "2026-05-13 update" for the full design.
 
+### `YTFACTORY_REASONING_EFFORT_<STAGE>` (cost optimization, 2026-05-13)
+
+gpt-5.x / o1 / o3 deployments accept a `reasoning_effort` parameter
+(`minimal` / `low` / `medium` / `high`) controlling how many invisible
+reasoning tokens the model burns before output. Default `high` burns
+~15-20k tokens per call — pure billing overhead on transformation
+stages that don't benefit from it.
+
+`pipeline/llm/cli.py::reasoning_effort_for(stage)` maps:
+- `rewrite_long_form` → `medium`
+- `critic` → `medium`
+- everything else → `minimal`
+
+Override per stage at runtime:
+
+```bash
+gcloud run jobs update ytfactory-render-worker-v2 \
+  --region asia-southeast1 --project ytfactory-prod-v2 \
+  --update-env-vars=YTFACTORY_REASONING_EFFORT_REWRITE=low
+
+# Disable globally (legacy gpt-4o deployments — auto-strip on 400 also
+# handles this, but env skips the discovery round-trip on first call):
+AZURE_REASONING_EFFORT_DISABLE=1
+```
+
+Estimated savings: ~70% of token cost per render. Full design in
+[`docs/llm_reasoning_effort.md`](./llm_reasoning_effort.md).
+
+### `YTFACTORY_MAX_TOKENS_AUTO_BUMP_CEILING` (truncation safety net, 2026-05-13)
+
+When Azure returns `finish_reason="length"`, the dispatcher doubles
+the budget and retries once — capped at this ceiling. Default 64000;
+floor 4096. Bump for future deployments with bigger hard caps:
+
+```bash
+YTFACTORY_MAX_TOKENS_AUTO_BUMP_CEILING=128000
+```
+
+If the doubled budget ALSO truncates (or the cap was already at the
+ceiling), `ClaudeCLIError` surfaces with the deployment, the cap that
+bottomed out, the reasoning_tokens count, and the exact
+`YTFACTORY_MAX_TOKENS_<STAGE>` env to bump. See
+[`docs/llm_max_tokens.md`](./llm_max_tokens.md) § "2026-05-13 update".
+
 ## Render modes
 
 | Mode | What runs |

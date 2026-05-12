@@ -53,6 +53,19 @@ generic env applies to every tier alias.
   ("matching this schema" / "ONLY a JSON object"); parses client-side
   via `_parse_inner_json`.
 
+## Reasoning-effort per stage (2026-05-13)
+
+The Azure backend resolves a `reasoning_effort` per-call via
+`reasoning_effort_for(stage)` and passes it as a kwarg if (and only
+if) the deployment accepts it. Per-deployment support is cached the
+same way as `AZURE_OPENAI_TOKEN_PARAM` (try → cache rejection →
+skip on subsequent calls).
+
+Default is `minimal` for transformation stages; `medium` for
+`rewrite_long_form` and `critic` (where reasoning genuinely helps).
+Saves ~70% of token cost per render. Full design in
+[`docs/llm_reasoning_effort.md`](./llm_reasoning_effort.md).
+
 ## Vision-aware kwargs
 
 `add_dirs` + `allowed_tools` are CLI-only today. The SDK backends
