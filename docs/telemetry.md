@@ -390,6 +390,38 @@ gcloud run services logs tail ytfactory-tts-chatterbox \
   the dashboard always has a same-process source of recent events.
   See "In-process shadow log buffer" above for caveats and tuning
   knobs.
+- **2026-05-12 (later) — dashboard reads Cloud Logging in production.**
+  The shadow-buffer fix above unblocked the laptop dashboard, but in
+  cloud the dashboard was STILL empty: the web-server is a thin BFF,
+  so its in-process buffer never sees render-worker / TTS / image
+  events (each runs in its own process). Two-part fix:
+    1. **Cloud Run-shaped JSON log exporter**
+       (`pipeline/observability/cloud_run_json_exporter.py`, copied
+       per-service via `cloud/_shared/cloud_run_json_exporter.py`).
+       Replaces `ConsoleLogRecordExporter` in the gcp branch.
+       Cloud Run's structured-log shipper promotes each `severity`-
+       containing JSON line to a `jsonPayload` Cloud Logging entry
+       with every `ytfactory.*` field individually queryable. Pre-fix
+       these landed as multi-line `textPayload` and could not be
+       filtered cross-service.
+    2. **Cloud Logging reader for the dashboard**
+       (`pipeline/observability/cloud_log_reader.py`). When the
+       active OTel mode is `gcp` and `GOOGLE_CLOUD_PROJECT` is set,
+       `read_events()` queries Cloud Logging API for
+       `jsonPayload."ytfactory.event"!=""` records over the requested
+       window, normalises them to the legacy dict shape, and TTL-
+       caches results so dashboard polls don't hammer the API.
+       Fails open: any reader failure falls back to the in-process
+       buffer rather than crashing the dashboard.
+  Tuning knobs:
+    * `YTFACTORY_TELEMETRY_CLOUDLOG_DISABLE=1` — disable the reader
+      entirely; force fallback to the in-process buffer.
+    * `YTFACTORY_TELEMETRY_CLOUDLOG_TTL=15` — cache TTL in seconds
+      (default 15 s).
+    * `YTFACTORY_TELEMETRY_CLOUDLOG_LIMIT=1000` — max records per
+      query (default 1000).
+  Slim cloud build dep added: `google-cloud-logging>=3.10` in
+  `requirements-control.txt` (the laptop venv already had it).
 
 ## Operational rules
 
