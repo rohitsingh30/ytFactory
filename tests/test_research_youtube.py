@@ -102,6 +102,12 @@ def _make_http_error(status: int):
     class _Resp:
         def __init__(self, s):
             self.status = s
+            # googleapiclient's HttpError._get_reason reads .reason for
+            # str() — pre-T1.9 the existing 403 tests stringified the
+            # error directly via repr(); the new retry tests trigger
+            # the str() path inside _is_retryable_http_error which
+            # expects a reason attr.
+            self.reason = f"HTTP {s}"
     return err_mod.HttpError(_Resp(status), b"forbidden")
 
 
@@ -634,6 +640,85 @@ class FetchUploadsPlaylistTest(unittest.TestCase):
         result = yt_mod._fetch_uploads_playlist(yt, "PLtest")
         self.assertEqual(result, ["VALID"])
 
+    def test_retries_transient_5xx_then_succeeds(self):
+        """Audit T1.9 — pre-fix, ANY HttpError mid-pagination broke
+        the loop and silently truncated the cached video list. Now
+        transient 5xx + 429 retry up to 3 times so a single flaky
+        Google response doesn't drop historical stats."""
+
+        class FlakyOnce:
+            def __init__(self, pages):
+                self._pages = pages
+                self._fail_count = 0
+
+            def list(self, *, part, playlistId, maxResults, pageToken):
+                # First call to None page fails 503; subsequent calls
+                # succeed. Ensures the retry actually re-issues the
+                # request rather than just no-op'ing.
+                if pageToken is None and self._fail_count == 0:
+                    self._fail_count += 1
+                    raise _make_http_error(503)
+                return _FakeRequest(self._pages.get(
+                    pageToken, {"items": [], "nextPageToken": None},
+                ))
+
+        pages = {
+            None: {"items": [{"contentDetails": {"videoId": "V1"}}]},
+        }
+        yt = _FakeYouTube(
+            channels=_FakeChannels(),
+            playlist_items=FlakyOnce(pages),
+            videos=_FakeVideos({}),
+        )
+        # Patch time.sleep so the test stays fast.
+        with patch("pipeline.research.youtube.time.sleep"):
+            result = yt_mod._fetch_uploads_playlist(yt, "PLtest")
+        self.assertEqual(result, ["V1"])
+
+    def test_retries_429_then_succeeds(self):
+        # 429 (rate limit) is also retryable.
+        class FlakyOnce429:
+            def __init__(self, pages):
+                self._pages = pages
+                self._failed = False
+
+            def list(self, *, part, playlistId, maxResults, pageToken):
+                if not self._failed:
+                    self._failed = True
+                    raise _make_http_error(429)
+                return _FakeRequest(self._pages.get(
+                    pageToken, {"items": [], "nextPageToken": None},
+                ))
+
+        pages = {None: {"items": [{"contentDetails": {"videoId": "V1"}}]}}
+        yt = _FakeYouTube(
+            channels=_FakeChannels(),
+            playlist_items=FlakyOnce429(pages),
+            videos=_FakeVideos({}),
+        )
+        with patch("pipeline.research.youtube.time.sleep"):
+            result = yt_mod._fetch_uploads_playlist(yt, "PLtest")
+        self.assertEqual(result, ["V1"])
+
+    def test_permanent_403_does_NOT_retry(self):
+        # 403 quotaExceeded / auth is permanent — no point retrying.
+        # Existing behaviour preserved (truncate at the failed page).
+        pages = {None: {"items": [{"contentDetails": {"videoId": "V1"}}]}}
+
+        class Permanent403:
+            def list(self, **kw):
+                raise _make_http_error(403)
+
+        yt = _FakeYouTube(
+            channels=_FakeChannels(),
+            playlist_items=Permanent403(),
+            videos=_FakeVideos({}),
+        )
+        with patch("pipeline.research.youtube.time.sleep") as ts:
+            result = yt_mod._fetch_uploads_playlist(yt, "PLtest")
+        self.assertEqual(result, [])
+        ts.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # _parse_iso8601_duration
@@ -744,6 +829,53 @@ class FetchVideosBatchTest(unittest.TestCase):
         _install_fake_google(yt)
         result = yt_mod._fetch_videos_batch(yt, ["VID1"])
         self.assertEqual(result, {})
+
+    def test_videos_batch_retries_transient_5xx(self):
+        # Audit T1.9 — _fetch_videos_batch must retry transient 5xx
+        # so a single flaky chunk doesn't drop 50 videos from the
+        # cache.
+        item = {
+            "id": "V1",
+            "snippet": {"title": "T", "description": "", "publishedAt": "",
+                        "channelId": "", "channelTitle": "", "thumbnails": {}, "tags": []},
+            "statistics": {"viewCount": "100"},
+            "contentDetails": {"duration": "PT1M"},
+            "status": {"privacyStatus": "public"},
+        }
+
+        class FlakyVideos:
+            def __init__(self):
+                self._failed = False
+
+            def list(self, *, part, id):
+                if not self._failed:
+                    self._failed = True
+                    raise _make_http_error(503)
+                return _FakeRequest({"items": [item]})
+
+        yt = _FakeYouTube(
+            channels=_FakeChannels(),
+            playlist_items=_FakePlaylistItems({}),
+            videos=FlakyVideos(),
+        )
+        with patch("pipeline.research.youtube.time.sleep"):
+            result = yt_mod._fetch_videos_batch(yt, ["V1"])
+        self.assertIn("V1", result)
+
+    def test_videos_batch_permanent_403_does_not_retry(self):
+        class Permanent403:
+            def list(self, **kw):
+                raise _make_http_error(403)
+
+        yt = _FakeYouTube(
+            channels=_FakeChannels(),
+            playlist_items=_FakePlaylistItems({}),
+            videos=Permanent403(),
+        )
+        with patch("pipeline.research.youtube.time.sleep") as ts:
+            result = yt_mod._fetch_videos_batch(yt, ["VID1"])
+        self.assertEqual(result, {})
+        ts.assert_not_called()
 
     def test_missing_stats_fields_produce_none(self):
         vid_item = {

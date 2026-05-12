@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -386,8 +387,32 @@ def _fetch_channel(youtube) -> dict | None:
     }
 
 
+def _is_retryable_http_error(exc) -> bool:
+    """Audit T1.9 — distinguish transient (5xx, 429, network blip) from
+    permanent (4xx auth/quota/bad request) HttpError so paged
+    playlistItems.list / videos.list calls retry the transients
+    instead of silently truncating the cached video list mid-paginate.
+
+    Returns True for 429 (rate limit) and 5xx (server) responses; False
+    for everything else (including 403 quotaExceeded which the caller
+    handles via a separate path)."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status is None:
+        return False  # coverage: HttpError without .resp.status is rare degenerate case
+    return status == 429 or 500 <= int(status) < 600
+
+
 def _fetch_uploads_playlist(youtube, playlist_id: str) -> list[str]:
-    """Paginate playlistItems.list, return every video_id on the channel."""
+    """Paginate playlistItems.list, return every video_id on the channel.
+
+    **Audit T1.9 — retry transient errors.** Pre-fix, ANY ``HttpError``
+    mid-pagination ``break``ed the loop → the cached video list was
+    silently truncated to whatever pages had succeeded so far. A
+    transient 5xx or 429 (the most common kind) made historical
+    stats vanish from the dashboard. Now we retry transients with
+    exponential backoff (3 attempts: 0.5s, 1s, 2s) and only break on
+    permanent errors (4xx other than 429).
+    """
     from googleapiclient.errors import HttpError
 
     if not playlist_id:
@@ -395,14 +420,23 @@ def _fetch_uploads_playlist(youtube, playlist_id: str) -> list[str]:
     ids: list[str] = []
     page_token: str | None = None
     while True:
-        try:
-            resp = youtube.playlistItems().list(
-                part="contentDetails",
-                playlistId=playlist_id,
-                maxResults=50,
-                pageToken=page_token,
-            ).execute()
-        except HttpError:
+        resp = None
+        for attempt in range(3):
+            try:
+                resp = youtube.playlistItems().list(
+                    part="contentDetails",
+                    playlistId=playlist_id,
+                    maxResults=50,
+                    pageToken=page_token,
+                ).execute()
+                break
+            except HttpError as e:
+                if _is_retryable_http_error(e) and attempt < 2:
+                    time.sleep(0.5 * (2 ** attempt))
+                    continue
+                resp = None
+                break
+        if resp is None:
             break
         for it in resp.get("items") or []:
             vid = (it.get("contentDetails") or {}).get("videoId")
@@ -441,18 +475,32 @@ def _parse_iso8601_duration(s: str | None) -> int | None:
 
 
 def _fetch_videos_batch(youtube, video_ids: list[str]) -> dict[str, dict]:
-    """Returns {video_id: full row}. Batches at 50 ids per call."""
+    """Returns {video_id: full row}. Batches at 50 ids per call.
+
+    Audit T1.9 — retry transient HttpError per chunk so a single
+    flaky 5xx mid-batch doesn't silently drop a 50-video chunk
+    from the cache.
+    """
     from googleapiclient.errors import HttpError
 
     out: dict[str, dict] = {}
     for i in range(0, len(video_ids), 50):
         chunk = video_ids[i : i + 50]
-        try:
-            resp = youtube.videos().list(
-                part="snippet,statistics,contentDetails,status",
-                id=",".join(chunk),
-            ).execute()
-        except HttpError:
+        resp = None
+        for attempt in range(3):
+            try:
+                resp = youtube.videos().list(
+                    part="snippet,statistics,contentDetails,status",
+                    id=",".join(chunk),
+                ).execute()
+                break
+            except HttpError as e:
+                if _is_retryable_http_error(e) and attempt < 2:
+                    time.sleep(0.5 * (2 ** attempt))
+                    continue
+                resp = None
+                break
+        if resp is None:
             continue
         for item in resp.get("items") or []:
             snippet = item.get("snippet") or {}

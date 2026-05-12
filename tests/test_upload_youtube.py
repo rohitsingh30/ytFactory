@@ -64,9 +64,23 @@ class _FakeResp:
         self.reason = "HTTP Error"
 
 
-def _make_http_error(status: int):
+def _make_http_error(status: int, content: bytes = b"error body"):
     from googleapiclient.errors import HttpError
-    return HttpError(resp=_FakeResp(status), content=b"error body")
+    return HttpError(resp=_FakeResp(status), content=content)
+
+
+def _make_quota_http_error(reason: str = "quotaExceeded"):
+    """403 with the documented YouTube Data API quota error body shape."""
+    body = json.dumps({
+        "error": {
+            "code": 403,
+            "message": "The request cannot be completed because you have "
+                       "exceeded your quota.",
+            "errors": [{"reason": reason, "domain": "youtube.quota",
+                        "message": "quota over"}],
+        },
+    }).encode()
+    return _make_http_error(403, content=body)
 
 
 def _make_fake_youtube(video_id="vid123"):
@@ -1231,6 +1245,164 @@ class TestYoutubeUpload(_UploadTestBase):
         mp4 = self._mk_mp4()
         yt = _make_fake_youtube()
         yt.videos.return_value.insert.return_value.next_chunk.side_effect = _make_http_error(400)
+        mock_build.return_value = yt
+        with self.assertRaises(UploadError):
+            youtube_upload(mp4, title="T", description="D", tags=[])
+
+    @patch("pipeline.upload.upload.authenticate")
+    @patch("googleapiclient.http.MediaFileUpload")
+    @patch("googleapiclient.discovery.build")
+    def test_403_quota_exceeded_raises_typed_QuotaExceededError(
+        self, mock_build, mock_media, mock_auth,
+    ):
+        # Audit T1.10 — 403 quotaExceeded must surface as the typed
+        # QuotaExceededError so the caller can defer the slug until
+        # the YouTube quota window resets, instead of treating it as
+        # a generic auth failure.
+        from pipeline.upload.upload import QuotaExceededError
+        mp4 = self._mk_mp4()
+        yt = _make_fake_youtube()
+        yt.videos.return_value.insert.return_value.next_chunk.side_effect = (
+            _make_quota_http_error("quotaExceeded")
+        )
+        mock_build.return_value = yt
+        with self.assertRaises(QuotaExceededError) as ctx:
+            youtube_upload(mp4, title="T", description="D", tags=[])
+        self.assertEqual(ctx.exception.reason, "quotaExceeded")
+
+    @patch("pipeline.upload.upload.authenticate")
+    @patch("googleapiclient.http.MediaFileUpload")
+    @patch("googleapiclient.discovery.build")
+    def test_403_other_quota_reasons_also_raise_QuotaExceededError(
+        self, mock_build, mock_media, mock_auth,
+    ):
+        from pipeline.upload.upload import QuotaExceededError
+        for reason in ("rateLimitExceeded", "userRateLimitExceeded",
+                       "uploadLimitExceeded", "dailyLimitExceeded"):
+            with self.subTest(reason=reason):
+                mp4 = self._mk_mp4()
+                yt = _make_fake_youtube()
+                yt.videos.return_value.insert.return_value.next_chunk.side_effect = (
+                    _make_quota_http_error(reason)
+                )
+                mock_build.return_value = yt
+                with self.assertRaises(QuotaExceededError) as ctx:
+                    youtube_upload(mp4, title="T", description="D", tags=[])
+                self.assertEqual(ctx.exception.reason, reason)
+
+    @patch("pipeline.upload.upload.authenticate")
+    @patch("googleapiclient.http.MediaFileUpload")
+    @patch("googleapiclient.discovery.build")
+    def test_403_non_quota_reason_stays_generic_UploadError(
+        self, mock_build, mock_media, mock_auth,
+    ):
+        # 403 with a non-quota reason (e.g. forbidden / disabled)
+        # should NOT be misclassified as quota-exhaustion.
+        from pipeline.upload.upload import QuotaExceededError
+        mp4 = self._mk_mp4()
+        yt = _make_fake_youtube()
+        body = json.dumps({
+            "error": {"errors": [{"reason": "forbidden"}]},
+        }).encode()
+        yt.videos.return_value.insert.return_value.next_chunk.side_effect = (
+            _make_http_error(403, content=body)
+        )
+        mock_build.return_value = yt
+        with self.assertRaises(UploadError) as ctx:
+            youtube_upload(mp4, title="T", description="D", tags=[])
+        self.assertNotIsInstance(ctx.exception, QuotaExceededError)
+
+
+class TestHttpErrorQuotaReason(_UploadTestBase):
+    """Audit T1.10 — direct unit tests for _http_error_quota_reason
+    helper that distinguishes quota-class 403s from other 403s."""
+
+    def test_non_403_returns_none(self):
+        from pipeline.upload.upload import _http_error_quota_reason
+        self.assertIsNone(_http_error_quota_reason(_make_http_error(500)))
+
+    def test_403_with_quota_reason_returns_reason(self):
+        from pipeline.upload.upload import _http_error_quota_reason
+        err = _make_quota_http_error("rateLimitExceeded")
+        self.assertEqual(
+            _http_error_quota_reason(err), "rateLimitExceeded",
+        )
+
+    def test_403_non_json_body_returns_none(self):
+        # Defensive: body that doesn't parse as JSON ≠ quota.
+        from pipeline.upload.upload import _http_error_quota_reason
+        err = _make_http_error(403, content=b"not json {{{")
+        self.assertIsNone(_http_error_quota_reason(err))
+
+    def test_403_json_with_no_errors_array_returns_none(self):
+        from pipeline.upload.upload import _http_error_quota_reason
+        body = json.dumps({"error": {"code": 403}}).encode()
+        err = _make_http_error(403, content=body)
+        self.assertIsNone(_http_error_quota_reason(err))
+
+    def test_403_json_unknown_reason_returns_none(self):
+        from pipeline.upload.upload import _http_error_quota_reason
+        body = json.dumps({
+            "error": {"errors": [{"reason": "youtubeSignupRequired"}]},
+        }).encode()
+        err = _make_http_error(403, content=body)
+        self.assertIsNone(_http_error_quota_reason(err))
+
+
+    @patch("pipeline.upload.upload.authenticate")
+    @patch("googleapiclient.http.MediaFileUpload")
+    @patch("pipeline.upload.upload.time")
+    @patch("googleapiclient.discovery.build")
+    def test_socket_timeout_retries_then_succeeds(
+        self, mock_build, mock_time, mock_media, mock_auth,
+    ):
+        # Audit Q2.28 — socket.timeout from next_chunk() must retry
+        # via the resumable infrastructure, not crash the upload.
+        import socket as _socket
+        mp4 = self._mk_mp4()
+        yt = _make_fake_youtube()
+        yt.videos.return_value.insert.return_value.next_chunk.side_effect = [
+            _socket.timeout("read timed out"),
+            (None, {"id": "vid_socket", "kind": "youtube#video", "etag": "e"}),
+        ]
+        mock_build.return_value = yt
+        result = youtube_upload(mp4, title="T", description="D", tags=[])
+        self.assertEqual(result["video_id"], "vid_socket")
+        mock_time.sleep.assert_called()
+
+    @patch("pipeline.upload.upload.authenticate")
+    @patch("googleapiclient.http.MediaFileUpload")
+    @patch("pipeline.upload.upload.time")
+    @patch("googleapiclient.discovery.build")
+    def test_connection_error_retries_then_succeeds(
+        self, mock_build, mock_time, mock_media, mock_auth,
+    ):
+        mp4 = self._mk_mp4()
+        yt = _make_fake_youtube()
+        yt.videos.return_value.insert.return_value.next_chunk.side_effect = [
+            ConnectionResetError("connection reset by peer"),
+            (None, {"id": "vid_conn", "kind": "youtube#video", "etag": "e"}),
+        ]
+        mock_build.return_value = yt
+        result = youtube_upload(mp4, title="T", description="D", tags=[])
+        self.assertEqual(result["video_id"], "vid_conn")
+        mock_time.sleep.assert_called()
+
+    @patch("pipeline.upload.upload.authenticate")
+    @patch("googleapiclient.http.MediaFileUpload")
+    @patch("pipeline.upload.upload.time")
+    @patch("googleapiclient.discovery.build")
+    def test_socket_timeout_exceeds_backoff_raises(
+        self, mock_build, mock_time, mock_media, mock_auth,
+    ):
+        # 7 retries with backoff 1,2,4,8,16,32,64 → next would be
+        # 128 > 64, so eventually raise.
+        import socket as _socket
+        mp4 = self._mk_mp4()
+        yt = _make_fake_youtube()
+        yt.videos.return_value.insert.return_value.next_chunk.side_effect = [
+            _socket.timeout("timeout"),
+        ] * 8
         mock_build.return_value = yt
         with self.assertRaises(UploadError):
             youtube_upload(mp4, title="T", description="D", tags=[])

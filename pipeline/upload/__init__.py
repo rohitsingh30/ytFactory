@@ -22,6 +22,7 @@ _UPLOAD_PUBLIC = (
     "SECRETS_ROOT",
     "UploadError",
     "RefreshTokenLost",
+    "QuotaExceededError",
     "authenticate",
     "compute_throttled_publish_at",
     "derive_metadata",

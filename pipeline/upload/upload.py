@@ -311,6 +311,65 @@ class RefreshTokenLost(UploadError):
         )
 
 
+class QuotaExceededError(UploadError):
+    """The YouTube Data API has refused this call due to quota exhaustion.
+
+    Audit T1.10 — pre-fix the upload pipeline raised a generic
+    ``UploadError`` for 403 responses, which the caller could not
+    distinguish from "auth-broken" (also 403). The two have very
+    different fixes:
+
+    - ``QuotaExceededError`` → back off until the YouTube quota
+      window resets (typically next day at 00:00 PT). The dashboard
+      / cron should defer this slug instead of marking it failed.
+    - generic 403 → tokens revoked / SA missing role → re-OAuth or
+      grant-fix; cron MUST mark failed and surface the operator
+      alert.
+
+    Raised by :func:`youtube_upload` when the YouTube API returns a
+    403 with one of the documented quota reasons
+    (``quotaExceeded``, ``rateLimitExceeded``, ``userRateLimitExceeded``,
+    ``uploadLimitExceeded``).
+    """
+
+    def __init__(self, reason: str, message: str):
+        self.reason = reason
+        super().__init__(f"YouTube quota exceeded ({reason}): {message}")
+
+
+def _http_error_quota_reason(exc) -> str | None:
+    """Audit T1.10 — extract the YouTube API quota reason string from
+    an ``HttpError`` (or None if it isn't a quota-class 403). Reads
+    the documented ``error.errors[0].reason`` field on the response
+    body — see https://developers.google.com/youtube/v3/docs/errors."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status != 403:
+        return None
+    content = getattr(exc, "content", b"") or b""
+    if isinstance(content, bytes):
+        # coverage: bytes.decode with errors='replace' practically never raises
+        try:
+            content = content.decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 — content decode is defensive
+            return None
+    try:
+        body = json.loads(content)
+    except Exception:  # noqa: BLE001 — non-JSON body just means "not a quota response"
+        return None
+    errors = (body.get("error") or {}).get("errors") or []
+    if not errors:
+        return None
+    reason = errors[0].get("reason")
+    quota_reasons = {
+        "quotaExceeded",
+        "rateLimitExceeded",
+        "userRateLimitExceeded",
+        "uploadLimitExceeded",
+        "dailyLimitExceeded",
+    }
+    return reason if reason in quota_reasons else None
+
+
 def _persist_token(account: str, blob_json: str, tp: Path) -> None:
     """Write the (possibly rotated) token blob to the active backend.
 
@@ -997,10 +1056,24 @@ def _youtube_upload_impl(
     response = None
     last_progress = -1.0
     backoff = 1.0
+    # Audit Q2.28 — also catch socket.timeout / ConnectionError /
+    # ConnectionResetError from next_chunk(). These bubble up from
+    # the underlying httplib2 transport when a TCP RST or read
+    # timeout hits mid-chunk; the resumable infrastructure can
+    # recover from them via the same retry loop, but pre-fix only
+    # HttpError was caught → connection-class failures crashed the
+    # full upload instead of retrying the chunk.
+    import socket  # local import keeps import graph clean for envs without socket
+
     while response is None:
         try:
             chunk_status, response = request.next_chunk()
         except HttpError as e:
+            # Audit T1.10 — distinguish quota exhaustion from generic
+            # auth failure so the caller can defer-vs-fail correctly.
+            quota_reason = _http_error_quota_reason(e)
+            if quota_reason is not None:
+                raise QuotaExceededError(quota_reason, str(e)) from e
             # 5xx — transient, retry with exponential backoff up to 60s.
             if e.resp.status in (500, 502, 503, 504) and backoff <= 64:
                 print(f"[upload] transient {e.resp.status}, retrying in {backoff}s")
@@ -1008,6 +1081,14 @@ def _youtube_upload_impl(
                 backoff *= 2
                 continue
             raise UploadError(f"YouTube API error {e.resp.status}: {e}") from e
+        except (socket.timeout, ConnectionError) as e:
+            # Q2.28 — transport-level transient: same backoff as 5xx.
+            if backoff <= 64:
+                print(f"[upload] transport error {type(e).__name__}: {e!s} — retrying in {backoff}s")
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            raise UploadError(f"YouTube upload transport failure: {e!s}") from e
         if chunk_status:
             pct = chunk_status.progress() * 100.0
             if pct - last_progress >= 5.0:
