@@ -504,10 +504,10 @@ laptop ``<channel>/`` folder is **not** created when the bucket is
 configured and the mirror env is unset.
 
 Currently in scope: ``pipeline/niche_specs.py`` (only GCS-canonical
-helper that writes inside a channel folder today). ``burner_engage``
-and ``research/youtube`` write under ``data/``, not ``<channel>/``,
-so they don't trigger this rule. Any future ``<channel>/<thing>/``
-GCS-canonical helper must opt the mirror behind its own env var.
+helper that writes inside a channel folder today). ``research/youtube``
+writes under ``data/``, not ``<channel>/``, so it doesn't trigger this
+rule. Any future ``<channel>/<thing>/`` GCS-canonical helper must opt
+the mirror behind its own env var.
 
 ---
 

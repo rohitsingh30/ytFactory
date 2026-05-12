@@ -665,11 +665,11 @@ async def get_queue_state() -> QueueResponse:
     doc permanently at ``status=pending, stage=dispatching`` and
     this endpoint surfaces it in the Queued column forever. The
     existing ``web/server.py::_periodic_queue_reaper`` only walks
-    ``agent_tasks/*`` (laptop-agent leases). Mitigation design in
-    ``docs/jobs_collection_reaper.md`` (Option A: extend that loop
-    to walk ``jobs/*`` and cross-check ``cloud_execution`` against
-    ``run_v2.ExecutionsClient``; Option B: SIGTERM/atexit writeback
-    in the render entrypoints)."""
+    ``agent_tasks/*`` (cloud render-worker JOB leases). Mitigation
+    design in ``docs/jobs_collection_reaper.md`` (Option A: extend
+    that loop to walk ``jobs/*`` and cross-check ``cloud_execution``
+    against ``run_v2.ExecutionsClient``; Option B: SIGTERM/atexit
+    writeback in the render entrypoints)."""
     backend = jobs_mod.get_jobs()
     queued: list[dict] = []
     running: list[dict] = []

@@ -82,7 +82,6 @@ Before authoring a new `/cloud-*` / `/admin-*` / `/status-*` /
 - `/app` — Dashboard
 - `/app/queue` — Queue state (job status)
 - `/app/channels` — Channel registry + per-channel state
-- `/app/burner-channels` — Burner channel registry
 - `/app/admin` — User/access admin
 - `/app/cloud` — Cloud Run health / cost / deploys (this rule's
   reference implementation, 2026-05-10)

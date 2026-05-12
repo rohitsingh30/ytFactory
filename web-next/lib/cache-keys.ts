@@ -17,11 +17,9 @@
 
 import {
   api,
-  burnerApi,
   queueApi,
 } from "@/lib/api";
 import type {
-  BurnerChannel,
   ChannelSummary,
   DashboardData,
   QueueState,
@@ -35,7 +33,6 @@ export const CK = {
   cloudHealth: "cloud:health",
   cloudCost30d: "cloud:cost:30d",
   cloudDeploys: "cloud:deploys",
-  burnerList: "burner:list",
   adminRequests: "admin:requests",
   adminUsers: "admin:users",
   whoami: "auth:whoami",
@@ -55,11 +52,6 @@ export const CK = {
 interface PrimerEntry {
   key: string;
   fetcher: () => Promise<unknown>;
-}
-
-interface BurnerListResp {
-  burners: BurnerChannel[];
-  catalog_size: number;
 }
 
 /**
@@ -91,9 +83,6 @@ export const ROUTE_PREFETCHES: Record<string, PrimerEntry[]> = {
     { key: CK.cloudHealth, fetcher: () => api.get("/api/cloud/health") },
     { key: CK.cloudCost30d, fetcher: () => api.get("/api/cloud/cost?days=30") },
     { key: CK.cloudDeploys, fetcher: () => api.get("/api/cloud/deploys") },
-  ],
-  "/app/burner-channels": [
-    { key: CK.burnerList, fetcher: () => burnerApi.list() as Promise<BurnerListResp> },
   ],
   "/app/admin": [
     { key: CK.adminRequests, fetcher: () => api.get("/api/admin/requests") },

@@ -1,4 +1,4 @@
-"""Tests for pipeline.channels — production + burner channel registry."""
+"""Tests for pipeline.channels — production channel registry."""
 from __future__ import annotations
 
 import tempfile
@@ -10,20 +10,15 @@ import yaml
 
 from pipeline import channels as ch_mod
 from pipeline.channels import (
-    BurnerAccount,
     Channel,
-    _load_burners,
     _load_channels,
-    all_burners,
     all_channels,
     all_niches,
-    burner_slugs,
     channel_for_niche,
     channel_rotation,
     get_channel,
     is_known_channel,
     niche_channel_map,
-    resolve_burner,
 )
 
 
@@ -36,10 +31,6 @@ def _write_yaml(path: Path, data: dict) -> None:
 
 def _channels_yaml(entries: list[dict]) -> dict:
     return {"channels": entries}
-
-
-def _burners_yaml(entries: list[dict]) -> dict:
-    return {"burners": entries}
 
 
 def _simple_channel(slug="testchan", channel_id="UC_test", rotation=True) -> dict:
@@ -232,74 +223,6 @@ class TestPublicAPI(unittest.TestCase):
 
     def test_channel_for_niche_unknown_returns_none(self):
         self.assertIsNone(channel_for_niche("no_such_niche_xyz_abc"))
-
-
-# ── BurnerAccount + _load_burners ─────────────────────────────────────────
-
-
-class TestLoadBurners(unittest.TestCase):
-    def setUp(self):
-        self._td = tempfile.TemporaryDirectory()
-        self._path = Path(self._td.name) / "burners.yaml"
-
-    def tearDown(self):
-        self._td.cleanup()
-
-    def test_missing_file_returns_empty(self):
-        result = _load_burners(Path(self._td.name) / "nonexistent.yaml")
-        self.assertEqual(result, ())
-
-    def test_empty_file_returns_empty(self):
-        self._path.write_text("")
-        result = _load_burners(self._path)
-        self.assertEqual(result, ())
-
-    def test_no_burners_key_returns_empty(self):
-        _write_yaml(self._path, {"other": []})
-        result = _load_burners(self._path)
-        self.assertEqual(result, ())
-
-    def test_loads_burners(self):
-        data = _burners_yaml([{
-            "slug": "burner1",
-            "youtube_title": "Burner 1",
-            "youtube_channel_id": "UCb1",
-            "google_email": "b1@example.com",
-        }])
-        _write_yaml(self._path, data)
-        result = _load_burners(self._path)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].slug, "burner1")
-
-    def test_duplicate_burner_slug_raises(self):
-        entry = {
-            "slug": "dup",
-            "youtube_title": "Dup",
-            "youtube_channel_id": "UCdup",
-            "google_email": "dup@example.com",
-        }
-        _write_yaml(self._path, _burners_yaml([entry, dict(entry, youtube_channel_id="UC2")]))
-        with self.assertRaises(ValueError):
-            _load_burners(self._path)
-
-
-class TestBurnerPublicAPI(unittest.TestCase):
-    def test_all_burners_returns_tuple(self):
-        self.assertIsInstance(all_burners(), tuple)
-
-    def test_burner_slugs_returns_list(self):
-        self.assertIsInstance(burner_slugs(), list)
-
-    def test_resolve_burner_unknown(self):
-        self.assertIsNone(resolve_burner("no_such_burner_xyz"))
-
-    def test_resolve_burner_known(self):
-        burners = all_burners()
-        if burners:
-            b = burners[0]
-            result = resolve_burner(b.slug)
-            self.assertIsNotNone(result)
-            self.assertEqual(result.slug, b.slug)  # type: ignore[union-attr]
 
 
 if __name__ == "__main__":

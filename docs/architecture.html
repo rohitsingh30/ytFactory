@@ -169,11 +169,10 @@ a:hover { text-decoration: underline; }
 
 <div class="kpis">
   <div class="kpi"><div class="v">7</div><div class="l">production channels</div></div>
-  <div class="kpi"><div class="v">49</div><div class="l">burner accounts</div></div>
   <div class="kpi"><div class="v">7</div><div class="l">Cloud Run services</div></div>
   <div class="kpi"><div class="v">3</div><div class="l">Cloud Run jobs</div></div>
   <div class="kpi"><div class="v">5</div><div class="l">GCS buckets</div></div>
-  <div class="kpi"><div class="v">14</div><div class="l">secrets</div></div>
+  <div class="kpi"><div class="v">12</div><div class="l">secrets</div></div>
 </div>
 
 <div class="tabs">
@@ -195,8 +194,7 @@ a:hover { text-decoration: underline; }
 Click any node for detail. Skills run on the laptop in Claude Code, drive the cloud
 website. Cloud Scheduler ticks every 30 min and picks the next channel from rotation.
 Render-worker-v2 is the muscle — calls TTS / image / ASR services, ffmpegs the mp4,
-uploads to YouTube. The laptop agent does cross-engagement (Playwright likes/subs)
-on uploads via 49 burner profiles.
+uploads to YouTube.
 </p>
 
 <div class="arch">
@@ -212,8 +210,7 @@ on uploads via 49 burner profiles.
     <rect x="20" y="40" width="220" height="100"/>
     <text class="nm" x="40" y="68">💻 Laptop</text>
     <text class="ds" x="40" y="88">Claude Code (orchestrator)</text>
-    <text class="ds" x="40" y="104">com.ytfactory.laptop-agent</text>
-    <text class="ds" x="40" y="120">  → Playwright × 49 burners</text>
+    <text class="ds" x="40" y="104">drives skills → cloud</text>
   </g>
 
   <!-- Cloud Scheduler -->
@@ -439,19 +436,6 @@ No aliases. <code>get_channel(slug)</code> takes the canonical name only.
 
 </div>
 
-<h2>Burner accounts (49)</h2>
-<details>
-<summary>49 cross-engagement accounts on <code>rsinghtomar54@gmail.com</code> + a few on <code>rsinghtomar3011@gmail.com</code> (click to expand)</summary>
-<p class="body" style="color:var(--tx-2)">Source of truth: <code>pipeline/burners.yaml</code>. They never author content — only run Playwright likes / subscribes via the laptop agent (<code>com.ytfactory.laptop-agent.plist</code>).</p>
-<ul style="columns: 4; column-gap: 16px; font-family: ui-monospace, monospace; font-size: 11px;">
-<li>afddfdf</li><li>ajfsbqe</li><li>axkxlwv</li><li>cbxqzlyivk</li><li>clmpqbgfx</li>
-<li>+ 44 others</li>
-</ul>
-<p class="body">Run <code>python -c "from pipeline.channels import all_burners; [print(b.slug) for b in all_burners()]"</code> for the full list.</p>
-</details>
-
-</div>
-
 <!-- ===================================================================== -->
 <!-- CLOUD RESOURCES TAB                                                   -->
 <!-- ===================================================================== -->
@@ -539,7 +523,6 @@ No aliases. <code>get_channel(slug)</code> takes the canonical name only.
 <dt>profile-map</dt><dd>email mapping for some accounts</dd>
 <dt>youtube-channel-ids</dt><dd>cached channel ID metadata (can drift)</dd>
 <dt>youtube-token-{historyrecapped, hindutavaanimated, mystoriesanimated, rhymetimejunction, scrollpulse, sportsrecapped, cosmosdecoded}</dt><dd>OAuth tokens for the 7 production channels</dd>
-<dt>youtube-token-{afddfdf, zgsbhqszdheo}</dt><dd>OAuth tokens for 2 of the 49 burners (the rest engage via Playwright only)</dd>
 <dt>yt-dlp-cookies</dt><dd>cookies for footage download</dd>
 <dt>ytfactory-oauth-client</dt><dd>OAuth client secret for /create-youtube-channel</dd>
 </dl>
@@ -594,19 +577,6 @@ No aliases. <code>get_channel(slug)</code> takes the canonical name only.
 </pre>
 </div>
 
-<h2>Cross-engagement flow — laptop agent</h2>
-<div class="card">
-<pre style="margin:0; font: 12px/1.6 ui-monospace, monospace; color: var(--tx);">
-1. After upload, web enqueues a burner_engage lease task
-2. Laptop com.ytfactory.laptop-agent.plist long-polls /agent/lease
-3. Picks up the task, runs pipeline.burner_engage:
-   - Iterates over the 49 burners in pipeline/burners.yaml
-   - For each, spins up Chrome with that burner's profile (laptop-local)
-   - Playwright likes + subscribes the new upload
-4. ACK back via /agent/ack/&lt;task_id&gt;
-</pre>
-</div>
-
 </div>
 
 <!-- ===================================================================== -->
@@ -628,7 +598,7 @@ No aliases. <code>get_channel(slug)</code> takes the canonical name only.
 
 <h2>Architectural wins so far</h2>
 <details open>
-<summary>Single source of truth (pipeline/channels.yaml + burners.yaml)</summary>
+<summary>Single source of truth (pipeline/channels.yaml)</summary>
 <p class="body">Channel data is now configuration, not code. Adding a channel = YAML edit. <code>control/scheduler.py</code> CHANNEL_ROTATION, <code>pipeline/niches.py</code> NICHE_CHANNEL, <code>pipeline/niche_schema.py</code> NICHE_REGISTRY all derive from this one place. No aliases (one canonical slug per channel).</p>
 </details>
 
@@ -663,10 +633,8 @@ No aliases. <code>get_channel(slug)</code> takes the canonical name only.
 const NODE_INFO = {
   laptop: {
     title: "💻 Laptop (Mac M2 Max)",
-    sub: "Two pieces left after cloud cutover",
-    body: `<p>Claude Code (orchestrator) drives skills that POST to the cloud. The laptop-agent.plist long-polls <code>/agent/lease</code> for Playwright work — likes/subs across 49 burner profiles. No data lives here post-Phase-5.</p>
-           <dl><dt>plist</dt><dd>~/Library/LaunchAgents/com.ytfactory.laptop-agent.plist</dd>
-           <dt>state-sync</dt><dd>retiring in Phase 5</dd></dl>`,
+    sub: "Orchestrator only after cloud cutover",
+    body: `<p>Claude Code (orchestrator) drives skills that POST to the cloud. No long-running agent processes; no per-render data lives here.</p>`,
   },
   scheduler: {
     title: "⏰ Cloud Scheduler · ytfactory-tick",
@@ -727,7 +695,7 @@ const NODE_INFO = {
   youtube: {
     title: "📺 YouTube",
     sub: "7 production channels",
-    body: `<p>HistoryRecapped · HindutavaJourney · My Stories Animated · RhymeTimeJunction · ScrollPulse · SportsRecapped · Cosmos Decoded. 49 burner accounts cross-engage via Playwright.</p>`,
+    body: `<p>HistoryRecapped · HindutavaJourney · My Stories Animated · RhymeTimeJunction · ScrollPulse · SportsRecapped · Cosmos Decoded.</p>`,
   },
 };
 

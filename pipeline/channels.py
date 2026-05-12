@@ -5,17 +5,6 @@ live in ``pipeline/channels.yaml`` (committed). This module loads,
 validates, and exposes derived views — adding a channel is a YAML
 edit, no Python change needed.
 
-Two registries, two sources:
-
-  1. Production channels — ``pipeline/channels.yaml``, ~7 entries,
-     one Pydantic ``Channel`` per row, loaded at import time.
-
-  2. Burner accounts — ~50 entries, managed via Chrome-profile setup
-     and recorded in ``~/.config/ytfactory/channel_ids.json``.
-     Source of truth is ``pipeline.cross_engage.cross_engage_burner_attached.
-     list_known_burners()``; this module re-exports it without
-     duplication.
-
 The YAML is the canonical reference for production channels (slug,
 youtube_title, youtube_channel_id, niches, rotation flag, aliases).
 The cloud ``youtube-channel-ids`` Secret Manager secret can drift
@@ -257,63 +246,13 @@ def all_niches() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Burners — committed YAML, same shape as production channels.
+# Burners — DEPRECATED 2026-05-13.
+#
+# The burner-channel cross-engagement system was retired (YouTube filtered
+# subs from new burner accounts out of public sub counts; engineering effort
+# better spent elsewhere). The browser-automation patterns it pioneered are
+# captured project-agnostic at docs/chrome_signed_in_automation.md.
+#
+# Removed: pipeline/burners.yaml, pipeline/cross_engage/, pipeline/laptop_agent.py,
+# control/routes/burner_routes.py, web-next/app/app/burner-channels/.
 # ---------------------------------------------------------------------------
-#
-# 49 cross-engagement accounts. Different file (burners.yaml) because
-# they're not channels-with-niches; they're auth-only accounts that
-# like + subscribe on production uploads. Loaded the same way: at
-# import time, validated by Pydantic.
-#
-
-_BURNERS_YAML = Path(__file__).parent / "burners.yaml"
-
-
-class BurnerAccount(BaseModel):
-    """A YouTube account used purely for cross-engagement.
-
-    No niches, no config_yaml, no rotation. Has a YouTube channel_id
-    + a Google email. The Playwright agent attaches a per-account
-    Chrome user-data-dir at runtime; that's machine-local and NOT
-    tracked in this YAML.
-    """
-
-    slug: str
-    youtube_title: str
-    youtube_channel_id: str
-    google_email: str
-
-
-def _load_burners(yaml_path: Path = _BURNERS_YAML) -> tuple[BurnerAccount, ...]:
-    if not yaml_path.exists():
-        return ()
-    with yaml_path.open("r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
-    if "burners" not in raw:
-        return ()
-    parsed = [BurnerAccount.model_validate(b) for b in raw["burners"]]
-    seen: set[str] = set()
-    for b in parsed:
-        if b.slug in seen:
-            raise ValueError(f"duplicate burner slug: {b.slug!r}")
-        seen.add(b.slug)
-    return tuple(parsed)
-
-
-BURNERS: tuple[BurnerAccount, ...] = _load_burners()
-
-
-def all_burners() -> tuple[BurnerAccount, ...]:
-    """Every burner account registered in burners.yaml."""
-    return BURNERS
-
-
-def burner_slugs() -> list[str]:
-    return [b.slug for b in BURNERS]
-
-
-def resolve_burner(slug: str) -> Optional[BurnerAccount]:
-    for b in BURNERS:
-        if b.slug == slug:
-            return b
-    return None

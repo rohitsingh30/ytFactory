@@ -14,9 +14,8 @@ mid-write never sees a partial file.
 
 Storage backend (FS vs GCS)
 ---------------------------
-Mirrors the convention in :mod:`pipeline.research.youtube` and
-:mod:`pipeline.utils.catalog`: when ``YTFACTORY_STATE_BUCKET`` is set,
-snapshots live in GCS at
+Mirrors the convention in :mod:`pipeline.research.youtube`: when
+``YTFACTORY_STATE_BUCKET`` is set, snapshots live in GCS at
 ``gs://$YTFACTORY_STATE_BUCKET/data/_bench/cloud_{health,cost,deploys}/YYYY-MM-DD.json``.
 When unset (laptop dev), the on-disk path under ``data/_bench/`` is the
 sole backend.

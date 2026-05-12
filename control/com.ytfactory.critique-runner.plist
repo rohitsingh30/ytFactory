@@ -25,9 +25,6 @@
   Uninstall:
     launchctl unload ~/Library/LaunchAgents/com.ytfactory.critique-runner.plist
     rm ~/Library/LaunchAgents/com.ytfactory.critique-runner.plist
-
-  Also see the parallel control/com.ytfactory.laptop-agent.plist
-  pattern this is modelled on (same KeepAlive + ThrottleInterval).
 -->
 <plist version="1.0">
 <dict>

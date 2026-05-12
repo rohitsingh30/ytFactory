@@ -69,8 +69,8 @@ for acct in "${ACCOUNTS[@]}"; do
     echo "==> ${secret}"
     if ! "${cmd[@]}" >/dev/null; then
       # Most common cause: secret doesn't exist for this project (e.g.
-      # afddfdf is a burner channel that may not be wired up everywhere).
-      # Don't abort the loop — just log and continue.
+      # an account that may not be wired up everywhere). Don't abort
+      # the loop — just log and continue.
       echo "    SKIP: secret ${secret} not found OR binding failed"
     fi
   fi

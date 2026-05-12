@@ -4,7 +4,7 @@
 #
 # Phase 4 consolidation reversed the earlier "control-plane is canonical"
 # call. ytfactory-web absorbs all of control's routers (agent, scheduler,
-# state API, niche schema, channels, niches, voices, burners, etc.) at
+# state API, niche schema, channels, niches, voices, etc.) at
 # the bottom of web/server.py. ytfactory-control is retired.
 #
 # Run in this order:
@@ -68,8 +68,8 @@ gcloud builds submit . \
 # - YTFACTORY_AGENT_TOKEN — shared bearer for M2M callers (Cloud
 #   Scheduler, laptop agent, skill_dispatch).
 # - YTFACTORY_CLIENT_SECRET — kept for the per-channel YouTube OAuth
-#   flow (oauth_web_routes.py, burner-channel onboarding); separate
-#   client (installed type, localhost:8089 callback).
+#   flow (oauth_web_routes.py); separate client (installed type,
+#   localhost:8089 callback).
 #
 # All five mounted via --set-secrets; values rotate by writing a new
 # secret version, no redeploy needed. NOTE: --set-secrets is destructive

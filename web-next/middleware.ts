@@ -30,7 +30,7 @@ import type { NextRequest } from "next/server";
 
 const CANONICAL_HOST = process.env.YTFACTORY_CANONICAL_HOST?.trim();
 
-export function middleware(req: NextRequest) {
+export async function middleware(req: NextRequest) {
   // 1. Host normalization (always-on when configured).
   if (CANONICAL_HOST) {
     const incomingHost = req.headers.get("host") ?? req.nextUrl.host;

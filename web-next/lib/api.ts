@@ -7,9 +7,6 @@
  */
 
 import type {
-  BurnerCatalogEntry,
-  BurnerChannel,
-  BurnerEngageState,
   ChannelSummary,
   CritiqueDetail,
   CustomizationSchema,
@@ -210,62 +207,6 @@ export const ENGAGE_MODES = [
   "complete",
 ] as const;
 export type EngageMode = (typeof ENGAGE_MODES)[number];
-
-export const ENGAGE_MODE_LABELS: Record<EngageMode, string> = {
-  subscribe_only: "Subscribe only",
-  like_subscribe: "Like + Subscribe",
-  like_subscribe_view: "Like + Subscribe + Watch loop",
-  complete: "Complete (with comments)",
-};
-
-export const ENGAGE_MODE_DESCRIPTIONS: Record<EngageMode, string> = {
-  subscribe_only:
-    "Subscribe to every channel once. No likes, no watch loop. Exits when done.",
-  like_subscribe:
-    "Like every video + subscribe to every channel. No watch loop. Exits when done.",
-  like_subscribe_view:
-    "Like + subscribe + permanent watch-time loop (default). Runs until you click Stop.",
-  complete:
-    "Like + subscribe + watch loop + LLM-generated comments on a random subset. Highest engagement, highest shadow-ban risk.",
-};
-
-export const burnerApi = {
-  list: () =>
-    api.get<{ burners: BurnerChannel[]; catalog_size: number }>("/api/burner_channels"),
-  catalog: () =>
-    api.get<{ videos: BurnerCatalogEntry[]; total: number }>("/api/burner_channels/catalog"),
-  start: (slug: string, mode: EngageMode = "like_subscribe_view") =>
-    api.post<{ started: boolean; pid?: number; reason?: string; log_path?: string; state?: BurnerEngageState; mode?: EngageMode }>(
-      `/api/burner_channels/${slug}/engage`,
-      { mode },
-    ),
-  poll: (slug: string) =>
-    api.get<BurnerEngageState>(`/api/burner_channels/${slug}/engage`),
-  stop: (slug: string) =>
-    api.post<{ stop_requested: boolean; slug: string }>(
-      `/api/burner_channels/${slug}/engage/stop`,
-      {},
-    ),
-  subscribeAllBurners: () =>
-    api.post<{
-      enqueued_count: number;
-      skipped_count: number;
-      enqueued: { slug: string; task_id: string }[];
-      skipped: { slug: string; reason: string }[];
-      hint?: string;
-    }>(`/api/burner_channels/subscribe_all_burners`, {}),
-  createBulk: (count: number, opts?: { email?: string; oauth?: boolean }) =>
-    api.post<{
-      enqueued_count: number;
-      enqueued: { task_id: string }[];
-      cap_applied: boolean;
-      hint?: string;
-    }>(`/api/burner_channels/create_bulk`, {
-      count,
-      ...(opts?.email ? { email: opts.email } : {}),
-      ...(opts?.oauth === false ? { oauth: false } : {}),
-    }),
-};
 
 export const nichesApi = {
   list: (channel: string) =>

@@ -215,7 +215,6 @@ sequenceDiagram
 | Worker raises exception | `runner.run` returns `(False, None, "<exception>")`; ack with `status=error`; task re-queued up to `max_attempts=3` times before FAILED. |
 | Cloud Run cold start | Heartbeat gets exponential backoff up to 30s; lease loop continues. |
 | Firestore composite index missing | Lease endpoint 500s; agent backoff retries. (Created at deploy time — see `gcloud firestore indexes composite list`.) |
-| Long-lived Chrome task (`burner_engage`) | Fire-and-forget pattern — agent spawns the worker via `subprocess.Popen(start_new_session=True)` and acks immediately. Worker outlives the agent. UI tracks per-burner progress via the GCS-mirrored state file (see `docs/cross_engage_cloud_v2.md`), not via task status. |
 
 ### Standing rule — composite-index discipline (2026-05-11)
 

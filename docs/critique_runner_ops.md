@@ -24,7 +24,7 @@ to start it. They didn't.
 
 **Fix (shipped commit `2fb4b1f`, 2026-05-12):**
 `control/com.ytfactory.critique-runner.plist` is a launchd LaunchAgent
-modelled on the existing `com.ytfactory.laptop-agent.plist`:
+modelled on the launchd LaunchAgent pattern (KeepAlive + ThrottleInterval):
 
 - `RunAtLoad=true` → starts the moment the user logs in.
 - `KeepAlive=true` → restarts on crash (within `ThrottleInterval=30s`).

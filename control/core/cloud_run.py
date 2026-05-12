@@ -2,8 +2,8 @@
 
 When ``YTFACTORY_RENDER_BACKEND=cloudrun`` is set, the control plane
 triggers the ``ytfactory-render-worker-v2`` Cloud Run Job (one
-execution per render) instead of letting the laptop-agent / sim worker
-pick up the queued task.
+execution per render) instead of letting the sim worker pick up the
+queued task.
 
 The Job entry point is ``cloud/render-worker-v2/entrypoint.py``. It
 reads ``YTFACTORY_JOB_ID`` from env, fetches the job doc from

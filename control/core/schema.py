@@ -35,8 +35,6 @@ class TaskKind(str, Enum):
     FOOTAGE = "footage"
     # Chrome-bound (REQUIRES laptop agent — never migrated to cloud)
     PLAYWRIGHT_UPLOAD = "playwright_upload"
-    BURNER_ENGAGE = "burner_engage"
-    CREATE_BURNER = "create_burner"
     # Smoke / no-op
     NOOP = "noop"
 
