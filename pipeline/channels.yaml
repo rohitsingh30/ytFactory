@@ -39,7 +39,14 @@ channels:
   - slug: rhymetimejunction
     youtube_title: RhymeTimeJunction
     youtube_channel_id: UCMnxP6T-jeJYP_MnkSV8VSg
-    in_rotation: true
+    # 2026-05-13: temporarily out of rotation while we validate the
+    # sunoapi.org auto-gen path end-to-end. SUNOAPI_API_KEY is now
+    # mounted on render-worker-v2 (Secret Manager: sunoapi-key) and
+    # pipeline/channels/rhymetimejunction.yaml is flipped to
+    # `audio_provider: sunoapi`, but the cron previously failed
+    # ~22 times in 36h on the missing-WAV precondition. Flip back to
+    # `true` after a manual render confirms sunoapi → song → mp4 works.
+    in_rotation: false
     config_yaml: pipeline/channels/rhymetimejunction.yaml
 
   - slug: sportsrecapped

@@ -75,8 +75,20 @@ source_adapter: manual  # curator hand-authors scripts/<slug>.json
 # re-burning credits on a render that's primarily testing visuals + the
 # new flat-crayon style. Future rhymes (where we DO want auto-gen) flip
 # back to audio_provider: sunoapi by uncommenting the two lines below.
-audio_provider: external_song
-# audio_provider: sunoapi
+#
+# 2026-05-13: flipped to audio_provider: sunoapi after the /api/scheduler/tick
+# cron started auto-firing every 30 min. external_song mode is incompatible
+# with cron-driven renders because the renderer suffixes the slug with
+# `-<jobid8>` (cast/audio cache busting), so a pre-staged WAV at
+# songs/hathi-raja-kahan-chale.wav can never match the runtime path
+# songs/hathi-raja-kahan-chale-2972b69e.wav. Sunoapi keys off a
+# (model, vocal, style, lyrics) fingerprint instead — same lyrics → same
+# cache hit regardless of slug. SUNOAPI_API_KEY now mounted on
+# render-worker-v2 from Secret Manager (sunoapi-key:1, granted to
+# render-runner@). Persisted in
+# docs/channel-learnings/rhymetimejunction/external_song_incompatible_with_cron.md.
+# audio_provider: external_song
+audio_provider: sunoapi
 sunoapi_model: V4_5            # current best for kids' content; V5 also available
 sunoapi_vocal_gender: f         # female lead (matches kid-rhyme convention)
 tts_provider: cloudrun_chatterbox

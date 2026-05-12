@@ -127,6 +127,14 @@ env is set (it is, on cloud), they list narrations + uploads from
 GCS instead of local disk. The narration "path" returned is a
 `gs://...` URI wrapped as `Path` for downstream consumers.
 
+> **2026-05-13 follow-up:** `_next_unrendered`'s "no upload record"
+> heuristic interacts badly with the worker passing `--no-upload`
+> to `pipeline.render.shorts` — same slug renders 12-22× per channel
+> in 36 h. Symptoms + design options in
+> [docs/scheduler_no_upload_repeat_loop.md](./scheduler_no_upload_repeat_loop.md).
+> Channel `in_rotation` flips also lag a `cloud/web-server/deploy.sh`
+> — see [docs/channel_rotation_deploy_lag.md](./channel_rotation_deploy_lag.md).
+
 **Auth model fix:** `control/scheduler_routes.py:_require_auth` now
 checks `K_SERVICE` (set by Cloud Run runtime) and trusts IAM when
 present. Cloud Scheduler invokes via `--oidc-service-account-email`

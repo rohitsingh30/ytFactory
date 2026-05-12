@@ -44,6 +44,16 @@ sunoapi` for the actual sung output.
 - Suno via sunoapi.org (current, ~$0.05-0.10/song, fully automated)
 - Manual Suno — `audio_provider: external_song` is wired and ready
 
+**2026-05-13 — `external_song` is incompatible with cron-driven
+renders.** The renderer suffixes the slug with `-<jobid8>` for cache
+busting, so a curator-staged `songs/<slug>.wav` never matches the
+runtime `songs/<slug>-<jobid8>.wav`. Cron lane MUST use
+`audio_provider: sunoapi` (cache key = lyrics fingerprint, not slug).
+Channel temporarily flipped to `in_rotation: false` until first
+sunoapi-driven cron tick is verified. Full post-mortem +
+`SUNOAPI_API_KEY` Secret Manager wiring in
+[external_song_cron_incompatible.md](./external_song_cron_incompatible.md).
+
 **Cast.json class-of-bug discovered first render:** `pipeline/cast.py` auto-authoring overrode the channel-level `character_description` in the YAML. The four mascots got re-imagined as a bear cub (Laddu) + mouse (Jalebi) + pug (Tuk-Tuk consistent) + dadi (consistent) — animal mascots instead of the human-kid-with-pug brief. Channel YAML's `character_description` block isn't being honored as the mascot lock for per-story cast. Fix: cast.py should TREAT a channel YAML's `character_description` block as authoritative when provided and skip auto-authoring; or have a `cast_lock: true` flag the YAML can set.
 
 **Beats.py doesn't read `lyrics: [...]`:** the existing beats path splits on Whisper ASR output of the spoken `narration` field; the rhyme-channel-only `lyrics: [...]` block is ignored. For v0 this is fine (12 auto-split beats vs 7 authored). For sung-Suno path it'll matter — beats need to align to verse boundaries from `lyrics`, not Whisper noise on sung Hindi.
