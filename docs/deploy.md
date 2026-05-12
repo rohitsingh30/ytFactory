@@ -215,3 +215,78 @@ Refactor every `cloud/<svc>/deploy.sh` to either:
 - `feedback_post_deploy_live_smoke_m2m.md` — what to run AFTER
   confirming the deploy fired (this rule is about confirming the
   deploy fired in the first place).
+
+---
+
+## 2026-05-12 — `gcloud` "Reauthentication failed" with fresh ADC: use `CLOUDSDK_AUTH_ACCESS_TOKEN`
+
+If `gcloud run services describe …` (or any other gcloud command)
+fails with:
+
+```
+ERROR: There was a problem refreshing your current auth tokens:
+Reauthentication failed. cannot prompt during non-interactive
+execution.
+Please run:
+  $ gcloud auth login
+```
+
+**don't immediately re-login.** First check whether ADC is alive:
+
+```bash
+gcloud auth application-default print-access-token | head -c 40
+# If a token comes back in <2 seconds, ADC is fresh.
+```
+
+ADC tokens are minted from a **separate credential subsystem** than
+gcloud's user-account creds. The org's reauth policy applies to
+the user-account subsystem (1h typical), but ADC tokens minted via
+`application-default` survive reauth windows for hours-to-days
+because they ride a different refresh-token path.
+
+### Bypass
+
+```bash
+export CLOUDSDK_AUTH_ACCESS_TOKEN=$(gcloud auth application-default print-access-token)
+gcloud run services describe ytfactory-web-next \
+  --region=asia-southeast1 --project=ytfactory-prod-v2 \
+  --format='value(status.url)'
+# ⇒ works
+```
+
+Or for a one-shot deploy:
+
+```bash
+CLOUDSDK_AUTH_ACCESS_TOKEN=$(gcloud auth application-default print-access-token) \
+  bash cloud/<service>/deploy.sh
+```
+
+`CLOUDSDK_AUTH_ACCESS_TOKEN` makes gcloud use that token verbatim
+and skip its own user-account refresh path entirely.
+
+### When the bypass DOESN'T work
+
+- Operations needing an **ID token** (Cloud Run service-to-service
+  invocation), not an access token. Use Python's `google-auth`
+  library or follow `feedback_cloudrun_auth_gcloud_hang_bypass.md`.
+- Operations requiring **service-account** signing (signed URLs,
+  etc.). User-account ADC can't sign on behalf of an SA without
+  explicit impersonation flags.
+- If both `gcloud auth list` AND
+  `gcloud auth application-default print-access-token` fail → both
+  subsystems are dead, re-auth is now genuinely required.
+
+### Class-of-bug for agent-driven deploys
+
+Burning a session asking "please re-login" when ADC is fresh is a
+recurring frustration vector — the user has a saved token, the
+agent silently ignores it, the deploy stalls. Memory:
+`feedback_gcloud_reauth_use_adc_bypass.md`. The triage flowchart
+lives there too.
+
+### See also
+
+- `feedback_cloudrun_auth_gcloud_hang_bypass.md` — Python subprocess
+  surface of the same root cause (gcloud user-auth fragility)
+- gcloud docs:
+  https://cloud.google.com/sdk/docs/authorizing#user-accounts

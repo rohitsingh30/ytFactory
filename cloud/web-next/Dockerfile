@@ -45,4 +45,10 @@ EXPOSE 8080
 # Cloud Run sets PORT; next start binds to it via -p.
 CMD ["sh", "-c", "node node_modules/next/dist/bin/next start -p ${PORT:-8080} -H 0.0.0.0"]
 
-COPY otel_init.py ./
+# NOTE: this service does NOT ship cloud/_shared/otel_init.py because
+# it's a Node.js runtime — the OTel SDK we vendor is Python-only and
+# would never be imported. Keep this Dockerfile out of every
+# `cloud/_shared/*.sh` patcher's scope. See
+# `docs/cloud_service_dep_playbook.md` §"Auto-patch scope: only
+# Python OTel-using services" for the rule and the 2026-05-12
+# deploy-failure post-mortem that drove it.

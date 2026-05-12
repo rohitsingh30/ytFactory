@@ -30,6 +30,15 @@ Env vars:
   in the OAuth flow. Must match one entry in the OAuth client's
   ``redirect_uris``. Default
   ``https://ytfactory-web-7hwnzw7lya-as.a.run.app/api/auth/google/callback``.
+
+  **Single-host invariant.** The host portion of this URI MUST match
+  ``YTFACTORY_CANONICAL_HOST`` on the public-facing service (the
+  Next.js ``ytfactory-web-next`` middleware enforces this via 308
+  host normalization). Cloud Run gives every service two equivalent
+  public URLs (project-id-hash form + project-number form); cookies
+  are host-bound, so ``yt_oauth_state`` only fires the callback OK
+  when the user starts and ends on the same host. See
+  ``docs/cloudrun_dual_url_host_normalization.md``.
 * ``YTFACTORY_SESSION_TTL_S`` — cookie TTL seconds. Default 7 days.
 """
 from __future__ import annotations

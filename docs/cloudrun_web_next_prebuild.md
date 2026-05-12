@@ -67,9 +67,15 @@ its native bindings. They're a clean separation.
 YTFACTORY_API_BASE=https://ytfactory-web-7hwnzw7lya-as.a.run.app
 NEXT_TELEMETRY_DISABLED=1
 YT_AUTH_ENABLED=1                  # enables edge middleware /app/* gate
+YTFACTORY_CANONICAL_HOST=ytfactory-web-next-7hwnzw7lya-as.a.run.app
+                                    # pins all incoming requests to the
+                                    # same host Google's OAuth client has
+                                    # registered as redirect_uri — see
+                                    # docs/cloudrun_dual_url_host_normalization.md
 ```
 
-`deploy.sh` sets all three.
+`deploy.sh` sets all four (the canonical-host value is
+auto-discovered from `gcloud run services describe ... --format='value(status.url)'`).
 
 ## Auth flow wiring
 
@@ -92,3 +98,15 @@ gcloud run services update ytfactory-web \
 The OAuth Web client
 (`283470729204-bu6kpl9bim33shlh2elh1qmhj3hbdoft`) must have that URL in its
 authorized redirect URIs (already added 2026-05-10).
+
+**Single-host invariant — non-negotiable.** The OAuth `redirect_uri`
+above MUST match `YTFACTORY_CANONICAL_HOST` (above). If a user lands
+on the *other* Cloud Run URL Cloud Run hands out for this same
+service (e.g. the project-number form
+`-283470729204.asia-southeast1.run.app`), the `yt_oauth_state` CSRF
+cookie gets set on that host, but Google bounces them to this
+canonical host on callback — different cookie jar, mismatch, sign-in
+fails with `{"error":"state mismatch"}`. The `web-next/middleware.ts`
+host-normalization layer 308s every non-canonical request to the
+canonical host before any cookie work happens. Full post-mortem:
+[`docs/cloudrun_dual_url_host_normalization.md`](./cloudrun_dual_url_host_normalization.md).

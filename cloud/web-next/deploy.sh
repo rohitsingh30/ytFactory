@@ -35,6 +35,32 @@ if [[ -z "${API_BASE}" ]]; then
     exit 1
 fi
 
+# Discover the canonical host (the one Google's OAuth client has
+# registered as redirect_uri). Cloud Run hands every service two URLs
+# (project-id-hash form + project-number form); we must pin all
+# requests to ONE of them so cookies + the OAuth callback line up.
+# `status.url` returns the project-id-hash form, which is what's
+# registered with Google.
+#
+# First-deploy bootstrap: if the service does not yet exist, the
+# describe call returns empty and we deploy without the env var. The
+# very next deploy will pick the URL up and lock the host. (Google
+# OAuth registration happens manually after the first deploy anyway.)
+CANONICAL_HOST=$(gcloud run services describe "${SERVICE}" \
+    --project="${PROJECT}" --region="${REGION}" \
+    --format='value(status.url)' 2>/dev/null \
+    | sed -E 's|^https?://||' \
+    || true)
+
+CANONICAL_ENV=""
+if [[ -n "${CANONICAL_HOST}" ]]; then
+    echo "==> Canonical host (will pin all requests via middleware): ${CANONICAL_HOST}"
+    CANONICAL_ENV="|YTFACTORY_CANONICAL_HOST=${CANONICAL_HOST}"
+else
+    echo "==> WARNING: ${SERVICE} not yet deployed; skipping YTFACTORY_CANONICAL_HOST."
+    echo "             Re-run this script once for the env to populate."
+fi
+
 # ---- 1. Pre-build .next/ on the host (macOS) ---------------------------
 # Linux builds of this app produce broken HTML (missing doctype/html/body
 # opening tags). The host build is the source of truth.
@@ -79,7 +105,7 @@ gcloud run deploy "${SERVICE}" \
   --timeout=60 \
   --port=8080 \
   --allow-unauthenticated \
-  --set-env-vars="^|^YTFACTORY_API_BASE=${API_BASE}|NEXT_TELEMETRY_DISABLED=1|YT_AUTH_ENABLED=1"
+  --set-env-vars="^|^YTFACTORY_API_BASE=${API_BASE}|NEXT_TELEMETRY_DISABLED=1|YT_AUTH_ENABLED=1${CANONICAL_ENV}"
 
 URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="${PROJECT}" --format='value(status.url)')
 echo ""

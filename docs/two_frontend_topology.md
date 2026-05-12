@@ -126,3 +126,10 @@ or talking about before editing.`
 - `docs/architecture.md` — overall service topology
 - `web-next/next.config.mjs` + `web-next/app/api/[...path]/route.ts` —
   the proxy that routes `/api/*` from web-next to ytfactory-web
+- `docs/cloudrun_dual_url_host_normalization.md` — **both** Cloud Run
+  URLs (`-7hwnzw7lya-as.a.run.app` AND `-283470729204.asia-southeast1.run.app`)
+  reach the same web-next container, but cookies are host-bound. Edge
+  middleware 308s every non-canonical request to the canonical host
+  before any cookie work happens, so OAuth + session cookies always
+  land in the same jar Google's callback returns to. Set
+  `YTFACTORY_CANONICAL_HOST` (auto-discovered by `deploy.sh`).

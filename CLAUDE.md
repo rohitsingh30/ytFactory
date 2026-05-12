@@ -170,10 +170,21 @@ failed Cloud Builds before a working one). Every step is mandatory:
 Skipping any step has historically cost 3-8 hours of failed build
 iterations. **The playbook saves that.** New service → read it first.
 
-**P9 add-on (2026-05-11):** every new Cloud Run service MUST also
-boot OTel via `cloud/_shared/otel_init.py` — see "Telemetry: OTel
+**P9 add-on (2026-05-11):** every new **Python** Cloud Run service MUST
+also boot OTel via `cloud/_shared/otel_init.py` — see "Telemetry: OTel
 SDK + Cloud Trace + Cloud Monitoring + Cloud Logging" below for the
 boot block to add to `server.py` / `entrypoint.py`.
+
+**P9.1 (2026-05-12) — non-Python services are out of scope.** OTel
+auto-patching applies *only* to services with `server.py` /
+`entrypoint.py` in their `cloud/<svc>/` dir (Python). Node.js,
+static-asset, and one-shot init containers like `cloud/web-next/`
+and `cloud/weights-staging/` MUST be skipped — both `sync.sh` and
+`add_otel_copy.sh` enforce this filter. Mismatching the two
+scripts breaks deploys with `COPY otel_init.py: file not found`
+(the 2026-05-12 web-next post-mortem). See
+`docs/cloud_service_dep_playbook.md` §"Auto-patch scope: only
+Python OTel-using services".
 
 ---
 

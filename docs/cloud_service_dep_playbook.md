@@ -451,3 +451,93 @@ unification.
 - Implementation: `cloud/_shared/add_otel_copy.sh` (context-aware)
 - Commit: `ffafae4` (the editing-agent Dockerfile fix); follow-up
   patches the script + this playbook.
+
+---
+
+## Auto-patch scope: only Python OTel-using services (2026-05-12)
+
+`cloud/_shared/add_otel_copy.sh` previously patched **every**
+`cloud/<svc>/Dockerfile` regardless of language, including
+`web-next/Dockerfile` (Node.js, runs `next start`). Three things
+made the bug invisible until the next web-next deploy:
+
+1. The patcher emitted `COPY otel_init.py ./` into web-next's
+   Dockerfile.
+2. `cloud/_shared/sync.sh` (correctly) only copies `otel_init.py`
+   into dirs containing `server.py` or `entrypoint.py` — i.e.
+   Python services. So `cloud/web-next/otel_init.py` was never
+   created.
+3. web-next's Dockerfile builds with **repo-root** context (via
+   `cloudbuild.yaml`), so even if `otel_init.py` had been synced
+   into the service dir, the path `./otel_init.py` would have
+   resolved to the repo root, not the service dir — also missing.
+
+Combined effect: the next `cloud/web-next/deploy.sh` failed at
+`Step 14/14 : COPY otel_init.py ./` with:
+
+```
+COPY failed: file not found in build context or excluded by
+.dockerignore: stat otel_init.py: file does not exist
+```
+
+This is a class-of-bug whenever any "shared template" patcher and
+its companion sync helper disagree on what counts as an
+"OTel-using service".
+
+### Single source of truth: the OTel-eligible service set
+
+A service is OTel-eligible **iff** its `cloud/<svc>/` directory
+contains `server.py` OR `entrypoint.py`. Equivalently: OTel
+applies to Python services only — the SDK we vendor in
+`cloud/_shared/otel_init.py` is `opentelemetry-sdk` for Python and
+would never be imported by Node.js, static-asset, or one-shot
+init containers.
+
+All three shared scripts now use this same filter:
+
+| Script | What it does | Filter |
+|---|---|---|
+| `cloud/_shared/sync.sh` | Copies `otel_init.py` into every service dir | `server.py` or `entrypoint.py` exists |
+| `cloud/_shared/add_otel_copy.sh` | Patches `Dockerfile` with the right `COPY otel_init.py` line | **same** (added 2026-05-12) |
+| `cloud/_shared/append_otel_deps.sh` | Appends `otel_requirements.txt` block to `requirements.txt` | naturally Python-only (no `requirements.txt` ⇒ no-op) |
+| `cloud/_shared/redeploy_for_otel.sh` | Parallel re-deploy of every OTel service after `_shared/` changes | hardcoded allowlist of 13 Python services |
+
+If you add a fourth shared-template script, mirror this filter
+exactly. If you add a non-Python service that genuinely DOES need
+distributed tracing (e.g. wire it via the JS OTel SDK in a SSR
+layer), do NOT relax this filter — instead, add an explicit
+opt-in marker file like `cloud/<svc>/.otel-eligible` and switch
+the filter to "Python file present OR opt-in marker exists".
+
+### Verifying scope after editing any shared script
+
+```bash
+# All three scope-using scripts agree (no diff in service lists):
+diff <(for d in cloud/*/; do
+         [[ -f "${d}server.py" || -f "${d}entrypoint.py" ]] && basename "${d%/}"
+       done | sort) \
+     <(grep -oE '"[a-z0-9-]+\|' cloud/_shared/redeploy_for_otel.sh \
+         | tr -d '"|' | sort)
+# Empty diff = aligned. Any diff = a service is in one list but not
+# the other. Reconcile before deploying.
+```
+
+### Why a non-Python service can never quietly piggyback on the patcher
+
+Adding `web-next` (or any future Node/static service) to the
+patcher's set without ALSO adding it to `sync.sh` reproduces the
+exact failure mode above. The `iff server.py OR entrypoint.py`
+filter is the smallest invariant that prevents it. Don't loosen
+it just to add a one-off — use the explicit opt-in marker
+approach.
+
+### See also
+
+- Implementation: `cloud/_shared/add_otel_copy.sh` (scope filter
+  added in this commit)
+- Implementation: `cloud/_shared/sync.sh` (canonical scope filter)
+- Service that triggered this rule: `cloud/web-next/` (Node.js;
+  Dockerfile carries an inline note pointing back here)
+- Sibling rule: §"Auto-patch scripts must detect each Dockerfile's
+  build context" (above) — this rule covers WHEN to patch; that
+  rule covers HOW to patch.
