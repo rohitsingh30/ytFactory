@@ -143,6 +143,75 @@ class ListSiblingAccountsTest(unittest.TestCase):
 
         self.assertEqual(result, ["acct"])
 
+    def test_includes_cloud_run_secret_mounts(self):
+        """Audit T1.7 — on Cloud Run, OAuth tokens live at
+        ``/secrets/youtube-token-<account>/value``. The discovery
+        helper must enumerate those alongside (or in absence of)
+        the laptop CONFIG_DIR so cross-engagement isn't silently
+        dead in cloud-upload mode."""
+        from unittest.mock import MagicMock, PropertyMock
+        with tempfile.TemporaryDirectory() as tmp:
+            secrets_root = Path(tmp) / "secrets"
+            secrets_root.mkdir()
+            # Two cloud accounts with mounted tokens.
+            for acct in ("alpha-cloud", "beta-cloud"):
+                d = secrets_root / f"youtube-token-{acct}"
+                d.mkdir()
+                (d / "value").write_text("{...secret blob...}")
+            # A directory without a `value` file must NOT be picked
+            # up (incomplete mount).
+            (secrets_root / "youtube-token-incomplete").mkdir()
+            # A FILE matching the glob must NOT be picked up either —
+            # only mounted secret DIRECTORIES are valid.
+            (secrets_root / "youtube-token-stray-file.json").write_text("x")
+            # An unrelated mount must NOT match.
+            (secrets_root / "other-secret").mkdir()
+            (secrets_root / "other-secret" / "value").write_text("x")
+
+            # Patch CONFIG_DIR away (cloud has no laptop dir) and
+            # patch the Path("/secrets") lookup inside the helper to
+            # point at our tmp dir.
+            with patch.object(ce_mod, "CONFIG_DIR", Path("/nonexistent/__cfg__")), \
+                 patch.object(ce_mod, "Path") as path_mock:
+                # Path("/secrets") → our tmp dir; everything else passes
+                # through unchanged.
+                def path_side_effect(arg):
+                    return secrets_root if arg == "/secrets" else Path(arg)
+                path_mock.side_effect = path_side_effect
+                # The original Path is needed for .glob/.is_dir calls
+                # inside the helper, so re-use the real Path for those
+                # objects (we replaced the constructor only).
+                result = ce_mod.list_sibling_accounts()
+
+        self.assertEqual(sorted(result), ["alpha-cloud", "beta-cloud"])
+
+    def test_unions_laptop_and_cloud_sources(self):
+        """A laptop with both CONFIG_DIR tokens AND mounted Cloud
+        Run secrets (e.g. local debugging against prod creds) must
+        see both sources unioned, deduplicated, and sorted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "cfg"
+            cfg.mkdir()
+            secrets_root = Path(tmp) / "secrets"
+            secrets_root.mkdir()
+            # Laptop has alpha + duplicate.
+            (cfg / "youtube_token_alpha.json").write_text("{}")
+            (cfg / "youtube_token_dup.json").write_text("{}")
+            # Cloud secret mount has beta + same-name dup.
+            for acct in ("beta", "dup"):
+                d = secrets_root / f"youtube-token-{acct}"
+                d.mkdir()
+                (d / "value").write_text("x")
+
+            with patch.object(ce_mod, "CONFIG_DIR", cfg), \
+                 patch.object(ce_mod, "Path") as path_mock:
+                def path_side_effect(arg):
+                    return secrets_root if arg == "/secrets" else Path(arg)
+                path_mock.side_effect = path_side_effect
+                result = ce_mod.list_sibling_accounts()
+
+        self.assertEqual(result, ["alpha", "beta", "dup"])
+
 
 # ---------------------------------------------------------------------------
 # _load_registry / _save_registry

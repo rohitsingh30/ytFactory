@@ -324,6 +324,19 @@ class BuildYoutubeTest(unittest.TestCase):
             result = yt_mod._build_youtube("myaccount")
         self.assertIsNotNone(result)
 
+    def test_refresh_token_lost_propagates(self):
+        # Audit T1.8 — pre-fix the broad except Exception swallowed
+        # this typed exception → silent all-nulls degrade. Now it
+        # bubbles so cloud-side callers can route the signal to
+        # /api/admin/token-health for the daily cron alert.
+        from pipeline.upload.upload import RefreshTokenLost
+        with patch(
+            "pipeline.upload.authenticate",
+            side_effect=RefreshTokenLost("myaccount"),
+        ):
+            with self.assertRaises(RefreshTokenLost):
+                yt_mod._build_youtube("myaccount")
+
 
 # ---------------------------------------------------------------------------
 # _save_cache / _load_cache / _list_cached_accounts — provider-aware (B1)
@@ -886,6 +899,47 @@ class FetchAllTest(unittest.TestCase):
         self.assertEqual(result["channels"], 2)  # 2 distinct accounts
         self.assertEqual(result["fetched"], 1)
         self.assertEqual(result["missing_auth"], 1)
+        # T1.8: empty lists default for backward-compat consumers.
+        self.assertEqual(result["refresh_token_lost"], 0)
+        self.assertEqual(result["lost_accounts"], [])
+
+    def test_refresh_token_lost_counted_distinctly(self):
+        """Audit T1.8 — fetch_all must surface RefreshTokenLost
+        accounts in their own counter + named list so the cron alert
+        / dashboard / token-health endpoint can route the operator
+        to 're-OAuth this channel' (vs the generic 'auth missing'
+        bucket which often resolves on retry)."""
+        from pipeline.upload.upload import RefreshTokenLost
+        configs = [("a-bad", "ch_a"), ("b-ok", "ch_b"), ("c-bad", "ch_c")]
+
+        def fake_fetch(account, *, quiet=False):
+            if account in ("a-bad", "c-bad"):
+                raise RefreshTokenLost(account)
+            return {"account": account, "videos": []}
+
+        with patch("pipeline.research.youtube.iter_channel_configs", return_value=configs):
+            with patch("pipeline.research.youtube.fetch_account", side_effect=fake_fetch):
+                with patch("builtins.print"):
+                    result = yt_mod.fetch_all(quiet=False)
+
+        self.assertEqual(result["channels"], 3)
+        self.assertEqual(result["fetched"], 1)
+        self.assertEqual(result["refresh_token_lost"], 2)
+        self.assertEqual(result["lost_accounts"], ["a-bad", "c-bad"])
+        # missing_auth bucket is reserved for the OTHER kind of
+        # failure (transient / non-typed).
+        self.assertEqual(result["missing_auth"], 0)
+
+    def test_no_channels_returns_zero_summary_includes_lost_keys(self):
+        # Ensure the empty-channels short-circuit also returns the new
+        # keys so consumers can blindly read them.
+        with patch("pipeline.research.youtube.iter_channel_configs", return_value=[]):
+            with patch("builtins.print"):
+                result = yt_mod.fetch_all()
+        self.assertIn("refresh_token_lost", result)
+        self.assertIn("lost_accounts", result)
+        self.assertEqual(result["refresh_token_lost"], 0)
+        self.assertEqual(result["lost_accounts"], [])
 
 
 # ---------------------------------------------------------------------------

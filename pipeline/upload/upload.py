@@ -139,6 +139,77 @@ def _parse_iso(ts: str | None) -> datetime | None:
     return dt
 
 
+def _state_bucket() -> str | None:
+    """When set, channel state (uploads/, scripts/, etc.) lives at
+    ``gs://$YTFACTORY_STATE_BUCKET/<channel>/...`` and the laptop FS
+    is treated as read-only/empty. Audit T1.6 — required for the
+    upload throttle to see any prior publishes when the upload
+    process runs on Cloud Run."""
+    return os.environ.get("YTFACTORY_STATE_BUCKET") or None
+
+
+def _gcs_storage_client():
+    """Lazy module-global storage client; None when google.cloud.storage
+    isn't importable (laptop dev without GCP extras)."""
+    # coverage: real GCS import path needs google.cloud.storage; integration-only
+    try:
+        from google.cloud import storage
+    except ImportError:
+        return None
+    # coverage: real GCS client construction needs cloud + auth; integration-only
+    try:
+        return storage.Client(
+            project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2"),
+        )
+    except Exception:  # noqa: BLE001 — broad: auth / network / quota all OK to skip
+        return None
+
+
+def _latest_publish_for_account_gcs(
+    bucket_name: str, account: str,
+) -> datetime | None:
+    """Audit T1.6 — GCS variant of :func:`_latest_publish_for_account`.
+
+    Lists every ``<channel>/uploads/*.json`` (and the niche-nested
+    ``<channel>/<niche>/uploads/*.json`` shape used by mystoriesanimated
+    and friends) from the canonical state bucket; filters by the
+    record's ``account`` field; returns the latest effective-publish
+    time. Match semantics with the FS variant exactly so the throttle
+    contract is the same regardless of which environment the upload
+    process runs in.
+    """
+    cli = _gcs_storage_client()
+    if cli is None:
+        return None
+    latest: datetime | None = None
+    try:
+        for blob in cli.list_blobs(bucket_name):
+            name = blob.name
+            parts = name.split("/")
+            if (len(parts) < 3
+                    or parts[-2] != "uploads"
+                    or not name.endswith(".json")
+                    or name.endswith(".x.json")):
+                continue
+            try:
+                rec = json.loads(blob.download_as_text())
+            except Exception:  # noqa: BLE001 — malformed records get skipped
+                continue
+            if rec.get("account") != account:
+                continue
+            eff = (
+                _parse_iso(rec.get("publish_at"))
+                or _parse_iso(rec.get("uploaded_at"))
+            )
+            if eff is None:
+                continue
+            if latest is None or eff > latest:
+                latest = eff
+    except Exception:  # noqa: BLE001 — bucket missing / permissions / network
+        return None
+    return latest
+
+
 def _latest_publish_for_account(project_root: Path, account: str) -> datetime | None:
     """Return the most recent effective-publish time across all upload
     records on this account, or ``None`` if no priors.
@@ -149,7 +220,17 @@ def _latest_publish_for_account(project_root: Path, account: str) -> datetime | 
     layouts (``<channel>/<niche>/uploads/<slug>.json``, post-2026-05-05)
     AND flat layouts (``<channel>/uploads/<slug>.json``). Skips
     ``*.x.json`` X-platform sidecars (different upload track).
+
+    Audit T1.6 — when ``YTFACTORY_STATE_BUCKET`` is set (Cloud Run
+    upload path), the laptop FS doesn't carry the channel dirs, so
+    iterating ``project_root.iterdir()`` returns nothing → throttle
+    silently returns None → publish-storms when YouTube quota frees.
+    Dispatch to the GCS variant in that case.
     """
+    bucket = _state_bucket()
+    if bucket:
+        return _latest_publish_for_account_gcs(bucket, account)
+
     latest: datetime | None = None
     # Glob shape: ``<channel>/**/uploads/*.json`` — recursive into each
     # channel root so niched uploads (mystoriesanimated/<niche>/uploads/)

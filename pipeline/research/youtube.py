@@ -328,13 +328,28 @@ def _build_youtube(account: str):
     'authenticate', ...)`` and direct rebinds of either
     ``pipeline.upload.authenticate`` or
     ``pipeline.upload.upload.authenticate`` are honoured.
+
+    **Audit T1.8 — must NOT swallow RefreshTokenLost.** Pre-fix the
+    broad ``except Exception: return None`` masked the typed
+    ``RefreshTokenLost`` raised by ``authenticate(interactive=False)``
+    when a cached token blob has lost its refresh_token. CLAUDE.md
+    "OAuth tokens have a typed failure mode … Catch this in
+    cloud-side callers and route to /api/admin/token-health so the
+    daily cron alert fires." Letting RefreshTokenLost propagate is
+    what makes that contract work; the broad except buried it,
+    silently degrading the channel to all-nulls in the dashboard.
     """
     from googleapiclient.discovery import build
 
     from pipeline.upload import authenticate  # resolves via package __getattr__
+    from pipeline.upload.upload import RefreshTokenLost
 
     try:
         creds = authenticate(account=account, interactive=False)
+    except RefreshTokenLost:
+        # Bubble — cloud callers route this to /api/admin/token-health
+        # via their own typed-exception handling.
+        raise
     except Exception:
         return None
     return build("youtube", "v3", credentials=creds, cache_discovery=False)
@@ -562,10 +577,16 @@ def fetch_all(*, quiet: bool = False) -> dict[str, Any]:
     if not accounts:
         if not quiet:
             print("[stats] no channels found — nothing to refresh")
-        return {"channels": 0, "fetched": 0, "missing_auth": 0, "videos": 0}
+        return {"channels": 0, "fetched": 0, "missing_auth": 0, "videos": 0,
+                "refresh_token_lost": 0, "lost_accounts": []}
+
+    # Lazy-import to avoid pulling pipeline.upload at module load.
+    from pipeline.upload.upload import RefreshTokenLost
 
     fetched = 0
     missing_auth = 0
+    refresh_token_lost = 0
+    lost_accounts: list[str] = []
     total_videos = 0
     # One fetch per distinct account (a few channel dirs may share an account).
     seen: set[str] = set()
@@ -573,7 +594,21 @@ def fetch_all(*, quiet: bool = False) -> dict[str, Any]:
         if account in seen:
             continue
         seen.add(account)
-        result = fetch_account(account, quiet=quiet)
+        try:
+            result = fetch_account(account, quiet=quiet)
+        except RefreshTokenLost:
+            # Audit T1.8 — surface this distinctly so the daily
+            # token-health cron + dashboard alert path can route the
+            # operator to "re-OAuth this channel" instead of treating
+            # it as a generic transient auth failure.
+            refresh_token_lost += 1
+            lost_accounts.append(account)
+            if not quiet:
+                print(
+                    f"[stats] {account}: refresh_token lost — "
+                    f"re-OAuth required (see /api/admin/token-health)"
+                )
+            continue
         if result is None:
             missing_auth += 1
             continue
@@ -584,6 +619,8 @@ def fetch_all(*, quiet: bool = False) -> dict[str, Any]:
         "channels": len(seen),
         "fetched": fetched,
         "missing_auth": missing_auth,
+        "refresh_token_lost": refresh_token_lost,
+        "lost_accounts": sorted(lost_accounts),
         "videos": total_videos,
     }
 

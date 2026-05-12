@@ -75,18 +75,36 @@ def list_sibling_accounts() -> list[str]:
 
     Returned in stable sorted order so subscribe-all and engagement
     fan-out are deterministic across runs.
+
+    **Audit T1.7 — cloud-blind discovery.** Pre-fix this only
+    listed laptop ``CONFIG_DIR`` (``~/.config/ytfactory/``). On
+    Cloud Run that dir doesn't exist → returned ``[]`` → the whole
+    cross-engagement layer was silently dead in cloud-upload mode
+    (no likes, no subscribes, no Playwright views from siblings).
+    Now also enumerates ``/secrets/youtube-token-*/value`` Cloud
+    Run secret mounts (per CLAUDE.md "every per-channel OAuth
+    refresh token lives at /secrets/youtube-token-<account>/value")
+    and unions both sources so the same code works on laptop and
+    on Cloud Run without env switching.
     """
-    if not CONFIG_DIR.exists():
-        return []
-    out: list[str] = []
-    for p in sorted(CONFIG_DIR.glob("youtube_token_*.json")):
-        if not _is_real_token(p):
-            continue
-        account = p.stem[len("youtube_token_"):]
-        if account in _EXCLUDE_ACCOUNTS:
-            continue
-        out.append(account)
-    return out
+    accounts: set[str] = set()
+    if CONFIG_DIR.exists():
+        for p in CONFIG_DIR.glob("youtube_token_*.json"):
+            if not _is_real_token(p):
+                continue
+            accounts.add(p.stem[len("youtube_token_"):])
+    # Audit T1.7: also enumerate Cloud Run secret mounts.
+    secrets_root = Path("/secrets")
+    if secrets_root.exists():
+        for p in secrets_root.glob("youtube-token-*"):
+            if not p.is_dir():
+                continue
+            if not (p / "value").exists():
+                continue
+            account = p.name[len("youtube-token-"):]
+            if account:
+                accounts.add(account)
+    return sorted(a for a in accounts if a not in _EXCLUDE_ACCOUNTS)
 
 
 # ---- channel-ID registry -----------------------------------------------

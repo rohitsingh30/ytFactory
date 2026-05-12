@@ -408,6 +408,153 @@ class TestPublishThrottle(_UploadTestBase):
         self.assertIsNone(result)
 
 
+class TestPublishThrottleGcsBackend(_UploadTestBase):
+    """Audit T1.6 — when YTFACTORY_STATE_BUCKET is set the throttle
+    must list GCS upload records (not the laptop FS) so the throttle
+    works on the Cloud Run upload path. Without this fix the cloud
+    job's project_root.iterdir() returned nothing → throttle returned
+    None → publish-storms when YouTube quota frees."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._saved_bucket = os.environ.pop("YTFACTORY_STATE_BUCKET", None)
+
+    def tearDown(self) -> None:
+        os.environ.pop("YTFACTORY_STATE_BUCKET", None)
+        if self._saved_bucket is not None:
+            os.environ["YTFACTORY_STATE_BUCKET"] = self._saved_bucket
+        super().tearDown()
+
+    def _make_blob(self, name: str, payload: dict):
+        b = MagicMock()
+        b.name = name
+        b.download_as_text.return_value = json.dumps(payload)
+        return b
+
+    def test_dispatches_to_gcs_when_bucket_env_set(self):
+        from unittest.mock import patch
+        os.environ["YTFACTORY_STATE_BUCKET"] = "test-bucket"
+        ts = "2026-05-12T12:00:00Z"
+        blobs = [
+            self._make_blob(
+                "historyrecapped/uploads/aita-001.json",
+                {"account": "default", "uploaded_at": ts},
+            ),
+            # Niche-nested layout matches the laptop semantics.
+            self._make_blob(
+                "mystoriesanimated/reddit_amitheasshole/uploads/aita-002.json",
+                {"account": "default", "publish_at": "2026-06-01T00:00:00Z"},
+            ),
+            # Wrong account should be skipped.
+            self._make_blob(
+                "rhymetimejunction/uploads/x.json",
+                {"account": "other", "uploaded_at": ts},
+            ),
+            # X-platform sidecars are excluded.
+            self._make_blob(
+                "historyrecapped/uploads/aita-001.x.json",
+                {"account": "default", "uploaded_at": "2030-01-01T00:00:00Z"},
+            ),
+        ]
+        fake_client = MagicMock()
+        fake_client.list_blobs.return_value = iter(blobs)
+        with patch(
+            "pipeline.upload.upload._gcs_storage_client",
+            return_value=fake_client,
+        ):
+            result = _latest_publish_for_account(self.project_root, "default")
+        # Latest of [2026-05-12, 2026-06-01] under account=default; the
+        # x.json's 2030 must NOT win because it's a sidecar; "other" account
+        # must NOT win either.
+        self.assertIsNotNone(result)
+        self.assertEqual(result.year, 2026)
+        self.assertEqual(result.month, 6)
+
+    def test_returns_none_when_gcs_client_unavailable(self):
+        from unittest.mock import patch
+        os.environ["YTFACTORY_STATE_BUCKET"] = "test-bucket"
+        with patch(
+            "pipeline.upload.upload._gcs_storage_client",
+            return_value=None,
+        ):
+            result = _latest_publish_for_account(self.project_root, "default")
+        self.assertIsNone(result)
+
+    def test_gcs_listing_failure_returns_none(self):
+        from unittest.mock import patch
+        os.environ["YTFACTORY_STATE_BUCKET"] = "test-bucket"
+        fake_client = MagicMock()
+        fake_client.list_blobs.side_effect = RuntimeError("permission denied")
+        with patch(
+            "pipeline.upload.upload._gcs_storage_client",
+            return_value=fake_client,
+        ):
+            # Throttle defensive: bucket missing / IAM blocked ⇒ no
+            # throttle (better than crashing the upload job).
+            result = _latest_publish_for_account(self.project_root, "default")
+        self.assertIsNone(result)
+
+    def test_gcs_skips_malformed_json_records(self):
+        from unittest.mock import patch
+        os.environ["YTFACTORY_STATE_BUCKET"] = "test-bucket"
+        bad = MagicMock()
+        bad.name = "historyrecapped/uploads/bad.json"
+        bad.download_as_text.return_value = "not json{{{"
+        good = self._make_blob(
+            "historyrecapped/uploads/good.json",
+            {"account": "default", "uploaded_at": "2026-05-12T12:00:00Z"},
+        )
+        fake_client = MagicMock()
+        fake_client.list_blobs.return_value = iter([bad, good])
+        with patch(
+            "pipeline.upload.upload._gcs_storage_client",
+            return_value=fake_client,
+        ):
+            result = _latest_publish_for_account(self.project_root, "default")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.year, 2026)
+
+    def test_gcs_skips_records_with_no_timestamps(self):
+        from unittest.mock import patch
+        os.environ["YTFACTORY_STATE_BUCKET"] = "test-bucket"
+        no_ts = self._make_blob(
+            "historyrecapped/uploads/no_ts.json",
+            {"account": "default"},  # no publish_at + no uploaded_at
+        )
+        fake_client = MagicMock()
+        fake_client.list_blobs.return_value = iter([no_ts])
+        with patch(
+            "pipeline.upload.upload._gcs_storage_client",
+            return_value=fake_client,
+        ):
+            result = _latest_publish_for_account(self.project_root, "default")
+        self.assertIsNone(result)
+
+    def test_compute_throttled_uses_gcs_path_when_bucket_set(self):
+        """End-to-end: compute_throttled_publish_at routes through the
+        GCS variant and produces a future publish slot."""
+        from unittest.mock import patch
+        os.environ["YTFACTORY_STATE_BUCKET"] = "test-bucket"
+        now = datetime.now(timezone.utc)
+        recent = (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+        fake_client = MagicMock()
+        fake_client.list_blobs.return_value = iter([
+            self._make_blob(
+                "historyrecapped/uploads/recent.json",
+                {"account": "default", "uploaded_at": recent},
+            ),
+        ])
+        with patch(
+            "pipeline.upload.upload._gcs_storage_client",
+            return_value=fake_client,
+        ):
+            result = compute_throttled_publish_at(
+                self.project_root, "default", now=now,
+            )
+        self.assertIsNotNone(result)
+        self.assertIn("Z", result)
+
+
 # ===========================================================================
 # 4.  inspect_token_status
 # ===========================================================================
