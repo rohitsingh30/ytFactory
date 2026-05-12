@@ -164,25 +164,151 @@ _DEFAULT_MODEL_BY_STAGE: dict[str, str] = {
 # (e.g. ``YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM=16000``).
 _DEFAULT_MAX_TOKENS_BY_STAGE: dict[str, int] = {
     # Long-form rewrite: 30-min script ~ 4500 words ~ 6500 prose
-    # tokens, plus the sectioned + panels JSON envelope. 12k gives
-    # ~50% headroom over the worst-case 30-min ask without being
-    # absurd; pushes to 16k via env if a future channel wants 60-min.
-    "rewrite_long_form": 12000,
-    # Shorts rewrite + cast + prompts run on much shorter outputs;
-    # the 4096 default has been fine for ~6 months of production.
-    "rewrite": 4096,
-    "cast": 4096,
-    "prompts": 4096,
-    "critic": 4096,
-    "audio_critic": 4096,
-    "imitate_analyze": 4096,
-    "imitate_apply": 4096,
+    # tokens, plus the sectioned + panels JSON envelope ≈ 8800 tokens
+    # of OUTPUT.
+    #
+    # 2026-05-13 — bumped 12000 → 32000 after gpt-5.3-chat truncated
+    # the Leigh Occhi long-form rewrite mid-string ("could reshape
+    # what we think happened to "). Reasoning deployments (gpt-5.x /
+    # o1 / o3) consume max_completion_tokens for INVISIBLE reasoning
+    # tokens — observed reasoning_tokens for a 30-min long-form is
+    # ~15-20k, leaving only ~-5k for the actual output if budget is
+    # 12k. We need budget ≥ reasoning + output; 32000 gives headroom
+    # for reasoning ~20k + output ~9k + 30% margin. The dispatcher
+    # also auto-retries with doubled budget on finish_reason="length"
+    # (capped at 64k) as a safety net for stages that go even bigger.
+    #
+    # Cost note: gpt-5.3-chat charges per OUTPUT token, including
+    # reasoning. 32000 max means up to 32000 × $/tok price — but most
+    # calls finish well under cap, so the typical render isn't
+    # affected. Override down via YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM
+    # if a particular channel runs gpt-4o (no reasoning) and 12k is
+    # plenty.
+    "rewrite_long_form": 32000,
+    # Shorts rewrite + cast + prompts run on much shorter outputs.
+    # 2026-05-13 — bumped 4096 → 8192 to give reasoning deployments
+    # the same headroom. Short-form output is ~1500 prose tokens, but
+    # gpt-5.x reasoning ~3-4k means 4k cap leaves no output budget.
+    "rewrite": 8192,
+    "cast": 8192,
+    "prompts": 8192,
+    "critic": 8192,
+    "audio_critic": 8192,
+    "imitate_analyze": 8192,
+    "imitate_apply": 8192,
 }
 
 # Floor for any stage we haven't pinned explicitly. Keeps the old
 # behaviour (4096 default) for any caller that passes a stage name
 # we haven't classified yet.
 _FALLBACK_MAX_TOKENS = 4096
+
+# Auto-bump ceiling for the finish_reason=length retry path. If a
+# stage's budget × 2 would exceed this, we don't retry — we surface
+# the clear "bump YTFACTORY_MAX_TOKENS_<STAGE>" error so the operator
+# audits the prompt before throwing more $/tokens at it. 64k matches
+# Azure gpt-5.x's typical per-deployment hard cap; raise via
+# YTFACTORY_MAX_TOKENS_AUTO_BUMP_CEILING if a future deployment
+# supports more.
+def _max_token_auto_bump_ceiling() -> int:
+    raw = os.environ.get("YTFACTORY_MAX_TOKENS_AUTO_BUMP_CEILING", "").strip()
+    if raw:
+        try:
+            return max(_FALLBACK_MAX_TOKENS, int(raw))
+        except ValueError:
+            pass
+    return 64000
+
+_MAX_TOKEN_AUTO_BUMP_CEILING = _max_token_auto_bump_ceiling()
+
+
+def _reasoning_tokens(usage: Any) -> int | None:
+    """Extract the reasoning_tokens count from an Azure OpenAI usage
+    object. gpt-5.x / o1 / o3 deployments include this in
+    ``completion_tokens_details.reasoning_tokens``. Older deployments
+    don't expose it (returns ``None``).
+    """
+    if usage is None:
+        return None
+    details = getattr(usage, "completion_tokens_details", None)
+    if details is None:
+        return None
+    return getattr(details, "reasoning_tokens", None)
+
+
+# ---- Reasoning-effort per stage (Tier 1A token-cost optimisation, 2026-05-13) ----
+#
+# gpt-5.x / o1 / o3 reasoning deployments accept a ``reasoning_effort``
+# parameter (``minimal`` / ``low`` / ``medium`` / ``high``) that
+# controls how many INVISIBLE reasoning tokens the model burns before
+# emitting output. Reasoning tokens are billed as output tokens but
+# don't appear in the response — they're pure cost.
+#
+# Observed on gpt-5.3-chat (2026-05-13):
+#   reasoning_effort=high       (default) → ~15-20k reasoning tokens
+#   reasoning_effort=medium               → ~5-8k reasoning tokens
+#   reasoning_effort=low                  → ~1-3k reasoning tokens
+#   reasoning_effort=minimal              → ~0-200 reasoning tokens
+#
+# Most pipeline stages don't NEED deep reasoning — they're transformation
+# tasks (assign character names to shotlist, format image prompts,
+# restructure JSON). Setting ``minimal`` for these stages saves ~70%
+# of total token consumption per render with no observed quality
+# degradation. Only stages that genuinely benefit from planning
+# (long-form rewrite, critique) stay at ``medium``.
+#
+# Override per-stage via ``YTFACTORY_REASONING_EFFORT_<STAGE>`` env
+# (one of minimal/low/medium/high — invalid values are ignored).
+# Set to ``off`` / ``none`` to omit the param entirely (useful when
+# diagnosing a stage that needs the deployment default).
+_DEFAULT_REASONING_EFFORT_BY_STAGE: dict[str, str] = {
+    "rewrite_long_form": "medium",  # planning a 30-min script benefits from reasoning
+    "critic":            "medium",  # we want thoughtful critique
+}
+_FALLBACK_REASONING_EFFORT = "minimal"
+_VALID_REASONING_EFFORTS = {"minimal", "low", "medium", "high"}
+
+
+def reasoning_effort_for(stage: str | None) -> str | None:
+    """Pick the ``reasoning_effort`` value for an Azure OpenAI call.
+
+    Returns one of ``minimal`` / ``low`` / ``medium`` / ``high`` — or
+    ``None`` to OMIT the parameter entirely (used when the operator
+    explicitly disables via env ``off`` / ``none``).
+    """
+    env_key = f"YTFACTORY_REASONING_EFFORT_{(stage or 'STAGE').upper()}"
+    raw = os.environ.get(env_key, "").strip().lower()
+    if raw in _VALID_REASONING_EFFORTS:
+        return raw
+    if raw in {"off", "none"}:
+        return None
+    if not stage:
+        return _FALLBACK_REASONING_EFFORT
+    return _DEFAULT_REASONING_EFFORT_BY_STAGE.get(stage, _FALLBACK_REASONING_EFFORT)
+
+
+# Per-deployment cache: does this Azure deployment accept the
+# ``reasoning_effort`` param? Legacy chat-completions deployments
+# (gpt-4o, gpt-4-turbo) reject it with a 400 unsupported_parameter.
+# Cache populated lazily — first call passes the param; on a 400 we
+# strip + remember. Skip discovery entirely by setting
+# ``AZURE_REASONING_EFFORT_DISABLE=1`` (legacy deployments).
+_AZURE_REASONING_EFFORT_SUPPORTED: dict[str, bool] = {}
+
+
+def _azure_supports_reasoning_effort(deployment: str) -> bool:
+    """Whether this deployment accepts ``reasoning_effort``. Defaults
+    to True (try once, learn from rejection). Honours
+    ``AZURE_REASONING_EFFORT_DISABLE=1`` to skip entirely.
+    """
+    if (os.environ.get("AZURE_REASONING_EFFORT_DISABLE") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    return _AZURE_REASONING_EFFORT_SUPPORTED.get(deployment, True)
+
+
+def _remember_azure_reasoning_effort_support(deployment: str, supported: bool) -> None:
+    """Cache the discovered reasoning_effort support for a deployment."""
+    _AZURE_REASONING_EFFORT_SUPPORTED[deployment] = supported
 
 
 def model_for(stage: str) -> str:
@@ -788,6 +914,8 @@ def _call_azure_openai(
         "schema": json_schema is not None,
         "stage": stage,
         "token_param": _azure_token_param(deployment),
+        "reasoning_effort": reasoning_effort_for(stage)
+            if _azure_supports_reasoning_effort(deployment) else None,
     }
 
     # Cap output tokens per stage. Without this, Azure deployments default
@@ -807,6 +935,16 @@ def _call_azure_openai(
         "messages": [{"role": "user", "content": user_prompt}],
         token_param: max_tokens_for(stage),
     }
+
+    # Tier 1A token-cost optimisation (2026-05-13): pass reasoning_effort
+    # to gpt-5.x / o1 / o3 deployments so non-reasoning stages (cast,
+    # prompts, shorts rewrite, etc) skip the ~15-20k invisible
+    # reasoning-token burn that gpt-5.3-chat does by default. Stripped
+    # via swap-retry for legacy deployments that reject it (gpt-4o).
+    if _azure_supports_reasoning_effort(deployment):
+        re_value = reasoning_effort_for(stage)
+        if re_value is not None:
+            kwargs["reasoning_effort"] = re_value
     if output_json:
         if json_schema is not None:
             kwargs["response_format"] = {
@@ -847,10 +985,17 @@ def _call_azure_openai(
         # don't support either json_schema or json_object. Retry once
         # WITHOUT response_format, parse client-side.
         #
+        # (3) ``reasoning_effort`` rejection. Legacy chat-completions
+        # deployments (gpt-4o, gpt-4-turbo) reject this param with a
+        # 400 unsupported_parameter. Strip + remember in the per-
+        # deployment cache so subsequent calls skip the parameter
+        # entirely. Disable globally via AZURE_REASONING_EFFORT_DISABLE=1.
+        #
         # Any other failure → ClaudeCLIError.
         msg = str(e)
         retry_label: str | None = None
         swap_to: str | None = None
+        reasoning_effort_dropped = False
 
         if "max_tokens" in msg and "max_completion_tokens" in msg:
             if "max_tokens" in kwargs:
@@ -861,6 +1006,13 @@ def _call_azure_openai(
                 kwargs["max_tokens"] = kwargs.pop("max_completion_tokens")
                 swap_to = "max_tokens"
                 retry_label = "max_tokens"
+        elif (
+            "reasoning_effort" in msg
+            and "reasoning_effort" in kwargs
+        ):
+            kwargs.pop("reasoning_effort", None)
+            reasoning_effort_dropped = True
+            retry_label = "no_reasoning_effort"
         elif (
             output_json
             and "response_format" in msg
@@ -881,11 +1033,12 @@ def _call_azure_openai(
                 raise ClaudeCLIError(
                     f"azure_openai chat error (post-retry={retry_label}): {e2}"
                 ) from e2
-            # Retry succeeded — if it was the token-param swap, cache the
-            # discovery so the next call in this process picks the right
-            # key on the FIRST try.
+            # Retry succeeded — cache the discoveries so subsequent
+            # calls in this process pick the right shape on first try.
             if swap_to:
                 _remember_azure_token_param(deployment, swap_to)
+            if reasoning_effort_dropped:
+                _remember_azure_reasoning_effort_support(deployment, False)
         else:
             _tlm.track("llm_call", category="llm", success=False,
                        duration_ms=int((time.time() - t0) * 1000),
@@ -903,6 +1056,78 @@ def _call_azure_openai(
 
     text = (resp.choices[0].message.content or "").strip()
     usage = getattr(resp, "usage", None)
+    finish_reason = getattr(resp.choices[0], "finish_reason", None)
+
+    # Detect output truncation — if Azure returned finish_reason=length,
+    # the model hit max_completion_tokens before finishing. Auto-retry
+    # ONCE with doubled budget (capped at MAX_TOKEN_AUTO_BUMP_CEILING)
+    # so reasoning-deployment renders don't silently lose half the
+    # script. The 2026-05-13 5e37f76b post-mortem: gpt-5.3-chat
+    # consumed all 12000 max_completion_tokens on invisible reasoning
+    # tokens, leaving the JSON cut off at "could reshape what we
+    # think happened to ".
+    if finish_reason == "length":
+        cap_used = kwargs.get(token_param) or max_tokens_for(stage)
+        bumped = min(cap_used * 2, _MAX_TOKEN_AUTO_BUMP_CEILING)
+        if bumped > cap_used:
+            logger.warning(
+                "azure_openai stage=%s deployment=%s truncated at "
+                "max_completion_tokens=%d (finish_reason=length, "
+                "completion_tokens=%s, reasoning_tokens=%s) — auto-"
+                "retrying once with bumped cap=%d",
+                stage, deployment, cap_used,
+                getattr(usage, "completion_tokens", "?"),
+                _reasoning_tokens(usage),
+                bumped,
+            )
+            kwargs[token_param] = bumped
+            t0_retry = time.time()
+            try:
+                resp = client.chat.completions.create(**kwargs)
+            except Exception as e:  # noqa: BLE001
+                _tlm.track("llm_call", category="llm", success=False,
+                           duration_ms=int((time.time() - t0_retry) * 1000),
+                           job_id=job_id,
+                           metadata={**tlm_meta, "error": str(e)[:200],
+                                     "retry": "max_tokens_doubled",
+                                     "max_tokens_first": cap_used,
+                                     "max_tokens_retry": bumped})
+                raise ClaudeCLIError(
+                    f"azure_openai chat error (post-retry=max_tokens_doubled "
+                    f"to {bumped}, original truncated at {cap_used}): {e}"
+                ) from e
+            text = (resp.choices[0].message.content or "").strip()
+            usage = getattr(resp, "usage", None)
+            finish_reason = getattr(resp.choices[0], "finish_reason", None)
+
+    # If we STILL got truncated after the retry (or hit the ceiling so
+    # no retry was attempted), surface a clear actionable error
+    # instead of letting _parse_inner_json fail with the misleading
+    # "could not parse JSON" message.
+    if finish_reason == "length":
+        completion = getattr(usage, "completion_tokens", None)
+        reasoning = _reasoning_tokens(usage)
+        cap_used = kwargs.get(token_param) or max_tokens_for(stage)
+        msg = (
+            f"azure_openai stage={stage} deployment={deployment} "
+            f"output truncated by max_completion_tokens={cap_used} "
+            f"(finish_reason=length, completion_tokens={completion}, "
+            f"reasoning_tokens={reasoning}). Bump via env: "
+            f"YTFACTORY_MAX_TOKENS_{(stage or 'STAGE').upper()}={cap_used * 2}. "
+            f"Reasoning deployments (gpt-5.x / o1 / o3) consume "
+            f"max_completion_tokens for INVISIBLE reasoning tokens — "
+            f"see docs/llm_max_tokens.md."
+        )
+        _tlm.track("llm_call", category="llm", success=False,
+                   duration_ms=int((time.time() - t0) * 1000),
+                   job_id=job_id,
+                   metadata={**tlm_meta, "error": msg[:200],
+                             "finish_reason": "length",
+                             "max_tokens_used": cap_used,
+                             "completion_tokens": completion,
+                             "reasoning_tokens": reasoning})
+        raise ClaudeCLIError(msg)
+
     _tlm.track(
         "llm_call",
         category="llm",
@@ -913,6 +1138,8 @@ def _call_azure_openai(
             **tlm_meta,
             "input_tokens":  getattr(usage, "prompt_tokens", None),
             "output_tokens": getattr(usage, "completion_tokens", None),
+            "reasoning_tokens": _reasoning_tokens(usage),
+            "finish_reason": finish_reason,
         },
     )
 

@@ -15,6 +15,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from tests._helpers import PROJECT_ROOT  # noqa: F401
@@ -33,6 +34,12 @@ def _clear_backend_env(monkey_keys: list[str] | None = None) -> dict[str, str]:
         "AZURE_OPENAI_MODEL_HAIKU",
         "AZURE_OPENAI_MODEL_OPUS",
         "AZURE_OPENAI_TOKEN_PARAM",
+        "AZURE_REASONING_EFFORT_DISABLE",
+        "YTFACTORY_REASONING_EFFORT_REWRITE",
+        "YTFACTORY_REASONING_EFFORT_REWRITE_LONG_FORM",
+        "YTFACTORY_REASONING_EFFORT_PROMPTS",
+        "YTFACTORY_REASONING_EFFORT_CAST",
+        "YTFACTORY_MAX_TOKENS_AUTO_BUMP_CEILING",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_MODEL_OPUS",
     ]
@@ -233,9 +240,10 @@ class AzureBackendTest(unittest.TestCase):
         fake_openai = types.ModuleType("openai")
         fake_openai.AzureOpenAI = MagicMock(return_value=self._fake_client)  # type: ignore[attr-defined]
         sys.modules["openai"] = fake_openai
-        # Per-deployment process cache leaks across tests if we don't
-        # clear it; many tests share the default deployment "gpt-4o".
+        # Per-deployment process caches leak across tests if we don't
+        # clear them; many tests share the default deployment "gpt-4o".
         llm_cli._AZURE_TOKEN_PARAM_BY_DEPLOYMENT.clear()
+        llm_cli._AZURE_REASONING_EFFORT_SUPPORTED.clear()
 
     def tearDown(self) -> None:
         if self._saved_module is not None:
@@ -245,14 +253,28 @@ class AzureBackendTest(unittest.TestCase):
         _clear_backend_env()
         _restore_env(self._saved)
         llm_cli._AZURE_TOKEN_PARAM_BY_DEPLOYMENT.clear()
+        llm_cli._AZURE_REASONING_EFFORT_SUPPORTED.clear()
 
     def _make_resp(self, content: str, *, prompt_tokens: int = 10,
-                   completion_tokens: int = 20):
-        return MagicMock(
-            choices=[MagicMock(message=MagicMock(content=content))],
-            usage=MagicMock(prompt_tokens=prompt_tokens,
-                            completion_tokens=completion_tokens),
+                   completion_tokens: int = 20,
+                   finish_reason: str = "stop",
+                   reasoning_tokens: int | None = None):
+        choice = MagicMock(
+            message=MagicMock(content=content),
+            finish_reason=finish_reason,
         )
+        usage_attrs: dict[str, Any] = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        }
+        if reasoning_tokens is not None:
+            usage_attrs["completion_tokens_details"] = MagicMock(
+                reasoning_tokens=reasoning_tokens,
+            )
+        else:
+            # Default: no reasoning_tokens detail (legacy gpt-4o).
+            usage_attrs["completion_tokens_details"] = None
+        return MagicMock(choices=[choice], usage=MagicMock(**usage_attrs))
 
     def test_text_call_returns_string(self) -> None:
         self._fake_client.chat.completions.create.return_value = \
@@ -562,6 +584,287 @@ class AzureBackendTest(unittest.TestCase):
             "max_tokens",
         )
 
+    # ----- Tier 1A token-cost optimisation (2026-05-13): reasoning_effort -----
+
+    def test_reasoning_effort_minimal_passed_for_default_stages(self) -> None:
+        # The whole point of Tier 1A: stages NOT in the
+        # _DEFAULT_REASONING_EFFORT_BY_STAGE table get "minimal" so
+        # gpt-5.x doesn't burn 15-20k invisible reasoning tokens on a
+        # task that's just JSON formatting.
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{"ok": true}')
+        llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="prompts",
+        )
+        kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs.get("reasoning_effort"), "minimal")
+
+    def test_reasoning_effort_medium_for_long_form_rewrite(self) -> None:
+        # rewrite_long_form genuinely benefits from reasoning (planning
+        # a coherent 30-min script) — keep it at "medium" by default.
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{"ok": true}')
+        llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite_long_form",
+        )
+        kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs.get("reasoning_effort"), "medium")
+
+    def test_reasoning_effort_env_override_per_stage(self) -> None:
+        # Operator can promote a stage to a different effort via env
+        # without code change.
+        os.environ["YTFACTORY_REASONING_EFFORT_PROMPTS"] = "low"
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{"ok": true}')
+        llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="prompts",
+        )
+        kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs.get("reasoning_effort"), "low")
+
+    def test_reasoning_effort_env_off_omits_param(self) -> None:
+        # Operator can disable the param entirely for a stage (e.g.
+        # while diagnosing a deployment-default behaviour).
+        os.environ["YTFACTORY_REASONING_EFFORT_PROMPTS"] = "off"
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{"ok": true}')
+        llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="prompts",
+        )
+        kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        self.assertNotIn("reasoning_effort", kwargs)
+
+    def test_reasoning_effort_global_disable_skips_param(self) -> None:
+        # AZURE_REASONING_EFFORT_DISABLE=1 turns off the optimisation
+        # globally — useful for legacy-only deployments.
+        os.environ["AZURE_REASONING_EFFORT_DISABLE"] = "1"
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{"ok": true}')
+        llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="prompts",
+        )
+        kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        self.assertNotIn("reasoning_effort", kwargs)
+
+    def test_reasoning_effort_rejected_by_legacy_deployment_strips_and_caches(self) -> None:
+        # Legacy gpt-4o rejects reasoning_effort with a 400. We strip,
+        # retry, AND cache "this deployment doesn't support it" so the
+        # next call skips the parameter entirely (no fail-then-retry
+        # round-trip per call).
+        bad = Exception(
+            "Unsupported parameter: 'reasoning_effort' is not supported "
+            "with this model."
+        )
+        ok = self._make_resp('{"ok": true}')
+        self._fake_client.chat.completions.create.side_effect = [bad, ok, ok]
+        # Call 1: passes reasoning_effort, gets 400, retries without.
+        out = llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="prompts",
+        )
+        self.assertEqual(out, {"ok": True})
+        # Call 2: cache says "not supported" → no reasoning_effort
+        # passed → first try succeeds.
+        llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="prompts",
+        )
+        # Three total SDK calls: 1 fail + 1 retry + 1 cached-success.
+        # Without the cache it would be 4.
+        self.assertEqual(self._fake_client.chat.completions.create.call_count, 3)
+        third_kwargs = self._fake_client.chat.completions.create.call_args_list[2].kwargs
+        self.assertNotIn("reasoning_effort", third_kwargs)
+        self.assertFalse(
+            llm_cli._AZURE_REASONING_EFFORT_SUPPORTED.get("gpt-4o", True),
+            "cache must record reasoning_effort=False for this deployment",
+        )
+
+    def test_reasoning_effort_telemetry_metadata(self) -> None:
+        # Operators viewing the dashboard need to know which effort
+        # level each call used so they can correlate cost vs quality.
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{"ok": true}')
+        captured: list[dict] = []
+        with patch.object(
+            llm_cli._tlm, "track",
+            side_effect=lambda *a, **kw: captured.append(kw.get("metadata") or {}),
+        ):
+            llm_cli._call_azure_openai(
+                "x", output_json=True, json_schema=None,
+                model="opus", timeout_s=30, stage="rewrite_long_form",
+            )
+        self.assertTrue(captured)
+        self.assertEqual(captured[0].get("reasoning_effort"), "medium")
+
+    # ----- finish_reason=length truncation handling (2026-05-13) -----
+
+    def test_finish_reason_length_auto_retries_with_doubled_budget(self) -> None:
+        # The exact 5e37f76b prod failure: gpt-5.3-chat consumed all
+        # 12k max_completion_tokens on invisible reasoning, leaving
+        # the JSON cut off mid-string. We auto-retry once with doubled
+        # budget so the typical render recovers without operator
+        # intervention.
+        truncated = self._make_resp(
+            '{"hook": "story…", "thesis": "cut off mid-',
+            finish_reason="length",
+            completion_tokens=12000,
+            reasoning_tokens=11500,
+        )
+        complete = self._make_resp('{"hook": "story", "thesis": "complete"}')
+        self._fake_client.chat.completions.create.side_effect = [truncated, complete]
+        out = llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite_long_form",
+        )
+        self.assertEqual(out, {"hook": "story", "thesis": "complete"})
+        self.assertEqual(self._fake_client.chat.completions.create.call_count, 2)
+        # Retry kwargs have DOUBLE the budget.
+        first_kwargs = self._fake_client.chat.completions.create.call_args_list[0].kwargs
+        retry_kwargs = self._fake_client.chat.completions.create.call_args_list[1].kwargs
+        first_cap = first_kwargs.get("max_tokens") or first_kwargs.get("max_completion_tokens")
+        retry_cap = retry_kwargs.get("max_tokens") or retry_kwargs.get("max_completion_tokens")
+        self.assertEqual(retry_cap, first_cap * 2)
+
+    def test_finish_reason_length_after_retry_raises_actionable_error(self) -> None:
+        # If the retry ALSO truncates, surface a clear error pointing
+        # at the env var the operator should bump — NOT the misleading
+        # "could not parse JSON from model output" surface that the
+        # 5e37f76b post-mortem suffered from.
+        truncated_again = self._make_resp(
+            '{"hook": "still cut off mid-',
+            finish_reason="length",
+            completion_tokens=64000,
+            reasoning_tokens=60000,
+        )
+        self._fake_client.chat.completions.create.side_effect = [
+            truncated_again,
+            truncated_again,
+        ]
+        with self.assertRaises(llm_cli.ClaudeCLIError) as ctx:
+            llm_cli._call_azure_openai(
+                "x", output_json=True, json_schema=None,
+                model="opus", timeout_s=30, stage="rewrite_long_form",
+            )
+        msg = str(ctx.exception)
+        self.assertIn("output truncated", msg)
+        self.assertIn("YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM", msg)
+        self.assertIn("reasoning_tokens=60000", msg)
+        # NOT the misleading legacy phrasing.
+        self.assertNotIn("could not parse JSON", msg)
+
+    def test_finish_reason_length_caps_at_auto_bump_ceiling(self) -> None:
+        # If the original budget is ALREADY at the ceiling, no retry
+        # is attempted (we don't blow through the cap silently). The
+        # error surface still points at the right env var.
+        os.environ["YTFACTORY_MAX_TOKENS_AUTO_BUMP_CEILING"] = "16000"
+        # Re-evaluate the module-level ceiling after env change.
+        # Production code reads the env at import time; in tests we
+        # need to monkey-patch the ceiling.
+        with patch.object(llm_cli, "_MAX_TOKEN_AUTO_BUMP_CEILING", 16000):
+            truncated = self._make_resp(
+                '{"oops": "cut off',
+                finish_reason="length",
+                completion_tokens=16000,
+                reasoning_tokens=15500,
+            )
+            self._fake_client.chat.completions.create.return_value = truncated
+            with self.assertRaises(llm_cli.ClaudeCLIError) as ctx:
+                llm_cli._call_azure_openai(
+                    "x", output_json=True, json_schema=None,
+                    model="opus", timeout_s=30, stage="rewrite_long_form",
+                )
+            # Only ONE SDK call — retry was skipped because doubled
+            # budget would exceed ceiling.
+            self.assertEqual(
+                self._fake_client.chat.completions.create.call_count, 1,
+            )
+            self.assertIn("output truncated", str(ctx.exception))
+
+    def test_finish_reason_length_retry_failure_surfaces_actionable_error(self) -> None:
+        # If the BUMPED-budget retry itself raises (e.g. content
+        # filter, timeout, rate-limit), surface a message that names
+        # both budgets so the operator can disambiguate "first call
+        # truncated" from "retry call exploded".
+        truncated = self._make_resp(
+            '{"hook": "cut off',
+            finish_reason="length",
+            completion_tokens=12000,
+            reasoning_tokens=11000,
+        )
+        self._fake_client.chat.completions.create.side_effect = [
+            truncated,
+            Exception("rate_limit_exceeded"),
+        ]
+        with self.assertRaises(llm_cli.ClaudeCLIError) as ctx:
+            llm_cli._call_azure_openai(
+                "x", output_json=True, json_schema=None,
+                model="opus", timeout_s=30, stage="rewrite_long_form",
+            )
+        msg = str(ctx.exception)
+        self.assertIn("post-retry=max_tokens_doubled", msg)
+        self.assertIn("rate_limit_exceeded", msg)
+
+
+class MaxTokensAutoBumpCeilingTest(unittest.TestCase):
+    """``_max_token_auto_bump_ceiling`` env override + invalid-int
+    fallback. Pinned because the env is read once at import time —
+    callers must stay confident the module-level constant reflects
+    the env shape, not a typo or empty string."""
+
+    def setUp(self) -> None:
+        self._saved = os.environ.pop("YTFACTORY_MAX_TOKENS_AUTO_BUMP_CEILING", None)
+
+    def tearDown(self) -> None:
+        os.environ.pop("YTFACTORY_MAX_TOKENS_AUTO_BUMP_CEILING", None)
+        if self._saved is not None:
+            os.environ["YTFACTORY_MAX_TOKENS_AUTO_BUMP_CEILING"] = self._saved
+
+    def test_env_override_sets_ceiling(self) -> None:
+        os.environ["YTFACTORY_MAX_TOKENS_AUTO_BUMP_CEILING"] = "100000"
+        self.assertEqual(llm_cli._max_token_auto_bump_ceiling(), 100000)
+
+    def test_invalid_int_falls_back_to_default(self) -> None:
+        os.environ["YTFACTORY_MAX_TOKENS_AUTO_BUMP_CEILING"] = "garbage"
+        self.assertEqual(llm_cli._max_token_auto_bump_ceiling(), 64000)
+
+    def test_no_env_uses_default(self) -> None:
+        self.assertEqual(llm_cli._max_token_auto_bump_ceiling(), 64000)
+
+    def test_floor_at_fallback_max_tokens(self) -> None:
+        # Floor protects against an operator setting the ceiling
+        # below the legacy 4096 floor — would break short stages.
+        os.environ["YTFACTORY_MAX_TOKENS_AUTO_BUMP_CEILING"] = "100"
+        self.assertGreaterEqual(
+            llm_cli._max_token_auto_bump_ceiling(), llm_cli._FALLBACK_MAX_TOKENS,
+        )
+
+
+class ReasoningTokensHelperTest(unittest.TestCase):
+    """``_reasoning_tokens`` extracts the per-call reasoning_tokens
+    count from an Azure OpenAI usage object. Defensive against
+    missing attributes (legacy gpt-4o doesn't expose the detail)."""
+
+    def test_returns_none_when_usage_is_none(self) -> None:
+        self.assertIsNone(llm_cli._reasoning_tokens(None))
+
+    def test_returns_none_when_no_completion_tokens_details(self) -> None:
+        usage = MagicMock(spec=["prompt_tokens", "completion_tokens"])
+        # MagicMock(spec=…) raises AttributeError for un-listed attrs
+        # when accessed via getattr — _reasoning_tokens uses getattr
+        # with default None so this should be safe.
+        usage.completion_tokens_details = None
+        self.assertIsNone(llm_cli._reasoning_tokens(usage))
+
+    def test_returns_count_when_present(self) -> None:
+        usage = MagicMock()
+        usage.completion_tokens_details = MagicMock(reasoning_tokens=12345)
+        self.assertEqual(llm_cli._reasoning_tokens(usage), 12345)
+
 
 class AnthropicBackendTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -714,22 +1017,31 @@ class MaxTokensForTest(unittest.TestCase):
             if v is not None:
                 os.environ[k] = v
 
-    def test_long_form_rewrite_gets_at_least_8k_tokens(self) -> None:
-        # 4500-word 30-min script ≈ 6500 prose tokens + JSON wrapper.
-        # Cap below 8k risks truncation again.
+    def test_long_form_rewrite_gets_at_least_24k_tokens(self) -> None:
+        # 4500-word 30-min script ≈ 6500 prose tokens + JSON wrapper
+        # ≈ 8800 OUTPUT tokens. Reasoning deployments (gpt-5.x / o1 /
+        # o3) ALSO consume max_completion_tokens for INVISIBLE
+        # reasoning tokens (~15-20k for a 30-min long-form). Total
+        # need: ~24-30k. Cap below 24k risks truncation again — the
+        # 2026-05-13 5e37f76b post-mortem caught a 12k cap getting
+        # 100% consumed by reasoning, leaving the JSON cut off
+        # mid-string at "could reshape what we think happened to ".
         self.assertGreaterEqual(
             llm_cli.max_tokens_for("rewrite_long_form"),
-            8000,
-            "rewrite_long_form must allow ≥8k output tokens to avoid "
-            "truncating 30-min scripts (the 2026-05-12 17-min-vs-30-min bug)",
+            24000,
+            "rewrite_long_form must allow ≥24k output tokens to give "
+            "reasoning deployments (gpt-5.x) headroom for invisible "
+            "reasoning tokens + the actual narration JSON",
         )
 
-    def test_short_stages_stay_at_4096_default(self) -> None:
+    def test_short_stages_stay_at_8192_default(self) -> None:
         # Conservative default for everything we haven't bumped on
-        # purpose — keeps spend predictable.
-        self.assertEqual(llm_cli.max_tokens_for("rewrite"), 4096)
-        self.assertEqual(llm_cli.max_tokens_for("cast"), 4096)
-        self.assertEqual(llm_cli.max_tokens_for("prompts"), 4096)
+        # purpose — bumped 2026-05-13 from 4096 to 8192 so reasoning
+        # deployments have headroom (gpt-5.x reasoning ~3-4k means
+        # 4k cap leaves ZERO output budget). 8192 is the new floor.
+        self.assertEqual(llm_cli.max_tokens_for("rewrite"), 8192)
+        self.assertEqual(llm_cli.max_tokens_for("cast"), 8192)
+        self.assertEqual(llm_cli.max_tokens_for("prompts"), 8192)
 
     def test_unknown_stage_falls_back_to_4096(self) -> None:
         self.assertEqual(llm_cli.max_tokens_for("totally_new_stage"), 4096)
@@ -749,7 +1061,7 @@ class MaxTokensForTest(unittest.TestCase):
 
     def test_env_override_invalid_int_falls_back_to_default(self) -> None:
         os.environ["YTFACTORY_MAX_TOKENS_REWRITE"] = "not_a_number"
-        self.assertEqual(llm_cli.max_tokens_for("rewrite"), 4096)
+        self.assertEqual(llm_cli.max_tokens_for("rewrite"), 8192)
 
 
 class MaxTokensWiredIntoBackendsTest(unittest.TestCase):
@@ -831,7 +1143,10 @@ class MaxTokensWiredIntoBackendsTest(unittest.TestCase):
             model="opus", timeout_s=30, stage="rewrite",
         )
         kwargs = self._fake_az.chat.completions.create.call_args.kwargs
-        self.assertEqual(kwargs.get("max_tokens"), 4096)
+        # Bumped 2026-05-13 to 8192 to give reasoning deployments
+        # headroom (gpt-5.x reasoning ~3-4k means 4k cap leaves no
+        # output budget). See _DEFAULT_MAX_TOKENS_BY_STAGE comment.
+        self.assertEqual(kwargs.get("max_tokens"), 8192)
 
 
 class CliSubprocessMaxTokensTest(unittest.TestCase):
@@ -857,9 +1172,10 @@ class CliSubprocessMaxTokensTest(unittest.TestCase):
         return proc
 
     def test_long_form_stage_scales_budget_above_default(self) -> None:
-        # rewrite_long_form has max_tokens_for=12000 → derived budget
-        # must exceed the default $2.00 cap so long-form prompts aren't
-        # silently dollar-capped at the haiku-tier default.
+        # rewrite_long_form has max_tokens_for=32000 (post-2026-05-13
+        # bump for reasoning-deployment headroom) → derived budget
+        # must exceed the default $2.00 cap so long-form prompts
+        # aren't silently dollar-capped at the haiku-tier default.
         derived_budget_args: list[str] = []
         with patch("subprocess.run",
                    return_value=self._make_envelope_proc("hi")) as mock_run:
