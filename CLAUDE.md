@@ -290,10 +290,15 @@ Day-one debug cookbook: [`docs/observability_runbook.md`](./docs/observability_r
   ```
 
   Then run, in order: `bash cloud/_shared/sync.sh` (copies
-  `otel_init.py` into the new service dir),
-  `bash cloud/_shared/append_otel_deps.sh` (appends OTel pin block
-  to `requirements.txt`), `bash cloud/_shared/add_otel_copy.sh`
-  (patches the Dockerfile to `COPY otel_init.py ./`).
+  `otel_init.py` AND `cloud_run_json_exporter.py` into the new
+  service dir), `bash cloud/_shared/append_otel_deps.sh` (appends
+  OTel pin block to `requirements.txt`), `bash
+  cloud/_shared/add_otel_copy.sh` (patches the Dockerfile to
+  `COPY otel_init.py ./` AND `COPY cloud_run_json_exporter.py ./`
+  — both helpers are required; the Cloud-Run-shaped JSON log
+  exporter is what makes events queryable as `jsonPayload` in
+  Cloud Logging vs `textPayload` from `ConsoleLogRecordExporter`,
+  see `docs/telemetry_dashboard_design.md` for why this matters).
 * **Telemetry must never block the pipeline.** Every `track` and
   `timed` call swallows exceptions internally; if the SDK fails,
   the render proceeds.
@@ -312,8 +317,14 @@ Day-one debug cookbook: [`docs/observability_runbook.md`](./docs/observability_r
 - **Legacy back-compat shim** (`tlm.track`, `tlm.timed`, …):
   `pipeline/telemetry.py` — still works; routes through OTel.
 - **Cloud Run init helper** (copied per service): `cloud/_shared/otel_init.py`
+- **Cloud-Run-shaped JSON log exporter** (copied per service):
+  `cloud/_shared/cloud_run_json_exporter.py`
+- **Cross-service Cloud Logging reader** (dashboard read path):
+  `pipeline/observability/cloud_log_reader.py`
 - **Dashboard API** (`/api/telemetry/*`): `control/routes/telemetry_routes.py`
 - **Dashboard UI** (`/app/telemetry`): `web-next/app/app/telemetry/`
+- **Dashboard design rule** (per-render first, counters last):
+  `docs/telemetry_dashboard_design.md`
 - **IAM grant**: `cloud/iam/grant_telemetry.sh` (idempotent)
 - **Per-service file sync**: `cloud/_shared/sync.sh` (with `--check` for CI drift)
 - **Cloud-side parallel redeploy**: `cloud/_shared/redeploy_for_otel.sh`

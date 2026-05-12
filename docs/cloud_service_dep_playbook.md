@@ -508,10 +508,10 @@ All three shared scripts now use this same filter:
 
 | Script | What it does | Filter |
 |---|---|---|
-| `cloud/_shared/sync.sh` | Copies `otel_init.py` into every service dir | `server.py` or `entrypoint.py` exists |
-| `cloud/_shared/add_otel_copy.sh` | Patches `Dockerfile` with the right `COPY otel_init.py` line | **same** (added 2026-05-12) |
+| `cloud/_shared/sync.sh` | Copies `otel_init.py` AND `cloud_run_json_exporter.py` into every service dir | `server.py` OR `entrypoint.py` OR existing `otel_init.py` exists (the `otel_init.py` clause was added 2026-05-12 to catch slim-wrapper images like `cloud/web-server/` whose actual app code lives in the repo's `web/server.py` and is COPY'd in via repo-root context) |
+| `cloud/_shared/add_otel_copy.sh` | Patches `Dockerfile` with the right `COPY <helper>` line for EVERY helper in the `OTEL_HELPERS` array (data-driven; adding a fourth helper later is a one-line config change) | **same** as `sync.sh` (added 2026-05-12) |
 | `cloud/_shared/append_otel_deps.sh` | Appends `otel_requirements.txt` block to `requirements.txt` | naturally Python-only (no `requirements.txt` ⇒ no-op) |
-| `cloud/_shared/redeploy_for_otel.sh` | Parallel re-deploy of every OTel service after `_shared/` changes | hardcoded allowlist of 13 Python services |
+| `cloud/_shared/redeploy_for_otel.sh` | Parallel re-deploy of every OTel service after `_shared/` changes | hardcoded allowlist of 14 Python services (now includes `web-server` so the dashboard backend itself ships the new exporter / reader together) |
 
 If you add a fourth shared-template script, mirror this filter
 exactly. If you add a non-Python service that genuinely DOES need
@@ -520,12 +520,23 @@ layer), do NOT relax this filter — instead, add an explicit
 opt-in marker file like `cloud/<svc>/.otel-eligible` and switch
 the filter to "Python file present OR opt-in marker exists".
 
+If you add a fifth helper file under `cloud/_shared/` that needs
+to ship into every service image, append it to BOTH
+`cloud/_shared/sync.sh::HELPERS` AND
+`cloud/_shared/add_otel_copy.sh::OTEL_HELPERS` arrays — the two
+arrays must stay in lockstep or `bash cloud/_shared/sync.sh
+--check` will pass while Cloud Build fails with `COPY <helper>:
+file not found`.
+
 ### Verifying scope after editing any shared script
 
 ```bash
 # All three scope-using scripts agree (no diff in service lists):
 diff <(for d in cloud/*/; do
-         [[ -f "${d}server.py" || -f "${d}entrypoint.py" ]] && basename "${d%/}"
+         [[ -f "${d}server.py" || -f "${d}entrypoint.py" \
+            || -f "${d}otel_init.py" ]] \
+           && [[ "$(basename "${d%/}")" != "_shared" ]] \
+           && basename "${d%/}"
        done | sort) \
      <(grep -oE '"[a-z0-9-]+\|' cloud/_shared/redeploy_for_otel.sh \
          | tr -d '"|' | sort)

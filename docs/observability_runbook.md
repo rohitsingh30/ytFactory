@@ -168,6 +168,27 @@ line is still present in `reset_for_tests`.
 
 ## Recipe: figure out the slowest stage in a render
 
+**Fastest path** (added 2026-05-12): open `/app/telemetry` →
+**Stage Latency** section. Horizontal bar chart of p50 and p95
+duration per render-pipeline stage, sorted by p95 descending — the
+slowest stage is at the top. Bars colour-coded: sky for stage
+events, violet for full render envelopes, rose if the stage failed
+in the window. Tabular detail underneath: count / errors / mean /
+p50 / p95 / max / total ms. Backed by
+`GET /api/telemetry/stage_latency`. Filtered to a render-pipeline
+event whitelist (`tts_synth`, `image_gen`, `llm_call`, `compose`,
+`upload_*`, `stage.*`, `render.*`) — bookkeeping events
+(`cache_hit`, `cloud.health.sweep`, HTTP auto-spans) are excluded
+so the chart isn't dominated by 0-ms noise.
+
+**For one specific render**, open `/app/telemetry` → **Recent
+Renders** section. Each row is one render with a horizontal
+stacked-bar waterfall (bar width = wall-clock duration vs the
+slowest render in the window). Click a row to expand the per-stage
+breakdown table with provider + duration + % of render. Backed by
+`GET /api/telemetry/renders` — supports `?channel=` filter.
+
+**For longitudinal analysis** (cross-day trend, alerting), use
 Cloud Monitoring → Metrics Explorer → custom metric
 `ytfactory.stage_duration_ms`. Group by `event` (label). p95 sorted
 descending = your hotspots.
@@ -179,6 +200,9 @@ custom.googleapis.com/opentelemetry/ytfactory.stage_duration_ms
 | label.event != ""
 | filter label.ytfactory_slug == "aita-001"
 ```
+
+See `docs/telemetry_dashboard_design.md` for the rule on what
+belongs in the dashboard vs Cloud Monitoring.
 
 ## Operational SLO suggestions (P9 follow-up)
 

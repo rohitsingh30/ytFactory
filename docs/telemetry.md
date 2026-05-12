@@ -11,8 +11,11 @@
 | Observability code | `pipeline/observability/` |
 | Legacy back-compat shim (`tlm.track`, `tlm.timed`, …) | `pipeline/telemetry.py` |
 | Cloud Run init helper (copied per service) | `cloud/_shared/otel_init.py` |
+| Cloud-Run-shaped JSON log exporter (copied per service) | `cloud/_shared/cloud_run_json_exporter.py` |
+| Cross-service Cloud Logging reader for the dashboard | `pipeline/observability/cloud_log_reader.py` |
 | Dashboard API (`/api/telemetry/*`) | `control/routes/telemetry_routes.py` |
 | Dashboard UI (`/app/telemetry`) | `web-next/app/app/telemetry/` |
+| Dashboard design rule (per-render first, counters last) | `docs/telemetry_dashboard_design.md` |
 | IAM grant script | `cloud/iam/grant_telemetry.sh` |
 | Cloud-side redeploy orchestrator | `cloud/_shared/redeploy_for_otel.sh` |
 | Per-service file sync | `cloud/_shared/sync.sh` |
@@ -422,6 +425,33 @@ gcloud run services logs tail ytfactory-tts-chatterbox \
       query (default 1000).
   Slim cloud build dep added: `google-cloud-logging>=3.10` in
   `requirements-control.txt` (the laptop venv already had it).
+- **2026-05-12 (round 4) — render-first dashboard panels.** With the
+  cross-service plumbing fixed, the dashboard finally had data — but
+  the existing panels (Overview / Activity / Services / Recent
+  Errors) were generic event-counter views, not render-first. The
+  operator's question "where did this render's time go?" had no
+  answer. Two new panels + two new endpoints:
+    * **`GET /api/telemetry/stage_latency?hours=24`** — p50 / p95 /
+      mean / max / total per render-pipeline stage. Filtered to a
+      whitelist of stage events (`tts_synth`, `image_gen`,
+      `llm_call`, `compose`, `upload_*`, `stage.*`, `render.*`) so
+      bookkeeping events (`cache_hit`, `cloud.health.sweep`, HTTP
+      auto-spans) don't dominate. Sorted by p95 desc — slowest at
+      top. Rendered as a horizontal bar chart at the top of the
+      dashboard.
+    * **`GET /api/telemetry/renders?hours=24&limit=30&channel=...`**
+      — one row per `(channel, slug, render_kind)` with envelope
+      wall-clock total + ordered child-stage breakdown. Optional
+      `?channel=` filter. Newest-first. Rendered as an expandable
+      table; bar width = wall-clock vs slowest render in window so
+      the eye lands on the longest bar immediately. Click a row to
+      expand the per-stage detail (provider + duration + % of
+      render).
+  See `docs/telemetry_dashboard_design.md` for the rule that
+  formalises "what belongs in an operator dashboard". Implementation:
+  `web-next/app/app/telemetry/{renders,stage-latency}-section.tsx`.
+  Pinned by 6 endpoint tests in
+  `tests/test_routes_telemetry_api.py::TestStageLatency, TestRenders`.
 
 ## Operational rules
 

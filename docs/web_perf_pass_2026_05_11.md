@@ -87,6 +87,12 @@ strictly opt-in for legacy callers (no API breaks).
   chunk. Skeleton placeholder of matching height during chunk load.
 - **`web-next/app/app/telemetry/timeline-line-chart.tsx`** — same
   pattern. Together these two splits cut **~100 kB off both pages**.
+- **`web-next/app/app/telemetry/stage-latency-chart.tsx`** (added
+  2026-05-12 with the render-first dashboard panels — see
+  `docs/telemetry_dashboard_design.md`) — same dynamic-import
+  pattern. Both new render-pipeline panels (Stage Latency + Recent
+  Renders) follow this rule; total `/app/telemetry` first-load
+  bundle stays bounded even as more chart sections land.
 
 ## How to add a new dashboard endpoint (the new contract)
 
