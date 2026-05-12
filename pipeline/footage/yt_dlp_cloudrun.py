@@ -364,10 +364,24 @@ def _local_fallback_download(
     # Substitute %(ext)s if present + verify file exists.
     if "%(ext)s" in out_str:
         # yt-dlp wrote with whatever extension it picked. Find the file.
-        stem_glob = out_str.replace("%(ext)s", "*")
-        candidates = sorted(Path("/").glob(stem_glob.lstrip("/")))
+        # Audit Q2.31 — pre-fix this was ``Path("/").glob(stem_glob.lstrip("/"))``
+        # which globs the ENTIRE filesystem starting at root. If the
+        # output path was passed as a non-absolute string, lstrip("/")
+        # left a relative-looking glob that walked from root. Now we
+        # restrict the glob to the parent dir of the configured
+        # output_path — yt-dlp always writes there per ``-o`` flag.
+        stem = Path(out_str.replace("%(ext)s", "*"))
+        if stem.is_absolute():
+            search_root = stem.parent
+            pattern = stem.name
+        else:
+            search_root = output_path.parent
+            pattern = stem.name
+        candidates = sorted(search_root.glob(pattern))
         if not candidates:
-            raise CloudRunYtDlpFailed(f"local yt-dlp produced no file matching {stem_glob}")
+            raise CloudRunYtDlpFailed(
+                f"local yt-dlp produced no file matching {stem} in {search_root}"
+            )
         return candidates[0]
     if not output_path.exists():
         raise CloudRunYtDlpFailed(f"local yt-dlp did not produce {output_path}")

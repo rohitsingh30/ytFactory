@@ -616,6 +616,30 @@ class CaptionRenderingTests(unittest.TestCase):
             out = render_long_form.build_captions_srt(tmp / "n.wav", tmp / "out.srt")
             self.assertIn("Trailing sentence", out.read_text())
 
+    def test_audit_q221_build_captions_srt_threads_asr_provider(self):
+        """Audit Q2.21 — pre-fix this called transcribe_words(narration_wav)
+        without ``provider=``, so the channel YAML's asr_provider was
+        silently ignored on the long-form caption path."""
+        words = [FakeWord("Hi.", 0.0, 0.5)]
+        with local_tempdir() as tmp, \
+             patch("pipeline.beats.transcribe_words", return_value=words) as m:
+            render_long_form.build_captions_srt(
+                tmp / "n.wav", tmp / "out.srt",
+                asr_provider="parakeet_mlx",
+            )
+            m.assert_called_once_with(tmp / "n.wav", provider="parakeet_mlx")
+
+    def test_audit_q221_build_captions_ass_whisper_path_threads_asr_provider(self):
+        words = [FakeWord("Hi.", 0.0, 0.5)]
+        with local_tempdir() as tmp, \
+             patch("pipeline.beats.transcribe_words", return_value=words) as m:
+            render_long_form.build_captions_ass(
+                tmp / "out.ass",
+                narration_wav=tmp / "n.wav",
+                asr_provider="parakeet_mlx",
+            )
+            m.assert_called_once_with(tmp / "n.wav", provider="parakeet_mlx")
+
     def test_build_caption_pngs_normal_font_fallback(self):
         words = [FakeWord("Hello", 0, 0.5), FakeWord("world.", 0.5, 1.0)]
         with local_tempdir() as tmp:
@@ -633,6 +657,17 @@ class CaptionRenderingTests(unittest.TestCase):
              patch("pipeline.beats.transcribe_words", return_value=[]):
             with self.assertRaises(RuntimeError):
                 render_long_form.build_caption_pngs(tmp / "n.wav", tmp / "caps")
+
+    def test_audit_q221_build_caption_pngs_threads_asr_provider(self):
+        """Audit Q2.21 — same fix on the PNG-overlay caption path."""
+        words = [FakeWord("Hi.", 0.0, 0.5)]
+        with local_tempdir() as tmp, \
+             patch("pipeline.beats.transcribe_words", return_value=words) as m:
+            render_long_form.build_caption_pngs(
+                tmp / "n.wav", tmp / "caps",
+                asr_provider="parakeet_mlx",
+            )
+            m.assert_called_once_with(tmp / "n.wav", provider="parakeet_mlx")
 
     def test_build_caption_pngs_trailing_sentence_truetype_exception(self):
         words = [FakeWord("Trailing", 0.0, 0.2), FakeWord("caption", 0.2, 0.5)]

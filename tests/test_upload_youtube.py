@@ -618,6 +618,82 @@ class TestInspectTokenStatus(_UploadTestBase):
         result = inspect_token_status("default")
         self.assertEqual(result["state"], "ok")
 
+    def test_audit_q227_expired_access_token_surfaced(self):
+        """Audit Q2.27 — pre-fix any token with refresh_token + scopes
+        was reported as ``ok`` regardless of expiry. Now an expired
+        access_token surfaces as ``state="expired"`` so the dashboard's
+        signal is honest about needing a refresh on the next call.
+        """
+        p = self.config_dir / "youtube_token_default.json"
+        p.write_text(json.dumps({
+            "token": "tok",
+            "refresh_token": "rt",
+            "scopes": list(SCOPES),
+            "expiry": "2020-01-01T00:00:00Z",  # long past
+        }))
+        result = inspect_token_status("default")
+        self.assertEqual(result["state"], "expired")
+        self.assertEqual(result["expiry"], "2020-01-01T00:00:00Z")
+
+    def test_audit_q227_expiring_soon_access_token_surfaced(self):
+        """Audit Q2.27 — token expiring within 60 s surfaces as
+        ``expiring_soon`` so the operator knows to expect a Secret
+        Manager version bump on the next call."""
+        from datetime import datetime, timezone, timedelta
+        soon = (datetime.now(timezone.utc) + timedelta(seconds=30)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        p = self.config_dir / "youtube_token_default.json"
+        p.write_text(json.dumps({
+            "token": "tok",
+            "refresh_token": "rt",
+            "scopes": list(SCOPES),
+            "expiry": soon,
+        }))
+        result = inspect_token_status("default")
+        self.assertEqual(result["state"], "expiring_soon")
+
+    def test_audit_q227_far_future_expiry_is_ok(self):
+        """Token with expiry > 60 s away → ``ok`` (no operator action)."""
+        from datetime import datetime, timezone, timedelta
+        future = (datetime.now(timezone.utc) + timedelta(hours=24)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        p = self.config_dir / "youtube_token_default.json"
+        p.write_text(json.dumps({
+            "token": "tok",
+            "refresh_token": "rt",
+            "scopes": list(SCOPES),
+            "expiry": future,
+        }))
+        result = inspect_token_status("default")
+        self.assertEqual(result["state"], "ok")
+
+    def test_audit_q227_unparseable_expiry_falls_back_to_ok(self):
+        """Audit Q2.27 — tokens authored before the field was canonical
+        may have a malformed expiry. Treat as ``ok`` rather than
+        crashing the dashboard."""
+        p = self.config_dir / "youtube_token_default.json"
+        p.write_text(json.dumps({
+            "token": "tok",
+            "refresh_token": "rt",
+            "scopes": list(SCOPES),
+            "expiry": "not-a-real-date",
+        }))
+        result = inspect_token_status("default")
+        self.assertEqual(result["state"], "ok")
+
+    def test_audit_q227_missing_expiry_treated_as_ok(self):
+        """No expiry field → no expiry check; falls through to ``ok``."""
+        p = self.config_dir / "youtube_token_default.json"
+        p.write_text(json.dumps({
+            "token": "tok",
+            "refresh_token": "rt",
+            "scopes": list(SCOPES),
+        }))
+        result = inspect_token_status("default")
+        self.assertEqual(result["state"], "ok")
+
 
 # ===========================================================================
 # 5.  authenticate

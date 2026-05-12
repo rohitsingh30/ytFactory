@@ -134,6 +134,8 @@ def _apply_tone(lf: dict, tone: str) -> tuple[float, float]:
 def _align_anchors_to_narration(
     narration_wav: Path,
     anchors: list[str],
+    *,
+    asr_provider: str = "whisper_mlx",
 ) -> dict[str, tuple[float, float]]:
     """For each anchor phrase, find its (start_s, end_s) in narration.wav.
 
@@ -147,12 +149,16 @@ def _align_anchors_to_narration(
     match are omitted — the renderer logs a warning and skips alignment-
     dependent overlays for them (they're only injected if a `at_s` is also
     explicitly authored).
+
+    **Audit Q2.21** — pre-fix this called transcribe_words without
+    ``provider=`` so the channel YAML's asr_provider was ignored on
+    the sports-doc anchor-alignment path.
     """
     from pipeline import beats as _beats
     import re as _re
 
     print(f"[align] whisper-transcribing {narration_wav.name} for anchor matching…")
-    words = _beats.transcribe_words(narration_wav)
+    words = _beats.transcribe_words(narration_wav, provider=asr_provider)
     if not words:
         return {}
 
@@ -436,6 +442,8 @@ def _gather_overlays(
     join_silence_s: float,
     chunk_target_chars: int,
     narration_text: str,
+    *,
+    asr_provider: str = "whisper_mlx",
 ) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict]]:
     """Resolve `at_s` for every overlay-able entry by aligning narration_anchor
     to whisper word timestamps on narration.wav.
@@ -474,7 +482,9 @@ def _gather_overlays(
     # Dedupe in order
     seen: set[str] = set()
     uniq_anchors = [a for a in anchors if not (a in seen or seen.add(a))]
-    anchor_times = _align_anchors_to_narration(narration_wav, uniq_anchors) if uniq_anchors else {}
+    anchor_times = _align_anchors_to_narration(
+        narration_wav, uniq_anchors, asr_provider=asr_provider,
+    ) if uniq_anchors else {}
 
     # Resolve chapter start_s — only chapters with a non-empty title get a
     # full-frame chapter card. cold_open + closer typically have title="" and
@@ -834,6 +844,9 @@ def _main_impl(args) -> int:
         join_silence_s=float(lf.get("tts_chunk_join_silence_s", 0.35)),
         chunk_target_chars=int(lf.get("tts_chunk_target_chars", 380)),
         narration_text=text,
+        # Audit Q2.21 — honour channel YAML's asr_provider on the
+        # sports-doc anchor-alignment path.
+        asr_provider=config.get("asr_provider", "whisper_mlx"),
     )
 
     timeline_summary = {

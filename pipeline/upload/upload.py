@@ -449,12 +449,31 @@ def inspect_token_status(account: str) -> dict:
     """Read this account's cached token and report its state — no API calls.
 
     ``state`` is one of:
-      ok               — has refresh_token and all required scopes; ready
-      missing          — file does not exist
-      no_refresh_token — token exists but no refresh_token (worthless once
-                         expired — re-auth required)
-      missing_scopes   — token exists but lacks one or more SCOPES
-      unreadable       — file exists but is malformed
+      ok                — has refresh_token, all required scopes, and the
+                          access_token expiry is at least 60 s in the future
+                          (so the next API call has time to actually run).
+      expiring_soon     — has refresh_token + scopes, but the access_token
+                          expires within 60 s. The pipeline auto-refreshes
+                          before use, but the dashboard surfaces this so the
+                          operator knows to expect a Secret Manager version
+                          bump on the next call.
+      expired           — has refresh_token + scopes, but expiry is in the
+                          past. Same auto-refresh path; surfaced for
+                          observability.
+      missing           — file does not exist
+      no_refresh_token  — token exists but no refresh_token (worthless once
+                          expired — re-auth required)
+      missing_scopes    — token exists but lacks one or more SCOPES
+      unreadable        — file exists but is malformed
+
+    **Audit Q2.27** — pre-fix this returned ``state="ok"`` whenever
+    refresh_token + scopes were present, regardless of whether
+    ``data.get("expiry")`` had already passed. The dashboard's "ok"
+    badge was misleading: an "ok" account could have an access_token
+    that expires in 10 s, surfacing as a transient mid-render upload
+    failure that the operator couldn't diagnose without manually
+    reading the cached token JSON. The pipeline auto-refreshes anyway,
+    but the new states make the operator-facing signal honest.
     """
     tp = _token_path(account)
     out: dict[str, Any] = {"account": account, "path": str(tp)}
@@ -475,8 +494,47 @@ def inspect_token_status(account: str) -> dict:
     if not data.get("refresh_token"):
         out["state"] = "no_refresh_token"
         return out
-    out["state"] = "ok"
+    out["state"] = _expiry_state(data.get("expiry"))
     return out
+
+
+def _expiry_state(expiry_raw: Any) -> str:
+    """Audit Q2.27 — bucket the access_token's freshness into ``ok``,
+    ``expiring_soon``, or ``expired``. Treats unparseable / missing
+    expiry as ``ok`` (no surfacing change for tokens authored before
+    the field was canonical).
+
+    The 60 s "expiring_soon" window matches Google's auth library
+    refresh-buffer convention.
+    """
+    if not expiry_raw:
+        return "ok"
+    expiry_str = str(expiry_raw)
+    parsed = None
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ",
+                "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            parsed = datetime.strptime(expiry_str, fmt)
+            break
+        except (ValueError, TypeError):
+            continue
+    if parsed is None:
+        try:
+            parsed = datetime.fromisoformat(expiry_str.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return "ok"  # coverage: fallthrough on truly unparseable expiry
+    # Make naive datetime UTC-aware for comparison.
+    if parsed.tzinfo is None:
+        from datetime import timezone as _tz
+        parsed = parsed.replace(tzinfo=_tz.utc)
+    from datetime import timezone as _tz
+    now_utc = datetime.now(_tz.utc)
+    delta = (parsed - now_utc).total_seconds()
+    if delta < 0:
+        return "expired"
+    if delta < 60:
+        return "expiring_soon"
+    return "ok"
 
 
 def _run_local_server_with_chrome_profile(
@@ -1792,7 +1850,11 @@ def _cmd_auth_status(_args) -> int:
         return 1
     rows = [inspect_token_status(a) for a in accounts]
     _print_status_table(rows)
-    bad = [r for r in rows if r["state"] != "ok"]
+    # Audit Q2.27 — expiring_soon and expired are pipeline-functional
+    # (auto-refresh path runs before the next API call) and don't
+    # require operator action; only the genuinely-broken states do.
+    _broken_states = {"missing", "no_refresh_token", "missing_scopes", "unreadable"}
+    bad = [r for r in rows if r["state"] in _broken_states]
     if bad:
         print(
             f"\n{len(bad)} account(s) need attention. Re-auth with:\n"

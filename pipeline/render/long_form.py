@@ -856,18 +856,26 @@ def build_captions_srt(
     out_srt: Path,
     max_chars_per_line: int = 70,
     max_lines_per_cue: int = 2,
+    *,
+    asr_provider: str = "whisper_mlx",
 ) -> Path:
     """Whisper-align narration → sentence-level SRT.
 
     Sleep-mode captions are SENTENCES not word-by-word (the latter is for
     Shorts where attention bursts matter). One or two short lines per cue.
     Style is baked in via the sibling ASS file produced by build_captions_ass.
+
+    **Audit Q2.21** — pre-fix this called ``transcribe_words(narration_wav)``
+    without ``provider=``, so the channel YAML's ``asr_provider`` and
+    ``YTFACTORY_ASR_PROVIDER`` env were silently ignored on the long-form
+    caption path. Now the caller (long_form.main + render_footage_only.py)
+    threads ``cfg["asr_provider"]`` through.
     """
     import re as _re
     from pipeline import beats as _beats
 
     print(f"[cap] whisper-aligning {narration_wav.name}…")
-    words = _beats.transcribe_words(narration_wav)
+    words = _beats.transcribe_words(narration_wav, provider=asr_provider)
     if not words:
         raise RuntimeError("whisper returned no words for caption alignment")
 
@@ -933,12 +941,18 @@ def build_caption_pngs(
     max_lines_per_cue: int = 2,
     text_color: tuple = (255, 217, 61, 255),  # warm yellow #FFD93D
     italic: bool = True,
+    *,
+    asr_provider: str = "whisper_mlx",
 ) -> list[tuple[Path, float, float]]:
     """Whisper-align narration → one PNG per sentence with sleep styling.
 
     PIL renders the PNGs (no libass dependency). Returns a list of
     (png_path, start_s, end_s) tuples for the overlay chain. Idempotent
     — re-running re-uses cached PNGs.
+
+    **Audit Q2.21** — ``asr_provider`` defaults to whisper_mlx but
+    callers should pass through the channel YAML's value so
+    ``YTFACTORY_ASR_PROVIDER`` and the per-channel override are honoured.
     """
     import re as _re
     from PIL import Image, ImageDraw, ImageFont
@@ -946,7 +960,7 @@ def build_caption_pngs(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[cap] whisper-aligning {narration_wav.name}…")
-    words = _beats.transcribe_words(narration_wav)
+    words = _beats.transcribe_words(narration_wav, provider=asr_provider)
     if not words:
         raise RuntimeError("whisper returned no words for caption alignment")
 
@@ -1326,6 +1340,7 @@ def build_captions_ass(
     margin_v: int = 80,
     max_chars: int = 70,
     max_lines: int = 2,
+    asr_provider: str = "whisper_mlx",
 ) -> tuple[Path, int]:
     """Build a libass-compatible ASS subtitle file for the long-form mux.
 
@@ -1384,10 +1399,12 @@ def build_captions_ass(
                 cursor += sent_dur
             chunk_start += cdur + join_silence_s
     elif narration_wav is not None:
-        # Whisper alignment (legacy fallback).
+        # Whisper alignment (legacy fallback). Audit Q2.21 — honour
+        # the channel YAML's asr_provider rather than always using
+        # the whisper_mlx default.
         from pipeline import beats as _beats  # noqa: PLC0415
         print(f"[cap] whisper-aligning {narration_wav.name}…")
-        words = _beats.transcribe_words(narration_wav)
+        words = _beats.transcribe_words(narration_wav, provider=asr_provider)
         if not words:
             raise RuntimeError("whisper returned no words for caption alignment")
         sentences: list[list] = []
@@ -2006,6 +2023,10 @@ def _main_impl(args) -> int:
                   "Install with `brew install homebrew-ffmpeg/ffmpeg/ffmpeg` for the 1-input ASS path.")
         if use_ass:
             ass_path = cap_dir / "captions.ass"
+            # Audit Q2.21 — pass the channel YAML's asr_provider so
+            # YTFACTORY_ASR_PROVIDER + per-channel overrides apply
+            # to the long-form caption alignment path.
+            asr_provider = config.get("asr_provider", "whisper_mlx")
             if align_mode == "authored":
                 _, cap_cue_count = build_captions_ass(
                     ass_path,
@@ -2018,6 +2039,7 @@ def _main_impl(args) -> int:
                     font_name=cap_font,
                     font_size=cap_size,
                     margin_v=cap_margin_v,
+                    asr_provider=asr_provider,
                 )
             else:
                 _, cap_cue_count = build_captions_ass(
@@ -2028,10 +2050,12 @@ def _main_impl(args) -> int:
                     font_name=cap_font,
                     font_size=cap_size,
                     margin_v=cap_margin_v,
+                    asr_provider=asr_provider,
                 )
             captions_ass = ass_path
         else:
             # Legacy PNG-overlay fallback (no libass).
+            asr_provider = config.get("asr_provider", "whisper_mlx")
             if align_mode == "authored":
                 if cap_dir.exists():
                     for old in cap_dir.glob("cap_*.png"):
@@ -2049,6 +2073,7 @@ def _main_impl(args) -> int:
                 caption_cues = build_caption_pngs(
                     narration_wav, cap_dir,
                     text_color=cap_color, italic=cap_italic,
+                    asr_provider=asr_provider,
                 )
             cap_cue_count = len(caption_cues)
     else:

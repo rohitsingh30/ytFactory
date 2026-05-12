@@ -208,13 +208,20 @@ def subscribe_pair(home_account: str, target_channel_id: str) -> dict[str, Any]:
         resp = yt.subscriptions().insert(part="snippet", body=body).execute()
         return {"status": "subscribed", "subscription_id": resp.get("id")}
     except HttpError as e:
-        # Already subscribed — fine. Surface other errors.
+        # Audit Q2.29 — pre-fix this returned ``already_subscribed``
+        # for ANY 400, masking real errors:
+        #   - invalid channel id (target deleted) → 400
+        #   - "subscriptionForbidden" (target's subs are private) → 400
+        #   - rate-limit hits → 400
+        # Only the YouTube API's documented "subscriptionDuplicate"
+        # reason actually means "already subscribed". Everything else
+        # surfaces so the caller can log + decide.
         body_text = ""
         try:
             body_text = e.content.decode("utf-8", "ignore")
         except Exception:
             pass
-        if "subscriptionDuplicate" in body_text or e.resp.status == 400:
+        if "subscriptionDuplicate" in body_text:
             return {"status": "already_subscribed"}
         raise
 

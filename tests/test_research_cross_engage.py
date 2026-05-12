@@ -386,6 +386,26 @@ class SubscribePairTest(unittest.TestCase):
             with self.assertRaises(HttpError):
                 ce_mod.subscribe_pair("home_acct", "UCTarget")
 
+    def test_audit_q229_400_without_subscription_duplicate_re_raises(self):
+        """Audit Q2.29 — pre-fix any 400 returned ``already_subscribed``
+        which masked real errors:
+          - invalid channel id (target deleted) → 400
+          - subscriptionForbidden (target's subs are private) → 400
+          - rate-limit hits → 400
+        Now ONLY ``subscriptionDuplicate`` in the body counts.
+        """
+        _install_fake_google_for_ce()
+        fake_yt = MagicMock()
+        # 400 with NO subscriptionDuplicate marker.
+        err = _make_http_error(400, "subscriptionForbidden")
+        HttpError = sys.modules["googleapiclient.errors"].HttpError
+        fake_yt.subscriptions.return_value.insert.return_value.execute.side_effect = err
+
+        with patch("pipeline.research.cross_engage.authenticate", return_value=MagicMock()):
+            sys.modules["googleapiclient.discovery"].build = MagicMock(return_value=fake_yt)
+            with self.assertRaises(HttpError):
+                ce_mod.subscribe_pair("home_acct", "UCTarget")
+
 
 # ---------------------------------------------------------------------------
 # subscribe_all_pairs
@@ -938,21 +958,25 @@ class DiscoverExistingUploadsNoDirTest(unittest.TestCase):
 
 class SubscribePairContentDecodeTest(unittest.TestCase):
 
-    def test_content_decode_raises_but_status_400_still_graceful(self):
-        """Lines 177-178: e.content.decode() raises → caught; status 400 → already_subscribed."""
+    def test_content_decode_raises_400_now_re_raises(self):
+        """Audit Q2.29 — pre-fix any 400 returned ``already_subscribed``
+        even when the body couldn't be decoded; that masked
+        non-duplicate 400 errors. Post-fix: when the body can't be
+        read AND the status alone (400) is no longer sufficient
+        evidence of duplicate, the HTTPError surfaces.
+        """
         _install_fake_google_for_ce()
         fake_yt = MagicMock()
         err = _make_http_error(400, "")
-        # Make content.decode() raise
         err.content = MagicMock()
         err.content.decode.side_effect = Exception("decode error")
+        HttpError = sys.modules["googleapiclient.errors"].HttpError
         fake_yt.subscriptions.return_value.insert.return_value.execute.side_effect = err
 
         with patch("pipeline.research.cross_engage.authenticate", return_value=MagicMock()):
             sys.modules["googleapiclient.discovery"].build = MagicMock(return_value=fake_yt)
-            result = ce_mod.subscribe_pair("home_acct", "UCTarget")
-
-        self.assertEqual(result["status"], "already_subscribed")
+            with self.assertRaises(HttpError):
+                ce_mod.subscribe_pair("home_acct", "UCTarget")
 
 
 class PlayViewAllExceptionsTest(unittest.TestCase):
