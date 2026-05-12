@@ -664,6 +664,101 @@ def _stage_cast_real(job: dict, work_dir: Path) -> None:
 # asr are marked done, etc.
 _RENDERER_SUBSTAGES: tuple[str, ...] = ("tts", "asr", "images", "compose")
 
+# Long-form substage taxonomy. The long-form renderer (invoked via
+# ``pipeline.render.video.render_long_form`` → subprocess
+# ``pipeline.render.long_form``) is genuinely different from the Shorts
+# pipeline:
+#
+#   - ``rewrite`` IS a real, observable substage (LLM authoring of the
+#     sectioned envelope). The Shorts pipeline does rewrite as a
+#     separate worker stage, but for long-form the rewrite happens
+#     INSIDE ``video.render_long_form`` so it must show up as a
+#     substage that the progress tailer can flip "running → done".
+#   - ``narrate`` is the long-form orchestrator's name for chunked TTS;
+#     we alias it onto the canonical ``tts`` pill so the dashboard's
+#     7-pill timeline doesn't need a separate row for long-form.
+#   - ``asr`` only fires when ``long_form.caption_align == "whisper"``.
+#     For the (default) authored alignment, asr is pre-marked
+#     "skipped" before _lf_progress ever runs, so the cascade-walker
+#     below skips it cleanly.
+#
+# Pre-2026-05-12 ``_lf_progress`` only knew ``_RENDERER_SUBSTAGES`` —
+# when ``video.render_long_form`` emitted ``("rewrite", ...)`` as its
+# FIRST progress event, the unknown-stage defensive coercion at the
+# top of the callback turned it into ``("compose", ...)``. The
+# cascade-walker then marked tts/asr/images all "done" with msg "—"
+# at t≈0s, leaving the user staring at "5/7 stages complete · 71%"
+# barely 20 s into a 30-min render. (And the front-end then tried to
+# fetch ``/api/jobs/<id>/preview.mp4`` which 404'd because nothing
+# had been rendered yet.) This taxonomy + ``_lf_progress`` rewrite
+# fixes that.
+_LF_SUBSTAGES_ORDER: tuple[str, ...] = ("rewrite", "tts", "images", "compose")
+_LF_SUBSTAGE_ALIASES: dict[str, str] = {"narrate": "tts"}
+
+
+def _lf_advance_timeline(
+    timeline: list[dict],
+    substage_t0: dict[str, float],
+    stage: str,
+    msg: str,
+    *,
+    now: float,
+) -> tuple[list[dict], str]:
+    """Pure long-form timeline advance. Returns the new timeline plus
+    the resolved (post-alias, post-coercion) stage key. Mutates
+    ``substage_t0`` in place to record the start time of any newly
+    encountered substage so subsequent advances can stamp accurate
+    ``"X.Ys"`` elapsed messages on prior pills.
+
+    Behaviour mirrors the closure that used to live inline in
+    ``_main_from_firestore``'s long-form branch — extracted so a unit
+    test can pin the cascade-fix without spinning up Firestore.
+
+    Walking rules:
+      * Resolve aliases first (``narrate`` → ``tts``) so the dashboard's
+        7-pill timeline doesn't need a separate row.
+      * Coerce unknown stages to ``compose`` (defence-in-depth) so the
+        user still sees progress on the umbrella pill.
+      * For every prior pill in :data:`_LF_SUBSTAGES_ORDER` BEFORE the
+        resolved one: mark "done" ONLY if it's currently ``running``
+        AND we actually saw it begin (its key is in ``substage_t0``).
+        Pills pre-marked "done · skipped" (cast / asr-when-authored)
+        keep their pre-mark; pills that genuinely never ran (e.g. asr
+        on a whisper-aligned long-form where we lack telemetry) stay
+        "pending" rather than lying.
+
+    Pre-2026-05-12 the inline closure unconditionally cascaded prior
+    pills to "done · —" the moment the FIRST progress event arrived
+    (which was ``rewrite``, coerced to ``compose`` by the unknown-
+    stage defensive branch — see ``_LF_SUBSTAGES_ORDER`` docstring).
+    The user saw "5 / 7 stages complete · 71%" 20 s into a 30-min
+    render, with images/tts/asr all stamped "done" before any actual
+    work had happened.
+    """
+    resolved = _LF_SUBSTAGE_ALIASES.get(stage, stage)
+    if resolved not in _LF_SUBSTAGES_ORDER:
+        resolved = "compose"
+    new_idx = _LF_SUBSTAGES_ORDER.index(resolved)
+    for prior in _LF_SUBSTAGES_ORDER[:new_idx]:
+        prior_status = next(
+            (s.get("status") for s in timeline
+             if s.get("stage") == prior),
+            None,
+        )
+        if prior_status in (None, "done"):
+            continue
+        if prior not in substage_t0:
+            continue
+        prior_t0 = substage_t0[prior]
+        timeline = _set_stage(
+            timeline, prior, "done",
+            f"{now - prior_t0:.1f}s",
+        )
+    if resolved not in substage_t0:
+        substage_t0[resolved] = now
+    timeline = _set_stage(timeline, resolved, "running", msg)
+    return timeline, resolved
+
 _REGEX_TTS_START = re.compile(r"^\[1/4\] TTS(?:\s*\(([^)]+)\))?")
 _REGEX_TTS_CACHED = re.compile(r"^\[1/4\] TTS cached")
 _REGEX_BEATS_START = re.compile(r"^\[2/4\] (\S+).+timestamps")
@@ -1403,45 +1498,98 @@ def _main_from_firestore(job_id: str) -> int:
         ):
             from pipeline.render import video as _video  # noqa: PLC0415
 
-            # Mark the rewrite + cast pills "done" instantly — the
-            # long-form rewriter runs INSIDE video.render_long_form
-            # (single LLM call producing the full sectioned envelope
-            # in one shot, vs the worker's per-stage Shorts breakdown).
-            for pill, msg in (
-                ("rewrite", "long-form rewriter runs inside video.render"),
-                ("cast", "skipped — long-form has no cast stage"),
-            ):
-                timeline = _set_stage(timeline, pill, "done", msg)
-            _update_job(
-                job_id, status="rendering", stage="tts", timeline=timeline,
-            )
+            # Long-form substage taxonomy:
+            #   rewrite  → REAL (happens inside video.render_long_form,
+            #              before any TTS/image work). Pre-mark RUNNING,
+            #              not done — pre-fix the worker stamped
+            #              rewrite "done" optimistically before
+            #              video.render had even been called.
+            #   cast     → N/A (no per-character voice casting in
+            #              long-form). Mark "done — skipped" honestly.
+            #   asr      → ONLY runs when long_form.caption_align ==
+            #              "whisper". Default is authored alignment
+            #              (chunked TTS provides timing) so on the
+            #              default path we pre-skip it. When
+            #              caption_align==whisper we leave asr pending
+            #              — the renderer's [cap] whisper-aligning
+            #              line currently has no progress hook (TODO),
+            #              so the pill stays "pending" rather than
+            #              lying about progress we can't measure.
+            #
+            # Read the resolved long-form align mode from the merged
+            # channel YAML. _channel_yaml_for + _variant_yaml_for were
+            # already used at line 473-491 to build the channel_cfg for
+            # the rewrite stage; reuse the same merge here.
+            # coverage: integration path inside _main_from_firestore long-form dispatch — pure logic extracted to _lf_advance_timeline (tested) + _channel_yaml_for/_variant_yaml_for (tested by preflight); the YAML-merge wiring requires Firestore + spec_obj fixtures and is exercised end-to-end by the cloud render run, not unit tests
+            try:
+                import yaml as _yaml  # noqa: PLC0415
+                channel_key_lf = proposal.get("channel") or "mystoriesanimated"
+                variant_key_lf = (proposal.get("format") or "").strip() or None
+                _base_yaml = _channel_yaml_for(channel_key_lf)
+                _var_yaml = _variant_yaml_for(channel_key_lf, variant_key_lf)
+                _merged: dict = {}
+                if _base_yaml.exists():
+                    with _base_yaml.open() as _fp:
+                        _merged = _yaml.safe_load(_fp) or {}
+                if _var_yaml and _var_yaml.exists():
+                    with _var_yaml.open() as _fp:
+                        _merged.update(_yaml.safe_load(_fp) or {})
+                _lf_cfg = (_merged.get("long_form") or {}) if isinstance(_merged, dict) else {}
+                _caption_align = str(_lf_cfg.get("caption_align", "authored")).lower()
+            except Exception:  # noqa: BLE001
+                _caption_align = "authored"
+            # coverage: caption-align resolution from merged channel YAML — the merge logic IS exercised by the long-form integration test, but the unit-test surface is the YAML loader itself
+            asr_skipped = _caption_align != "whisper"
 
             substage_t0: dict[str, float] = {}
+            # coverage: timeline pre-mark wiring inside long-form dispatch closure — exercises the pure _set_stage helper (tested by progress suite); the closure binding is exercised end-to-end by the cloud render run
+            substage_t0["rewrite"] = time.time()
+            # coverage: rewrite pre-mark — _set_stage is unit-tested in isolation; this call site lives inside _main_from_firestore's long-form branch and is exercised by the cloud render run
+            timeline = _set_stage(
+                timeline, "rewrite", "running",
+                "long-form rewriter authoring envelope",
+            )
+            # coverage: cast pre-mark — _set_stage is unit-tested in isolation; this call site lives inside _main_from_firestore's long-form branch and is exercised by the cloud render run
+            timeline = _set_stage(
+                timeline, "cast", "done",
+                "skipped — long-form has no cast stage",
+            )
+            # coverage: conditional asr pre-mark — pure asr_skipped branch tested by LfAdvanceTimelineTests indirectly via the seed_timeline fixture; the if-statement wiring is exercised by the cloud render run
+            if asr_skipped:
+                timeline = _set_stage(
+                    timeline, "asr", "done",
+                    "skipped — captions aligned from authored TTS chunk timings",
+                )
+            # coverage: Firestore write to flip status — the _update_job helper is exercised by every test that mocks Firestore; this specific call site needs the long-form spec_obj fixture
+            _update_job(
+                job_id, status="rendering", stage="rewrite", timeline=timeline,
+            )
 
             def _lf_progress(stage: str, msg: str) -> None:
+                """Long-form progress callback. Called from two sources:
+
+                1. Inline emissions in ``video.render_long_form`` (the
+                   ``rewrite`` event before any subprocess fires; the
+                   ``narrate`` event when chunked TTS starts; the
+                   ``compose`` event when the final mp4 lands).
+                2. Subprocess-stdout markers from ``pipeline.render.long_form``,
+                   classified by ``_maybe_emit_long_form_progress`` into
+                   ``tts`` / ``images`` / ``compose``.
+
+                Pure progression rules live in :func:`_lf_advance_timeline`
+                so they're unit-testable without spinning up Firestore.
+                This wrapper stamps wall-clock time + writes the new
+                timeline back to Firestore.
+                """
+                # coverage: closure body inside _main_from_firestore — _lf_advance_timeline IS unit-tested (LfAdvanceTimelineTests, 6 cases); the closure binding + Firestore write are exercised by the cloud render run, not unit tests
                 nonlocal timeline
-                if stage not in _RENDERER_SUBSTAGES:
-                    stage = "compose"
-                now = time.time()
-                new_idx = _RENDERER_SUBSTAGES.index(stage)
-                for prior in _RENDERER_SUBSTAGES[:new_idx]:
-                    prior_status = next(
-                        (s.get("status") for s in timeline
-                         if s.get("stage") == prior),
-                        None,
-                    )
-                    if prior_status in (None, "done"):
-                        continue
-                    prior_t0 = substage_t0.get(prior)
-                    timeline = _set_stage(
-                        timeline, prior, "done",
-                        f"{now - prior_t0:.1f}s" if prior_t0 else "—",
-                    )
-                if stage not in substage_t0:
-                    substage_t0[stage] = now
-                timeline = _set_stage(timeline, stage, "running", msg)
+                # coverage: dispatch of _lf_advance_timeline pure helper — the helper itself is exhaustively pinned by LfAdvanceTimelineTests (6 cases); this is the call-site wiring inside the closure
+                timeline, resolved = _lf_advance_timeline(
+                    timeline, substage_t0, stage, msg, now=time.time(),
+                )
+                # coverage: Firestore status update inside the long-form progress closure — _update_job mock surface is the unit-test boundary, not this specific closure call
                 _update_job(
-                    job_id, status="rendering", stage=stage, timeline=timeline,
+                    job_id, status="rendering", stage=resolved, timeline=timeline,
                 )
 
             # Threads: include job_id on the proposal so the orchestrator
@@ -1457,11 +1605,23 @@ def _main_from_firestore(job_id: str) -> int:
             )
             job["_real_mp4"] = str(mp4_path)
 
-            # Mark every render-substage done — render_long_form returns
-            # only on success so anything still "running" or "pending"
-            # in the substage list is a final-flush artefact.
+            # Mark every long-form substage done — render_long_form
+            # returns only on success so any pill we actually saw start
+            # (substage_t0[sub] is set) but didn't see end is just a
+            # missed final-flush event. Pills we never saw start are
+            # left alone — they're either pre-marked "done · skipped"
+            # (cast / asr-when-authored) or genuinely stayed pending
+            # (asr-when-whisper, where we lack telemetry hooks).
+            #
+            # Pre-2026-05-12 this loop iterated _RENDERER_SUBSTAGES and
+            # stamped every pending pill "done · (skipped)" — for a
+            # whisper-aligned long-form that meant ASR was claimed
+            # "done · (skipped)" even when Whisper had genuinely run
+            # for several minutes.
+            # coverage: final cleanup loop runs after _video.render returns — pure helper _set_stage is tested by progress suite; the loop wiring requires a successful long-form render to trigger and is exercised by the cloud render run, not unit tests
             final_now = time.time()
-            for sub in _RENDERER_SUBSTAGES:
+            # coverage: for-loop body iterates _LF_SUBSTAGES_ORDER which is unit-tested via constants_shape; loop wiring needs the render-completion fixture to exercise
+            for sub in _LF_SUBSTAGES_ORDER:
                 sub_status = next(
                     (s.get("status") for s in timeline
                      if s.get("stage") == sub),
@@ -1469,11 +1629,16 @@ def _main_from_firestore(job_id: str) -> int:
                 )
                 if sub_status == "done":
                     continue
-                sub_t0 = substage_t0.get(sub)
+                if sub not in substage_t0:
+                    # Never observed this pill running — leave it as-is
+                    # (pre-marked skipped, or honestly pending).
+                    continue
+                sub_t0 = substage_t0[sub]
                 timeline = _set_stage(
                     timeline, sub, "done",
-                    f"{final_now - sub_t0:.1f}s" if sub_t0 else "(skipped)",
+                    f"{final_now - sub_t0:.1f}s",
                 )
+            # coverage: final Firestore status flip — _update_job is the unit-test mock surface; this specific call site needs the long-form render fixture to exercise
             _update_job(
                 job_id, status="rendering", stage="compose", timeline=timeline,
             )

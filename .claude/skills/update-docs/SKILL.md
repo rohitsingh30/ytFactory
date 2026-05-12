@@ -303,6 +303,27 @@ git --no-pager diff --stat HEAD
 #          — heuristics 30b + 30c. 2026-05-12 wired in after 10 skills
 #          shipped broken across two waves.)
 #
+# 2b. (2026-05-12 add-on) If ANY production-code file is in the diff
+#     (pipeline/, control/, web/, web-next/, cloud/*/, scripts/), run
+#     the test-coverage gate FIRST. The gate enforces 100% coverage
+#     on lines changed THIS session — pre-fix, /update-docs would
+#     happily commit code with no test coverage and the bug would
+#     surface on the user's next render.
+#
+.venv/bin/python scripts/coverage_gate.py
+#
+#     Exit 0 → ready to commit.
+#     Exit 1 → uncovered changed lines. Author the missing tests
+#              (or add explicit `# coverage: <≥6-word reason>`
+#              comments) BEFORE committing. The gate's report
+#              names the exact action.
+#     Exit 3 → pytest itself failed. Fix the failing tests BEFORE
+#              committing — committing broken code under a docs
+#              commit defeats the gate.
+#
+#     The /test-coverage skill is the user-facing wrapper around
+#     this gate. See `.claude/skills/test-coverage/SKILL.md`.
+#
 # 3. Stage everything and write ONE descriptive commit. Do NOT split
 #    into per-file commits — the whole point is that /update-docs
 #    runs are one atomic persistence step.

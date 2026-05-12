@@ -246,6 +246,24 @@ because they ride a different refresh-token path.
 
 ### Bypass
 
+**Best (2026-05-12 onwards): no manual action needed for any
+`cloud/<svc>/deploy.sh`.** Every service deploy script now sources
+`cloud/_shared/auth_setup.sh` immediately after `set -euo pipefail`,
+which transparently exports `CLOUDSDK_AUTH_ACCESS_TOKEN` from ADC. So
+this just works:
+
+```bash
+bash cloud/render-worker-v2/deploy.sh   # auth bypass auto-applied
+```
+
+The script prints `==> auth: using ADC access token …` so the operator
+can see the bypass fired. If ADC is also dead, it exits cleanly with
+ONE clear "run `gcloud auth application-default login`" message
+instead of dying mid-build with "Reauthentication failed".
+
+For one-off `gcloud` invocations OUTSIDE a deploy script (manual
+`gcloud run jobs execute`, debugging, etc.):
+
 ```bash
 export CLOUDSDK_AUTH_ACCESS_TOKEN=$(gcloud auth application-default print-access-token)
 gcloud run services describe ytfactory-web-next \
@@ -254,15 +272,34 @@ gcloud run services describe ytfactory-web-next \
 # ⇒ works
 ```
 
-Or for a one-shot deploy:
+Or wrap the whole command:
 
 ```bash
-CLOUDSDK_AUTH_ACCESS_TOKEN=$(gcloud auth application-default print-access-token) \
-  bash cloud/<service>/deploy.sh
+bash -c 'source cloud/_shared/auth_setup.sh && gcloud …'
 ```
 
 `CLOUDSDK_AUTH_ACCESS_TOKEN` makes gcloud use that token verbatim
 and skip its own user-account refresh path entirely.
+
+### Adding a new `cloud/<svc>/deploy.sh`
+
+Every new deploy script MUST start with:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Bake in the ADC-token auth bypass so deploys don't die mid-build with
+# "Reauthentication failed" when the user-account access token has expired
+# but ADC is still fresh. See cloud/_shared/auth_setup.sh + the memory
+# file feedback_gcloud_reauth_use_adc_bypass.md for the full why.
+source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
+
+# … rest of script …
+```
+
+The cloud-service playbook (`docs/cloud_service_dep_playbook.md`)
+references this as a mandatory step.
 
 ### When the bypass DOESN'T work
 

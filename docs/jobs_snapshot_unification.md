@@ -105,10 +105,16 @@ done/failed/cancelled`) are already in JobView vocabulary; only
 the legacy `state` slot needs remapping (see table below).
 
 Preview URL gating: the control-plane fall-through sets
-`preview_url = /api/jobs/{id}/preview.mp4` ONLY when status ∈
-{`done`, `uploading`} — mirrors `control.routes.render_routes._doc_to_view`.
-SCRIPT_JOBS uses `/api/jobs/{id}/short` (different endpoint, different
-handler) so the two adapters point at different URLs.
+`preview_url = /api/jobs/{id}/preview.mp4` ONLY when the doc actually
+has a servable artifact — i.e. ``short_uri`` is set OR
+``preview_local_path`` exists. Mirrors `control.routes.render_routes._doc_to_view`.
+Pre-2026-05-12 this was gated on ``status in {done, uploading}`` —
+but the worker flips ``status="uploading"`` BEFORE the actual GCS
+upload completes, so ``short_uri`` is still None in that window and
+the dashboard's `<video>` element fired a noisy 404 GET. Memory:
+`feedback_preview_url_artifact_gate.md`. SCRIPT_JOBS uses
+`/api/jobs/{id}/short` (different endpoint, different handler) so
+the two adapters point at different URLs.
 
 State→status maps for both fall-through tiers:
 

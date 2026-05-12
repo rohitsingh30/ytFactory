@@ -461,5 +461,206 @@ class RunRendererSubprocessProgressTests(unittest.TestCase):
             ])
 
 
+# ---------------------------------------------------------------------------
+# Long-form progress walker — regression tests for the cascade-coercion
+# bug fixed 2026-05-12.
+#
+# The bug: the long-form ``_lf_progress`` callback only knew the SHORT
+# substages ``("tts", "asr", "images", "compose")``. When
+# ``video.render_long_form`` emitted ``("rewrite", ...)`` as its FIRST
+# progress event (before ANY actual TTS/image work), the unknown-stage
+# defensive coercion turned it into ``"compose"``. The cascade-walker
+# then marked tts/asr/images all "done" with msg "—" — leaving the
+# user staring at "5 / 7 stages complete · 71%" 20 s into a 30-min
+# render, with the front-end then 404'ing on
+# ``/api/jobs/<id>/preview.mp4`` because the mp4 didn't exist yet.
+#
+# Fix: a new long-form taxonomy + a pure
+# :func:`_lf_advance_timeline` helper that:
+#   - resolves aliases (``narrate`` → ``tts``);
+#   - coerces unknown stages to ``compose`` WITHOUT cascading priors;
+#   - only marks a prior pill "done" if we actually saw it START (its
+#     key is recorded in ``substage_t0``).
+# ---------------------------------------------------------------------------
+
+
+class LfAdvanceTimelineTests(unittest.TestCase):
+    """Pin the long-form progression contract.
+
+    Each test exercises :func:`_lf_advance_timeline` directly so the
+    fix is locked-in without spinning up Firestore or
+    ``video.render_long_form``.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ep = _load_entrypoint()
+
+    def _seed_timeline(self) -> list[dict]:
+        """Initial timeline as the long-form pre-mark step would leave it:
+        rewrite=running, cast=done(skipped), asr=done(skipped), rest pending.
+        Mirrors the pre-mark block in ``_main_from_firestore`` for the
+        long-form (caption_align=authored) path."""
+        from copy import deepcopy
+        timeline = self.ep._empty_timeline()
+        timeline = self.ep._set_stage(
+            timeline, "rewrite", "running", "long-form rewriter authoring envelope",
+        )
+        timeline = self.ep._set_stage(
+            timeline, "cast", "done", "skipped — long-form has no cast stage",
+        )
+        timeline = self.ep._set_stage(
+            timeline, "asr", "done",
+            "skipped — captions aligned from authored TTS chunk timings",
+        )
+        return deepcopy(timeline)
+
+    @staticmethod
+    def _stage_status(timeline: list[dict], key: str) -> str | None:
+        for s in timeline:
+            if s.get("stage") == key:
+                return s.get("status")
+        return None
+
+    @staticmethod
+    def _stage_msg(timeline: list[dict], key: str) -> str | None:
+        for s in timeline:
+            if s.get("stage") == key:
+                return s.get("msg")
+        return None
+
+    def test_constants_shape(self):
+        # Defends against accidental rename/reorder. Cast is intentionally
+        # NOT in the order — it's pre-marked "done · skipped" and never
+        # transitions inside _lf_advance_timeline.
+        self.assertEqual(
+            self.ep._LF_SUBSTAGES_ORDER,
+            ("rewrite", "tts", "images", "compose"),
+        )
+        self.assertEqual(self.ep._LF_SUBSTAGE_ALIASES, {"narrate": "tts"})
+
+    def test_rewrite_event_does_not_cascade_to_done(self):
+        """The bug: pre-fix, ``_lf_progress("rewrite", ...)`` got
+        coerced to "compose" and walked tts/asr/images all to "done".
+        Post-fix, the rewrite event lands on the rewrite pill and
+        leaves tts/images pending."""
+        timeline = self._seed_timeline()
+        substage_t0 = {"rewrite": 1000.0}
+        timeline, resolved = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "rewrite",
+            "long-form rewrite (1800s target)",
+            now=1001.0,
+        )
+        self.assertEqual(resolved, "rewrite")
+        self.assertEqual(self._stage_status(timeline, "rewrite"), "running")
+        self.assertEqual(
+            self._stage_msg(timeline, "rewrite"),
+            "long-form rewrite (1800s target)",
+        )
+        # Critical: tts/images must NOT be marked done by a rewrite event.
+        self.assertEqual(self._stage_status(timeline, "tts"), "pending")
+        self.assertEqual(self._stage_status(timeline, "images"), "pending")
+        self.assertEqual(self._stage_status(timeline, "compose"), "pending")
+        # And cast / asr stay in their pre-skipped state.
+        self.assertEqual(self._stage_status(timeline, "cast"), "done")
+        self.assertEqual(self._stage_status(timeline, "asr"), "done")
+
+    def test_narrate_alias_routes_to_tts_pill(self):
+        """``video.render_long_form`` emits ("narrate", ...) when chunked
+        TTS starts. The alias must route it onto the canonical tts pill
+        AND mark the rewrite pill done with its accurate elapsed."""
+        timeline = self._seed_timeline()
+        substage_t0 = {"rewrite": 1000.0}
+        timeline, resolved = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "narrate",
+            "long-form chunked narration starting",
+            now=1090.0,
+        )
+        self.assertEqual(resolved, "tts")
+        self.assertEqual(self._stage_status(timeline, "tts"), "running")
+        self.assertEqual(
+            self._stage_msg(timeline, "tts"),
+            "long-form chunked narration starting",
+        )
+        # rewrite was running + had a t0 → flips to done with elapsed.
+        self.assertEqual(self._stage_status(timeline, "rewrite"), "done")
+        self.assertEqual(self._stage_msg(timeline, "rewrite"), "90.0s")
+
+    def test_unknown_stage_coerced_to_compose_no_cascade(self):
+        """Defence-in-depth: if upstream emits a stage we don't know
+        about, attach the msg to the compose pill so the user still
+        sees progress — but do NOT mark prior pills done unless they
+        actually started (i.e. their t0 was recorded)."""
+        timeline = self._seed_timeline()
+        # Only rewrite has a t0 — tts and images never started.
+        substage_t0 = {"rewrite": 1000.0}
+        timeline, resolved = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "some_future_stage",
+            "weird upstream marker",
+            now=1100.0,
+        )
+        self.assertEqual(resolved, "compose")
+        self.assertEqual(self._stage_status(timeline, "compose"), "running")
+        # rewrite did start → marked done with elapsed.
+        self.assertEqual(self._stage_status(timeline, "rewrite"), "done")
+        # tts/images never started → must stay pending (the bug pre-fix
+        # marked them "done · —" here).
+        self.assertEqual(self._stage_status(timeline, "tts"), "pending")
+        self.assertEqual(self._stage_status(timeline, "images"), "pending")
+
+    def test_full_long_form_walk_marks_done_with_real_elapsed(self):
+        """End-to-end: rewrite → narrate (alias→tts) → images → compose,
+        each transition marks the prior with accurate elapsed-s."""
+        timeline = self._seed_timeline()
+        substage_t0 = {"rewrite": 1000.0}
+
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "narrate", "tts starting", now=1100.0,
+        )
+        # rewrite done · 100.0s; tts running.
+        self.assertEqual(self._stage_msg(timeline, "rewrite"), "100.0s")
+        self.assertEqual(self._stage_status(timeline, "tts"), "running")
+        self.assertIn("tts", substage_t0)
+
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "images", "image_panels", now=1300.0,
+        )
+        self.assertEqual(self._stage_msg(timeline, "tts"), "200.0s")
+        self.assertEqual(self._stage_status(timeline, "images"), "running")
+
+        timeline, _ = self.ep._lf_advance_timeline(
+            timeline, substage_t0, "compose", "muxing", now=1500.0,
+        )
+        self.assertEqual(self._stage_msg(timeline, "images"), "200.0s")
+        self.assertEqual(self._stage_status(timeline, "compose"), "running")
+
+        # Pre-skipped pills stayed pre-skipped throughout.
+        self.assertEqual(self._stage_status(timeline, "cast"), "done")
+        self.assertEqual(
+            self._stage_msg(timeline, "cast"),
+            "skipped — long-form has no cast stage",
+        )
+        self.assertEqual(self._stage_status(timeline, "asr"), "done")
+        self.assertIn("authored", self._stage_msg(timeline, "asr") or "")
+
+    def test_repeat_event_for_same_stage_is_idempotent_for_t0(self):
+        """``_maybe_emit_long_form_progress`` may emit several events
+        for the same substage (e.g. [3/5], [4/5], [5/5] all map to
+        compose). The substage's start time is recorded ONCE so its
+        eventual "done · Xs" reflects its true total duration."""
+        timeline = self._seed_timeline()
+        substage_t0 = {"rewrite": 1000.0}
+        # First compose event — records t0.
+        self.ep._lf_advance_timeline(
+            timeline, substage_t0, "compose", "music bed", now=1300.0,
+        )
+        first_t0 = substage_t0["compose"]
+        # Second compose event — must NOT overwrite t0.
+        self.ep._lf_advance_timeline(
+            timeline, substage_t0, "compose", "caption burn", now=1400.0,
+        )
+        self.assertEqual(substage_t0["compose"], first_t0)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

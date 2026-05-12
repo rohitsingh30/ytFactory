@@ -200,3 +200,120 @@ collapses information and lies about timing. The pattern:
   events directly through the SSE bus, not a tailed log).
 - `web-next/app/jobs/[id]/page.tsx` — the dashboard consumer of
   the timeline.
+
+---
+
+## 2026-05-12 — Long-form pipeline needs its OWN substage taxonomy
+
+The same routing pattern bit a SECOND time, on the long-form
+dispatch path. User reported "5 / 7 stages complete · 71%" 20 s
+into a 30-min render — every pill except `compose` and `upload`
+flashed "done · —" while the actual long-form rewrite hadn't even
+finished. Plus the front-end fetched `/api/jobs/<id>/preview.mp4`
+and got a 404 because the mp4 didn't exist yet.
+
+### Bug chain
+
+1. **Worker pre-marked `rewrite` as "done"** *before* invoking
+   `pipeline/render/video.py:render_long_form()`. But the actual
+   long-form rewrite happens INSIDE that call (LLM authoring of
+   the sectioned envelope) — the pill lied for 5–15 min while
+   the rewrite actually ran.
+2. **`_lf_progress` only knew the SHORT substages** — it reused
+   `_RENDERER_SUBSTAGES = ("tts","asr","images","compose")`. When
+   `video.render_long_form` emitted `progress_cb("rewrite",
+   "long-form rewrite (1800s target)")` as its FIRST progress
+   event, the unknown-stage defensive coercion at the top of the
+   callback turned `"rewrite"` into `"compose"`. The cascade-walker
+   then marked tts/asr/images all "done · —" at t≈0s.
+3. **Frontend mounted `<video>` while still rendering.** PlayerCard's
+   `ready` flag included `status === "rendering"`, AND `previewSrc`
+   fell back to constructing the URL when the backend hadn't emitted
+   one. Backend `preview_url` gate was also too loose (fired on
+   `uploading` before `short_uri` was populated). See
+   `feedback_preview_url_artifact_gate.md`.
+
+### Fix — long-form-aware taxonomy + no-cascade guard
+
+```python
+# Long-form substage taxonomy. Sibling to _RENDERER_SUBSTAGES.
+_LF_SUBSTAGES_ORDER  = ("rewrite", "tts", "images", "compose")
+_LF_SUBSTAGE_ALIASES = {"narrate": "tts"}  # video.render_long_form
+                                            # emits "narrate" for chunked TTS
+
+def _lf_advance_timeline(timeline, substage_t0, stage, msg, *, now):
+    """Pure progression helper. Resolves aliases, coerces unknown
+    stages to compose WITHOUT cascading priors, only marks a prior
+    pill 'done' if we actually saw it START (substage_t0 has the
+    key). Pre-skipped pills (cast / asr-when-authored) keep their
+    pre-mark; truly never-ran pills stay 'pending' rather than
+    lying."""
+    resolved = _LF_SUBSTAGE_ALIASES.get(stage, stage)
+    if resolved not in _LF_SUBSTAGES_ORDER:
+        resolved = "compose"
+    new_idx = _LF_SUBSTAGES_ORDER.index(resolved)
+    for prior in _LF_SUBSTAGES_ORDER[:new_idx]:
+        if timeline_status_of(prior) in (None, "done"):
+            continue
+        if prior not in substage_t0:
+            continue                      # phantom — never started
+        elapsed = now - substage_t0[prior]
+        _set_stage(timeline, prior, "done", f"{elapsed:.1f}s")
+    substage_t0.setdefault(resolved, now)
+    _set_stage(timeline, resolved, "running", msg)
+```
+
+Long-form pre-marks (set BEFORE invoking `_video.render`):
+
+| pill    | pre-mark                                                              | why                                                                                       |
+|---------|-----------------------------------------------------------------------|-------------------------------------------------------------------------------------------|
+| rewrite | `running` ("long-form rewriter authoring envelope")                  | rewrite happens INSIDE video.render_long_form; was wrongly pre-marked "done" pre-fix      |
+| cast    | `done` ("skipped — long-form has no cast stage")                     | long-form has no per-character voice casting                                              |
+| asr     | `done` ("skipped — captions aligned from authored TTS chunk timings") if `long_form.caption_align != "whisper"`; else left `pending` | default authored alignment uses TTS chunk timings; whisper alignment has no telemetry hook so we don't lie about progress |
+
+### Generalised rule (extends the parent rule above)
+
+The original rule was "any composite subprocess in a stage-loop UI
+must route sub-steps to the correct stage". The 2026-05-12 add-on:
+**each pipeline kind (short, long-form, future kinds) needs its OWN
+substage taxonomy + prior-cascade guard**, because the substages
+they emit aren't the same set:
+
+- **Short** (`pipeline.render.shorts`) emits tts/asr/images/compose.
+  Whole pipeline is one subprocess; cascade is safe (a later
+  substage starting genuinely implies all earlier ones finished).
+- **Long-form** (`pipeline.render.video.render_long_form`) emits
+  rewrite/narrate/compose inline AROUND a subprocess that emits
+  tts/images/compose. Cascade is UNSAFE for the inline events
+  because they fire before any subprocess substage; the prior-walk
+  must be guarded by `prior in substage_t0`.
+
+When wiring a new render kind:
+
+1. Decide whether its substage emissions are a subset / superset /
+   reordered relative to `_RENDERER_SUBSTAGES`.
+2. If different, define a sibling `_<KIND>_SUBSTAGES_ORDER` tuple
+   and (optionally) `_<KIND>_SUBSTAGE_ALIASES` dict.
+3. Pass the kind-specific tuple into the prior-walk; gate
+   "mark prior done" on `prior in substage_t0` so phantom
+   transitions can't cascade.
+4. Pin with a `<Kind>AdvanceTimelineTests` class — at minimum a
+   no-cascade test for the FIRST substage and an alias-resolution
+   test if the kind uses any.
+
+### Testing
+
+`tests/test_cloudrun_render_worker_progress.py::LfAdvanceTimelineTests`
+— 6 new tests pin the long-form contract:
+
+- `test_constants_shape` — defends against accidental rename.
+- `test_rewrite_event_does_not_cascade_to_done` — THE bug.
+- `test_narrate_alias_routes_to_tts_pill` — alias resolution +
+  rewrite→done with accurate elapsed.
+- `test_unknown_stage_coerced_to_compose_no_cascade` — defence.
+- `test_full_long_form_walk_marks_done_with_real_elapsed` — e2e.
+- `test_repeat_event_for_same_stage_is_idempotent_for_t0` — `[3/5]`
+  and `[4/5]` both routing to compose don't reset t0.
+
+Plus `tests/test_jobs_id_fallthrough.py::ControlPlaneFallthroughTests::test_status_uploading_without_short_uri_no_preview`
+pins the preview-gate fix.

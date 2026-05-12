@@ -131,8 +131,18 @@ def _doc_to_view(job_id: str, doc: dict) -> JobView:
             pass
 
     # Always-correct preview URL — the UI never has to switch on scheme.
+    # Gate on the artifacts ACTUALLY existing, not on the wider status
+    # window. Pre-2026-05-12 this was gated on
+    # ``status in (done, uploading)`` — but during ``status=uploading``
+    # the worker has flipped status BEFORE the actual GCS upload
+    # completed, so ``short_uri`` isn't populated yet. The dashboard
+    # then mounted a ``<video src="/api/jobs/<id>/preview.mp4">``
+    # which 404'd (the ``preview_mp4`` route below correctly returns
+    # 404 when neither preview_local_path nor short_uri is set). The
+    # symptom: a noisy 404 in DevTools the moment the upload pill
+    # flipped to "running", before the upload actually finished.
     preview_url: str | None = None
-    if doc.get("status") in (jobs_mod.STATUS_DONE, "uploading"):
+    if doc.get("preview_local_path") or doc.get("short_uri"):
         preview_url = f"/api/jobs/{job_id}/preview.mp4"
 
     return JobView(

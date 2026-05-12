@@ -359,8 +359,14 @@ class ControlPlaneFallthroughTests(unittest.TestCase):
 
     def test_status_rendering_no_preview_url_yet(self):
         """Mirror control._doc_to_view: only set preview_url once the
-        render is past `done` / `uploading` — UI shouldn't bind a
-        <video> to a URL guaranteed to 404."""
+        mp4 is actually servable (short_uri or preview_local_path is
+        set on the doc) — UI shouldn't bind a <video> to a URL
+        guaranteed to 404. Pre-2026-05-12 the gate was status-based
+        (``status in {done, uploading}``) which lit up preview_url
+        the moment the worker flipped to ``uploading`` — but the
+        ``short_uri`` doesn't get populated until the GCS upload
+        actually completes, so the dashboard's ``<video>`` element
+        fired a noisy 404 GET in that window."""
         jid = self._put_control_job()
         self.control_jobs.mark_stage(jid, status="rendering", stage="images")
         body = self.client.get(f"/api/jobs/{jid}").json()
@@ -368,6 +374,28 @@ class ControlPlaneFallthroughTests(unittest.TestCase):
         self.assertEqual(body["state"], "running")
         self.assertEqual(body["stage"], "images")
         self.assertIsNone(body["preview_url"])
+
+    def test_status_uploading_without_short_uri_no_preview(self):
+        """Regression for 2026-05-12: status==uploading with no
+        short_uri yet must NOT emit a preview_url. Pre-fix the gate
+        emitted the URL the moment the worker flipped status to
+        "uploading" (line ``_update_job(status="uploading", ...)``
+        in cloud/render-worker-v2/entrypoint.py) — but the GCS
+        upload hadn't actually completed, so the ``preview_mp4``
+        endpoint correctly returned 404. The dashboard ``<video>``
+        element fetched ``/preview.mp4`` and the user saw a noisy
+        404 in DevTools right at the upload stage."""
+        jid = self._put_control_job()
+        # Worker flips status to "uploading" BEFORE the upload finishes.
+        # short_uri gets populated only when the GCS write returns.
+        self.control_jobs.mark_stage(jid, status="uploading", stage="upload")
+        body = self.client.get(f"/api/jobs/{jid}").json()
+        self.assertEqual(body["status"], "uploading")
+        self.assertIsNone(
+            body["preview_url"],
+            "preview_url must stay None until short_uri is populated — "
+            "the /preview.mp4 endpoint returns 404 otherwise",
+        )
 
     def test_status_done_sets_preview_url_and_short_uri(self):
         jid = self._put_control_job()

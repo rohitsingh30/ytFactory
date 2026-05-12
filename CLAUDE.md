@@ -34,6 +34,51 @@ raw activity logs — things that don't belong in the repo.
 
 ---
 
+## Test-coverage gate (auto-invoked after every code change)
+
+Every code change in `pipeline/`, `control/`, `web/`, `web-next/`,
+`cloud/*/`, or `scripts/` MUST be pinned by a test that would have
+failed on the buggy state — OR carry an explicit `# coverage:
+<≥6-word reason>` comment when the line is genuinely untestable
+(real GPU inference, real network call, browser DOM).
+
+The `/test-coverage` skill enforces this. It auto-invokes:
+
+1. After any tool call that modifies a `.py` / `.ts` / `.tsx` file
+   in the watched dirs.
+2. Before any `git commit` that includes production code (NOT
+   docs-only commits) — including `/update-docs`'s commit step.
+3. On explicit ask: "test this", "check coverage", "did we miss
+   anything", "make sure this is tested".
+
+Run it standalone with:
+
+```bash
+.venv/bin/python scripts/coverage_gate.py
+# Or for just the diff that would be measured:
+.venv/bin/python scripts/coverage_gate.py --plan
+```
+
+Exit codes: 0 = all changed lines covered, 1 = uncovered lines,
+3 = pytest itself failed. The skill description + full quality
+gates live at `.claude/skills/test-coverage/SKILL.md`. The
+implementation is `scripts/coverage_gate.py` (43 unit tests
+pinning every helper).
+
+**Why this exists.** Established 2026-05-12 after a single render
+session surfaced 3 bugs (long-form cascade-coercion, preview_url
+status-window gate, hard-coded 9:16 PlayerCard) that all could
+have been caught by pinning the changed lines. The prior workflow
+was "agent edits → commits → user runs render → bug surfaces".
+This skill closes the loop.
+
+**Realistic scope.** It enforces 100% coverage on lines changed
+THIS session (the diff against `HEAD`). The historical 50k-LoC
+backlog is logged in `.claude/skills/test-coverage/learnings/backlog.md`
+for incremental work — full-repo 100% is a multi-week project.
+
+---
+
 ## Cloud-first TTS migration (2026-05-06 — COMPLETE)
 
 GPU-bound TTS runs on **Cloud Run + NVIDIA L4** in `asia-southeast1`.
@@ -185,6 +230,25 @@ scripts breaks deploys with `COPY otel_init.py: file not found`
 (the 2026-05-12 web-next post-mortem). See
 `docs/cloud_service_dep_playbook.md` §"Auto-patch scope: only
 Python OTel-using services".
+
+**P10 (2026-05-12) — every `cloud/<svc>/deploy.sh` MUST source the
+ADC auth bypass.** Right after `set -euo pipefail`, add:
+
+```bash
+source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
+```
+
+This auto-exports `CLOUDSDK_AUTH_ACCESS_TOKEN` from Application
+Default Credentials, so a single `gcloud auth application-default
+login` (lasts hours-to-days) covers every deploy without the
+user-account reauth policy biting mid-build. All 18 existing
+`cloud/*/deploy.sh` scripts already do this. **Skipping the source
+line is a recurring agent-frustration vector** — the user got
+furious twice on 2026-05-12 when an agent asked them to re-login
+despite their fresh ADC. See
+`docs/deploy.md` §"Adding a new `cloud/<svc>/deploy.sh`",
+`cloud/_shared/auth_setup.sh`, and the memory file
+`feedback_gcloud_reauth_use_adc_bypass.md`.
 
 ---
 

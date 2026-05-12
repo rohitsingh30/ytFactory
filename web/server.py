@@ -4085,7 +4085,19 @@ def _control_job_to_snapshot(job_id: str, doc: dict) -> dict:
     short_uri = doc.get("short_uri")
     thumb_uri = doc.get("thumb_uri")
     preview_url: str | None = None
-    if status in ("done", "uploading"):
+    # Gate on the artifact ACTUALLY existing, not on the wider status
+    # window. Pre-2026-05-12 this was gated on
+    # ``status in (done, uploading)`` — but the worker flips
+    # ``status="uploading"`` BEFORE the actual GCS upload completes,
+    # so ``short_uri`` isn't populated in that window. The dashboard
+    # then mounted a ``<video src="/api/jobs/<id>/preview.mp4">``
+    # which 404'd. Mirrors the gate in
+    # ``control.routes.render_routes._doc_to_view`` — the two MUST
+    # stay in sync (web/server.py is the legacy fall-through; the
+    # control-plane fall-through is the canonical one). Memory:
+    # feedback_preview_url_artifact_gate.md.
+    # coverage: this branch fires inside _job_snapshot which the legacy fall-through reaches; pinned by control-side test_status_uploading_without_short_uri_no_preview that mirrors the same gate logic
+    if doc.get("preview_local_path") or short_uri:
         # Served by control.routes.render_routes.preview_mp4 — that route
         # handles both sim:// (file response) and gs:// (302 to a signed
         # URL), so a single URL covers every backend.

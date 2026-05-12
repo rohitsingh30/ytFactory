@@ -5,6 +5,12 @@
 #     --project=ytfactory-prod-v2 --region=asia-southeast1 --wait
 set -euo pipefail
 
+# Bake in the ADC-token auth bypass so deploys don't die mid-build with
+# "Reauthentication failed" when the user-account access token has expired
+# but ADC is still fresh. See cloud/_shared/auth_setup.sh + the memory
+# file feedback_gcloud_reauth_use_adc_bypass.md for the full why.
+source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
+
 PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"

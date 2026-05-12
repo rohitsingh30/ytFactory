@@ -222,6 +222,17 @@ Before first build:
 [ ] Reviewed "Would install" line — no surprises
 [ ] If gated model: HF_TOKEN added to .env, build-arg wired in cloudbuild.yaml
 
+deploy.sh wiring (mandatory — every cloud/<svc>/deploy.sh):
+[ ] Starts with `set -euo pipefail`
+[ ] Sources `cloud/_shared/auth_setup.sh` immediately after, so the
+    ADC-token bypass auto-applies and a fresh `gcloud auth application-
+    default login` covers the deploy without asking the user to also
+    run `gcloud auth login` (workspace reauth policy).
+    See docs/deploy.md "Adding a new cloud/<svc>/deploy.sh" for the
+    exact snippet, and feedback_gcloud_reauth_use_adc_bypass.md for
+    why this is mandatory (escalated to a hard rule on 2026-05-12
+    after firing twice in one day).
+
 After first build:
 [ ] /readyz returns {"status":"ready", "warm_s":<n>}
 [ ] /synth returns valid WAV (verified with ffprobe + Whisper transcribe)

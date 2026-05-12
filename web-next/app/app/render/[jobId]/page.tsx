@@ -45,6 +45,7 @@ import { ChannelIcon, channelLabel } from "@/components/app/channel-icon";
 import { StatusPill } from "@/components/app/status-pill";
 import { CritiqueChatPanel } from "@/components/app/critique-chat-panel";
 import { jobsApi, pollJob } from "@/lib/api";
+import { derivePreviewDisplay } from "@/lib/render-display";
 import type { ArtifactEntry, Job, TimelineEntry } from "@/lib/types";
 import { cn, relativeTime } from "@/lib/utils";
 
@@ -87,7 +88,12 @@ export default function RenderDetailPage() {
     jobsApi.get(jobId).catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [jobId]);
 
-  const previewSrc = job?.preview_url ?? jobsApi.previewUrl(jobId);
+  // Preview URL comes from the backend ONLY when the mp4 is actually
+  // servable (preview_local_path or short_uri is set). Pre-2026-05-12
+  // this fell back to constructing the URL ourselves, which mounted
+  // the <video> element and triggered a 404 GET the moment status
+  // flipped to "rendering" — long before any mp4 existed.
+  const previewSrc = job?.preview_url ?? null;
 
   return (
     <div className="flex min-h-full flex-col">
@@ -166,9 +172,28 @@ export default function RenderDetailPage() {
   );
 }
 
-function PlayerCard({ job, src }: { job: Job | null; src: string }) {
-  const ready = job && (job.status === "done" || job.status === "uploading" || job.status === "rendering");
+function PlayerCard({ job, src }: { job: Job | null; src: string | null }) {
+  // Show the player ONLY when the backend says the preview is servable
+  // (src derives from job.preview_url, which the backend now emits
+  // only when preview_local_path or short_uri is set — see
+  // control/routes/render_routes.py:_doc_to_view). Pre-2026-05-12 this
+  // also flipped to true on status=="rendering", which mounted a
+  // <video> element pointing at a not-yet-existent mp4 and produced
+  // a noisy 404 in the user's DevTools.
+  const ready = !!src;
   const done = job?.status === "done";
+
+  // Pure aspect/kind derivation lives in lib/render-display.ts so it
+  // can be unit-tested without React testing infra (pinned by
+  // tests/render-display.test.mjs). Pre-2026-05-12 this card was
+  // hard-coded to "9:16 · auto-loop" with `aspect-[9/16]`, so picking
+  // "Long form" in the wizard rendered a 16:9 mp4 squashed into a
+  // portrait letterbox.
+  const { headerLabel, frameClass } = derivePreviewDisplay(
+    (job?.render_spec ?? null) as Record<string, unknown> | null,
+    (job?.proposal ?? null) as Record<string, unknown> | null,
+  );
+
   return (
     <div className="rounded-xl border border-border bg-surface p-4">
       <div className="flex items-center justify-between">
@@ -176,13 +201,13 @@ function PlayerCard({ job, src }: { job: Job | null; src: string }) {
           <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
             Preview
           </div>
-          <div className="mt-0.5 text-[13px] font-medium tracking-tight">9:16 · auto-loop</div>
+          <div className="mt-0.5 text-[13px] font-medium tracking-tight">{headerLabel}</div>
         </div>
         {job && <StatusPill status={job.status} pulse={job.status === "rendering" || job.status === "uploading"} />}
       </div>
       <div className="mt-4 flex justify-center">
-        <div className="relative aspect-[9/16] w-full max-w-xs overflow-hidden rounded-lg border border-border bg-background">
-          {ready ? (
+        <div className={cn("relative overflow-hidden rounded-lg border border-border bg-background", frameClass)}>
+          {ready && src ? (
             <video
               key={src}
               src={src}
@@ -212,7 +237,7 @@ function PlayerCard({ job, src }: { job: Job | null; src: string }) {
           )}
         </div>
       </div>
-      {done && (
+      {done && src && (
         <div className="mt-4 flex items-center justify-center gap-2">
           <Button asChild variant="outline" size="sm">
             <a href={src} download>
