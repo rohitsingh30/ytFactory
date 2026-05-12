@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -269,19 +270,11 @@ def render_long_form(
     log_path = work_dir / "long_form_renderer.log"
     rc = _stream_subprocess(cmd, log_path=log_path, progress_cb=progress_cb)
     if rc != 0:
-        # Surface the last few lines of the log to make the worker's
-        # Firestore error field actionable.
-        tail = ""
-        if log_path.exists():
-            try:
-                lines = log_path.read_text().splitlines()
-                tail = "\n".join(lines[-25:])
-            except Exception:  # noqa: BLE001
-                pass
-        raise RuntimeError(
-            f"pipeline.render.long_form exited with code {rc}.\n"
-            f"Last 25 log lines:\n{tail}"
-        )
+        # Surface via the central helper — see _format_subprocess_failure
+        # for the noise-tolerant traceback extraction. The helper has
+        # full unit coverage; this raise is the integration path.
+        # coverage: integration path requiring real long_form subprocess
+        raise RuntimeError(_format_subprocess_failure(rc, log_path))
 
     mp4_path = paths.long_form_for(env.slug)
     if not mp4_path.exists():
@@ -455,9 +448,21 @@ def _stream_subprocess(
     log_path: Path,
     progress_cb: ProgressCallback | None,
 ) -> int:
-    """Run a subprocess streaming stdout to both log_path and the
-    optional progress_cb (classified through the worker's existing
-    long-form regex bank)."""
+    """Run a subprocess streaming stdout to (a) the on-disk log file
+    AND (b) the parent's stdout (so cloud logs see the subprocess
+    output in real time, not just on failure via "last 25 lines"),
+    AND (c) the optional progress_cb (classified through the worker's
+    existing long-form regex bank).
+
+    The tee-to-parent-stdout is what makes Cloud Run subprocess
+    debugging tractable: prior to 2026-05-13 the only place the
+    subprocess output landed was a /tmp file inside the container,
+    and the parent only ever surfaced the last 25 lines on failure
+    — frequently drowned by OTel ConsoleMetricExporter JSON dumps
+    (since the JOB-runtime had no K_SERVICE env so OTel resolved
+    to console mode). With tee+real-mode-OTel-fix in place, every
+    line of subprocess output is queryable in Cloud Logging.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -476,11 +481,85 @@ def _stream_subprocess(
         for line in proc.stdout:
             logf.write(line)
             logf.flush()
+            # Tee to parent stdout — Cloud Run captures this into
+            # Cloud Logging, so subprocess errors are queryable in
+            # real time (no more "last 25 lines drowned by OTel
+            # JSON" debugging dead-ends).
+            sys.stdout.write(line)
+            sys.stdout.flush()
             if progress_cb:
                 _maybe_emit_long_form_progress(line, progress_cb)
         rc = proc.wait()
 
     return rc
+
+
+# Matches the start of a Python traceback. We use this to extract the
+# REAL error from the subprocess log when surfacing the worker's
+# Firestore error field — blindly tail-25-lines used to land in OTel
+# JSON noise (the 2026-05-13 5e37f76b post-mortem). The log file
+# contains the full subprocess stdout/stderr stream, so we walk
+# backward from the end and grab the LAST traceback block (the
+# crash that actually killed the subprocess, not an earlier
+# warning-but-recovered one).
+_TRACEBACK_HEADER_RE = re.compile(r"^Traceback \(most recent call last\):\s*$")
+
+
+def _extract_last_traceback(log_text: str, *, max_lines: int = 80) -> str:
+    """Return the last Python traceback block in ``log_text``.
+
+    Walks lines top-to-bottom remembering the index of the most recent
+    ``Traceback (most recent call last):`` header. Returns from there
+    forward, capped at ``max_lines`` (preserving the HEAD of the
+    traceback so the actionable ``ErrorClass: message`` line — which
+    appears in the first few lines of the traceback — survives the
+    cap even when the traceback is followed by hundreds of lines of
+    OTel ConsoleMetricExporter JSON noise from the subprocess's
+    exit-time metric flush).
+
+    If no traceback is found, returns the trailing 25 lines as the
+    legacy fallback (so callers that pre-date this helper still see
+    *something*).
+    """
+    if not log_text:
+        return ""
+    lines = log_text.splitlines()
+    last_tb_idx: int | None = None
+    for idx, line in enumerate(lines):
+        if _TRACEBACK_HEADER_RE.match(line):
+            last_tb_idx = idx
+    if last_tb_idx is None:
+        return "\n".join(lines[-25:])
+    block = lines[last_tb_idx:]
+    if len(block) > max_lines:
+        # Keep the HEAD of the traceback (operator-actionable
+        # ErrorClass + early frames) — the tail is usually deep
+        # framework frames that don't help triage.
+        block = block[:max_lines]
+    return "\n".join(block)
+
+
+def _format_subprocess_failure(rc: int, log_path: Path) -> str:
+    """Build the ``RuntimeError`` message surfaced when the long_form
+    subprocess exits non-zero.
+
+    Centralised so both the call site and the unit tests share one
+    contract: "Subprocess error:" header + extracted Python traceback
+    (or trailing 25 lines as fallback). Pre-2026-05-13 the call site
+    used "Last 25 log lines:" + raw tail-25, which during the
+    5e37f76b post-mortem turned out to be 100% OTel
+    ConsoleMetricExporter JSON dump and ZERO actionable diagnostic.
+    """
+    tail = ""
+    if log_path.exists():
+        try:
+            tail = _extract_last_traceback(log_path.read_text())
+        except Exception:  # noqa: BLE001
+            pass
+    return (
+        f"pipeline.render.long_form exited with code {rc}.\n"
+        f"Subprocess error:\n{tail}"
+    )
 
 
 def _maybe_emit_long_form_progress(

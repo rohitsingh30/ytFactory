@@ -40,18 +40,75 @@ class TestResolveMode(unittest.TestCase):
     def test_auto_cloud_run(self) -> None:
         os.environ.pop("OTEL_EXPORTER", None)
         os.environ.pop("PYTEST_CURRENT_TEST", None)
+        os.environ.pop("CLOUD_RUN_JOB", None)
+        os.environ.pop("CLOUD_RUN_EXECUTION", None)
         os.environ["K_SERVICE"] = "render-worker-v2"
         self.assertEqual(exporters.resolve_mode(), "gcp")
+
+    def test_auto_cloud_run_job_via_CLOUD_RUN_JOB(self) -> None:
+        # Cloud Run JOBS do NOT set K_SERVICE. They set CLOUD_RUN_JOB
+        # + CLOUD_RUN_EXECUTION + CLOUD_RUN_TASK_INDEX. Pre-2026-05-13
+        # the resolver only checked K_SERVICE → JOBS fell through to
+        # "console" mode → ConsoleMetricExporter dumped JSON to stdout
+        # every 60s, drowning the worker's "last 25 log lines" error
+        # surface. Regression-pin the JOB-detection so this never
+        # silently re-breaks.
+        os.environ.pop("OTEL_EXPORTER", None)
+        os.environ.pop("PYTEST_CURRENT_TEST", None)
+        os.environ.pop("K_SERVICE", None)
+        os.environ.pop("CLOUD_RUN_EXECUTION", None)
+        os.environ["CLOUD_RUN_JOB"] = "ytfactory-render-worker-v2"
+        self.assertEqual(exporters.resolve_mode(), "gcp")
+
+    def test_auto_cloud_run_job_via_CLOUD_RUN_EXECUTION(self) -> None:
+        # CLOUD_RUN_EXECUTION alone is also sufficient (some Cloud Run
+        # surfaces set EXECUTION but not JOB on the task pod).
+        os.environ.pop("OTEL_EXPORTER", None)
+        os.environ.pop("PYTEST_CURRENT_TEST", None)
+        os.environ.pop("K_SERVICE", None)
+        os.environ.pop("CLOUD_RUN_JOB", None)
+        os.environ["CLOUD_RUN_EXECUTION"] = "ytfactory-render-worker-v2-abcde"
+        self.assertEqual(exporters.resolve_mode(), "gcp")
+
+    def test_pytest_does_not_pre_empt_cloud_run_job(self) -> None:
+        # Cloud Run env wins over PYTEST_CURRENT_TEST so the
+        # production code path is exercised end-to-end during cloud
+        # smoke tests, not silently downgraded to inmemory mode.
+        os.environ.pop("OTEL_EXPORTER", None)
+        os.environ.pop("K_SERVICE", None)
+        os.environ["CLOUD_RUN_JOB"] = "ytfactory-render-worker-v2"
+        os.environ["PYTEST_CURRENT_TEST"] = "x"
+        self.assertEqual(exporters.resolve_mode(), "gcp")
+
+    def test_on_cloud_run_helper_detects_all_three_env_signals(self) -> None:
+        os.environ.pop("K_SERVICE", None)
+        os.environ.pop("CLOUD_RUN_JOB", None)
+        os.environ.pop("CLOUD_RUN_EXECUTION", None)
+        self.assertFalse(exporters._on_cloud_run())
+
+        for env_key in ("K_SERVICE", "CLOUD_RUN_JOB", "CLOUD_RUN_EXECUTION"):
+            os.environ.pop("K_SERVICE", None)
+            os.environ.pop("CLOUD_RUN_JOB", None)
+            os.environ.pop("CLOUD_RUN_EXECUTION", None)
+            os.environ[env_key] = "x"
+            self.assertTrue(
+                exporters._on_cloud_run(),
+                f"_on_cloud_run() must return True when {env_key} is set",
+            )
 
     def test_auto_pytest(self) -> None:
         os.environ.pop("OTEL_EXPORTER", None)
         os.environ.pop("K_SERVICE", None)
+        os.environ.pop("CLOUD_RUN_JOB", None)
+        os.environ.pop("CLOUD_RUN_EXECUTION", None)
         os.environ["PYTEST_CURRENT_TEST"] = "x"
         self.assertEqual(exporters.resolve_mode(), "inmemory")
 
     def test_auto_laptop(self) -> None:
         os.environ.pop("OTEL_EXPORTER", None)
         os.environ.pop("K_SERVICE", None)
+        os.environ.pop("CLOUD_RUN_JOB", None)
+        os.environ.pop("CLOUD_RUN_EXECUTION", None)
         os.environ.pop("PYTEST_CURRENT_TEST", None)
         self.assertEqual(exporters.resolve_mode(), "console")
 

@@ -244,6 +244,7 @@ def _build_resource(
         service_name
         or os.environ.get("OTEL_SERVICE_NAME")
         or os.environ.get("K_SERVICE")
+        or os.environ.get("CLOUD_RUN_JOB")
         or "ytfactory-laptop"
     )
     version = (
@@ -265,7 +266,10 @@ def _build_resource(
 
 def _resolve_env() -> str:
     """Best-effort environment label."""
-    if os.environ.get("K_SERVICE"):
+    # Cloud Run services set K_SERVICE; Cloud Run jobs set CLOUD_RUN_JOB.
+    # Both are "prod" for env-tagging purposes — see ``_on_cloud_run`` in
+    # ``exporters.py`` for the full rationale.
+    if os.environ.get("K_SERVICE") or os.environ.get("CLOUD_RUN_JOB"):
         return "prod"
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return "test"
@@ -274,7 +278,14 @@ def _resolve_env() -> str:
 
 def _maybe_merge_gcp_resource(base: Resource) -> Resource:
     """Merge the GCP resource detector's attrs when running on GCP."""
-    if not os.environ.get("K_SERVICE"):
+    # Same Cloud Run service+job detection as _on_cloud_run() in
+    # exporters.py — gcp resource detector applies in BOTH execution
+    # environments.
+    if not (
+        os.environ.get("K_SERVICE")
+        or os.environ.get("CLOUD_RUN_JOB")
+        or os.environ.get("CLOUD_RUN_EXECUTION")
+    ):
         return base
     try:
         from opentelemetry.resourcedetector.gcp_resource_detector import (

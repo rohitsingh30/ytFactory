@@ -59,7 +59,11 @@ def init(
             return
         _STATE["initialised"] = True
 
-    on_cloud_run = bool(os.environ.get("K_SERVICE"))
+    on_cloud_run = bool(
+        os.environ.get("K_SERVICE")
+        or os.environ.get("CLOUD_RUN_JOB")
+        or os.environ.get("CLOUD_RUN_EXECUTION")
+    )
 
     try:
         from opentelemetry import _logs as _logs_api

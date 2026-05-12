@@ -73,6 +73,27 @@ _logger = logging.getLogger(__name__)
 VALID_MODES = ("gcp", "otlp", "console", "inmemory", "none")
 
 
+def _on_cloud_run() -> bool:
+    """True when running inside Cloud Run — service OR job.
+
+    Cloud Run **services** set ``K_SERVICE`` (along with ``K_REVISION``,
+    ``K_CONFIGURATION``). Cloud Run **jobs** set ``CLOUD_RUN_JOB`` +
+    ``CLOUD_RUN_EXECUTION`` + ``CLOUD_RUN_TASK_INDEX`` instead — and do
+    NOT set ``K_SERVICE``. We need both detected so the shared OTel
+    init picks ``gcp`` mode (Cloud Trace + Cloud Monitoring + Cloud
+    Logging) instead of falling through to ``console`` mode (which
+    floods stdout with ``ConsoleMetricExporter`` JSON every 60 s — the
+    2026-05-13 5e37f76b post-mortem: render failure root cause was
+    invisible because OTel JSON dumps drowned the subprocess error
+    in the worker's "Last 25 log lines" surface).
+    """
+    return bool(
+        os.environ.get("K_SERVICE")
+        or os.environ.get("CLOUD_RUN_JOB")
+        or os.environ.get("CLOUD_RUN_EXECUTION")
+    )
+
+
 def resolve_mode(explicit: Optional[str] = None) -> str:
     """Pick the exporter mode based on env / runtime."""
     raw = (explicit or os.environ.get("OTEL_EXPORTER") or "").strip().lower()
@@ -83,7 +104,7 @@ def resolve_mode(explicit: Optional[str] = None) -> str:
             "OTEL_EXPORTER=%r is not one of %s; falling back to auto",
             raw, VALID_MODES,
         )
-    if os.environ.get("K_SERVICE"):
+    if _on_cloud_run():
         return "gcp"
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return "inmemory"
@@ -354,14 +375,14 @@ def _build_gcp_log_processor(
     we used ``ConsoleLogRecordExporter`` whose Python ``__repr__``-ish
     output indexes as ``textPayload`` only.
 
-    Off Cloud Run (laptop without ``K_SERVICE``), we still try the
-    direct REST API writer (``CloudLoggingLogExporter``) because the
-    laptop has no platform agent to scrape stdout — fall back to the
-    same structured JSON exporter when ``google-cloud-logging`` isn't
-    installed.
+    Off Cloud Run (laptop, no Cloud Run env markers), we still try
+    the direct REST API writer (``CloudLoggingLogExporter``) because
+    the laptop has no platform agent to scrape stdout — fall back to
+    the same structured JSON exporter when ``google-cloud-logging``
+    isn't installed.
     """
     from .cloud_run_json_exporter import CloudRunStructuredJsonLogExporter
-    if os.environ.get("K_SERVICE"):
+    if _on_cloud_run():
         return BatchLogRecordProcessor(
             CloudRunStructuredJsonLogExporter(project_id=project),
         )
