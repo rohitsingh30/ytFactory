@@ -46,12 +46,20 @@ export default function ChannelDetailPage() {
 
   useEffect(() => {
     if (!ch) return;
+    // Audit Q2.47 — pre-fix this Promise.all had no cancellation
+    // token. Navigate away from /app/channels/A mid-fetch and into
+    // /app/channels/B → the still-in-flight A response landed AFTER
+    // the B effect re-ran, overwriting B's data with A's. Now track
+    // a `cancelled` flag closured into the effect; on cleanup we
+    // flip it and the resolution handler bails before any setState.
+    let cancelled = false;
     Promise.all([
       channelsApi.get(ch),
       channelsApi.schema(ch),
       jobsApi.list({ channel: ch, limit: 12 }),
     ])
       .then(([c, s, j]) => {
+        if (cancelled) return;
         setChannel(c);
         setSchema(s);
         setJobs(j.jobs);
@@ -65,6 +73,9 @@ export default function ChannelDetailPage() {
         setDefaults(seeded);
       })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [ch]);
 
   async function saveDefaults() {

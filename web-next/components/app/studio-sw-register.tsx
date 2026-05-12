@@ -60,9 +60,40 @@ export function StudioSwRegister(): null {
 /**
  * Imperative cache wipe — call after logout / account switch so the
  * next user doesn't inherit stale auth-gated payloads.
+ *
+ * **Audit Q2.48** — pre-fix this only posted ``BUST_CACHE`` to the
+ * service worker, leaving every browser-side cache (localStorage,
+ * sessionStorage, the SWR mutation map, the Firestore IndexedDB
+ * persistence layer) intact. Logout-then-different-user-login on
+ * the same browser tab let the new user see the previous user's
+ * dashboard data for as long as the SWR cache survived. Now also
+ * wipes localStorage + sessionStorage entries we own.
  */
 export function bustServiceWorkerCache(): void {
   if (typeof window === "undefined") return;
-  if (!("serviceWorker" in navigator)) return;
-  navigator.serviceWorker.controller?.postMessage({ type: "BUST_CACHE" });
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.controller?.postMessage({ type: "BUST_CACHE" });
+  }
+  // Audit Q2.48 — wipe localStorage + sessionStorage so SWR's
+  // localStorage cache and our own auth-gated entries don't leak
+  // to the next user. We use prefix matching ("ytfactory:" /
+  // "swr-") so we don't nuke unrelated host storage.
+  try {
+    if (typeof localStorage !== "undefined") {
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && (k.startsWith("ytfactory:") || k.startsWith("swr-") || k === "user")) {
+          keysToRemove.push(k);
+        }
+      }
+      keysToRemove.forEach((k) => localStorage.removeItem(k));
+    }
+    if (typeof sessionStorage !== "undefined") {
+      sessionStorage.clear();
+    }
+  } catch {
+    // localStorage can throw in private-mode tabs / quota-exceeded;
+    // a wipe failure here shouldn't block logout.
+  }
 }

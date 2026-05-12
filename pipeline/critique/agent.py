@@ -358,10 +358,18 @@ def run_agent_turn(
     if env_overrides:
         env.update(env_overrides)
     # Force unbuffered output so the line-stream is real-time, not
-    # batched in 8 KB blocks. Both CLIs respect the standard
-    # PYTHONUNBUFFERED / NODE_NO_OUTPUT_BUFFERING contracts but
-    # belt-and-braces won't hurt.
+    # batched in 8 KB blocks.
+    #
+    # **Audit Q2.5** — pre-fix this comment claimed
+    # ``NODE_NO_OUTPUT_BUFFERING`` is a "standard" env var. It isn't —
+    # Node has no such contract. Real-time stdout from a Node CLI
+    # requires either calling ``process.stdout.write`` (which is
+    # synchronous on TTY/PIPE) or running with ``--stdio-buffer-size=0``
+    # (Node 22+) or wrapping with a PTY. PYTHONUNBUFFERED is the only
+    # genuine standard here. The forced env var below stays only for
+    # back-compat in case a future Node release respects it.
     env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("NODE_NO_OUTPUT_BUFFERING", "1")  # not a real contract; harmless
     env.setdefault("FORCE_COLOR", "0")  # ANSI colour codes pollute the chat
 
     logger.info("agent turn: %s (timeout=%ds, repo=%s)", agent, timeout_s, repo_root)

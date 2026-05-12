@@ -114,6 +114,15 @@ export function CritiqueChatPanel({ jobId }: Props) {
   const startSession = useCallback(async () => {
     setStatus("starting");
     setErrorText(null);
+    // Audit Q2.49 — pre-fix unsubsRef.current.push(...) added new
+    // subscriptions WITHOUT first tearing down any existing ones.
+    // Hitting the Retry button (or restart-on-different-agent) ran
+    // startSession a second time → two parallel onSnapshot callbacks
+    // for the same doc, double-firing setDoc/setMessages, plus a
+    // permanent leak (the first pair was no longer reachable). Tear
+    // down before re-subscribing.
+    unsubsRef.current.forEach((unsub) => unsub());
+    unsubsRef.current = [];
     try {
       // 1. Create or fetch the parent critique doc.
       const startRes = await fetch(`/api/jobs/${jobId}/critique/start`, {
