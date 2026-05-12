@@ -408,6 +408,61 @@ class TimelineAssemblyTests(unittest.TestCase):
             self.assertTrue(out2.exists())
             self.assertEqual(ff.call_count, 1)
 
+    def test_splice_overlays_batch_uses_one_concat_pass(self):
+        # Audit T1.19 — splice plan is computed on the ORIGINAL base
+        # (no inter-overlay dependency chain) so the work scales as
+        # max(per-segment-extracts-in-parallel, 1 concat) instead of
+        # the pre-fix 3*N sequential ffmpeg invocations.
+        with _tmpdir() as td:
+            tmp = Path(td)
+            base = _write(tmp / "base.mp4")
+            ovs = [_write(tmp / f"ov{i}.mp4") for i in range(5)]
+            cache = tmp / "cache"
+            cache.mkdir()
+            # Simulate a 30s base with 5 short overlays.
+            durations = {base: 30.0}
+            for o in ovs:
+                durations[o] = 1.0
+            ffmpeg_calls: list[list[str]] = []
+            with patch.object(sd, "_probe_duration",
+                              side_effect=lambda p: durations.get(p, 1.0)), \
+                 patch.object(sd, "_ffmpeg",
+                              side_effect=lambda cmd: (
+                                  ffmpeg_calls.append(cmd),
+                                  _write(Path(cmd[-1]), b"v"),
+                              )):
+                out = sd._splice_overlays_batch(
+                    base, [(2.0, ovs[0]), (8.0, ovs[1]), (14.0, ovs[2]),
+                           (20.0, ovs[3]), (26.0, ovs[4])],
+                    cache,
+                )
+            self.assertTrue(out.exists())
+            # Plan: 5 overlays + 6 base segments = 11 segments. Per-segment
+            # extracts are 6 (only base segments), plus 1 final concat = 7.
+            # Pre-fix sequential approach was 5 * 3 = 15. The batch is
+            # both fewer ffmpeg calls AND can run extracts in parallel.
+            self.assertLessEqual(
+                len(ffmpeg_calls), 7,
+                f"batch splice must use ≤7 ffmpeg invocations for 5 "
+                f"overlays (6 segment extracts + 1 concat); pre-fix "
+                f"sequential approach used 15. got {len(ffmpeg_calls)}.",
+            )
+            # The final invocation is the concat.
+            self.assertIn("concat", ffmpeg_calls[-1])
+            self.assertIn("-c", ffmpeg_calls[-1])
+            self.assertEqual(
+                ffmpeg_calls[-1][ffmpeg_calls[-1].index("-c") + 1], "copy",
+                "concat must use stream-copy, not re-encode",
+            )
+
+    def test_splice_overlays_batch_empty_returns_base(self):
+        with _tmpdir() as td:
+            tmp = Path(td)
+            base = _write(tmp / "base.mp4")
+            cache = tmp / "cache"
+            cache.mkdir()
+            self.assertEqual(sd._splice_overlays_batch(base, [], cache), base)
+
 
 class MainEntrypointTests(unittest.TestCase):
     def _main_patches(self, paths: _FakeRenderPaths):
@@ -556,6 +611,16 @@ class MainEntrypointTests(unittest.TestCase):
                 prep_mock = stack.enter_context(patch.object(sd, "_prep_footage_clip", side_effect=prep))
                 stack.enter_context(patch.object(sd, "_build_filler_video", side_effect=lambda clips, *a: _write(paths.cache_for("doc") / "filler.mp4")))
                 ov = stack.enter_context(patch.object(sd, "_overlay_clip_on_filler", side_effect=overlay))
+                # Audit T1.19 — call site now uses _splice_overlays_batch,
+                # not _overlay_clip_on_filler. Patch both to keep the
+                # test resilient to which one main() calls (and to
+                # prevent the real splicer from running ffmpeg in test).
+                splice_mock = stack.enter_context(patch.object(
+                    sd, "_splice_overlays_batch",
+                    side_effect=lambda base, ovs, _cd: _write(
+                        paths.cache_for("doc") / "spliced.mp4", b"spliced"
+                    ),
+                ))
                 ff = stack.enter_context(patch.object(sd, "_ffmpeg", side_effect=ffmpeg))
                 stack.enter_context(patch.object(sd, "_render_chapter_card", side_effect=chapter_card))
                 stack.enter_context(patch.object(sd, "build_caption_pngs_from_chunks", side_effect=caption_builder))
@@ -565,7 +630,13 @@ class MainEntrypointTests(unittest.TestCase):
                 self.assertEqual(sd.main(), 0)
             reset_mlx.assert_called_once_with(drop_f5=True, label="sports-doc stage-1 TTS")
             self.assertGreaterEqual(prep_mock.call_count, 6)
-            self.assertGreaterEqual(ov.call_count, 2)
+            # Audit T1.19 — overlay loop now calls _splice_overlays_batch
+            # ONCE for all overlays instead of _overlay_clip_on_filler N times.
+            self.assertGreaterEqual(splice_mock.call_count, 1)
+            # Verify the batch got at least 2 overlays (matches the old
+            # ov.call_count >= 2 invariant against the test fixture).
+            batched_overlays = splice_mock.call_args.args[1]
+            self.assertGreaterEqual(len(batched_overlays), 2)
             self.assertTrue((paths.cache_for("doc") / "composed.mp4").exists())
             self.assertFalse((cap_dir / "cap_old.png").exists())
             final_cmd = ff.call_args_list[-1].args[0]

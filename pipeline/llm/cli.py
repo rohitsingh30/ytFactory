@@ -247,6 +247,55 @@ def _azure_model_for(tier: str) -> str:
 _azure_deployment = _azure_model_for
 
 
+# Per-deployment "which output-token cap key does this model want?" cache.
+# gpt-4o (chat completions) and most legacy deployments accept ``max_tokens``;
+# gpt-5.x / o1 / o3 reasoning deployments require ``max_completion_tokens``
+# and reject ``max_tokens`` outright (Azure 400). We can't tell which a given
+# Azure deployment wants from its NAME (the user's `AZURE_OPENAI_MODEL`
+# environment variable is opaque), so we discover at first call: try the
+# default, on the well-known "use max_completion_tokens instead" 400, swap
+# AND remember. Subsequent calls in the same process skip the round-trip.
+#
+# To skip discovery entirely (recommended in production where the deployment
+# is known), set ``AZURE_OPENAI_TOKEN_PARAM=max_completion_tokens`` (or
+# ``=max_tokens``) on the cloud render-worker. This avoids the wasteful
+# fail-then-retry on every LLM call when the deployment is gpt-5.x.
+_AZURE_TOKEN_PARAM_BY_DEPLOYMENT: dict[str, str] = {}
+_VALID_AZURE_TOKEN_PARAMS = {"max_tokens", "max_completion_tokens"}
+
+
+def _azure_token_param(deployment: str) -> str:
+    """Return ``max_tokens`` or ``max_completion_tokens`` — whichever this
+    Azure deployment expects.
+
+    Resolution order:
+      1. ``AZURE_OPENAI_TOKEN_PARAM`` env (forces a specific param,
+         skips runtime discovery — recommended in production).
+      2. Process cache (populated by previous swap-retry).
+      3. Default ``max_tokens`` (the historical chat-completions key —
+         covers gpt-4o + every pre-reasoning deployment).
+    """
+    env = (os.environ.get("AZURE_OPENAI_TOKEN_PARAM") or "").strip()
+    if env in _VALID_AZURE_TOKEN_PARAMS:
+        return env
+    return _AZURE_TOKEN_PARAM_BY_DEPLOYMENT.get(deployment, "max_tokens")
+
+
+def _remember_azure_token_param(deployment: str, param: str) -> None:
+    """Cache the discovered token-cap key for a deployment, so subsequent
+    calls in this process skip the failed-then-retry handshake.
+
+    Honours the env override: if ``AZURE_OPENAI_TOKEN_PARAM`` is set, the
+    cache is irrelevant (and we don't pollute it with a value that may
+    contradict what the operator wired up).
+    """
+    if param not in _VALID_AZURE_TOKEN_PARAMS:
+        return
+    if (os.environ.get("AZURE_OPENAI_TOKEN_PARAM") or "").strip() in _VALID_AZURE_TOKEN_PARAMS:
+        return
+    _AZURE_TOKEN_PARAM_BY_DEPLOYMENT[deployment] = param
+
+
 # Anthropic SDK model IDs. Override per-tier via env. Unknown tier
 # names pass through verbatim — lets call sites that already know the
 # concrete model id (e.g. ``model="claude-opus-4-7"``) keep working.

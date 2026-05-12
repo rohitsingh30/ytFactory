@@ -594,8 +594,9 @@ def _overlay_clip_on_filler(
     a single ffmpeg overlay+enable filter for short overlays, but produces
     a cleanly re-encoded single file that subsequent passes can copy.
 
-    For perf — if there are many overlays, the caller should batch-build a
-    composite filter graph instead. v1 keeps it simple.
+    For perf — if there are many overlays, the caller should use
+    :func:`_splice_overlays_batch` which collapses N sequential
+    splice operations into a single ffmpeg concat pass.
     """
     overlay_dur = _probe_duration(overlay)
     base_dur = _probe_duration(base)
@@ -621,6 +622,86 @@ def _overlay_clip_on_filler(
     _ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_txt), "-c", "copy", str(out)])
     for p in (head, tail):
         p.unlink(missing_ok=True)
+    list_txt.unlink(missing_ok=True)
+    return out
+
+
+def _splice_overlays_batch(
+    base: Path,
+    overlays: list[tuple[float, Path]],
+    cache_dir: Path,
+) -> Path:
+    """Audit T1.19 — splice every overlay into ``base`` in ONE ffmpeg
+    concat pass instead of N sequential cut-paste passes.
+
+    Pre-fix the renderer called :func:`_overlay_clip_on_filler` once per
+    overlay, with each call's output feeding the next call's input. For
+    a sports doc with 30 overlays on a 30-min base, that meant 30*3=90
+    sequential ffmpeg invocations (head-extract + tail-extract + concat
+    per overlay), each one re-reading the increasingly-mutated base
+    file from disk. -c copy saves the re-encode but doesn't fence the
+    repeated I/O — the loop still cost minutes of wallclock per render.
+
+    This helper computes the entire splice plan on the ORIGINAL base
+    timeline (no inter-overlay dependency chain), extracts each base
+    segment once IN PARALLEL, then runs a single concat at the end.
+    For N overlays the work is now max(N+1 segments-extracted-in-parallel,
+    1 concat) ~ O(1) wallclock vs the old O(N) sequential.
+
+    overlays: list of (at_s, overlay_path) tuples, with overlay_path's
+    full duration replacing base[at_s : at_s + dur(overlay)]. Order
+    doesn't matter (we sort).
+    """
+    if not overlays:
+        return base
+    overlays_sorted = sorted(overlays, key=lambda t: t[0])
+    base_dur = _probe_duration(base)
+
+    # Build the segment plan on the ORIGINAL base — no in-place mutation.
+    plan: list[tuple[str, float, float, Path]] = []  # (kind, start, dur, src)
+    cursor = 0.0
+    for at_s, ov in overlays_sorted:
+        ov_dur = _probe_duration(ov)
+        # Base segment [cursor, at_s] if non-trivially long.
+        if at_s > cursor + 0.05:
+            plan.append(("base", cursor, at_s - cursor, base))
+        # Overlay clip (whole).
+        plan.append(("overlay", 0.0, ov_dur, ov))
+        cursor = at_s + ov_dur
+    # Tail base segment.
+    if cursor < base_dur - 0.05:
+        plan.append(("base", cursor, base_dur - cursor, base))
+
+    # Materialise each base segment via parallel ffmpeg extracts.
+    # Overlay clips are already complete files; we just reference them
+    # directly in the concat list (no extract needed).
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+    parts: list[Path] = [Path() for _ in plan]
+
+    def _materialise(i: int) -> None:
+        kind, start, dur, src = plan[i]
+        if kind == "overlay":
+            parts[i] = src
+            return
+        seg_out = cache_dir / f"_seg_{i:04d}.mp4"
+        _ffmpeg([
+            "-ss", f"{start:.3f}", "-i", str(src),
+            "-t", f"{dur:.3f}", "-c", "copy", str(seg_out),
+        ])
+        parts[i] = seg_out
+
+    # Tunable concurrency — N=4 keeps disk/CPU pressure bounded.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(_materialise, range(len(plan))))
+
+    list_txt = cache_dir / "_splice_list.txt"
+    list_txt.write_text("\n".join(f"file '{p.resolve()}'" for p in parts))
+    out = cache_dir / "spliced.mp4"
+    _ffmpeg([
+        "-f", "concat", "-safe", "0", "-i", str(list_txt),
+        "-c", "copy", str(out),
+    ])
     list_txt.unlink(missing_ok=True)
     return out
 
@@ -852,12 +933,19 @@ def _main_impl(args) -> int:
     all_overlays.sort(key=lambda t: t[0], reverse=True)
 
     print(f"[5/7] overlaying {len(all_overlays)} pinned clips/cards onto filler…")
-    cur = base_video
     composed_dir = cache_dir / "composed"
     composed_dir.mkdir(exist_ok=True)
-    for idx, (at_s, clip, meta) in enumerate(all_overlays):
-        nxt = _overlay_clip_on_filler(cur, clip, at_s, composed_dir)
-        cur = nxt
+    # Audit T1.19 — batch all overlays into ONE concat-pass instead of
+    # the pre-fix N sequential cut-paste passes (which re-read the
+    # increasingly-mutated base file from disk every iteration).
+    if all_overlays:
+        cur = _splice_overlays_batch(
+            base_video,
+            [(at_s, clip) for at_s, clip, _meta in all_overlays],
+            composed_dir,
+        )
+    else:
+        cur = base_video
 
     composed_video = cache_dir / "composed.mp4"
     shutil.copy2(cur, composed_video)
