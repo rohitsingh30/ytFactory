@@ -774,17 +774,62 @@ def _render_impl(channel: str, slug: str, *, do_upload: bool = False, aspect_ove
 
     print(f"[cfg] aspect={aspect} caption_mode={caption_mode} channel={channel} slug={slug}")
 
-    narration_path, _, beat_list = _regen_audio_caps(channel, slug, cfg, caption_mode=caption_mode)
+    # ----- TTS ⫽ footage-build overlap (added 2026-05-13) -----------------
+    # _build_silent_video (yt-dlp downloads + ffmpeg trim+concat) is
+    # FULLY independent of TTS — only needs the shotlist. Kick it off
+    # on a worker thread BEFORE _regen_audio_caps so the slow network
+    # downloads + libx264 trim ladder overlap with TTS + Whisper ASR
+    # on the wall clock. Gated on
+    # :func:`pipeline.stage_overlap.gpu_safe_to_overlap` — local TTS
+    # providers (f5_tts / kokoro) fall back to sequential to avoid
+    # Metal/unified-memory contention with any other in-process MLX
+    # singleton (this orchestrator drops F5 mid-render anyway, but
+    # the gate keeps the policy uniform across orchestrators).
+    from pipeline.stage_overlap import StageOverlap, gpu_safe_to_overlap  # noqa: PLC0415
+    tts_provider = str(cfg.get("tts_provider", "kokoro"))
+    overlap_safe, overlap_reason = gpu_safe_to_overlap(
+        tts_provider=tts_provider,
+        image_provider=None,  # footage_only has no diffusion image gen
+    )
 
-    # 2026-05-05: drop F5-TTS-MLX (~1.35 GB) at the renderer-stage boundary
-    # before the video build / mux stages. F5 was loaded by the TTS step and
-    # is not needed again in this renderer; previously it leaked into the
-    # ffmpeg-heavy stages and contributed to the Metal-completion-queue
-    # SIGABRTs. (No-op when channel uses Kokoro / Chatterbox / etc. — those
-    # singletons aren't dropped here, only F5.)
-    reset_mlx_state(drop_f5=True, label="footage-only stage-1 TTS")
+    if overlap_safe:
+        print(f"[overlap] {overlap_reason} — kicking off footage build in parallel with TTS")
+        with StageOverlap(
+            label="footage_only-build",
+            max_workers=1,
+            log=True,
+        ) as overlap:
+            silent_fut = overlap.submit(
+                "silent_video",
+                _build_silent_video, channel, slug, shotlist, scratch,
+            )
+            narration_path, _, beat_list = _regen_audio_caps(
+                channel, slug, cfg, caption_mode=caption_mode,
+            )
+            silent = silent_fut.result()
+    else:
+        print(f"[overlap] disabled: {overlap_reason} — running stages sequentially")
+        narration_path, _, beat_list = _regen_audio_caps(
+            channel, slug, cfg, caption_mode=caption_mode,
+        )
 
-    silent = _build_silent_video(channel, slug, shotlist, scratch)
+        # 2026-05-05: drop F5-TTS-MLX (~1.35 GB) at the renderer-stage boundary
+        # before the video build / mux stages. F5 was loaded by the TTS step and
+        # is not needed again in this renderer; previously it leaked into the
+        # ffmpeg-heavy stages and contributed to the Metal-completion-queue
+        # SIGABRTs. (No-op when channel uses Kokoro / Chatterbox / etc. — those
+        # singletons aren't dropped here, only F5.)
+        reset_mlx_state(drop_f5=True, label="footage-only stage-1 TTS")
+
+        silent = _build_silent_video(channel, slug, shotlist, scratch)
+
+    # When the parallel branch ran, the F5 reset still needs to happen
+    # — but only AFTER the silent build finishes (so the trim ladder
+    # in _build_silent_video doesn't suddenly lose the MLX heap mid-
+    # ffmpeg). The order is: silent_fut.result() above, then drop F5
+    # here, then proceed to mux.
+    if overlap_safe:
+        reset_mlx_state(drop_f5=True, label="footage-only stage-1 TTS (post-overlap)")
 
     out_dir = chan_dir / ("long_form" if aspect == "16:9" else "shorts")
     out = out_dir / f"{slug}.mp4"
