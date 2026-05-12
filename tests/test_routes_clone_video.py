@@ -10,6 +10,8 @@ import sys
 import types
 import unittest
 from pathlib import Path
+
+from fastapi import HTTPException
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -264,13 +266,128 @@ class CloneVideoRoutesTest(CloneBase, unittest.IsolatedAsyncioTestCase):
         with patch.object(clone_mod.uuid, "uuid4", return_value=SimpleNamespace(hex="abc123def4567890")), \
              patch.object(clone_mod._EXEC, "submit") as submit:
             async with await self._client() as c:
-                created = await c.post("/api/clone_video", json={"url": "https://example.com/v", "notes": "copy pacing"})
+                # Audit S1.4 — use an allowlisted host so the SSRF
+                # validator passes; the original ?url=https://example.com/v
+                # was a placeholder that the new validator (correctly)
+                # refuses.
+                created = await c.post(
+                    "/api/clone_video",
+                    json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                          "notes": "copy pacing"},
+                )
                 fetched = await c.get("/api/clone_video/abc123def456")
         self.assertEqual(created.status_code, 200, created.text)
         self.assertEqual(created.json()["request_id"], "abc123def456")
         submit.assert_called_once()
         self.assertEqual(fetched.status_code, 200)
         self.assertEqual(fetched.json()["state"], "queued")
+
+    async def test_create_clone_rejects_ssrf_attempts(self) -> None:
+        # Audit S1.4 — must refuse SSRF-class URLs at the validator
+        # layer (HTTP 4xx — pydantic ValidationError → 422 OR our
+        # explicit HTTPException(400)) so the request never reaches
+        # the worker dispatch.
+        attacks = [
+            "file:///etc/passwd",
+            "http://169.254.169.254/computeMetadata/v1/",
+            "http://10.0.0.1/admin",
+            "http://127.0.0.1:8080/",
+            "http://192.168.1.1/",
+            "https://metadata.google.internal/",
+            "https://attacker.example/x",  # not in allowlist
+            "ftp://files.youtube.com/",  # wrong scheme
+        ]
+        async with await self._client() as c:
+            for attack in attacks:
+                with self.subTest(url=attack):
+                    r = await c.post(
+                        "/api/clone_video",
+                        json={"url": attack, "notes": "n"},
+                    )
+                    self.assertIn(
+                        r.status_code, (400, 422),
+                        f"expected 4xx for {attack}; got {r.status_code} {r.text}",
+                    )
+
+
+class ValidateCloneUrlTest(unittest.TestCase):
+    """Direct unit coverage for the SSRF validator (audit S1.4)."""
+
+    def test_allowlisted_https_passes(self) -> None:
+        for ok in (
+            "https://www.youtube.com/watch?v=abc",
+            "https://youtu.be/abc",
+            "https://m.youtube.com/watch?v=abc",
+            "https://vm.tiktok.com/xxx",
+            "https://www.instagram.com/reel/xxx",
+            "https://x.com/user/status/1",
+            "https://www.vimeo.com/12345",
+        ):
+            with self.subTest(url=ok):
+                self.assertEqual(clone_mod._validate_clone_url(ok), ok)
+
+    def test_subdomain_match_passes(self) -> None:
+        # x.com base allowlists *.x.com via the suffix-match path.
+        self.assertEqual(
+            clone_mod._validate_clone_url("https://api.x.com/v"),
+            "https://api.x.com/v",
+        )
+
+    def test_env_extra_hosts_extends_allowlist(self) -> None:
+        with patch.dict(os.environ, {"YTFACTORY_CLONE_VIDEO_HOSTS": "extra.example, more.example"}):
+            self.assertEqual(
+                clone_mod._validate_clone_url("https://extra.example/x"),
+                "https://extra.example/x",
+            )
+
+    def test_forbidden_internal_targets_rejected(self) -> None:
+        for url in (
+            "http://10.0.0.1/x",
+            "http://127.0.0.1/x",
+            "http://169.254.169.254/x",
+            "http://192.168.1.1/x",
+            "http://172.16.0.1/x",
+            "http://172.17.0.1/x",
+            "http://0.0.0.0/x",
+            "http://metadata.google.internal/x",
+            "http://metadata/x",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(HTTPException) as ctx:
+                    clone_mod._validate_clone_url(url)
+                self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_unsupported_scheme_rejected(self) -> None:
+        for url in (
+            "file:///etc/passwd",
+            "ftp://files.youtube.com",
+            "data:text/plain,hi",
+            "javascript:alert(1)",
+            "gopher://x.com/",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(HTTPException) as ctx:
+                    clone_mod._validate_clone_url(url)
+                self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_missing_host_rejected(self) -> None:
+        with self.assertRaises(HTTPException):
+            clone_mod._validate_clone_url("http:///path-only")
+
+    def test_off_allowlist_host_rejected(self) -> None:
+        with self.assertRaises(HTTPException):
+            clone_mod._validate_clone_url("https://attacker.example/x")
+
+
+# The two tests below were originally part of CloneVideoRoutesTest;
+# rebuilt as their own async-aware class so the structural insert of
+# ValidateCloneUrlTest above doesn't accidentally re-parent them
+# (would silently downgrade the await to "returns coroutine, test
+# passes vacuously" per pytest deprecation warning).
+class CloneVideoAsyncRoutesTest(CloneBase, unittest.IsolatedAsyncioTestCase):
+    async def _client(self):
+        import httpx
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=_make_app()), base_url="http://test")
 
     async def test_get_clone_missing_invalid_and_corrupt_state(self) -> None:
         bad = self.req_dir("badstate")

@@ -38,9 +38,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from control.routes.auth_pin import require_pin
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,93 @@ router = APIRouter(prefix="/api/clone_video")
 
 
 # ---------------------------------------------------------------------------
+# SSRF defence — Audit S1.4
+# ---------------------------------------------------------------------------
+#
+# Pre-fix this endpoint accepted ANY user-supplied URL (no scheme/host
+# check) and forwarded it to the Cloud Run yt-dlp worker. An attacker
+# could ask yt-dlp to fetch ``file:///etc/passwd``, RFC-1918 hosts on
+# the cloud project's VPC, or — most damagingly — the GCP metadata
+# endpoint at 169.254.169.254 which would expose the worker SA token.
+#
+# The allowlist below covers the legitimate clone-format sources we
+# actually support (every site recognised by /clone-video-format
+# upstream). New hosts MUST be added here explicitly; the env override
+# ``YTFACTORY_CLONE_VIDEO_HOSTS`` lets ops add ad-hoc hosts without a
+# code change.
+
+_CLONE_DEFAULT_HOSTS = frozenset({
+    "youtube.com", "www.youtube.com", "m.youtube.com",
+    "youtu.be",
+    "tiktok.com", "www.tiktok.com", "vm.tiktok.com",
+    "instagram.com", "www.instagram.com",
+    "x.com", "twitter.com", "www.x.com", "www.twitter.com",
+    "vimeo.com", "www.vimeo.com",
+})
+
+# RFC1918 / link-local / loopback ranges we always refuse, no matter
+# what the allowlist or env says — protects the GCP metadata endpoint
+# and any internal service that happens to share a hostname.
+_FORBIDDEN_NETS = (
+    "10.", "127.", "169.254.", "192.168.", "172.16.", "172.17.", "172.18.",
+    "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
+    "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
+    "172.31.", "0.0.0.0", "metadata.google.internal", "metadata",
+)
+
+
+def _allowed_clone_hosts() -> frozenset[str]:
+    extra = os.environ.get("YTFACTORY_CLONE_VIDEO_HOSTS", "").strip()
+    if not extra:
+        return _CLONE_DEFAULT_HOSTS
+    extras = {h.strip().lower() for h in extra.split(",") if h.strip()}
+    return _CLONE_DEFAULT_HOSTS | extras
+
+
+def _validate_clone_url(url: str) -> str:
+    """Return ``url`` if it's a legitimate clone target; raise 400 else.
+
+    Audit S1.4 — enforces:
+      - scheme MUST be http or https (no ``file:`` / ``ftp:`` / ``data:``).
+      - host MUST resolve syntactically to one of the allowlisted domains
+        (or be a subdomain of one).
+      - host MUST NOT be a forbidden internal target (RFC1918 / loopback
+        / link-local / GCP metadata).
+    """
+    from urllib.parse import urlparse
+    # coverage: urlparse practically never raises on a string; defensive guard
+    try:
+        parsed = urlparse(url)
+    except Exception as e:  # noqa: BLE001 — urlparse rarely raises but be defensive
+        raise HTTPException(400, f"invalid URL: {e}") from e
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise HTTPException(
+            400, f"unsupported scheme {scheme!r}; only http/https allowed",
+        )
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise HTTPException(400, "URL is missing a host")
+    for prefix in _FORBIDDEN_NETS:
+        if host == prefix.rstrip(".") or host.startswith(prefix):
+            raise HTTPException(
+                400, f"host {host!r} is on the forbidden-internal-targets list",
+            )
+    allowed = _allowed_clone_hosts()
+    # Direct match OR sub-domain match (.youtube.com matches www.youtube.com).
+    matched = (host in allowed) or any(
+        host.endswith("." + a) for a in allowed
+    )
+    if not matched:
+        raise HTTPException(
+            400,
+            f"host {host!r} not in clone-video allowlist. "
+            f"Add to YTFACTORY_CLONE_VIDEO_HOSTS env if intentional.",
+        )
+    return url
+
+
+# ---------------------------------------------------------------------------
 # Request / response shapes
 # ---------------------------------------------------------------------------
 
@@ -63,6 +152,14 @@ router = APIRouter(prefix="/api/clone_video")
 class CloneRequest(BaseModel):
     url: str = Field(..., min_length=4, max_length=2000)
     notes: str = Field("", max_length=2000)
+
+    # Audit S1.4 — pydantic-level scheme + host validation. Runs
+    # before the route body, so the request never reaches the
+    # threadpool dispatch with an SSRF-class URL.
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, v: str) -> str:
+        return _validate_clone_url(v)
 
 
 class CloneState(BaseModel):
@@ -494,7 +591,10 @@ def _run_pipeline(request_id: str) -> None:
 
 
 @router.post("")
-async def create_clone(req: CloneRequest) -> dict:
+async def create_clone(
+    req: CloneRequest,
+    _pin: None = Depends(require_pin),
+) -> dict:
     request_id = uuid.uuid4().hex[:12]
     req_dir = WORKSPACE / request_id
     req_dir.mkdir(parents=True, exist_ok=True)
