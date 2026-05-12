@@ -53,7 +53,11 @@ channels:
   - slug: scrollpulse
     youtube_title: ScrollPulse
     youtube_channel_id: UCFLO4gxR_j6ZPx9ugfPZ_Pw
-    in_rotation: true
+    # in_rotation: false until pipeline/channels/scrollpulse.yaml exists
+    # (see audit T1.1 — channel scaffolding partial; YouTube channel
+    #  + assets exist but render config YAML not yet authored).
+    in_rotation: false
+    in_production: false
     config_yaml: pipeline/channels/scrollpulse.yaml
 
   - slug: cosmosdecoded

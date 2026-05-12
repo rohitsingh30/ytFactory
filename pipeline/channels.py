@@ -160,6 +160,7 @@ def _load_channels(yaml_path: Path = _YAML_PATH) -> tuple[Channel, ...]:
     # Sanity gates: catch the failure modes we've actually hit.
     seen_slugs: set[str] = set()
     seen_channel_ids: dict[str, str] = {}
+    repo_root = yaml_path.parent.parent
     for c in parsed:
         if c.slug in seen_slugs:
             raise ValueError(f"duplicate channel slug: {c.slug!r}")
@@ -176,6 +177,20 @@ def _load_channels(yaml_path: Path = _YAML_PATH) -> tuple[Channel, ...]:
                     f"canonical slug and migrate every caller to it"
                 )
             seen_channel_ids[c.youtube_channel_id] = c.slug
+
+        # Audit T1.1: an in_rotation channel whose config_yaml doesn't
+        # exist on disk crashes any caller that loads the render config
+        # (and the round-robin scheduler will pick it). Block at load
+        # time so the failure surfaces at startup, not mid-render.
+        if c.in_rotation and c.config_yaml:
+            cfg_path = repo_root / c.config_yaml
+            if not cfg_path.exists():
+                raise FileNotFoundError(
+                    f"channel {c.slug!r} has in_rotation=true but its "
+                    f"config_yaml {c.config_yaml!r} does not exist at "
+                    f"{cfg_path}. Either create the YAML or set "
+                    f"in_rotation: false in {yaml_path.name}."
+                )
 
     return tuple(parsed)
 

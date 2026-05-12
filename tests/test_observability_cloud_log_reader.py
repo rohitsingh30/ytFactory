@@ -88,6 +88,19 @@ class TestNormalisePayload(unittest.TestCase):
         out = clr._normalise_payload(payload, 1.0)
         self.assertIsNone(out["duration_ms"])
 
+    def test_missing_success_returns_none_not_true(self) -> None:
+        # Audit Q2.9 — defaulting absent ytfactory.success to True
+        # silently overcounted SUCCESS in dashboard failure-rate calc
+        # for events emitted without an explicit success signal.
+        payload = {"ytfactory.event": "x"}
+        out = clr._normalise_payload(payload, 1.0)
+        self.assertIsNone(out["success"])
+
+    def test_explicit_none_success_returns_none(self) -> None:
+        payload = {"ytfactory.event": "x", "ytfactory.success": None}
+        out = clr._normalise_payload(payload, 1.0)
+        self.assertIsNone(out["success"])
+
 
 class TestEntryAccessors(unittest.TestCase):
     def test_payload_from_object(self) -> None:
@@ -181,7 +194,10 @@ class TestCloudLoggingEventReader(unittest.TestCase):
         kwargs = client.list_entries.call_args.kwargs
         filter_ = kwargs["filter_"]
         self.assertIn('jsonPayload."ytfactory.event"!=""', filter_)
+        # T1.3 — filter must accept BOTH cloud_run_revision (services)
+        # AND cloud_run_job (render-worker-v2 emits as a Cloud Run JOB).
         self.assertIn('resource.type="cloud_run_revision"', filter_)
+        self.assertIn('resource.type="cloud_run_job"', filter_)
         self.assertRegex(filter_, r'timestamp >= "[0-9TZ:\-]+"')
         self.assertEqual(kwargs["order_by"], "timestamp desc")
 
@@ -210,6 +226,40 @@ class TestCloudLoggingEventReader(unittest.TestCase):
         reader, _ = self._make_reader([unrelated, ours])
         events = reader.read(since_ts=time.time() - 3600)
         self.assertEqual([e["event"] for e in events], ["ours"])
+
+    def test_skips_entries_with_no_jsonpayload(self) -> None:
+        # text-payload entries (raw `message=...` writes from libs that
+        # don't emit jsonPayload at all) must be silently skipped, not
+        # crash the reader.
+        text_only = MagicMock(spec=["payload", "timestamp"])
+        text_only.payload = "raw string log line"
+        text_only.timestamp = datetime.now(tz=timezone.utc)
+        ours = _entry(
+            {"ytfactory.event": "ours"},
+            ts=datetime.now(tz=timezone.utc),
+        )
+        reader, _ = self._make_reader([text_only, ours])
+        events = reader.read(since_ts=time.time() - 3600)
+        self.assertEqual([e["event"] for e in events], ["ours"])
+
+    def test_stops_at_deadline(self) -> None:
+        # Wall-clock deadline must short-circuit the iterator; otherwise
+        # a slow Cloud Logging response could block the dashboard well
+        # past the documented timeout.
+        now = datetime.now(tz=timezone.utc)
+        many = [_entry({"ytfactory.event": f"e{i}"}, ts=now) for i in range(20)]
+        client = MagicMock()
+        client.list_entries = MagicMock(return_value=iter(many))
+        reader = clr.CloudLoggingEventReader(
+            project_id="p",
+            client_factory=lambda: client,
+            timeout_s=0.0,  # forces every iteration past the deadline
+        )
+        events = reader.read(since_ts=time.time() - 60)
+        # With timeout_s=0.0 the deadline is hit on iteration 1 → 0
+        # results land. Anything <20 confirms the deadline branch fired.
+        assert events is not None
+        self.assertLess(len(events), len(many))
 
     def test_returns_none_on_client_failure(self) -> None:
         client = MagicMock()

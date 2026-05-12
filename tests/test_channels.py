@@ -163,6 +163,25 @@ class TestLoadChannels(unittest.TestCase):
         result = self._load(_channels_yaml([entry]))
         self.assertIsNone(result[0].youtube_channel_id)
 
+    def test_in_rotation_with_missing_config_yaml_raises(self):
+        # T1.1 regression — an in_rotation channel pointing at a
+        # non-existent config_yaml must be caught at load time, not
+        # crash a downstream renderer mid-job.
+        entry = _simple_channel()
+        entry["config_yaml"] = "pipeline/channels/__definitely_missing__.yaml"
+        with self.assertRaises(FileNotFoundError):
+            self._load(_channels_yaml([entry]))
+
+    def test_out_of_rotation_with_missing_config_yaml_ok(self):
+        # T1.1 follow-up — a channel held out of rotation can have
+        # a missing YAML (this is the explicit "scaffolding partial"
+        # state for scrollpulse).
+        entry = _simple_channel(rotation=False)
+        entry["config_yaml"] = "pipeline/channels/__definitely_missing__.yaml"
+        result = self._load(_channels_yaml([entry]))
+        self.assertEqual(len(result), 1)
+        self.assertFalse(result[0].in_rotation)
+
 
 # ── Public API tests ──────────────────────────────────────────────────────
 

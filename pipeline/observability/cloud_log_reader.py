@@ -95,7 +95,14 @@ def _normalise_payload(payload: Dict[str, Any], received_ts: float) -> Optional[
         return None
 
     category = payload.get("ytfactory.category", "pipeline")
-    success = _bool(payload.get("ytfactory.success", True))
+    # Audit Q2.9 — defaulting absent ytfactory.success to True silently
+    # overcounted SUCCESS in dashboard failure-rate calc (every event
+    # without an explicit success field looked passing). Default to
+    # None so downstream "success vs failure" math has to make an
+    # explicit decision; events that genuinely don't carry a success
+    # signal should not bias the rate either way.
+    raw_success = payload.get("ytfactory.success")
+    success = None if raw_success is None else _bool(raw_success)
     job_id = payload.get("ytfactory.job_id")
 
     duration = payload.get("ytfactory.duration_ms")
@@ -300,39 +307,42 @@ class CloudLoggingEventReader:
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         filter_ = (
-            'resource.type="cloud_run_revision" AND '
+            # Audit T1.3 — render-worker-v2 is a Cloud Run JOB
+            # (resource.type="cloud_run_job"), not a revision; the
+            # original "cloud_run_revision"-only filter dropped every
+            # span the worker emits. Match both shapes so we cover
+            # both Cloud Run services AND Cloud Run jobs.
+            '(resource.type="cloud_run_revision" OR '
+            'resource.type="cloud_run_job") AND '
             'jsonPayload."ytfactory.event"!="" AND '
             f'timestamp >= "{ts_iso}"'
         )
 
         out: List[Dict[str, Any]] = []
         deadline = time.time() + self._timeout_s
-        try:
-            for entry in client.list_entries(
-                filter_=filter_,
-                order_by="timestamp desc",
-                page_size=min(1000, self._max_records),
-            ):
-                if time.time() > deadline:
-                    _logger.debug(
-                        "Cloud Logging telemetry read hit %.1fs deadline",
-                        self._timeout_s,
-                    )
-                    break
-                payload = _entry_payload(entry)
-                if payload is None:
-                    continue
-                ts = _entry_timestamp_seconds(entry)
-                if ts < since_ts:
-                    continue
-                event = _normalise_payload(payload, ts)
-                if event is None:
-                    continue
-                out.append(event)
-                if len(out) >= self._max_records:
-                    break
-        except Exception:
-            raise
+        for entry in client.list_entries(
+            filter_=filter_,
+            order_by="timestamp desc",
+            page_size=min(1000, self._max_records),
+        ):
+            if time.time() > deadline:
+                _logger.debug(
+                    "Cloud Logging telemetry read hit %.1fs deadline",
+                    self._timeout_s,
+                )
+                break
+            payload = _entry_payload(entry)
+            if payload is None:
+                continue
+            ts = _entry_timestamp_seconds(entry)
+            if ts < since_ts:
+                continue
+            event = _normalise_payload(payload, ts)
+            if event is None:
+                continue
+            out.append(event)
+            if len(out) >= self._max_records:
+                break
 
         # Sort oldest → newest (legacy contract).
         out.sort(key=lambda e: e["ts"])

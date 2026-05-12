@@ -6,7 +6,7 @@
   <string>com.ytfactory.upload-next</string>
 
   <!--
-    Run scripts/upload_next.py at 10 slots per day, every 2.4 hrs.
+    Run scripts/ops/upload_next.py at 10 slots per day, every 2.4 hrs.
     Slots in LOCAL system time (configure your Mac to IST if you
     want IST slots; launchd has no per-job timezone option).
     Slots: 07:00, 09:24, 11:48, 14:12, 16:36, 19:00, 21:24, 23:48,
@@ -37,7 +37,7 @@
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>cd /Users/rohit/ytFactory &amp;&amp; set -a &amp;&amp; source .env &amp;&amp; set +a &amp;&amp; PYTHONPATH=. .venv/bin/python scripts/upload_next.py --count 1</string>
+    <string>cd /Users/rohit/ytFactory &amp;&amp; set -a &amp;&amp; source .env &amp;&amp; set +a &amp;&amp; PYTHONPATH=. .venv/bin/python scripts/ops/upload_next.py --count 1</string>
   </array>
 
   <key>StandardOutPath</key>
