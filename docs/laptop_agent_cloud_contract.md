@@ -301,6 +301,17 @@ A non-zero `reset N stuck-LEASED tasks back to QUEUED` line every
 see it firing with N>0 every cycle, agents are crashing mid-task —
 investigate further.
 
+**Sibling gap (NOT YET FIXED):** the `jobs/*` Firestore collection
+(consumed by `/api/queue` Queued column) has the **same** problem
+and **no** equivalent reaper. Cloud Run JOB executions that crash
+before the worker's first `jobs_mod.update(...)` writeback leave
+the doc permanently at `status=pending, stage=dispatching` — no
+one sweeps it. Caught 2026-05-13 on an `airecap` test render that
+ghosted the dashboard for 3.5 days. Mitigation design (Option A
+sweeper extending this loop + Option B atexit writeback in render
+entrypoints) is in **`docs/jobs_collection_reaper.md`**. Memory:
+`feedback_jobs_collection_no_reaper.md`.
+
 ## Drift flavour 7 — Aspirational doc claims (META, 2026-05-12)
 
 **Symptom:** `docs/laptop_agent_cloud_contract.md` (this doc) said

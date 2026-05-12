@@ -21,6 +21,21 @@
 # (YTFACTORY_RENDER_BACKEND=cloudrun is baked into the image).
 set -euo pipefail
 
+# Pre-flight reminder (post-S1.21 trap, caught 2026-05-13):
+#
+# If the `gcloud run deploy` step below fails with one or more
+# `Permission denied on secret … must be granted
+# roles/secretmanager.secretAccessor` lines (Cloud Build will have
+# succeeded), the per-service `web-runner@` SA is missing the
+# accessor binding on the 7 secrets we mount via --set-secrets.
+# Run the idempotent grant script first, then re-run this:
+#
+#   bash cloud/iam/grant_web_runner_secrets.sh
+#   bash cloud/web-server/deploy.sh
+#
+# Memory: feedback_web_runner_secret_accessor_post_s121.md.
+# Doc: docs/iam_per_service.md § "Roles per SA → web-runner".
+
 # Bake in the ADC-token auth bypass so deploys don't die mid-build with
 # "Reauthentication failed" when the user-account access token has expired
 # but ADC is still fresh. See cloud/_shared/auth_setup.sh + the memory

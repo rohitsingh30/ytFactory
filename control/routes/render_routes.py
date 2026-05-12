@@ -656,7 +656,20 @@ async def get_queue_state() -> QueueResponse:
     missing composite index on the terminal query can't blank out the
     active queue (or vice-versa). Failures are surfaced in
     ``warnings[section]`` so the UI can render an actionable banner
-    instead of silently lying about an empty queue."""
+    instead of silently lying about an empty queue.
+
+    KNOWN GAP (2026-05-13): nothing reaps stuck-pending docs from
+    the ``jobs/*`` collection — a Cloud Run JOB worker that crashes
+    before its first ``jobs_mod.update(...)`` writeback (e.g.
+    "Internal error running task" pre-stage-rendering) leaves the
+    doc permanently at ``status=pending, stage=dispatching`` and
+    this endpoint surfaces it in the Queued column forever. The
+    existing ``web/server.py::_periodic_queue_reaper`` only walks
+    ``agent_tasks/*`` (laptop-agent leases). Mitigation design in
+    ``docs/jobs_collection_reaper.md`` (Option A: extend that loop
+    to walk ``jobs/*`` and cross-check ``cloud_execution`` against
+    ``run_v2.ExecutionsClient``; Option B: SIGTERM/atexit writeback
+    in the render entrypoints)."""
     backend = jobs_mod.get_jobs()
     queued: list[dict] = []
     running: list[dict] = []

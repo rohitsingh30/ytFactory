@@ -5,6 +5,44 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
 
 ## CLASS-OF-BUG (rule changes to SKILL.md)
 
+- 2026-05-13 — **Firestore `jobs/*` collection has no stuck-pending
+  reaper.** `web/server.py::_periodic_queue_reaper` only walks
+  `agent_tasks/*` (laptop-agent leasing). When a Cloud Run JOB
+  worker crashes pre-writeback (e.g. "Internal error running task"),
+  the `jobs/<id>` doc stays at `status=pending, stage=dispatching`
+  forever and ghosts `/api/queue` Queued column. Caught when a
+  3.5-day-old `airecap` test render kept showing in the Queued
+  column with the Cloud Run execution itself reporting `Completed`
+  with failure. Mitigation design (Option A sweeper extending the
+  existing reaper loop + Option B SIGTERM/atexit writeback in 4
+  render entrypoints) shipped to `docs/jobs_collection_reaper.md`;
+  inline `KNOWN GAP` note added to
+  `control/routes/render_routes.py::get_queue_state` docstring;
+  cross-link added to `docs/laptop_agent_cloud_contract.md` flavour 6.
+  Memory: `feedback_jobs_collection_no_reaper.md`. Sweep recipe to
+  surface siblings (any other Firestore collection with the same
+  "writer might die before update" pattern):
+  `grep -rn "create_job\|create_render\|jobs_mod.update" control/ pipeline/ web/ --include='*.py' | grep -v test_`.
+
+- 2026-05-13 — **S1.21 (per-service runtime SAs) created `web-runner@`
+  but per-secret IAM bindings did NOT carry over from the legacy
+  `tts-runner@`.** First redeploy after the SA flip succeeded
+  through Cloud Build, then failed at `gcloud run deploy` step
+  with `Permission denied on secret … must be granted
+  roles/secretmanager.secretAccessor` repeated 7× (one per secret
+  `cloud/web-server/deploy.sh::--set-secrets` mounts). Idempotent
+  fix script `cloud/iam/grant_web_runner_secrets.sh` shipped;
+  table entry in `docs/iam_per_service.md` flipped from `⚠️ pending`
+  to `✅ 05-13`; pre-flight reminder added to
+  `cloud/web-server/deploy.sh` so the next agent who hits this
+  doesn't re-debug from scratch; cross-reference added to
+  `docs/deploy.md § Subsequent updates`. Memory:
+  `feedback_web_runner_secret_accessor_post_s121.md`. Sibling SAs
+  (`render-runner`, `image-runner`, `weights-runner`,
+  `cobalt-runner`, `stats-refresh-runner`) still rely on manual
+  per-binding `gcloud secrets add-iam-policy-binding` runs — same
+  trap if any of them ever needs >3 secret mounts.
+
 - 2026-05-13 — **Cloud-Run-shape assumptions baked into helpers
   silently break in JOB context.** Multiple `K_SERVICE`-only checks
   in `pipeline/observability/` + 15 per-service `cloud/<svc>/otel_init.py`

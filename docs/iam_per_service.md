@@ -34,9 +34,23 @@ bash cloud/iam/create_per_service_sas.sh
 bash cloud/iam/grant_per_service_telemetry.sh
 
 # 3. Grant per-service-specific roles (see "Roles per SA" below).
-#    These are NOT yet scripted — operator runs each `gcloud projects
-#    add-iam-policy-binding` manually because the role list per SA
-#    is small (1-3 grants) and the prod state needs eyeballs.
+#    These are PARTIALLY scripted — operator runs each `gcloud projects
+#    add-iam-policy-binding` manually for small (1-3 grants) lists,
+#    but per-secret bindings have grown beyond the eyeballs-budget for
+#    web-runner so a dedicated idempotent grant script exists:
+#
+#      bash cloud/iam/grant_web_runner_secrets.sh
+#        # Grants secretAccessor on the 7 secrets web-server mounts.
+#        # Idempotent — safe to re-run after adding a secret to
+#        # cloud/web-server/deploy.sh::--set-secrets (also add it to
+#        # the SECRETS=() array in the script).
+#        # Caught 2026-05-13 when the first post-S1.21 web-server deploy
+#        # failed at deploy-step with "Permission denied on secret" x7.
+#
+#    Sibling scripts:
+#      cloud/iam/grant_token_writeback.sh  — secretVersionAdder for
+#        YouTube OAuth refresh-token rotation (T1.20).
+#      cloud/iam/grant_per_service_telemetry.sh — OTel logs/trace/metrics.
 #
 # 3b. (2026-05-13 add-on) Grant the deploying user `roles/iam.serviceAccountUser`
 #     on each new SA — without this, `gcloud run jobs deploy` fails with
@@ -63,7 +77,7 @@ bash cloud/iam/grant_per_service_telemetry.sh
 | `tts-runner`             | ✅      | ✅         | ✅ (pre-existing) | legacy SA — full role set inherited |
 | `image-runner`           | ✅ 05-13 | ✅        | ⚠️ pending      | needs storage.objectViewer on weights bucket |
 | `render-runner`          | ✅ 05-13 | ✅        | ✅ 05-13       | secretAccessor + datastore.user + storage.objectAdmin + run.invoker + iam.serviceAccountTokenCreator + cloudtasks.enqueuer |
-| `web-runner`             | ✅ 05-13 | ✅        | ⚠️ pending      | needs secretAccessor + secretVersionAdder + datastore.user + run.invoker |
+| `web-runner`             | ✅ 05-13 | ✅        | ✅ 05-13 (secretAccessor) / ⚠️ partial (secretVersionAdder + datastore.user + run.invoker still pending) | secretAccessor wired via `cloud/iam/grant_web_runner_secrets.sh`; surfaced when first deploy after S1.21 SA flip failed with "Permission denied on secret" 7x |
 | `weights-runner`         | ✅ 05-13 | ✅        | ⚠️ pending      | needs HF_HOME bucket write |
 | `cobalt-runner`          | ✅ 05-13 | ✅        | ⚠️ none needed | network-egress only; no GCS/Firestore |
 | `stats-refresh-runner`   | ✅ 05-13 | ✅        | ⚠️ pending      | YouTube API key secret access + GCS write |

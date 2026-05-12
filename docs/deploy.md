@@ -89,6 +89,25 @@ Re-running any deploy.sh rebuilds the image and rolls the service
 forward. Cloud Run keeps the previous revision; flip back with
 `gcloud run services update-traffic`.
 
+**`Permission denied on secret` at deploy step (post-S1.21)?** When
+S1.21 (per-service runtime SAs) flipped a service from the legacy
+`tts-runner@` to its dedicated SA (`web-runner@`, `render-runner@`,
+…), per-secret IAM bindings did NOT carry over and the next
+redeploy fails with one `Permission denied on secret … must be
+granted roles/secretmanager.secretAccessor` line per mounted
+secret. Cloud Build still succeeds — only the `gcloud run deploy`
+step fails. For `web-runner@` use the idempotent script:
+
+```bash
+bash cloud/iam/grant_web_runner_secrets.sh
+bash cloud/web-server/deploy.sh   # retry
+```
+
+For other per-service SAs the manual `gcloud secrets
+add-iam-policy-binding` matrix lives in
+`docs/iam_per_service.md` § "Roles per SA". Memory:
+`feedback_web_runner_secret_accessor_post_s121.md`.
+
 ## Costs (steady state, low traffic)
 
 | Component | Cost/month |
