@@ -395,6 +395,42 @@ class TestSynthCloudrun(unittest.TestCase):
         payload = mock_post.call_args[0][0]
         self.assertEqual(payload["ref_audio_b64"], "")
 
+    def test_description_included_in_payload_when_provided(self):
+        # Audit Q2.17 — description must land in the wire payload as
+        # 'description' so the cloud server's req.description picks
+        # it up. Pre-fix, the indicparler wrapper smuggled it in
+        # ref_text and the model never saw it → every Hindi render
+        # used the hardcoded "calm devotional Indian female" default.
+        out = Path("/fake/out.wav")
+        resp = {"output_inline": "abc", "duration_s": 0.5, "wall_s": 0.1, "rtf": 0.05}
+        with patch.object(_mod, "_post_synth", return_value=resp) as mock_post, \
+             patch.object(_mod, "_materialise_wav", return_value=out):
+            _mod._synth_cloudrun(
+                model="indicparler", text="text", ref_audio_path="",
+                ref_audio_text=None, out_path=out, speed=1.0,
+                description="A calm Marathi male voice, slow pace.",
+            )
+        payload = mock_post.call_args[0][0]
+        self.assertEqual(
+            payload["description"],
+            "A calm Marathi male voice, slow pace.",
+        )
+
+    def test_description_omitted_from_payload_when_none(self):
+        # description is optional — when None the field MUST NOT
+        # appear in the payload (so the server picks its own default
+        # for non-description-driven models).
+        out = Path("/fake/out.wav")
+        resp = {"output_inline": "abc", "duration_s": 0.5, "wall_s": 0.1, "rtf": 0.05}
+        with patch.object(_mod, "_post_synth", return_value=resp) as mock_post, \
+             patch.object(_mod, "_materialise_wav", return_value=out):
+            _mod._synth_cloudrun(
+                model="f5", text="text", ref_audio_path="",
+                ref_audio_text="ref", out_path=out, speed=1.0,
+            )
+        payload = mock_post.call_args[0][0]
+        self.assertNotIn("description", payload)
+
 
 class TestSynthCloudrunChunked(unittest.TestCase):
     """Tests for _synth_cloudrun_chunked — single and multi-chunk paths."""
@@ -616,6 +652,9 @@ class TestSynthCloudrunIndicf5(unittest.TestCase):
 
 class TestSynthCloudrunIndicparler(unittest.TestCase):
     def test_uses_default_description_when_none(self):
+        # Audit Q2.17 — description must land in kwargs["description"]
+        # (the proper channel the cloud server reads as
+        # ``req.description``), NOT piggybacked on ref_audio_text.
         out = Path("/fake/out.wav")
         with patch.object(_mod, "_synth_cloudrun_chunked", return_value=out) as mock_ck:
             _mod._synth_cloudrun_indicparler(
@@ -623,7 +662,8 @@ class TestSynthCloudrunIndicparler(unittest.TestCase):
                 out_path=out, speed=1.0, description=None,
             )
         kwargs = mock_ck.call_args[1]
-        self.assertIn("Indian female voice", kwargs["ref_audio_text"])
+        self.assertIn("Indian female voice", kwargs["description"])
+        self.assertIsNone(kwargs["ref_audio_text"])
 
     def test_custom_description_used(self):
         out = Path("/fake/out.wav")
@@ -633,7 +673,8 @@ class TestSynthCloudrunIndicparler(unittest.TestCase):
                 out_path=out, speed=1.0, description="A calm male voice.",
             )
         kwargs = mock_ck.call_args[1]
-        self.assertEqual(kwargs["ref_audio_text"], "A calm male voice.")
+        self.assertEqual(kwargs["description"], "A calm male voice.")
+        self.assertIsNone(kwargs["ref_audio_text"])
 
     def test_model_is_indicparler(self):
         out = Path("/fake/out.wav")

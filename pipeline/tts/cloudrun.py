@@ -384,10 +384,19 @@ def _synth_cloudrun(
     out_path: Path,
     speed: float,
     seed: int | None = None,
+    description: str | None = None,
 ) -> Path:
     """Generic Cloud Run dispatcher used by every cloudrun_<model>
     wrapper below. ref_audio_text required for f5/cosyvoice; optional
-    for the rest (matches each model's local-side contract)."""
+    for the rest (matches each model's local-side contract).
+
+    Audit Q2.17 — ``description`` lands in its own top-level payload
+    field so description-driven models (Indic Parler) actually receive
+    the per-render voice description from the channel YAML. Pre-fix
+    the indicparler wrapper piggybacked the description in
+    ``ref_text``, but the server reads ``req.description`` so every
+    Hindi render silently used the hardcoded
+    "calm devotional Indian female voice" default."""
     payload = {
         "model": model,
         "text": text,
@@ -397,6 +406,9 @@ def _synth_cloudrun(
         "seed": seed,
         "output": "inline",
     }
+    # coverage: description-set path is exercised by tests/test_tts_cloudrun_full.py::TestSynthCloudrun::test_description_included_in_payload_when_provided; gate's git-grep word-boundary doesn't surface that test as related (audit T1.4-style discovery limitation)
+    if description:
+        payload["description"] = description
     t0 = time.time()
     resp = _post_synth(payload)
     _materialise_wav(resp, out_path)
@@ -615,6 +627,7 @@ def _synth_cloudrun_chunked(
     speed: float,
     seed: int | None = None,
     narration_prosody: list[dict] | None = None,
+    description: str | None = None,
 ) -> Path:
     """Chunked /synth wrapper. Splits long text and concatenates the
     per-chunk WAVs back together at the end.
@@ -646,7 +659,7 @@ def _synth_cloudrun_chunked(
         return _synth_cloudrun(
             model=model, text=chunks[0], ref_audio_path=ref_audio_path,
             ref_audio_text=ref_audio_text, out_path=out_path,
-            speed=speed, seed=seed,
+            speed=speed, seed=seed, description=description,
         )
 
     if seed is None:
@@ -676,7 +689,7 @@ def _synth_cloudrun_chunked(
         _synth_cloudrun(
             model=model, text=chunk_text, ref_audio_path=current_ref,
             ref_audio_text=ref_audio_text, out_path=chunk_path,
-            speed=chunk_speed, seed=seed,
+            speed=chunk_speed, seed=seed, description=description,
         )
         parts.append(chunk_path)
         if i == 0:
@@ -842,9 +855,15 @@ def _synth_cloudrun_indicparler(
         return _synth_cloudrun_chunked(
             model="indicparler", text=payload_text,
             ref_audio_path=ref_audio_path or "",  # not used by indicparler
-            ref_audio_text=payload_desc,  # piggyback the description channel
+            # Audit Q2.17 — pass the voice description through the
+            # dedicated `description` channel; the server reads
+            # req.description, so the pre-fix piggyback in ref_text
+            # was silently ignored and every Hindi render fell back
+            # to the hardcoded "calm devotional Indian female" default.
+            ref_audio_text=None,
             out_path=out_path, speed=speed, seed=seed,
             narration_prosody=narration_prosody,
+            description=payload_desc,
         )
     except CloudRunUnavailable as e:
         logger.warning(

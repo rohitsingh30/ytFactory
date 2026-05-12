@@ -58,8 +58,16 @@ gcloud run jobs deploy "${JOB}" \
   --memory=8Gi --cpu=4 \
   --max-retries=0 \
   --task-timeout=3600 \
-  --set-secrets="AZURE_OPENAI_API_KEY=azure-openai-key:latest" \
+  --update-secrets="AZURE_OPENAI_API_KEY=azure-openai-key:latest" \
   --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=ytfactory-prod-v2-artifacts|CLOUDRUN_TTS_CHATTERBOX_URL=https://ytfactory-tts-chatterbox-283470729204.${REGION}.run.app|CLOUDRUN_TTS_INDICPARLER_URL=https://ytfactory-tts-indicparler-283470729204.${REGION}.run.app|CLOUDRUN_IMAGE_FLUX2_KLEIN_URL=https://ytfactory-image-flux2-klein-283470729204.${REGION}.run.app|CLOUDRUN_TTS_DISABLE_FALLBACK=1|CLOUDRUN_IMAGE_DISABLE_FALLBACK=1|YTFACTORY_RENDER_MODE=real|YTFACTORY_LLM_BACKEND=azure_openai|AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}|AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}|AZURE_OPENAI_MODEL=${AZURE_OPENAI_MODEL}|YTFACTORY_ASR_PROVIDER=faster_whisper|LOG_LEVEL=INFO"
+
+# Audit T1.11 — was --set-secrets="AZURE_OPENAI_API_KEY=...".
+# --set-secrets is REPLACE-not-merge, so any subsequent
+# --update-secrets=ANTHROPIC_API_KEY=... toggle (recommended in this
+# script's own help text below) regressed AZURE_OPENAI_API_KEY off
+# the deployment on the next redeploy. Switched to --update-secrets
+# (additive) so the YTFACTORY_LLM_BACKEND env-toggle workflow is
+# safe to repeat.
 
 echo ""
 echo "==> Job deployed (mode=real, llm=azure_openai, endpoint=${AZURE_OPENAI_ENDPOINT}, model=${AZURE_OPENAI_MODEL})."
