@@ -15,6 +15,17 @@ What this surfaces:
   compose, upload_*, stage.* / render.*). Backs the "where is time
   being spent?" bar chart on /app/telemetry. Excludes background
   bookkeeping events so the chart isn't dominated by 0-ms noise.
+* ``GET /api/telemetry/jobs?hours=24&limit=100&status=...&channel=...``
+  — Firestore-backed per-job view. Sees jobs the Cloud Logging
+  /renders view CANNOT — including dispatch failures (gcloud / IAM /
+  quota errors before the worker ever ran), cancelled jobs, and jobs
+  whose worker crashed before emitting any ``obs.timed()`` event.
+  Together with /renders this gives the operator full ground-truth.
+* ``GET /api/telemetry/llm_costs?hours=24`` — aggregate llm_call
+  events grouped by tier and backend. Tracks calls / failed /
+  input_tokens / output_tokens / mean+p95 latency. Catches cost
+  regressions when the dispatcher routes to a paid SDK instead of
+  the free CLI.
 * ``GET /api/telemetry/renders?hours=24&limit=30&channel=...`` —
   per-render breakdown (one row per channel + slug + render_kind)
   with total wall-clock duration AND ordered per-stage timings.
@@ -430,6 +441,279 @@ def telemetry_renders(
     out.sort(key=lambda r: r["started_at"] or 0, reverse=True)
     out = out[:max(1, min(limit, 200))]
     return {"hours": hours, "renders": out}
+
+
+# ---- /api/telemetry/jobs (Firestore-backed control-plane view) ----------
+
+
+def _synthesize_stage_durations(timeline: list[dict] | None) -> list[dict]:
+    """Build a render-section-shaped stages list from the Firestore
+    job's timeline.
+
+    The cloud render-worker's `_set_stage` writes one entry per stage
+    transition with `ts` (ISO-8601 UTC). Sequential `ts` deltas give
+    us per-stage durations even for jobs that ran BEFORE the
+    Cloud-Run-shaped JSON log exporter was deployed (i.e. before
+    Cloud Logging had any structured `ytfactory.event` records).
+
+    Output shape matches what `/api/telemetry/renders` returns for
+    each `stages[]` entry, so the dashboard's `<StageWaterfall />`
+    component can render Firestore-backfilled jobs identically to
+    Cloud-Logging-backed ones.
+    """
+    if not timeline or not isinstance(timeline, list):
+        return []
+    rows: list[dict] = []
+    # Pair each `done` event with the most recent `running` event for
+    # the same stage. Falls back to "ts only" when only one phase was
+    # captured (legacy dispatcher writes that didn't include both).
+    last_running_ts: dict[str, float] = {}
+    for entry in timeline:
+        if not isinstance(entry, dict):
+            continue
+        stage = entry.get("stage")
+        status = entry.get("status")
+        ts_iso = entry.get("ts")
+        ts = _parse_iso(str(ts_iso)) if ts_iso else None
+        if not stage or ts is None:
+            continue
+        if status == "running":
+            last_running_ts[stage] = ts
+        elif status in ("done", "failed", "skipped"):
+            start = last_running_ts.pop(stage, None)
+            duration_ms = int((ts - start) * 1000) if start else None
+            rows.append({
+                "name": f"stage.{stage}",
+                "duration_ms": duration_ms,
+                "success": status != "failed",
+                "ts": ts,
+                "provider": entry.get("msg"),
+            })
+    # Surface stages still in-flight at last update so an in-flight
+    # render's waterfall isn't empty.
+    for stage, start in last_running_ts.items():
+        rows.append({
+            "name": f"stage.{stage}",
+            "duration_ms": None,
+            "success": True,
+            "ts": start,
+            "provider": "in_flight",
+        })
+    rows.sort(key=lambda r: r.get("ts") or 0)
+    return rows
+
+
+def _job_doc_to_view(job_id: str, doc: dict) -> dict:
+    """Distill a Firestore job doc to the fields the dashboard needs.
+
+    Source of truth for "what did the operator submit + how did it
+    end up?". This is DISTINCT from the Cloud Logging /renders view
+    above, which only sees jobs that actually emitted ``obs.timed()``
+    events from inside the worker. Jobs that failed during DISPATCH
+    (gcloud command rejected, IAM denied, quota exceeded) never run
+    a render envelope and are invisible to /renders — but they ARE
+    visible here because Firestore is the control-plane source of
+    truth.
+
+    Includes synthesized stage durations from the doc's ``timeline``
+    array so historical jobs (predating the Cloud-Run-shaped JSON log
+    exporter) come back with a renderable stage waterfall.
+    """
+    created = doc.get("created_at")
+    updated = doc.get("updated_at")
+    duration_ms: int | None = None
+    if created and updated:
+        try:
+            # Firestore SDK returns datetime; raw REST returns ISO str.
+            created_ts = created.timestamp() if hasattr(created, "timestamp") \
+                else _parse_iso(str(created))
+            updated_ts = updated.timestamp() if hasattr(updated, "timestamp") \
+                else _parse_iso(str(updated))
+            if created_ts and updated_ts:
+                duration_ms = max(0, int((updated_ts - created_ts) * 1000))
+        except Exception:  # noqa: BLE001
+            pass
+
+    proposal = doc.get("proposal") or {}
+    timeline = doc.get("timeline") or []
+    stages = _synthesize_stage_durations(timeline)
+    stage_total_ms = sum(int(s["duration_ms"] or 0) for s in stages)
+    return {
+        "job_id": job_id,
+        "channel": doc.get("channel") or proposal.get("channel"),
+        "topic": doc.get("topic") or proposal.get("topic"),
+        "status": doc.get("status", "pending"),
+        "stage": doc.get("stage"),
+        "render_kind": (doc.get("render_spec") or {}).get("kind")
+            or proposal.get("render_kind") or proposal.get("format"),
+        "error": doc.get("error"),
+        "created_at": str(created) if created else None,
+        "updated_at": str(updated) if updated else None,
+        "duration_ms": duration_ms,
+        "stage_total_ms": stage_total_ms,
+        "stages": stages,
+        "youtube_url": doc.get("youtube_url"),
+        "cloud_execution": doc.get("cloud_execution"),
+    }
+
+
+def _parse_iso(s: str) -> float | None:
+    """Lenient ISO-8601 → unix seconds; returns None on parse failure."""
+    if not s:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@router.get("/api/telemetry/jobs")
+def telemetry_jobs(
+    hours: int = 24,
+    limit: int = 100,
+    status: str | None = None,
+    channel: str | None = None,
+    authorization: str | None = Header(None),
+) -> dict[str, Any]:
+    """Firestore-backed per-job view over the requested window.
+
+    Sees jobs the Cloud Logging /renders view CANNOT — including
+    dispatch failures (gcloud / IAM / quota errors before the worker
+    ever ran), cancelled jobs, and jobs whose worker crashed before
+    emitting any ``obs.timed()`` event. Together with /renders this
+    gives the operator full ground-truth: /jobs answers "which jobs
+    did I submit and what was their final status?", /renders answers
+    "for the jobs that actually ran, where did the time go?".
+
+    Each row also includes a ``stages`` array synthesised from the
+    Firestore job's ``timeline`` field — sequential
+    ``{stage, status: "running"|"done"|"failed", ts}`` entries are
+    paired into per-stage durations. This means historical jobs
+    (predating the Cloud-Run-shaped JSON log exporter) come back
+    with a renderable stage waterfall, NOT just a status badge —
+    full backfill of operator-visible render history.
+
+    Returns one row per Firestore job doc, sorted newest-first by
+    updated_at. Optional filters:
+    * ``status=failed|done|cancelled|pending|rendering|uploading`` —
+      narrow to one outcome.
+    * ``channel=mystoriesanimated|...`` — narrow to one channel.
+    * ``hours`` — only jobs whose created_at >= now - hours.
+      ``hours=0`` returns ALL jobs (no time filter) — capped by
+      ``limit`` so a runaway query can't blow the response.
+    * ``limit`` — caps the row count (default 100, max 1000).
+
+    Per-job rollup carries: status / stage / channel / topic /
+    render_kind / error / wall-clock duration / youtube_url when
+    published / synthesised stage waterfall.
+    """
+    _require_auth(authorization)
+    project = _gcp_project()
+    rows: list[dict] = []
+    error: str | None = None
+    if not project:
+        return {"hours": hours, "jobs": [], "error": "GOOGLE_CLOUD_PROJECT not set"}
+
+    try:
+        from datetime import datetime, timezone
+        from google.cloud import firestore  # noqa: PLC0415
+        db = firestore.Client(project=project)
+        capped_limit = min(max(1, limit), 1000)
+        # ``hours=0`` = "give me everything" backfill mode. Skip the
+        # created_at filter and rely on the limit + reverse sort to
+        # bound the response. Useful for one-shot dashboard backfills
+        # ("show me all 100 historical jobs even though most are
+        # >24h old").
+        q = db.collection("jobs")
+        if hours > 0:
+            cutoff = datetime.fromtimestamp(
+                time.time() - hours * 3600, tz=timezone.utc,
+            )
+            q = q.where("created_at", ">=", cutoff)
+        # Single-field sort uses Firestore's auto-created index.
+        q = q.order_by("created_at", direction=firestore.Query.DESCENDING) \
+             .limit(capped_limit)
+        for snap in q.stream():
+            doc = snap.to_dict() or {}
+            view = _job_doc_to_view(snap.id, doc)
+            if status and view["status"] != status:
+                continue
+            if channel and view["channel"] != channel:
+                continue
+            rows.append(view)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("telemetry_jobs Firestore query failed: %s", e)
+        error = f"{type(e).__name__}: {str(e)[:200]}"
+
+    return {"hours": hours, "jobs": rows, "error": error}
+
+
+@router.get("/api/telemetry/llm_costs")
+def telemetry_llm_costs(
+    hours: int = 24,
+    authorization: str | None = Header(None),
+) -> dict[str, Any]:
+    """Aggregate llm_call events for the LLM cost / usage chart.
+
+    Reads ``llm_call`` events from the same source ``read_events()``
+    consults (in-process buffer for laptop, Cloud Logging for cloud).
+    Each event has metadata: ``model``, ``tier``, ``input_tokens``,
+    ``output_tokens``, ``backend`` (cli / azure_openai / anthropic_sdk).
+
+    Returns:
+    * ``totals`` — total calls, failures, total input/output tokens
+      across the window.
+    * ``by_tier`` — per-tier rollup (small / medium / large): calls,
+      failed, input_tokens, output_tokens, mean_latency_ms,
+      p95_latency_ms.
+    * ``by_backend`` — same shape grouped by backend (helps catch
+      cost regressions when the dispatcher routes to a paid SDK
+      instead of the free CLI).
+    """
+    _require_auth(authorization)
+    events = [e for e in _read_events(hours) if e.get("event") == "llm_call"]
+
+    def _zero_row() -> dict:
+        return {
+            "calls": 0, "failed": 0,
+            "input_tokens": 0, "output_tokens": 0,
+            "_durs": [],
+        }
+
+    by_tier: dict[str, dict] = defaultdict(_zero_row)
+    by_backend: dict[str, dict] = defaultdict(_zero_row)
+    totals = _zero_row()
+
+    for e in events:
+        md = e.get("metadata") or {}
+        tier = md.get("tier") or "unknown"
+        backend = md.get("backend") or "unknown"
+        success = bool(e.get("success", True))
+        in_t = int(md.get("input_tokens") or 0)
+        out_t = int(md.get("output_tokens") or 0)
+        d = e.get("duration_ms")
+        for bucket in (totals, by_tier[tier], by_backend[backend]):
+            bucket["calls"] += 1
+            if not success:
+                bucket["failed"] += 1
+            bucket["input_tokens"] += in_t
+            bucket["output_tokens"] += out_t
+            if d is not None:
+                bucket["_durs"].append(int(d))
+
+    def _finalise(row: dict) -> dict:
+        durs = row.pop("_durs")
+        row["mean_latency_ms"] = round(sum(durs) / len(durs)) if durs else 0
+        row["p95_latency_ms"] = round(_percentile(durs, 0.95)) if durs else 0
+        return row
+
+    return {
+        "hours": hours,
+        "totals": _finalise(totals),
+        "by_tier": {k: _finalise(v) for k, v in by_tier.items()},
+        "by_backend": {k: _finalise(v) for k, v in by_backend.items()},
+    }
 
 
 @router.get("/api/telemetry/timeline")

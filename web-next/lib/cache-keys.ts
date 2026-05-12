@@ -47,6 +47,8 @@ export const CK = {
   telemetryTimeline: (hours: number) => `telemetry:timeline:${hours}`,
   telemetryStageLatency: (hours: number) => `telemetry:stage_latency:${hours}`,
   telemetryRenders: (hours: number) => `telemetry:renders:${hours}`,
+  telemetryJobs: (hours: number) => `telemetry:jobs:${hours}`,
+  telemetryLLMCosts: (hours: number) => `telemetry:llm_costs:${hours}`,
   telemetryInitStatus: "telemetry:init_status",
 } as const;
 
@@ -107,6 +109,8 @@ export const ROUTE_PREFETCHES: Record<string, PrimerEntry[]> = {
     { key: CK.telemetryTimeline(24), fetcher: () => api.get("/api/telemetry/timeline?hours=24") },
     { key: CK.telemetryStageLatency(24), fetcher: () => api.get("/api/telemetry/stage_latency?hours=24") },
     { key: CK.telemetryRenders(24), fetcher: () => api.get("/api/telemetry/renders?hours=24&limit=30") },
+    { key: CK.telemetryJobs(0), fetcher: () => api.get("/api/telemetry/jobs?hours=0&limit=200") },
+    { key: CK.telemetryLLMCosts(24), fetcher: () => api.get("/api/telemetry/llm_costs?hours=24") },
     { key: CK.telemetryInitStatus, fetcher: () => api.get("/api/telemetry/init_status") },
   ],
 };
