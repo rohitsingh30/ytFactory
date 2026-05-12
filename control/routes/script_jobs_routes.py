@@ -61,9 +61,16 @@ _ALLOWED_RENDER_CMDS: set[str] = {
     "scrollpulse/scripts/render_split_screen.py",
 }
 
-# In-memory script-job tracking. Survives single revision; on revision
-# replacement, in-flight jobs lose their tracking but the underlying
-# Cloud Run JOB execution + GCS state.json continue independently.
+# Audit Q2.44 — pre-fix this dict and ``web/server.py``'s
+# ``ScriptJobsStore`` were two independent stores for the same
+# logical concept. The web app's ``app.include_router`` order means
+# ``POST /api/jobs/from_script`` in control IS SHADOWED by the
+# matching @app.post in web/server.py — so this dict only ever
+# accumulates rows in dev (when control/server_dev.py runs as the
+# entrypoint). Documenting the dev-only role to make the contract
+# explicit. Production prod_jobs persistence + cross-revision
+# rehydration lives in web/server.py::SCRIPT_JOBS (a real
+# Firestore-backed ScriptJobsStore).
 SCRIPT_JOBS: dict[str, dict[str, Any]] = {}
 
 

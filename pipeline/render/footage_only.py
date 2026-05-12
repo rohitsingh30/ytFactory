@@ -286,19 +286,42 @@ def _regen_audio_caps(
     if not narrations_json.exists():
         raise FileNotFoundError(f"no narration for {slug} under {channel}/")
 
-    narration_text = json.loads(narrations_json.read_text())["narration"]
+    narration_loaded = json.loads(narrations_json.read_text())
+    # Audit Q2.24 — pre-fix this hard-indexed ``script["narration"]``
+    # which KeyError'd on channels whose narration JSON used a
+    # different field name (``script`` / ``text``). Now fall back
+    # gracefully through the known field names; raise a clear error
+    # if none match.
+    narration_text = (
+        narration_loaded.get("narration")
+        or narration_loaded.get("script")
+        or narration_loaded.get("text")
+    )
+    if not narration_text:
+        # coverage: defensive — pre-existing channels always have one of these field names
+        raise ValueError(
+            f"narration JSON {narrations_json} has no recognised text field "
+            f"(expected one of: narration, script, text)"
+        )
     narration_text = audio.normalize_for_tts(narration_text)
 
     # 1. TTS (skip if cached)
+    # Audit Q2.24 — pre-fix ``cfg["tts_voice"]`` and ``cfg["tts_provider"]``
+    # KeyError'd on channels missing these keys. long_form.py has
+    # cfg.get(...) fallbacks; footage_only didn't. Now defaults match
+    # long_form's: voice="default", provider="kokoro" (the cloud
+    # fallback for footage-only docs that don't specify TTS).
+    tts_voice = cfg.get("tts_voice", "default")
+    tts_provider = cfg.get("tts_provider", "kokoro")
     if not narr_path.exists():
-        print(f"[1/5] TTS via {cfg['tts_provider']} voice={cfg['tts_voice']}…")
+        print(f"[1/5] TTS via {tts_provider} voice={tts_voice}…")
         t0 = time.time()
         audio.synthesize(
             narration_text,
-            voice=cfg["tts_voice"],
+            voice=tts_voice,
             out_path=narr_path,
             speed=cfg.get("tts_speed", 1.0),
-            provider=cfg["tts_provider"],
+            provider=tts_provider,
             language=cfg.get("tts_language", "en"),
             ref_audio_text=cfg.get("tts_ref_text"),
         )
@@ -741,6 +764,16 @@ def _render_impl(channel: str, slug: str, *, do_upload: bool = False, aspect_ove
 
     paths = RenderPaths.from_channel_dir(channel, project_root=REPO_ROOT)
     chan_dir = paths.root  # backward-compat: subsequent code uses chan_dir
+    # Audit Q2.24 — pre-fix this raised FileNotFoundError without
+    # context if config.yaml was missing. Now surface a clear
+    # message pointing at the channel layout doc.
+    if not paths.config_yaml.exists():
+        # coverage: defensive — every production channel has config.yaml; this guard catches operator typos
+        raise FileNotFoundError(
+            f"channel {channel!r}: config.yaml missing at "
+            f"{paths.config_yaml} — see docs/channel_layout.md for "
+            f"required structure"
+        )
     cfg = yaml.safe_load(paths.config_yaml.read_text())
     shotlist_path = paths.shotlist_for(slug)
     if not shotlist_path.exists():

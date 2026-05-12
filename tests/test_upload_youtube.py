@@ -2540,5 +2540,69 @@ class TestMain(_UploadTestBase):
                 self.assertEqual(ctx.exception.code, 1)
 
 
+    def test_audit_q226_skips_secret_version_when_unchanged(self):
+        """Audit Q2.26 — pre-fix every refresh added a new Secret
+        Manager version. ~24/day × 365 = 8.7k versions/yr per
+        secret; SM's per-secret limit is 10k → we hit
+        AlreadyExists / FailedPrecondition on a 14-month-old
+        account. Now compare to the latest version's content; skip
+        add_secret_version when blob is identical.
+        """
+        from unittest.mock import MagicMock, patch
+        from pipeline.upload import upload as _upload
+
+        secret_path = (Path("/secrets") / "youtube-token-acct" / "value")
+        blob = '{"token": "tok", "refresh_token": "rt"}'
+        latest = MagicMock()
+        latest.payload.data = blob.encode("utf-8")
+        client = MagicMock()
+        client.access_secret_version.return_value = latest
+
+        sm_module = types.SimpleNamespace(
+            SecretManagerServiceClient=lambda: client,
+        )
+        with patch.dict(sys.modules, {"google.cloud.secretmanager": sm_module}):
+            with patch.dict(os.environ, {"GOOGLE_CLOUD_PROJECT": "p"}):
+                _upload._persist_token("acct", blob, secret_path)
+        client.add_secret_version.assert_not_called()
+        client.access_secret_version.assert_called_once()
+
+    def test_audit_q226_writes_when_blob_differs(self):
+        """Different blob → add_secret_version called (no early-out)."""
+        from unittest.mock import MagicMock, patch
+        from pipeline.upload import upload as _upload
+
+        secret_path = (Path("/secrets") / "youtube-token-acct" / "value")
+        latest = MagicMock()
+        latest.payload.data = b'{"old": true}'
+        client = MagicMock()
+        client.access_secret_version.return_value = latest
+
+        sm_module = types.SimpleNamespace(
+            SecretManagerServiceClient=lambda: client,
+        )
+        with patch.dict(sys.modules, {"google.cloud.secretmanager": sm_module}):
+            with patch.dict(os.environ, {"GOOGLE_CLOUD_PROJECT": "p"}):
+                _upload._persist_token("acct", '{"new": true}', secret_path)
+        client.add_secret_version.assert_called_once()
+
+    def test_audit_q226_falls_through_when_latest_lookup_raises(self):
+        """First-persist 404 / IAM denial → add_secret_version still called."""
+        from unittest.mock import MagicMock, patch
+        from pipeline.upload import upload as _upload
+
+        secret_path = (Path("/secrets") / "youtube-token-acct" / "value")
+        client = MagicMock()
+        client.access_secret_version.side_effect = RuntimeError("not found")
+
+        sm_module = types.SimpleNamespace(
+            SecretManagerServiceClient=lambda: client,
+        )
+        with patch.dict(sys.modules, {"google.cloud.secretmanager": sm_module}):
+            with patch.dict(os.environ, {"GOOGLE_CLOUD_PROJECT": "p"}):
+                _upload._persist_token("acct", '{"new": true}', secret_path)
+        client.add_secret_version.assert_called_once()
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -408,6 +408,13 @@ def _persist_token(account: str, blob_json: str, tp: Path) -> None:
         return
 
     # Cloud — mount is read-only. Add a new Secret Manager version.
+    # Audit Q2.26 — pre-fix every refresh added a new Secret Manager
+    # version. ~24 refreshes/day × 365 = 8.7k versions/yr per secret;
+    # Secret Manager's per-secret limit is 10k → on a 14-month-old
+    # account we'd start hitting AlreadyExists / FailedPrecondition.
+    # Now: only persist if the new blob differs from the latest
+    # version's content. Idempotent refreshes (same access_token
+    # round-trip, same expiry rounding) skip the write entirely.
     safe = "".join(c for c in account if c.isalnum() or c in "-_") or "default"
     secret_id = f"youtube-token-{safe}"
     try:
@@ -425,6 +432,22 @@ def _persist_token(account: str, blob_json: str, tp: Path) -> None:
     )
     client = secretmanager.SecretManagerServiceClient()
     parent = f"projects/{project}/secrets/{secret_id}"
+    # Audit Q2.26 — read latest version and compare. Skip the
+    # add_secret_version call when blob is unchanged.
+    try:
+        latest = client.access_secret_version(
+            request={"name": f"{parent}/versions/latest"},
+        )
+    # coverage: first-persist 404 / IAM denial; falls through to add_secret_version
+    except Exception:  # noqa: BLE001
+        # latest may not exist yet (first persist) or access may
+        # be denied; fall through to add_secret_version which has
+        # its own error handling below.
+        latest = None
+    if latest is not None and latest.payload.data == blob_json.encode("utf-8"):
+        # No-op — token is already at this exact value.
+        # coverage: requires real Secret Manager + matching cached payload to short-circuit
+        return
     try:
         client.add_secret_version(
             request={"parent": parent, "payload": {"data": blob_json.encode("utf-8")}}

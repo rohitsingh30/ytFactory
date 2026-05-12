@@ -513,13 +513,28 @@ async def _idle_watchdog() -> None:
     so leaving a job running after the browser tab is gone is genuine
     waste. ``zero_subs_since`` is tracked per-job and only reset when a
     fresh subscriber attaches.
+
+    **Audit Q2.33** — pre-fix this snapshotted ``list(JOBS.items())``
+    at the top of each iteration; ``_runtime`` was then mutated in
+    the body. Today both happen on the asyncio event loop (single
+    thread) so the read-then-mutate sequence is atomic. But any
+    future ``asyncio.to_thread(_runtime, ...)`` adoption immediately
+    surfaces a race. Now build the snapshot defensively into a tuple
+    BEFORE iterating + skip any job that disappeared between snapshot
+    and access.
     """
     while True:
         try:
             await asyncio.sleep(5)
             now = time.time()
-            for jid, job in list(JOBS.items()):
-                if job.state != "running":
+            # Audit Q2.33 — snapshot keys only (lighter); look up
+            # each job by key inside the loop with .get() so a
+            # concurrent JOBS.pop() is tolerated as a skip.
+            # coverage: requires _idle_watchdog loop to fire — needs live SSE-disconnected job
+            jid_snapshot = tuple(JOBS.keys())
+            for jid in jid_snapshot:  # coverage: live watchdog loop with disconnected jobs only
+                job = JOBS.get(jid)  # coverage: live watchdog loop with disconnected jobs only
+                if job is None or job.state != "running":  # coverage: live watchdog loop with disconnected jobs only
                     continue
                 rt = _runtime(jid)
                 if SUBSCRIBERS.get(jid):
@@ -542,12 +557,9 @@ async def _idle_watchdog() -> None:
 # ---- Periodic queue reaper -----------------------------------------------
 #
 # Returns stuck-LEASED tasks back to QUEUED so a crashed/orphaned agent
-# can't pin a task forever. On 2026-05-12 we discovered 158 zombie LEASED
-# burner_engage tasks accumulated over several days because the laptop
-# agent's _ack used to send status="failed" instead of the schema's "error",
-# silently 422-ing every failure ack and leaving the lease dangling. The
-# ack bug is fixed in pipeline/laptop_agent.py, but agents can still crash
-# mid-task — this reaper is the belt-and-braces guard.
+# can't pin a task forever. Belt-and-braces guard against agents crashing
+# mid-task (the cloud render-worker JOB; historically also the laptop
+# agent before the burner-channel system was retired 2026-05-13).
 
 _QUEUE_REAPER_INTERVAL_S = int(os.environ.get("YTFACTORY_QUEUE_REAPER_INTERVAL_S", "300"))
 
@@ -1774,7 +1786,6 @@ async def _perf_headers_middleware(request, call_next):
 #
 from control.routes.agent_routes import router as _control_agent_router
 from control.routes.auth_pin import router as _control_auth_pin_router
-from control.routes.burner_routes import router as _control_burner_router
 from control.routes.channels_routes import router as _control_channels_router
 from control.routes.cloud_routes import router as _control_cloud_router
 from control.routes.clone_video_routes import router as _control_clone_video_router
@@ -1803,8 +1814,8 @@ from control.routes.voices_routes import router as _control_voices_router
 # /api/research/*, /api/dashboard/*, /api/voices/*) resolve to web's
 # established handler — control's duplicate registrations become no-ops.
 # Endpoints that are unique to control (/agent/*, /api/scheduler/*,
-# /api/state/*, /api/channels, /api/niches/*, /api/burner*, etc.)
-# attach cleanly with no collision.
+# /api/state/*, /api/channels, /api/niches/*, etc.) attach cleanly with
+# no collision.
 
 
 @app.post("/api/_internal/render")
@@ -1930,10 +1941,7 @@ async def auth_middleware(request: Request, call_next):
         # binding before the request reached us; the OIDC consumed the
         # Authorization header so we can't ALSO require an app-level
         # bearer here. Trust IAM. Mirrors the same K_SERVICE bypass in
-        # control/core/auth.py:require_agent — without this the laptop
-        # agent (which sends `gcloud print-identity-token`, not the
-        # shared YTFACTORY_AGENT_TOKEN) is permanently 401'd against
-        # cloud, and `/app/burner-channels` cross-engage never starts.
+        # control/core/auth.py:require_agent.
         if os.environ.get("K_SERVICE"):
             return await call_next(request)
         if AGENT_TOKEN is None:
@@ -4459,8 +4467,7 @@ async def list_critique_jobs(limit: int = 20) -> dict:
 # pipeline.upload.upload_short() in the website's process. On API
 # quotaExceeded (HTTP 403 across all owned channels' shared 10K-unit
 # pool), sets state='quota_exhausted' with a hint to run
-# /upload-via-playwright. Future P3.5: drive Playwright in-process from
-# pipeline/cross_engage_via_playwright.py shape.
+# /upload-via-playwright.
 
 
 def _is_quota_exhausted_error(err: BaseException) -> bool:
@@ -5573,12 +5580,12 @@ async def research_rebuild(refresh_analytics: bool = Query(False)) -> dict:
 
 # ---- YouTube OAuth re-auth (cross-engagement support) -------------------
 #
-# pipeline/cross_engage.py likes + subscribes from every sibling channel
-# on every upload. That requires each channel's OAuth token to (a) carry
-# the full `youtube` scope and (b) include a refresh_token so the laptop
-# agent can run non-interactively. These routes surface auth health on
-# the dashboard and let the operator kick off a re-auth flow per account
-# without dropping to a terminal.
+# pipeline/research/cross_engage.py (API-based: subscriptions.insert +
+# videos.rate from each owned channel) needs each channel's OAuth token
+# to (a) carry the full `youtube` scope and (b) include a refresh_token
+# so cron-style runs work non-interactively. These routes surface auth
+# health on the dashboard and let the operator kick off a re-auth flow
+# per account without dropping to a terminal.
 
 # In-memory map of account → in-flight reauth subprocess + captured URL.
 _REAUTH_JOBS: dict[str, dict[str, Any]] = {}
@@ -5775,12 +5782,11 @@ async def youtube_cross_engage_subscribe_all() -> dict:
 # paths (/api/jobs/from_script, /api/research/*, /api/dashboard/*,
 # /api/voices/*, etc.) resolve to web's established handler. Control's
 # routes that DON'T overlap (/agent/*, /api/scheduler/*, /api/state/*,
-# channels, niches v2, burners, ...) attach cleanly. The chat router is
+# channels, niches v2, ...) attach cleanly. The chat router is
 # intentionally absent — retired in Phase 1.
 #
 app.include_router(_control_agent_router)
 app.include_router(_control_auth_pin_router)
-app.include_router(_control_burner_router)
 app.include_router(_control_channels_router)
 app.include_router(_control_cloud_router)
 app.include_router(_control_clone_video_router)

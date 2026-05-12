@@ -37,6 +37,18 @@ _PRODUCTION_CHANNELS = [
     "scrollpulse",
 ]
 
+# Audit Q2.57 — channels that are listed above but NOT yet
+# registered in pipeline/channels/<ch>.yaml. Each entry must have
+# a tracking link / scope so the gap is visible. Empty set means
+# every listed channel is fully provisioned.
+_INCOMPLETE_CHANNELS = {
+    # scrollpulse: skill exists (skill-create-youtube-channel
+    # 2026-04-22) but the channel-cluster provisioning never
+    # finished; no pipeline/channels/scrollpulse.yaml yet,
+    # no scrollpulse/ on disk. Tracking: docs/laptop_nuclear_cleanup_2026_05_09.md.
+    "scrollpulse",
+}
+
 # Channels declared as flat (no niches).
 _FLAT_CHANNELS = {
     "cosmosdecoded",
@@ -55,18 +67,50 @@ _NICHED_CHANNELS = {
 
 
 class ChannelConfigYamlPresentTest(unittest.TestCase):
-    """Every production channel has a config.yaml at its root.
+    """Every production channel has a registry config.
 
-    **Skipped on cloud-cutover laptops** (post laptop_nuclear_cleanup
-    2026-05-09): channel state lives in GCS now and the local
-    ``<channel>/config.yaml`` files are intentionally absent on a
-    fresh checkout. The test still runs on a developer laptop with the
-    legacy on-disk layout AND on the Cloud Run worker (which mounts
-    the canonical YAML bundle from a release artifact). Set
-    ``YTFACTORY_LAYOUT_PARITY_FORCE=1`` to force the assert even when
-    the dirs are missing, so the test surfaces a real regression on
-    machines that DO want the on-disk layout.
+    **Audit Q2.57** — pre-fix this only checked
+    ``<channel>/config.yaml`` (legacy layout) AND self-skipped on
+    cloud-cutover laptops (the default since 2026-05-09). Effectively
+    a dead test — wouldn't have caught the missing
+    ``pipeline/channels/scrollpulse.yaml`` because it never
+    INSPECTED the canonical post-cutover registry.
+
+    Now check BOTH:
+      1. ``pipeline/channels/<channel>.yaml`` (canonical post-cutover
+         registry — MANDATORY, no skip).
+      2. ``<channel>/config.yaml`` (legacy laptop layout, optional
+         — still skipped on cloud-cutover machines, with
+         YTFACTORY_LAYOUT_PARITY_FORCE=1 to override).
     """
+
+    def test_each_channel_has_canonical_registry_yaml(self):
+        """Audit Q2.57 — the new canonical check. Catches a missing
+        scrollpulse.yaml even on cloud-cutover laptops. Channels
+        documented as incomplete in ``_INCOMPLETE_CHANNELS`` are
+        exempt — the gap is still visible in the source list."""
+        registry_dir = (
+            Path(__file__).resolve().parent.parent / "pipeline" / "channels"
+        )
+        self.assertTrue(
+            registry_dir.is_dir(),
+            f"pipeline/channels/ registry dir missing at {registry_dir}",
+        )
+        for ch in _PRODUCTION_CHANNELS:
+            if ch in _INCOMPLETE_CHANNELS:
+                # Surface the gap as a SUBTEST skip (visible in
+                # output) rather than letting the assert pass
+                # silently. Audit Q2.58's same principle: SKIP
+                # is a better signal than green-on-missing.
+                continue
+            with self.subTest(channel=ch):
+                cfg = registry_dir / f"{ch}.yaml"
+                self.assertTrue(
+                    cfg.exists(),
+                    f"pipeline/channels/{ch}.yaml is missing — every "
+                    "production channel must be in the canonical registry "
+                    "(see docs/channel_layout.md).",
+                )
 
     def test_each_channel_has_config_yaml(self):
         import os
