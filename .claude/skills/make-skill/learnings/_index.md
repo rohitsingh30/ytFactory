@@ -15,3 +15,15 @@ Heuristics live in `heuristics.md` (the 51-item canonical list).
 ---
 
 <!-- regressions appended below -->
+
+- 2026-05-12 — 10 skills (image-edit, make-cosmos-long,
+  make-cosmos-short, make-football-explainer, make-hindutava-long,
+  make-history-short, make-tweet-reaction, parallel-render,
+  tune-ai-extraction, voice-bench) — heuristics 30b + 30c — failed
+  to load at session start. 6 overflowed 1024-char cap; 4 had
+  unquoted `key: value` patterns in description that broke YAML
+  parsing (3 overlap). Fix: trimmed overflows + switched 4 to
+  folded block scalar (`description: >-`). New heuristic 30c
+  added; mechanical lint gate at `scripts/lint_skill_md.py`
+  (parses + cap-checks every SKILL.md). See heuristics.md
+  regression log for the full table.

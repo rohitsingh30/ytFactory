@@ -98,6 +98,18 @@ class JobView(BaseModel):
     proposal: dict | None = None
     preview_url: str | None = None  # always-correct URL the UI <video> can play
 
+    # Slice 4 — live artifact previews. Each entry mirrors what
+    # pipeline.render.artifacts.emit_artifact wrote to Firestore:
+    # {status: "pending"|"ready"|"failed", uri, version, ...extras}.
+    # Dashboard reads these to render inline previews as artifacts
+    # arrive (script as text, narration as <audio>, images as a grid,
+    # video as <video>).
+    artifacts: dict | None = None
+    # Resolved RenderSpec (Slice 1) so the dashboard can show
+    # "the system interpreted your inputs as kind=long_form, aspect=16:9"
+    # alongside the live previews.
+    render_spec: dict | None = None
+
 
 def _doc_to_view(job_id: str, doc: dict) -> JobView:
     short_signed: str | None = None
@@ -142,6 +154,8 @@ def _doc_to_view(job_id: str, doc: dict) -> JobView:
         updated_at=str(doc.get("updated_at")) if doc.get("updated_at") else None,
         proposal=doc.get("proposal"),
         preview_url=preview_url,
+        artifacts=doc.get("artifacts"),
+        render_spec=doc.get("render_spec"),
     )
 
 
@@ -189,6 +203,87 @@ async def preview_mp4(job_id: str):
             raise HTTPException(status_code=502, detail=f"GCS signing failed: {e}")
 
     raise HTTPException(status_code=404, detail="no preview available yet")
+
+
+# ---------------------------------------------------------------------------
+# Slice 4 — live artifact previews
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/jobs/{job_id}/artifact/{kind}")
+async def artifact_redirect(job_id: str, kind: str, index: int | None = None):
+    """302-redirect to a 1-hour signed URL for a per-job artifact.
+
+    Single endpoint for every artifact kind (script / narration /
+    beats / images[i] / envelope / thumb / video / preview). The
+    Firestore job doc's ``artifacts.<kind>`` field carries the
+    ``gs://`` URI; we sign + redirect.
+
+    Args:
+        job_id: Firestore job id.
+        kind: Artifact kind. Must match what
+            :mod:`pipeline.render.artifacts` wrote.
+        index: For list-typed kinds (``images``, ``panels``), which
+            entry to fetch. Required when the artifact is list-typed.
+
+    Errors:
+        404 — job missing, artifact kind not yet ready, OR list-typed
+              kind without an index.
+        502 — GCS signing failed.
+    """
+    doc = jobs_mod.get_job(job_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    artifacts = doc.get("artifacts") or {}
+    entry = artifacts.get(kind)
+    if entry is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"artifact '{kind}' not yet ready for job {job_id}",
+        )
+
+    # List-typed: pull the requested index.
+    if isinstance(entry, list):
+        if index is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"artifact '{kind}' is list-typed; pass ?index=N",
+            )
+        if index < 0 or index >= len(entry):
+            raise HTTPException(
+                status_code=404,
+                detail=f"artifact '{kind}'[{index}] out of range "
+                       f"(len={len(entry)})",
+            )
+        entry = entry[index]
+        if not isinstance(entry, dict):
+            raise HTTPException(
+                status_code=500,
+                detail=f"artifact '{kind}'[{index}] malformed",
+            )
+
+    if entry.get("status") != "ready":
+        raise HTTPException(
+            status_code=404,
+            detail=f"artifact '{kind}' status={entry.get('status')!r} — not ready",
+        )
+
+    uri = entry.get("uri")
+    if not uri or not isinstance(uri, str) or not uri.startswith("gs://"):
+        raise HTTPException(
+            status_code=404,
+            detail=f"artifact '{kind}' has no gs:// uri",
+        )
+
+    try:
+        from control.core import storage  # noqa: PLC0415
+        signed = storage.signed_url(uri, ttl_s=3600, method="GET")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("signed_url failed for %s: %s", uri, exc)
+        raise HTTPException(status_code=502, detail=f"GCS signing failed: {exc}")
+
+    return RedirectResponse(url=signed, status_code=302)
 
 
 class JobsListResponse(BaseModel):

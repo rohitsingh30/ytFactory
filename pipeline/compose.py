@@ -62,6 +62,7 @@ def prerender_word_captions(
     cache_dir: Path,
     *,
     font_size: int | None = None,
+    resolution: "Resolution | None" = None,
 ) -> int:
     """Render every word_NNNN.png the upcoming compose() call will need,
     skipping files that already exist on disk.
@@ -79,9 +80,15 @@ def prerender_word_captions(
     ``_wipe_stale_per_beat_artefacts``) when the font size changes —
     otherwise the cached PNGs from a previous run will be re-used.
 
+    ``resolution`` controls the canvas width word PNGs are rendered
+    against. Defaults to Shorts (1080 px) — pass
+    ``Resolution.long_form()`` (1920 px) for 16:9 long-form so the
+    text stays sized correctly on the wider canvas.
+
     Idempotent: safe to call twice; safe to call inside compose()
     after this function has already populated the directory.
     """
+    res = resolution or _DEFAULT_RES
     cache_dir.mkdir(parents=True, exist_ok=True)
     n_rendered = 0
     gi = 0
@@ -92,7 +99,7 @@ def prerender_word_captions(
                 continue
             wp = cache_dir / f"word_{gi:04d}.png"
             if not wp.exists():
-                kwargs: dict = {"canvas_w": WIDTH}
+                kwargs: dict = {"canvas_w": res.width}
                 if font_size is not None:
                     kwargs["font_size"] = font_size
                 captions.render_word_caption(text, wp, **kwargs)
@@ -181,9 +188,74 @@ def _materialise_rank_chips(
     return out
 
 
-WIDTH = 1080
-HEIGHT = 1920
-FPS = 30
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """Output resolution + framerate for one render.
+
+    Pre-2026-05-12 ``WIDTH`` / ``HEIGHT`` / ``FPS`` were module-level
+    constants pinned to the Shorts default (1080×1920, 30 fps). That
+    made it impossible for ``pipeline.render.video`` to ask compose for
+    a 16:9 1920×1080 long-form mp4 — the constants leaked into the
+    ffmpeg filter graphs of every compose function.
+
+    This dataclass lets every public compose function take a single
+    ``resolution=`` kwarg (default = Shorts resolution for back-compat).
+    Callers that pass an explicit ``Resolution`` get exactly that
+    aspect; callers that don't keep the legacy behaviour without code
+    changes.
+
+    The module-level ``WIDTH`` / ``HEIGHT`` / ``FPS`` constants below
+    remain for back-compat — they're still imported by a few
+    pipeline + test modules — but every internal compose call now
+    reads from a passed-in ``Resolution`` instead.
+    """
+    width: int = 1080
+    height: int = 1920
+    fps: int = 30
+
+    @classmethod
+    def shorts(cls) -> "Resolution":
+        """Canonical 9:16 Short — 1080×1920 at 30 fps."""
+        return cls(1080, 1920, 30)
+
+    @classmethod
+    def long_form(cls) -> "Resolution":
+        """Canonical 16:9 long-form — 1920×1080 at 30 fps."""
+        return cls(1920, 1080, 30)
+
+    @classmethod
+    def from_cfg(cls, cfg: dict | None) -> "Resolution":
+        """Build a Resolution from a channel YAML cfg dict.
+
+        Reads ``cfg.output_resolution = [W, H]`` and ``cfg.output_fps``.
+        Falls back to the Shorts default when either is missing — keeps
+        every existing channel YAML working without edits.
+        """
+        if not cfg:
+            return cls.shorts()
+        res = cfg.get("output_resolution") or [1080, 1920]
+        try:
+            w = int(res[0])
+            h = int(res[1])
+        except (TypeError, ValueError, IndexError):
+            return cls.shorts()
+        fps = int(cfg.get("output_fps") or 30)
+        return cls(w, h, fps)
+
+
+_DEFAULT_RES = Resolution.shorts()
+
+# Legacy module constants — kept for backwards compatibility with
+# callers that haven't migrated to passing a Resolution. Every internal
+# compose path reads from a function-local ``res`` variable instead so
+# changing these no longer affects the active render. Tests that read
+# these constants directly continue to work.
+WIDTH = _DEFAULT_RES.width
+HEIGHT = _DEFAULT_RES.height
+FPS = _DEFAULT_RES.fps
 # XFADE bridges through a SOLID BLACK frame (transition=fadeblack),
 # not a content cross-dissolve. This prevents the ghost double-exposure
 # artifact (Principle #16) where two independently-generated AI images
@@ -208,10 +280,16 @@ ZOOM_MAX = 1.12
 ZOOM_DRIFT_END = 1.16  # +4% over the post-punch hold
 
 
-def _kenburns_filter(clip_duration: float, beat_index: int) -> str:
+def _kenburns_filter(
+    clip_duration: float,
+    beat_index: int,
+    *,
+    resolution: Resolution = _DEFAULT_RES,
+) -> str:
     """zoompan: a punch-in followed by a slow drift, never frozen."""
     del beat_index  # all beats share one motion shape
-    frames = max(1, int(round(clip_duration * FPS)))
+    res = resolution
+    frames = max(1, int(round(clip_duration * res.fps)))
     z_max = ZOOM_MAX
     z_end = ZOOM_DRIFT_END
     drift_frames = max(1, frames - PUNCH_FRAMES)
@@ -220,11 +298,19 @@ def _kenburns_filter(clip_duration: float, beat_index: int) -> str:
         f"1+({z_max}-1)*on/{PUNCH_FRAMES},"
         f"{z_max}+({z_end}-{z_max})*(on-{PUNCH_FRAMES})/{drift_frames})"
     )
+    # Pre-scale to ~2× the larger output dimension so zoompan has
+    # enough sensor area for the punch-in. Pre-2026-05-12 this was
+    # hardcoded `scale=2400:-1` (assuming portrait), which broke 16:9
+    # output: scale=2400:-1 gives a 2400×wide-aspect intermediate that
+    # zoompan can crop fine for 1080×1920 portrait but truncates the
+    # height for 1920×1080 landscape. Scale by the larger of (w, h)
+    # × 2 so both orientations get an oversized canvas.
+    pre_scale_long = max(res.width, res.height) * 2
     return (
-        f"scale=2400:-1,"
+        f"scale={pre_scale_long}:-1,"
         f"zoompan=z='{z_expr}':"
         f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-        f"d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},"
+        f"d={frames}:s={res.width}x{res.height}:fps={res.fps},"
         f"setsar=1"
     )
 
@@ -328,6 +414,7 @@ def _compose_with_word_captions(
     pass_label: str,
     rank_chips: list[tuple[int, Path]] | None = None,
     word_caption_font_size: int | None = None,
+    resolution: Resolution = _DEFAULT_RES,
 ) -> Path:
     """Compose the Short with per-word karaoke captions (the default path).
 
@@ -365,7 +452,7 @@ def _compose_with_word_captions(
     for gi, _ws, _we, text in all_words:
         wp = cache_dir / f"word_{gi:04d}.png"
         if not wp.exists():
-            kwargs: dict = {"canvas_w": WIDTH}
+            kwargs: dict = {"canvas_w": resolution.width}
             if word_caption_font_size is not None:
                 kwargs["font_size"] = word_caption_font_size
             captions.render_word_caption(text, wp, **kwargs)
@@ -388,7 +475,9 @@ def _compose_with_word_captions(
     for i, img in enumerate(image_paths):
         clip_t = video_dur[i] + XFADE
         inputs += ["-loop", "1", "-t", f"{clip_t:.3f}", "-i", str(img)]
-        filter_chains.append(f"[{i}:v]{_kenburns_filter(clip_t, i)}[v{i}]")
+        filter_chains.append(
+            f"[{i}:v]{_kenburns_filter(clip_t, i, resolution=resolution)}[v{i}]"
+        )
 
     # Crossfade chain — audio-anchored offsets.
     if len(beats) == 1:
@@ -433,7 +522,7 @@ def _compose_with_word_captions(
         # words are the only text on screen.
 
         in_label = f"{word_input_idx_start + gi}:v"
-        word_y = int(HEIGHT * _WORD_CAPTION_Y_FRAC)
+        word_y = int(resolution.height * _WORD_CAPTION_Y_FRAC)
         filter_chains.append(
             f"[{prev_label}][{in_label}]overlay=x=(W-w)/2:y={word_y}:"
             f"enable='between(t,{ws:.3f},{we:.3f})'"
@@ -505,7 +594,7 @@ def _compose_with_word_captions(
         "-map", f"{audio_idx}:a",
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
-        "-r", str(FPS),
+        "-r", str(resolution.fps),
         "-c:a", "aac",
         "-b:a", "192k",
         "-movflags", "+faststart",
@@ -556,6 +645,7 @@ def compose(
     caption_mode: str = "word",
     rank_chips: list[tuple[int, Path]] | None = None,
     word_caption_font_size: int | None = None,
+    resolution: Resolution | None = None,
 ) -> Path:
     """Render the final Short.
 
@@ -574,7 +664,14 @@ def compose(
     per OpusClip/Submagic 2026 benchmarks, and makes residual sync
     drift invisible at the word grain). ``"beat"`` falls back to the
     legacy per-beat block at the bottom of the frame.
+
+    ``resolution`` controls output dimensions + framerate. Defaults to
+    Shorts (1080×1920 @ 30 fps) for back-compat. Pass
+    ``Resolution.long_form()`` (1920×1080) or
+    ``Resolution.from_cfg(channel_cfg)`` to honour a different aspect.
     """
+    res = resolution or _DEFAULT_RES
+
     # Pre-flight: image-count must match beat count, fail loud not silent.
     assert len(image_paths) == len(beats), \
         f"image-count drift: {len(image_paths)} images vs {len(beats)} beats"
@@ -622,6 +719,7 @@ def compose(
             pass_label=pass_label,
             rank_chips=rank_chips,
             word_caption_font_size=word_caption_font_size,
+            resolution=res,
         )
 
     # ---- Legacy per-beat caption mode (kept for backwards compat) ----
@@ -633,7 +731,7 @@ def compose(
     caption_paths: list[Path] = []
     for i, beat in enumerate(beats):
         cp = cache_dir / f"caption_{i:02d}.png"
-        captions.render_beat_caption(beat, cp, canvas_w=WIDTH, canvas_h=320)
+        captions.render_beat_caption(beat, cp, canvas_w=res.width, canvas_h=320)
         caption_paths.append(cp)
 
     # 2. Build ffmpeg input list and per-image Ken Burns chain.
@@ -644,7 +742,9 @@ def compose(
     for i, img in enumerate(image_paths):
         clip_t = video_dur[i] + XFADE
         inputs += ["-loop", "1", "-t", f"{clip_t:.3f}", "-i", str(img)]
-        filter_chains.append(f"[{i}:v]{_kenburns_filter(clip_t, i)}[v{i}]")
+        filter_chains.append(
+            f"[{i}:v]{_kenburns_filter(clip_t, i, resolution=res)}[v{i}]"
+        )
 
     # 3. Crossfade in sequence. Offset is anchored to the audio
     #    timeline: xfade between beat i-1 and beat i ends exactly at
@@ -717,7 +817,7 @@ def compose(
                 _cap_h = _cap_img.height
         except Exception:
             _cap_h = 320  # legacy fallback
-        y_pos = HEIGHT - _cap_h - BOTTOM_SAFE_ZONE
+        y_pos = res.height - _cap_h - BOTTOM_SAFE_ZONE
         filter_chains.append(
             f"[{prev_label}][{in_label}]overlay=x=0:y={y_pos}:"
             f"enable='between(t,{cap_start:.3f},{cap_end:.3f})'"
@@ -791,7 +891,7 @@ def compose(
         "-map", f"{audio_idx}:a",
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
-        "-r", str(FPS),
+        "-r", str(res.fps),
         "-c:a", "aac",
         "-b:a", "192k",
         "-movflags", "+faststart",
@@ -823,7 +923,11 @@ def compose(
     return out_path
 
 
-def _clip_filter(clip_duration: float) -> str:
+def _clip_filter(
+    clip_duration: float,
+    *,
+    resolution: Resolution = _DEFAULT_RES,
+) -> str:
     """Filter chain for a per-beat animation clip.
 
     Unlike the slideshow path, animated clips don't need Ken Burns —
@@ -833,11 +937,12 @@ def _clip_filter(clip_duration: float) -> str:
     xfade has overlap to consume.
     """
     target = clip_duration
+    res = resolution
     return (
-        f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-        f"crop={WIDTH}:{HEIGHT},"
+        f"scale={res.width}:{res.height}:force_original_aspect_ratio=increase,"
+        f"crop={res.width}:{res.height},"
         f"setsar=1,"
-        f"fps={FPS},"
+        f"fps={res.fps},"
         # Loop short clips, then trim — handles the case where AnimateDiff
         # produced a 2.0s clip but the beat is 2.6s.
         f"loop=loop=-1:size=32767:start=0,"
@@ -850,20 +955,25 @@ def image_to_kenburns_clip(
     image_path: Path,
     duration_s: float,
     out_path: Path,
+    *,
+    resolution: Resolution | None = None,
 ) -> Path:
-    """Render a still image to a 1080x1920 Ken Burns mp4 clip.
+    """Render a still image to a Ken Burns mp4 clip at ``resolution``.
 
     Used by ``compose_hybrid`` to convert the slideshow path's per-beat
     images into mp4 clips so they can interleave with real footage clips
     inside ``compose_clips``. The motion shape mirrors what
     ``compose()`` applies inline (punch-in then drift) so a hybrid Short
     feels visually consistent across image beats and footage beats.
+
+    ``resolution`` defaults to Shorts (1080×1920 @ 30 fps) for back-compat.
     """
+    res = resolution or _DEFAULT_RES
     # Pad the rendered length by XFADE so the next clip in the chain has
     # frames to crossfade against — same accounting compose_clips uses
     # when it pulls clips into its xfade graph.
     clip_t = max(0.5, duration_s + XFADE)
-    vf = _kenburns_filter(clip_t, 0)
+    vf = _kenburns_filter(clip_t, 0, resolution=res)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg", "-y",
@@ -871,7 +981,7 @@ def image_to_kenburns_clip(
         "-t", f"{clip_t:.3f}",
         "-i", str(image_path),
         "-vf", vf,
-        "-r", str(FPS),
+        "-r", str(res.fps),
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         "-an",
@@ -1033,6 +1143,7 @@ def compose_hybrid(
     cache_dir: Path,
     tail_hold_s: float = 0.0,
     rank_chips: list[tuple[int, Path]] | None = None,
+    resolution: Resolution | None = None,
 ) -> Path:
     """Compose a Short whose beats mix static images and footage clips.
 
@@ -1080,7 +1191,10 @@ def compose_hybrid(
             # duration. compose_clips loops/trims clips that don't match
             # video_dur[i], but giving it the right length up front keeps
             # the xfade math clean.
-            image_to_kenburns_clip(src_path, video_dur[i], clip_dst)
+            image_to_kenburns_clip(
+                src_path, video_dur[i], clip_dst,
+                resolution=resolution,
+            )
             clip_paths.append(clip_dst)
         elif kind == "footage":
             # Use the footage mp4 as-is. compose_clips' _clip_filter will
@@ -1108,6 +1222,7 @@ def compose_hybrid(
         caption_style="per_word",
         layer_footage_audio=True,
         subscribe_button=True,
+        resolution=resolution,
     )
 
 
@@ -1125,6 +1240,7 @@ def compose_clips(
     caption_style: str = "per_beat",
     layer_footage_audio: bool = False,
     subscribe_button: bool = False,
+    resolution: Resolution | None = None,
 ) -> Path:
     """Render the final Short from per-beat animated clips (mp4s).
 
@@ -1148,6 +1264,7 @@ def compose_clips(
     """
     assert len(clip_paths) == len(beats), "one clip per beat required"
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    res = resolution or _DEFAULT_RES
 
     # Normalise rank chip specs — accept (start, end, rank_int) or
     # (start, end, png_path) and ensure the PNGs exist on disk.
@@ -1174,13 +1291,13 @@ def compose_clips(
                     )
         for gi, _ws, _we, text in all_words:
             wp = cache_dir / f"word_{gi:04d}.png"
-            captions.render_word_caption(text, wp, canvas_w=WIDTH)
+            captions.render_word_caption(text, wp, canvas_w=res.width)
             word_pngs.append(wp)
     else:
         for i, beat in enumerate(beats):
             cp = cache_dir / f"caption_{i:02d}.png"
             if not cp.exists():
-                captions.render_beat_caption(beat, cp, canvas_w=WIDTH, canvas_h=320)
+                captions.render_beat_caption(beat, cp, canvas_w=res.width, canvas_h=320)
             caption_paths.append(cp)
 
     # 2. Each clip is a real video input (no -loop / -t). The filter
@@ -1191,7 +1308,9 @@ def compose_clips(
     for i, clip in enumerate(clip_paths):
         clip_t = video_dur[i] + XFADE
         inputs += ["-i", str(clip)]
-        filter_chains.append(f"[{i}:v]{_clip_filter(clip_t)}[v{i}]")
+        filter_chains.append(
+            f"[{i}:v]{_clip_filter(clip_t, resolution=res)}[v{i}]"
+        )
 
     # 3. Crossfade chain — audio-anchored offsets (Principle #1).
     if len(beats) == 1:
@@ -1256,7 +1375,7 @@ def compose_clips(
     if use_word_caps:
         # Per-word centred overlays — one PNG flips on for each word's
         # [start, end] interval. Same logic as compose() slideshow path.
-        word_y = int(HEIGHT * _WORD_CAPTION_Y_FRAC)
+        word_y = int(res.height * _WORD_CAPTION_Y_FRAC)
         n_words = len(all_words)
         for k, (gi, ws, we, _text) in enumerate(all_words):
             is_last_word = k == n_words - 1
@@ -1281,7 +1400,7 @@ def compose_clips(
             cap_start, cap_end = _caption_window(beats, video_start, video_dur, i)
             if is_chain_end and tail_hold_s > 0:
                 cap_end += tail_hold_s
-            y_pos = HEIGHT - 460
+            y_pos = res.height - 460
             filter_chains.append(
                 f"[{prev_label}][{in_label}]overlay=x=0:y={y_pos}:"
                 f"enable='between(t,{cap_start:.3f},{cap_end:.3f})'"
@@ -1336,7 +1455,7 @@ def compose_clips(
         # y offset: lift up from centre slightly so it doesn't sit on
         # caption row. Caption is centred at HEIGHT*0.45 ≈ 864; place
         # button below that at HEIGHT*0.62.
-        sub_y = int(HEIGHT * 0.62)
+        sub_y = int(res.height * 0.62)
         filter_chains.append(
             f"[v_pre_sub][{sub_input_idx}:v]overlay=x=(W-w)/2:y={sub_y}:"
             f"enable='between(t,{sub_start:.3f},{sub_total:.3f})'[vout]"
@@ -1422,7 +1541,7 @@ def compose_clips(
         "-map", audio_map_label,
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
-        "-r", str(FPS),
+        "-r", str(res.fps),
         "-c:a", "aac",
         "-b:a", "192k",
         "-movflags", "+faststart",

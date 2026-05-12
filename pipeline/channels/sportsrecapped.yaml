@@ -317,3 +317,35 @@ long_form_doc:
       pinned comment and we'll cut it within 24 h.
 
       #footballdocumentary #footballhistory #footballbreakdown #footballanalysis #sportsdocumentary
+
+# ---- Long-form (16:9) — sports documentary mode -----------------------
+# Added 2026-05-12 (Slice 2 of unified-renderer rollout). 10-30 min
+# horizontal documentary on a player/match/tactical idea, archival
+# footage matched to the chaptered narration. Distinct from
+# `sports_doc:` which is the chapter-card-driven format with
+# talking-head + b-roll lanes (that's still owned by
+# pipeline.render.sports_doc). This is the simpler "long-form recap"
+# entry, sharing the long-form chunked-TTS + archival_shotlist path
+# with historyrecapped.
+long_form:
+  render_mode: archival_footage
+  tts_provider: cloudrun_chatterbox
+  tts_voice: pipeline/voice_refs/sarah.wav
+  tts_speed: 0.95
+  tts_post_atempo: 0.92
+  tts_chunk_target_chars: 380
+  tts_chunk_join_silence_s: 0.4
+  audio_narration_db: -6
+  audio_music_bed_db: -28
+  audio_source_mix: 0.10                 # leak some crowd ambience under narration
+  duration_target_s: [600, 1800]
+  duration_max_s: 1800
+  output_resolution: [1920, 1080]
+  output_fps: 30
+  captions_enabled: true
+  caption_style:
+    text_rgba: [255, 255, 255, 255]
+    box_rgba: [0, 0, 0, 180]
+    font_size: 40
+  footage_dir: footage/long_sources
+  music_bed_default: cinematic.mp3

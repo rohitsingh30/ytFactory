@@ -103,6 +103,7 @@ RUN python -c "import f5_tts; from f5_tts.infer.utils_infer import infer_process
 
 WORKDIR /app
 COPY server.py ./
+COPY otel_init.py ./
 
 EXPOSE 8080
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080", \

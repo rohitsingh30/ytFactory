@@ -99,3 +99,60 @@ upload:
     ━━━━━━━━━━━━━━━━━━━━
 
     #shorts #aita #reddit #redditstories #storytime
+
+# ---- Long-form (16:9) --------------------------------------------------
+# Added 2026-05-12 as part of Slice 2 of the unified-renderer rollout
+# (see plan.md). Lets the form's "Long video" option actually produce a
+# 5-30 min 16:9 video on this channel instead of silently rendering a
+# 9:16 Short. render_mode=image_panels keeps the channel's animated
+# aesthetic (no archival footage to lean on for a Reddit-stories
+# channel). Reuses the cloud Chatterbox + Flux2 services already
+# deployed for Shorts; no new GPU services needed.
+long_form:
+  render_mode: image_panels
+  # TTS — Chatterbox cloned from sarah.wav, slowed slightly so 30+ min
+  # listens are calm enough to not be exhausting. atempo=0.92 keeps the
+  # voice warm without F5-style smearing.
+  tts_provider: cloudrun_chatterbox
+  tts_voice: pipeline/voice_refs/sarah.wav
+  tts_speed: 0.95
+  tts_post_atempo: 0.92
+  tts_chunk_target_chars: 380
+  tts_chunk_join_silence_s: 0.4
+  # Audio mix — narration loud, bed quiet so it doesn't compete.
+  audio_narration_db: -6
+  audio_music_bed_db: -28
+  audio_source_mix: 0.0
+  # Output — 1080p 16:9 horizontal.
+  duration_target_s: [600, 1800]   # 10-30 min sweet spot
+  duration_max_s: 1800
+  output_resolution: [1920, 1080]
+  output_fps: 30
+  # Captions on for long-form (eyes-open viewers in the
+  # awake-engagement window read them).
+  captions_enabled: true
+  caption_style:
+    text_rgba: [255, 217, 61, 255]   # yellow italic, matches sleep-history convention
+    box_rgba: [0, 0, 0, 160]
+    font_size: 42
+  # Image panels — Flux2 klein on cloud, same provider Shorts uses.
+  # Hard cap of 24 keeps Metal/Cloud-Run cold-load + memory pressure
+  # bounded; archival_shotlist would be wrong for this channel (no
+  # footage source to draw from).
+  panel_max_count: 24
+  image_provider: cloudrun_flux2_klein
+  image_seed: 4242
+  image_steps: 4
+  image_width: 1344
+  image_height: 768
+  image_style_prefix: |
+    Flat 2D crayon-style children's drawing with thick black outlines and
+    soft pastel fill colors (warm beige, dusty pink, mustard yellow,
+    light blue). Round-headed simple cartoon shapes. 16:9 horizontal
+    composition with subject centred for Ken-Burns motion.
+  panel_crossfade_s: 1.5
+  panel_zoom_factor: 1.08
+  music_bed_default: ambient_low.mp3
+  # Animated channel — no support-asks. (historyrecapped uses
+  # ask_cadence_s: 1080 for periodic LIKE/SUB asks; that breaks the
+  # crayon-aesthetic vibe here.)

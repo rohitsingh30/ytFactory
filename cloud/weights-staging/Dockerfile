@@ -22,3 +22,5 @@ WORKDIR /app
 COPY stage.py ./
 
 ENTRYPOINT ["python", "/app/stage.py"]
+
+COPY otel_init.py ./

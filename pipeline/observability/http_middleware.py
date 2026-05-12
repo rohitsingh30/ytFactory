@@ -13,22 +13,30 @@ short list of body keys and merges them onto the active span as
 ``ytfactory.channel`` / ``ytfactory.slug`` / ``ytfactory.job_id``.
 We keep it cheap (no body re-serialisation) — body extraction is
 opt-in per route via path-segments only.
+
+Importing this module is safe even in non-HTTP contexts (Cloud Run
+JOB workers, laptop pipeline subprocesses): ``fastapi`` is imported
+lazily so the module load doesn't pull it in. Without ``fastapi``
+installed, :func:`install` raises a clear error if anyone tries to
+mount the middleware (no-one does in worker contexts).
 """
 from __future__ import annotations
 
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
-from fastapi import Request, Response
 from opentelemetry import trace as _trace
+
+if TYPE_CHECKING:  # type-only — never imported at runtime in worker contexts
+    from fastapi import Request, Response
 
 
 _CARRY_KEYS = ("channel", "slug", "job_id", "niche", "account")
 
 
 async def attach_identity_attrs(
-    request: Request,
-    call_next: Callable[[Request], Awaitable[Response]],
-) -> Response:
+    request: "Request",
+    call_next: "Callable[[Request], Awaitable[Response]]",
+) -> "Response":
     """Add ytFactory identity attrs to the active span.
 
     Runs the handler first (``await call_next``) so FastAPI has populated

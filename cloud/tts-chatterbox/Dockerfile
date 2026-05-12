@@ -43,6 +43,7 @@ RUN python -c "from huggingface_hub import snapshot_download; \
 
 WORKDIR /app
 COPY server.py ./
+COPY otel_init.py ./
 
 EXPOSE 8080
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080", \

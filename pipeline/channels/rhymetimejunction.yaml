@@ -269,3 +269,44 @@ upload:
     ━━━━━━━━━━━━━━━━━━━━
 
     #shorts #kidssongs #nurseryrhymes #hindirhymes #hinglish
+
+# ---- Long-form (16:9) — kids-song compilation mode --------------------
+# Added 2026-05-12 (Slice 2 of unified-renderer rollout). 30-60 min
+# Hinglish nursery-rhyme compilation — chapters of sung songs (Suno)
+# stitched with image_panels of the Laddu / Jalebi / Tuk-Tuk / Dadi
+# mascots. Same Suno + Flux2 stack the Shorts use, just chained.
+long_form:
+  render_mode: image_panels
+  # Audio path for kids-song compilation is "song" not TTS — the
+  # long_form orchestrator detects audio_mode=song from the spec and
+  # uses Suno for narration synthesis. tts_voice/provider here are the
+  # fallback if the spec keeps audio_mode=voice.
+  tts_provider: cloudrun_chatterbox
+  tts_voice: pipeline/voice_refs/sarah.wav
+  tts_speed: 0.95
+  tts_post_atempo: 1.0
+  tts_chunk_target_chars: 240
+  tts_chunk_join_silence_s: 0.3
+  audio_narration_db: -3
+  audio_music_bed_db: -22
+  audio_source_mix: 0.0
+  duration_target_s: [1800, 3600]        # 30-60 min sweet spot
+  duration_max_s: 3600
+  output_resolution: [1920, 1080]
+  output_fps: 30
+  captions_enabled: true
+  panel_max_count: 24
+  image_provider: cloudrun_flux2_klein
+  image_seed: 7777
+  image_steps: 4
+  image_width: 1344
+  image_height: 768
+  image_style_prefix: |
+    Cheerful 2D children's-book illustration: round-cheeked mascots
+    Laddu (yellow puffy ball), Jalebi (curly-spiral orange), Tuk-Tuk
+    (red autorickshaw with eyes), Dadi (smiling grandmother). Bright
+    primary colours, sky-blue background, soft sunlight. 16:9
+    horizontal composition with mascots centred for gentle Ken-Burns.
+  panel_crossfade_s: 1.5
+  panel_zoom_factor: 1.10
+  music_bed_default: upbeat.mp3

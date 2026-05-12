@@ -102,6 +102,32 @@ SKILL.md cross-reference if the wording changes.
     `make-cosmos-decoder` (1159) and `make-sleep-history` (1033) both
     failed to load on session start; trimmed to 981 each.
 
+30c. **SKILL.md `description:` MUST be YAML-safe.** When the
+    description is written as a plain-flow single-line scalar, the
+    YAML parser interprets any `key: value` substring (e.g.
+    `` `image_provider: cloudrun_flux2_klein` ``,
+    `(archival: shotlist/... | animated: cache/...)`,
+    `Critical-path engineering wins:`) as a nested mapping and
+    rejects the file with:
+    ```
+    ✖ .claude/skills/<name>/SKILL.md: failed to parse YAML frontmatter:
+      Nested mappings are not allowed in compact mappings
+    ```
+    This is **independent** of heuristic 30b — the cap check never
+    runs because the file fails to parse. Fix: switch to folded
+    block scalar form (`description: >-` on its own line, body
+    indented 2 spaces). Single-quoted scalars also work but require
+    escaping internal apostrophes (brittle for "channel's" /
+    "klein's"). Default to `>-` for any description ≥3 sentences OR
+    containing `:`. Regression: 2026-05-12 —
+    `image-edit`, `make-history-short`, `parallel-render`,
+    `voice-bench` all failed YAML parsing on session start
+    (`make-history-short` was under 1024 chars — proving 30b
+    misses this entirely). Memory:
+    `feedback_skill_description_yaml_colon_safety.md`. Mechanical
+    gate: `scripts/lint_skill_md.py` (parses every `SKILL.md`,
+    rejects on YAML failure OR description >1024 chars).
+
 ## E. Pre-render quality gates (31–38)
 
 31. Run `/critique-audio` before image gen. TTS bugs invalidate
@@ -205,3 +231,28 @@ SKILL.md cross-reference if the wording changes.
   to /make-script, /make-top10, /make-katha, /make-cosmos-decoder,
   /make-sports-doc. New rule: hard-cap descriptions at ~980 chars in
   /make-skill stage-3 emit.
+- 2026-05-12 — 30b + 30c — **second wave, 10 skills affected.**
+  Loader rejected at session start:
+  - 30b overflow (6 skills): `make-cosmos-long` (1094), `make-cosmos-short` (1096),
+    `make-football-explainer` (1160), `make-hindutava-long` (1181),
+    `make-tweet-reaction` (1183), `tune-ai-extraction` (1035).
+    Trimmed to ≤1016 chars each, preserving every trigger phrase
+    and routing pointer.
+  - 30c YAML colon (4 skills, 3 overlap with 30b): `image-edit`
+    (`` `image_provider: cloudrun_flux2_klein` ``),
+    `make-history-short` (`archival: shotlist/... | animated: cache/...`),
+    `parallel-render` (`Critical-path engineering wins:`),
+    `voice-bench` (`` `tts_provider: cloudrun_<voice>` ``).
+    Switched all four to folded block scalar (`description: >-`)
+    which treats colons as scalar text. `make-history-short` was
+    under the 1024 cap — proving 30c is a distinct failure mode
+    that 30b never catches.
+  Root cause of repeat: 30b lives only in `/make-skill` stage-3
+  emit. Skills authored by hand-editing, by
+  `/clone-video-format → /make-skill` chains, or by post-emit
+  growth bypass the check. Added new heuristic 30c (YAML-safety)
+  and a mechanical gate at `scripts/lint_skill_md.py` (parses
+  every `.claude/skills/*/SKILL.md`, rejects on YAML failure OR
+  description >1024 chars). The lint runs as part of
+  `/update-docs` Section 8 commit step and is the recommended
+  pre-commit hook.

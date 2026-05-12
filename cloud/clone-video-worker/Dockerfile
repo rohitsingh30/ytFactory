@@ -55,6 +55,7 @@ RUN pip install --no-cache-dir bgutil-ytdlp-pot-provider
 RUN pip install --no-cache-dir 'git+https://github.com/alive4ever/yt-jsc-youtubei'
 
 COPY server.py .
+COPY otel_init.py ./
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

@@ -39,3 +39,5 @@ WORKDIR /workspace
 # pipeline/channels/*.yaml. Override at job-execute time to refresh a
 # single account by passing --account=<slug>.
 ENTRYPOINT ["python", "-m", "pipeline.research.youtube"]
+
+COPY cloud/stats-refresh/otel_init.py /workspace/otel_init.py

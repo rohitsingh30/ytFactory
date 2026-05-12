@@ -555,6 +555,25 @@ def _stage_rewrite_real(job: dict, work_dir: Path) -> None:
                 slug, script_path,
                 channel_yaml.relative_to(REPO_ROOT))
 
+    # Live artifact preview (Slice 4): upload the script.json to GCS the
+    # moment it's authored so the dashboard can show it ~5 s into the
+    # render instead of waiting for the final mp4. NEVER fails the render
+    # — emit_artifact wraps every IO call in a try/except and logs.
+    try:
+        from pipeline.render.artifacts import emit_artifact  # noqa: PLC0415
+        emit_artifact(
+            job_id=job.get("job_id") or os.environ.get("YTFACTORY_JOB_ID", ""),
+            kind="script",
+            local_path=script_path,
+            extras={
+                "slug": slug,
+                "hook": getattr(script, "hook", "")[:300],
+                "n_words": len((getattr(script, "narration", "") or "").split()),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("emit_artifact(script) failed: %s", exc)
+
 
 def _fetch_source(kind: str, ref: str) -> dict | None:
     """Adapter dispatcher for source_kind → fetched story dict.
@@ -969,6 +988,81 @@ def _stage_render_real(
         check=False,
     )
     job["_real_mp4"] = str(mp4)
+
+    # Slice 4 — emit per-render artifacts the moment they're discoverable
+    # on disk. The Shorts subprocess writes everything into
+    # ``<channel_root>/cache/<slug>/`` plus the final mp4 at
+    # ``<channel_root>/shorts/<slug>.mp4``; we don't have to modify the
+    # subprocess to surface them, just sweep the cache dir after it
+    # finishes.
+    try:
+        from pipeline.render.artifacts import emit_artifact  # noqa: PLC0415
+        from pipeline.paths import RenderPaths  # noqa: PLC0415
+        from pipeline.probe import probe_duration  # noqa: PLC0415
+
+        job_id = job.get("job_id") or os.environ.get("YTFACTORY_JOB_ID", "")
+        slug = job.get("_slug") or ""
+        channel_yaml = job.get("_channel_yaml")
+        if job_id and slug and channel_yaml:
+            rp = RenderPaths.from_channel_yaml(
+                Path(channel_yaml), project_root=REPO_ROOT,
+            )
+            cache_dir = rp.cache_for(slug)
+
+            # Narration audio (TTS output) lives at cache/narration.wav
+            # OR cache/narration_with_bed.wav (when a music bed mixed in).
+            for nar_name in ("narration_with_bed.wav", "narration.wav"):
+                nar = cache_dir / nar_name
+                if nar.exists():
+                    try:
+                        dur = float(probe_duration(nar))
+                    except Exception:  # noqa: BLE001
+                        dur = 0.0
+                    emit_artifact(
+                        job_id=job_id, kind="narration", local_path=nar,
+                        extras={"slug": slug, "duration_s": round(dur, 2)},
+                    )
+                    break
+
+            # ASR beats — beats.json under the cache.
+            beats_json = cache_dir / "beats.json"
+            if beats_json.exists():
+                try:
+                    n_beats = len(json.loads(beats_json.read_text()))
+                except Exception:  # noqa: BLE001
+                    n_beats = None
+                emit_artifact(
+                    job_id=job_id, kind="beats", local_path=beats_json,
+                    extras=({"n_beats": n_beats} if n_beats is not None else {}),
+                )
+
+            # Per-beat images — img_NN.png (slideshow) or motion clips.
+            for img in sorted(cache_dir.glob("img_[0-9][0-9].png")):
+                try:
+                    idx = int(img.stem.split("_")[1])
+                except (ValueError, IndexError):
+                    continue
+                emit_artifact(
+                    job_id=job_id, kind="images", local_path=img, index=idx,
+                )
+
+            # Final video + thumb (in addition to the worker's separate
+            # short_uri upload — these go under jobs/<id>/video/ and
+            # jobs/<id>/thumb/ for the LiveArtifactsCard).
+            try:
+                vdur = float(probe_duration(mp4))
+            except Exception:  # noqa: BLE001
+                vdur = 0.0
+            emit_artifact(
+                job_id=job_id, kind="video", local_path=mp4,
+                extras={"slug": slug, "duration_s": round(vdur, 2)},
+            )
+            if thumb.exists():
+                emit_artifact(
+                    job_id=job_id, kind="thumb", local_path=thumb,
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("post-render artifact emission failed: %s", exc)
     job["_real_thumb"] = str(thumb) if thumb.exists() else None
 
 
@@ -1182,6 +1276,95 @@ def _main_from_firestore(job_id: str) -> int:
     logger.info("job loaded: channel=%s topic=%s",
                 proposal.get("channel"), proposal.get("topic"))
 
+    # Build the resolved RenderSpec from proposal + channel/variant YAML.
+    # This is the single source of truth for what the worker is about
+    # to render. Persisted to Firestore so the dashboard + ops can see
+    # how the system interpreted the user's inputs (kind, aspect,
+    # visual_mode, …) BEFORE any compute starts.
+    #
+    # Then the spec acts as a gate: if the user asked for a kind/aspect
+    # the legacy ``pipeline.render.shorts`` codepath cannot honour
+    # (long_form, 16:9, panels, …), we mark the job failed at
+    # bootstrap with a friendly error pointing at the slice landing
+    # for that combo. Pre-2026-05-12 the worker silently routed every
+    # render through shorts.py regardless, so a user picking
+    # length_s=1800 got a 30-min 9:16 Short with no error.
+    spec_failed = False
+    spec_dict: dict = {}
+    spec_obj = None  # captured for long-form dispatch later in the stage loop
+    try:
+        from pipeline.render.spec import (  # noqa: PLC0415
+            RenderKind, build_spec,
+        )
+        channel_key = proposal.get("channel") or "mystoriesanimated"
+        variant_key = (proposal.get("format") or "").strip() or None
+
+        # Pass the EXPECTED variant YAML path even when the file is missing
+        # so the spec builder can attach a phantom-niche note. Without
+        # this, a missing variant degrades to "no niche overlay" silently
+        # — the user wouldn't see "experimental niche 'X' has no overlay
+        # YAML" surfaced anywhere.
+        variant_yaml: Path | None = _variant_yaml_for(channel_key, variant_key)
+        if variant_yaml is None and variant_key:
+            variant_yaml = (
+                REPO_ROOT / "pipeline" / "variants" / channel_key
+                / f"{variant_key}.yaml"
+            )
+
+        spec_obj = build_spec(
+            proposal,
+            channel_yaml_path=_channel_yaml_for(channel_key),
+            variant_yaml_path=variant_yaml,
+        )
+        spec_dict = spec_obj.to_dict()
+        _update_job(job_id, render_spec=spec_dict)
+
+        # Slice-2 (2026-05-12): the gate now ONLY fires for combos that
+        # NEITHER the legacy shorts.py codepath NOR the unified
+        # video.render orchestrator can produce yet. Long-form on every
+        # channel now routes through pipeline.render.video.render —
+        # see the kind=LONG_FORM branch in the stage loop below.
+        legacy_shorts_ok = (
+            spec_obj.kind == RenderKind.SHORT
+            and spec_obj.aspect_ratio == "9:16"
+            and (spec_obj.duration_max_s or 0) <= 120
+        )
+        long_form_ok = spec_obj.kind == RenderKind.LONG_FORM
+        if mode == "real" and not (legacy_shorts_ok or long_form_ok):
+            spec_failed = True
+            err_lines = [
+                f"This combination is not yet wired in the unified renderer: "
+                f"kind={spec_obj.kind.value}, "
+                f"aspect={spec_obj.aspect_ratio}, "
+                f"duration_max_s={spec_obj.duration_max_s}, "
+                f"visual_mode={spec_obj.visual_mode.value}.",
+                "",
+                f"Today's supported combos: short (9:16, ≤120 s) and "
+                f"long_form (any channel × any aspect, slice 2 of unified "
+                f"renderer rollout).",
+            ]
+            for n in spec_obj.notes:
+                err_lines.append(f"  · {n}")
+            _update_job(
+                job_id,
+                status="failed",
+                stage="bootstrap",
+                error="\n".join(err_lines),
+                render_spec=spec_dict,
+            )
+            return 2
+    except Exception as exc:  # noqa: BLE001
+        # Spec resolution failed — log + surface but DON'T block the
+        # render. Falling back to the pre-spec behaviour means the
+        # render still has a chance of succeeding for combos that
+        # already work today; spec-induced regressions stay
+        # visible but non-fatal.
+        logger.exception("spec build failed; proceeding with legacy dispatch")
+        _update_job(
+            job_id,
+            render_spec={"error": f"spec build failed: {exc}"},
+        )
+
     work_dir = TMP_ROOT / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1192,7 +1375,134 @@ def _main_from_firestore(job_id: str) -> int:
     _update_job(job_id, status="rendering", stage="rewrite", timeline=timeline)
 
     try:
+        # ----- LONG-FORM dispatch ----------------------------------------
+        # When the resolved spec asks for kind=long_form, bypass the
+        # worker's per-stage Shorts pipeline and hand off to the
+        # unified video.render_long_form orchestrator. The orchestrator
+        # internally:
+        #   1. Calls pipeline.llm.rewrite_long_form to author a sectioned
+        #      ScriptEnvelope.
+        #   2. Writes the legacy long-form narration JSON shape into
+        #      <channel>/narrations/<slug>.json.
+        #   3. Shells out to pipeline.render.long_form which produces
+        #      the mp4 at <channel>/long_form/<slug>.mp4.
+        # We surface progress through the same compose/tts substage
+        # pills the Shorts UI already animates so the dashboard
+        # doesn't need a long-form-specific timeline yet (Slice 5
+        # standardises substages across short + long).
+        try:
+            from pipeline.render.spec import RenderKind  # noqa: PLC0415
+        except Exception:  # noqa: BLE001
+            RenderKind = None  # type: ignore[assignment]
+
+        if (
+            mode == "real"
+            and spec_obj is not None
+            and RenderKind is not None
+            and spec_obj.kind == RenderKind.LONG_FORM
+        ):
+            from pipeline.render import video as _video  # noqa: PLC0415
+
+            # Mark the rewrite + cast pills "done" instantly — the
+            # long-form rewriter runs INSIDE video.render_long_form
+            # (single LLM call producing the full sectioned envelope
+            # in one shot, vs the worker's per-stage Shorts breakdown).
+            for pill, msg in (
+                ("rewrite", "long-form rewriter runs inside video.render"),
+                ("cast", "skipped — long-form has no cast stage"),
+            ):
+                timeline = _set_stage(timeline, pill, "done", msg)
+            _update_job(
+                job_id, status="rendering", stage="tts", timeline=timeline,
+            )
+
+            substage_t0: dict[str, float] = {}
+
+            def _lf_progress(stage: str, msg: str) -> None:
+                nonlocal timeline
+                if stage not in _RENDERER_SUBSTAGES:
+                    stage = "compose"
+                now = time.time()
+                new_idx = _RENDERER_SUBSTAGES.index(stage)
+                for prior in _RENDERER_SUBSTAGES[:new_idx]:
+                    prior_status = next(
+                        (s.get("status") for s in timeline
+                         if s.get("stage") == prior),
+                        None,
+                    )
+                    if prior_status in (None, "done"):
+                        continue
+                    prior_t0 = substage_t0.get(prior)
+                    timeline = _set_stage(
+                        timeline, prior, "done",
+                        f"{now - prior_t0:.1f}s" if prior_t0 else "—",
+                    )
+                if stage not in substage_t0:
+                    substage_t0[stage] = now
+                timeline = _set_stage(timeline, stage, "running", msg)
+                _update_job(
+                    job_id, status="rendering", stage=stage, timeline=timeline,
+                )
+
+            # Threads: include job_id on the proposal so the orchestrator
+            # produces the same slug the worker would've.
+            proposal_for_video = dict(proposal)
+            proposal_for_video["job_id"] = job_id
+            mp4_path = _video.render(
+                spec_obj,
+                proposal=proposal_for_video,
+                work_dir=work_dir,
+                job_id=job_id,
+                progress_cb=_lf_progress,
+            )
+            job["_real_mp4"] = str(mp4_path)
+
+            # Mark every render-substage done — render_long_form returns
+            # only on success so anything still "running" or "pending"
+            # in the substage list is a final-flush artefact.
+            final_now = time.time()
+            for sub in _RENDERER_SUBSTAGES:
+                sub_status = next(
+                    (s.get("status") for s in timeline
+                     if s.get("stage") == sub),
+                    None,
+                )
+                if sub_status == "done":
+                    continue
+                sub_t0 = substage_t0.get(sub)
+                timeline = _set_stage(
+                    timeline, sub, "done",
+                    f"{final_now - sub_t0:.1f}s" if sub_t0 else "(skipped)",
+                )
+            _update_job(
+                job_id, status="rendering", stage="compose", timeline=timeline,
+            )
+
+            # Fall through to the upload stage below by manually running it.
+            timeline = _set_stage(timeline, "upload", "running", "uploading mp4 to GCS")
+            _update_job(
+                job_id, status="uploading", stage="upload", timeline=timeline,
+            )
+            t_up = time.time()
+        else:
+            t_up = None  # short path drives upload through the loop
+
+        # ----- SHORT (and stub-mode) dispatch -----------------------------
+        # The existing per-stage loop. When kind=long_form and we
+        # already produced the mp4 above, we skip straight to upload
+        # by leaving job_stages walking but no-op'ing the early stages
+        # via a `lf_done` flag.
+        lf_done = (
+            mode == "real"
+            and spec_obj is not None
+            and RenderKind is not None
+            and spec_obj.kind == RenderKind.LONG_FORM
+        )
+
         for key, _ in job_stages:
+            if lf_done and key != "upload":
+                # Long-form already covered every render stage above.
+                continue
             # In real mode the renderer subprocess covers tts / asr /
             # images / compose as a single umbrella step (see
             # _RENDERER_SUBSTAGES). Skip the early "running" stamp for
@@ -1216,7 +1526,7 @@ def _main_from_firestore(job_id: str) -> int:
                 stage=key,
                 timeline=timeline,
             )
-            t0 = time.time()
+            t0 = time.time() if key != "upload" or t_up is None else t_up
             if mode == "stub":
                 # Stub path doesn't have a real editing handler — use
                 # the dedicated stub so the timeline pill shows

@@ -89,6 +89,30 @@ class FieldOption(BaseModel):
     description: str | None = None
 
 
+class CfgTarget(BaseModel):
+    """Where one input's value lands in the channel cfg dict.
+
+    A single input may write to MULTIPLE cfg locations — e.g. ``voice``
+    writes to ``cfg["tts_voice"]`` (consumed by the SHORT compose path)
+    AND to ``cfg["long_form"]["tts_voice"]`` (consumed by long_form.py).
+    Each entry is one location.
+    """
+    path: list[str]
+    """Dotted-path components into cfg. ``["tts_voice"]`` → ``cfg["tts_voice"]``;
+    ``["long_form", "tts_voice"]`` → ``cfg["long_form"]["tts_voice"]``."""
+
+    transform: str | None = None
+    """Name of a registered transform function (in
+    :mod:`pipeline.render.input_registry`). Maps the form value to the
+    consumer-specific cfg value. e.g. ``"music_bed_to_filename"``
+    converts ``"ambient_low"`` → ``"ambient_low.mp3"``."""
+
+    condition: str | None = None
+    """Name of a registered predicate. When set, the write happens only
+    if ``condition(value, cfg) → True``. Used for capability gates like
+    "only flip provider to kokoro on a non-cloud channel"."""
+
+
 class CustomizationField(BaseModel):
     key: str
     label: str
@@ -102,6 +126,46 @@ class CustomizationField(BaseModel):
     step: float | None = None
     placeholder: str | None = None
     max_length: int | None = Field(default=None, alias="maxLength")
+
+    # ----- Renderer-side metadata (Slice-2.P3 — 2026-05-12) ------------------
+    # The frontend ignores these; the renderer + orchestrator read them to
+    # know how to plumb a form value into spec / cfg / prompts. Adding a
+    # new form input is a SINGLE-FILE edit on the factory function — these
+    # fields drive every downstream consumer automatically.
+
+    spec_field: str | None = None
+    """Name of the matching :class:`pipeline.render.spec.RenderSpec`
+    field. If set, build_spec mirrors the form value onto the spec.
+    Unknown / unmapped form values stay in spec.extra."""
+
+    cfg_targets: list[CfgTarget] | None = None
+    """One or more cfg locations the value writes to. Replaces the
+    pre-2026-05-12 hardcoded if/elif chain in
+    ``pipeline/render/shorts.py:_apply_form_overrides``. The descriptor-
+    driven loop in :func:`pipeline.render.input_registry.apply_overrides`
+    walks this list."""
+
+    apply_handler: str | None = None
+    """For values whose translation isn't a simple cfg write — e.g. the
+    voice cloud-carve-out logic (bare voice id ignored on cloud, path-
+    style ref WAV applied, kokoro provider-flip on laptop). Names a
+    handler registered in
+    :mod:`pipeline.render.input_registry._APPLY_HANDLERS` that owns the
+    full apply path; ``cfg_targets`` is ignored when ``apply_handler``
+    is set."""
+
+    prompt_patch_fn: str | None = None
+    """For values that should bias the long-form rewriter prompt — e.g.
+    ``audio_mode=song`` switches the prompt to lyrics mode,
+    ``narrator_visual_mode=voice_only`` adds "no narrator on screen"
+    instruction. Names a handler in
+    :mod:`pipeline.render.input_registry._PROMPT_PATCHES` that returns
+    a :class:`pipeline.render.input_registry.PromptPatch`."""
+
+    consumers: list[str] | None = None
+    """Informational: which pipeline stages READ this knob (rewrite /
+    cast / tts / asr / images / compose / upload). Helps audit tools
+    detect "knob X claims to affect TTS but TTS doesn't read it"."""
 
     class Config:
         populate_by_name = True
@@ -298,6 +362,16 @@ def _length_field(default_s: int) -> CustomizationField:
         min=15,
         max=90,
         step=5,
+        # Renderer-side metadata (Slice-2.P3 — 2026-05-12 descriptor registry).
+        # Form sends length_s; spec mirrors as duration_target_s; cfg
+        # consumers read duration_max_s; long-form rewriter reads it for
+        # word/section/panel scaling. ONE descriptor → all consumers.
+        spec_field="duration_target_s",
+        cfg_targets=[
+            CfgTarget(path=["duration_max_s"]),
+            CfgTarget(path=["long_form", "duration_max_s"]),
+        ],
+        consumers=["rewrite", "compose", "spec"],
     )
 
 
@@ -310,6 +384,10 @@ def _topic_field() -> CustomizationField:
         required=True,
         placeholder="The 1962 Cuban Missile Crisis — thirteen days that nearly ended the world.",
         max_length=500,
+        # Topic flows into the rewrite stage's raw_story.title
+        # (worker:_stage_rewrite_real). Not a cfg knob.
+        spec_field=None,
+        consumers=["rewrite"],
     )
 
 
@@ -322,6 +400,8 @@ def _source_kind_field(allowed: Iterable[str]) -> CustomizationField:
         default=opts[0].value if opts else "auto",
         options=opts,
         help="Where to pull the story from",
+        # Routed via worker's _fetch_source dispatcher; not a cfg knob.
+        consumers=["rewrite"],
     )
 
 
@@ -332,6 +412,7 @@ def _source_ref_field() -> CustomizationField:
         kind="text",
         help="Reddit URL, Wikipedia topic, or freeform text — leave blank for auto-pick",
         placeholder="https://reddit.com/r/AmItheAsshole/...  or  Cuban Missile Crisis",
+        consumers=["rewrite"],
     )
 
 
@@ -346,6 +427,11 @@ def _visibility_field() -> CustomizationField:
             FieldOption(value="unlisted", label="Unlisted (default)"),
             FieldOption(value="private", label="Private"),
         ],
+        # Spec mirrors; upload stage reads from spec via job doc, not from
+        # cfg dict, so no cfg_targets. Slice-4 work landed visibility on
+        # spec; the upload stage already reads spec.visibility.
+        spec_field="visibility",
+        consumers=["upload"],
     )
 
 
@@ -355,6 +441,8 @@ def _schedule_field() -> CustomizationField:
         label="Schedule (optional)",
         kind="datetime",
         help="Leave blank to publish immediately on approve",
+        spec_field="schedule_at",
+        consumers=["upload"],
     )
 
 
@@ -366,6 +454,7 @@ def _notes_field() -> CustomizationField:
         help="Anything extra — visual cues, character names, language preference",
         placeholder="",
         max_length=1000,
+        consumers=["rewrite"],
     )
 
 
@@ -403,6 +492,14 @@ def _voice_field(default_voice: str, language: str) -> CustomizationField:
         default=default_voice,
         options=_voice_options_for(language),
         help="Narrator voice. Cloud Run TTS handles synthesis.",
+        # Voice has long-standing carve-out logic (path-style ref WAV vs
+        # bare voice id, cloud-vs-laptop provider flip) — handled by a
+        # named registered handler instead of cfg_targets so the business
+        # logic stays in one place. apply_voice_with_cloud_carveout
+        # writes to BOTH cfg["tts_voice"] and cfg["long_form"]["tts_voice"].
+        spec_field="voice_id",
+        apply_handler="apply_voice_with_cloud_carveout",
+        consumers=["tts"],
     )
 
 
@@ -417,6 +514,12 @@ def _captions_density_field() -> CustomizationField:
             FieldOption(value="standard", label="Standard · 2 lines"),
             FieldOption(value="dense", label="Dense · 3 lines"),
         ],
+        spec_field="captions_density",
+        cfg_targets=[
+            CfgTarget(path=["captions_density"]),
+            CfgTarget(path=["long_form", "captions_density"]),
+        ],
+        consumers=["compose", "rewrite"],
     )
 
 
@@ -433,6 +536,17 @@ def _music_field(default: str = "ambient_low") -> CustomizationField:
             FieldOption(value="cinematic", label="Cinematic"),
             FieldOption(value="upbeat", label="Upbeat"),
         ],
+        # Music bed key gets transformed to a filename via
+        # _music_bed_to_filename ("ambient_low" → "ambient_low.mp3";
+        # "off" → ""). Writes to BOTH cfg["music_bed_default"] (Shorts
+        # compose path) AND cfg["long_form"]["music_bed_default"]
+        # (long-form mux path) so the user's pick honours either render.
+        spec_field="music_bed",
+        cfg_targets=[
+            CfgTarget(path=["music_bed_default"], transform="music_bed_to_filename"),
+            CfgTarget(path=["long_form", "music_bed_default"], transform="music_bed_to_filename"),
+        ],
+        consumers=["compose"],
     )
 
 
@@ -465,6 +579,18 @@ def _audio_mode_field(audio_provider: str) -> CustomizationField:
             FieldOption(value="song", label="Song", description="Sung audio via Suno"),
         ],
         help="Voice = spoken narration · Song = full sung audio (Suno).",
+        # audio_mode bridges THREE consumers:
+        #  - cfg["audio_provider"] gets the transformed provider name
+        #    ("song" → "sunoapi"; "voice" → "tts")
+        #  - the long-form rewriter's prompt switches to lyrics mode
+        #    when audio_mode=song (audio_mode_branch PromptPatch)
+        #  - the spec mirrors for cross-stage visibility
+        spec_field="audio_mode",
+        cfg_targets=[
+            CfgTarget(path=["audio_provider"], transform="audio_mode_to_provider"),
+        ],
+        prompt_patch_fn="audio_mode_branch",
+        consumers=["rewrite", "tts", "compose"],
     )
 
 
@@ -494,6 +620,12 @@ def _song_style_field(ydoc: dict[str, Any], language: str) -> CustomizationField
             "kids choir, gentle acoustic guitar + tabla, 120 BPM"
         ),
         max_length=500,
+        # Custom apply handler threads the style into
+        # cfg["_suno_prompt_override"]["style"] (consumed by the Suno
+        # synth call AND by the audio fingerprint cache).
+        spec_field="song_style",
+        apply_handler="apply_song_style",
+        consumers=["tts"],
     )
 
 
@@ -507,6 +639,9 @@ def _song_vocal_gender_field(ydoc: dict[str, Any]) -> CustomizationField:
             FieldOption(value="f", label="Female"),
             FieldOption(value="m", label="Male"),
         ],
+        spec_field="song_vocal_gender",
+        cfg_targets=[CfgTarget(path=["sunoapi_vocal_gender"])],
+        consumers=["tts"],
     )
 
 
@@ -520,6 +655,9 @@ def _song_model_field(ydoc: dict[str, Any]) -> CustomizationField:
             FieldOption(value="V4_5", label="V4_5", description="Best for kids' content + bilingual"),
             FieldOption(value="V5", label="V5", description="Newer · richer production"),
         ],
+        spec_field="song_model",
+        cfg_targets=[CfgTarget(path=["sunoapi_model"])],
+        consumers=["tts"],
     )
 
 
@@ -576,6 +714,19 @@ def _visual_source_field(default_format: str) -> CustomizationField:
             ),
         ],
         help="What plays behind the audio. Default is the channel's house style.",
+        # visual_source affects two things:
+        #  - cfg["visual_source"] read by _attach_footage_to_beats in
+        #    shorts.py to pick AI / footage / hybrid per-beat routing
+        #  - the long-form rewriter's prompt (visual_source_branch
+        #    PromptPatch) — when source=footage, narration MUST anchor
+        #    on named events the footage matcher can search for
+        spec_field="visual_source",
+        cfg_targets=[
+            CfgTarget(path=["visual_source"]),
+            CfgTarget(path=["long_form", "visual_source"]),
+        ],
+        prompt_patch_fn="visual_source_branch",
+        consumers=["rewrite", "images", "compose"],
     )
 
 

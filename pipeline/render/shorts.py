@@ -959,20 +959,65 @@ def _mix_music_bed_under_narration(
     return out_path
 
 
-def _apply_form_overrides(cfg: dict, overrides: dict) -> None:
+def _apply_form_overrides(
+    cfg: dict,
+    overrides: dict,
+    *,
+    channel_key: str | None = None,
+) -> None:
     """Translate website-form `channel_overrides` keys → channel YAML cfg keys.
 
-    The Customize step on the create page emits a flat dict; this is
-    where each entry lands in the actual cfg the renderer reads. Kept
-    as a separate function so the override→cfg-key map is reviewable in
-    one place — adding a new form knob is one entry here plus the
-    matching schema field in pipeline/schemas/customization.py.
+    Slice-2.P3 (2026-05-12): this function is now a thin shim that
+    delegates to :func:`pipeline.render.input_registry.apply_overrides`,
+    which walks the descriptor registry (each ``CustomizationField`` in
+    ``pipeline/schemas/customization.py`` carries ``cfg_targets`` /
+    ``apply_handler`` metadata declaring how its value lands in cfg).
 
-    Quietly skips empty / None values so a YAML default keeps winning
-    when the user didn't touch a field. Unknown keys are ignored on
-    purpose — the form is expected to send a wider superset over time
-    and we don't want a stale form value silently mis-configuring the
-    render.
+    Why the indirection: the pre-2026-05-12 hand-coded if/elif chain
+    here was DEAD CODE — ``_make_short_impl`` never called this
+    function, so every form pick on the SHORT path was silently
+    dropped. Plus, the long-form path had its OWN missing override
+    layer (no equivalent function existed). Routing both paths through
+    one descriptor registry means:
+
+    - Adding a new form input is ONE entry in
+      ``pipeline/schemas/customization.py`` (declare the
+      ``CustomizationField`` with ``cfg_targets``); apply_overrides
+      picks it up automatically here AND
+      :func:`input_registry.long_form_overlay_from_spec` picks it up
+      for the long-form per-render YAML overlay.
+    - Removing a form input is one descriptor deletion.
+    - Cross-path inconsistencies (knob honoured on Short but not on
+      long-form) become structurally impossible.
+
+    Backwards compat:
+
+    - The signature accepts the same ``(cfg, overrides)`` plus a new
+      keyword-only ``channel_key`` so existing call sites compile.
+      When ``channel_key`` is None, falls back to the global
+      descriptor list (best-effort — log a warning).
+    - The function NEVER raises; descriptor-resolution / handler
+      failures log + return.
+    - Idempotent — calling twice is safe; transforms are pure.
+    """
+    if not overrides:
+        return
+    try:
+        from pipeline.render.input_registry import apply_overrides as _apply  # noqa: PLC0415
+    except ImportError:
+        # Registry module missing — keep the legacy behaviour as a last
+        # resort so a packaging bug doesn't silently drop user picks.
+        return _legacy_apply_form_overrides(cfg, overrides)
+    _apply(cfg, overrides, channel_key=channel_key)
+
+
+def _legacy_apply_form_overrides(cfg: dict, overrides: dict) -> None:
+    """LEGACY hand-coded form-override translator. Kept ONLY as a
+    fall-back if ``pipeline.render.input_registry`` is unavailable.
+
+    Replaced 2026-05-12 by the descriptor-driven loop in
+    ``input_registry.apply_overrides``. Do not extend; add a
+    descriptor in ``pipeline/schemas/customization.py`` instead.
     """
     audio_mode = overrides.get("audio_mode")
     if audio_mode == "song":
@@ -1198,30 +1243,47 @@ def _make_short_impl(
 
     cfg = yaml.safe_load(channel_path.read_text())
 
-    # Apply website-form overrides BEFORE any cfg-driven branching.
-    # `cfg_overrides` arrives as a flat dict from the create-page form
-    # (channel_overrides → CLI --override key=value → here). The keys we
-    # honour map cleanly to existing cfg knobs:
+    # CRITICAL — apply website-form overrides into cfg BEFORE any cfg-driven
+    # branching below. Pre-2026-05-12 the dead `cfg_overrides` parameter
+    # was bound but never read inside this function — every form pick on
+    # the SHORT path (audio_mode, voice, music_bed, captions_density,
+    # visual_source, song_*, length_kind/length_s) was silently
+    # dropped at this exact spot. This is THE root cause of the
+    # "input parameters not respected" frustration: the form was a
+    # UI-only theatre that landed in cfg_overrides → _make_short_impl(...)
+    # → ignored. AST-confirmed 2026-05-12 by the descriptor-registry-design
+    # rubber-duck pass.
     #
-    #   audio_mode=song        → cfg.audio_provider = sunoapi (forces Suno
-    #                            even on a TTS channel, raises clearly if
-    #                            SUNOAPI_API_KEY is missing)
-    #   audio_mode=voice       → cfg.audio_provider = tts (force TTS even
-    #                            on a song channel, e.g. for a Dadi-style
-    #                            spoken bridge; uses cfg.tts_voice as-is)
-    #   song_style             → cfg._suno_prompt_override.style (consumed
-    #                            by _audio_fingerprint_for_cache + the
-    #                            sunoapi synth call below)
-    #   song_vocal_gender      → cfg.sunoapi_vocal_gender
-    #   song_model             → cfg.sunoapi_model
-    #   visual_source          → cfg.visual_source (advisory; honoured at
-    #                            the per-beat decision points below)
-    #
-    # Anything not in this map is ignored — pass-through of arbitrary
-    # YAML-style overrides would let the form silently mis-configure
-    # the renderer. New knobs need an entry here.
+    # Slice-2.P3 wired `_apply_form_overrides` to delegate to the
+    # descriptor registry (pipeline/render/input_registry.py) so adding
+    # a new form input is a single CustomizationField declaration in
+    # pipeline/schemas/customization.py. Pass channel_key derived from
+    # the YAML path so the registry can look up the per-channel
+    # descriptor list.
     if cfg_overrides:
-        _apply_form_overrides(cfg, cfg_overrides)
+        try:
+            from pipeline.paths import RenderPaths  # noqa: PLC0415
+            _channel_key_for_overrides = RenderPaths.from_channel_yaml(
+                channel_path
+            ).channel
+        except Exception:  # noqa: BLE001 — be tolerant; legacy chains used None
+            _channel_key_for_overrides = None
+        _apply_form_overrides(
+            cfg, cfg_overrides, channel_key=_channel_key_for_overrides,
+        )
+
+    # Resolution for every compose call below. Pre-2026-05-12 compose.py
+    # had hardcoded WIDTH=1080 / HEIGHT=1920 / FPS=30 module constants,
+    # so this Short was structurally locked to 9:16 regardless of
+    # cfg.output_resolution. Now compose.* takes a ``resolution=`` kwarg;
+    # built once here from cfg so all four compose call sites below
+    # honour the same Resolution. Channel YAMLs that don't set
+    # output_resolution (most Shorts channels) keep the 1080×1920 default.
+    # NOTE: built AFTER _apply_form_overrides so a form-supplied
+    # output_resolution / aspect_ratio override actually takes effect.
+    resolution = compose.Resolution.from_cfg(cfg)
+
+    # Apply website-form overrides BEFORE any cfg-driven branching.
 
     # An override that contains no path separator is a Kokoro voice id
     # (e.g. "am_eric"). When the channel default is F5-TTS but the user
@@ -1925,6 +1987,7 @@ def _make_short_impl(
             out_path=out_path,
             cache_dir=cache,
             tail_hold_s=float(cfg.get("closer_hold_s", 0.0)),
+            resolution=resolution,
         )
         _record_stage_done(
             "compose", t0, slug=slug, channel=channel_path.stem,
@@ -2613,6 +2676,7 @@ def _make_short_impl(
                 cache_dir=cache,
                 tail_hold_s=tail_hold_s,
                 rank_chips=rank_chips or None,
+                resolution=resolution,
             )
             print(f"     done in {time.time() - t0:.1f}s")
             _record_stage_done(
@@ -2642,6 +2706,7 @@ def _make_short_impl(
             closer_format=closer_format,
             rank_chips=rank_chips or None,
             word_caption_font_size=_resolve_caption_font_size(cfg),
+            resolution=resolution,
         )
         print(f"     done in {time.time() - compose_t0:.1f}s")
         _record_stage_done(
@@ -2784,6 +2849,7 @@ def _make_short_impl(
                         pass_label="recompose",
                         rank_chips=rank_chips or None,
                         word_caption_font_size=_resolve_caption_font_size(cfg),
+                        resolution=resolution,
                     )
                     print(f"✓ re-rendered {out_path}")
             elif score < min_score:

@@ -38,6 +38,7 @@ scenedetect[opencv]==0.6.4
 # --- image probing for assemble-stills planner manifest ---
 Pillow==10.4.0
 
+
 # ---- OTEL_DEPS (managed by cloud/_shared/append_otel_deps.sh)
 # OTel dependencies appended to every cloud/*/requirements.txt by
 # cloud/_shared/append_otel_deps.sh.

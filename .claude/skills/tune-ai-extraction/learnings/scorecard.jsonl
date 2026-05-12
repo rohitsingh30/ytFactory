@@ -1,0 +1,1 @@
+{"_schema_version": 1, "_doc": "Each subsequent line is one patch attempt. Fields: ts, patch_id, scope, audit_run, axis_before {prompt, extraction, orchestration}, axis_after, files_changed[], fingerprint_bumped[], regression_test, ship_status (green | gate-failed:<which> | user-rejected), regression_count, notes"}

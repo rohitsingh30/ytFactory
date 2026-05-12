@@ -29,6 +29,19 @@ gcloud builds submit . \
   --project="${PROJECT}" \
   --timeout=3600s
 
+# Azure OpenAI wiring — these MUST be on the JOB or preflight aborts every
+# render at stage=bootstrap with "AZURE_OPENAI_ENDPOINT missing". They were
+# previously left as a manual post-deploy step which got skipped on ~every
+# redeploy (--set-env-vars below replaces ALL env vars). Baked in now so
+# `bash deploy.sh` is sufficient.
+#
+# Override per-deploy by exporting AZURE_OPENAI_ENDPOINT / _API_VERSION /
+# _MODEL before invoking the script. Defaults match the chat assistant's
+# Azure deployment (ytfactory-web service env, 2026-05-12).
+AZURE_OPENAI_ENDPOINT="${AZURE_OPENAI_ENDPOINT:-https://testshoffer.openai.azure.com}"
+AZURE_OPENAI_API_VERSION="${AZURE_OPENAI_API_VERSION:-2025-04-01-preview}"
+AZURE_OPENAI_MODEL="${AZURE_OPENAI_MODEL:-gpt-5.3-chat}"
+
 echo "==> Creating/updating Cloud Run JOB ${JOB}"
 gcloud run jobs deploy "${JOB}" \
   --image="${IMAGE}" \
@@ -39,19 +52,18 @@ gcloud run jobs deploy "${JOB}" \
   --memory=8Gi --cpu=4 \
   --max-retries=0 \
   --task-timeout=3600 \
-  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=ytfactory-prod-v2-artifacts|CLOUDRUN_TTS_CHATTERBOX_URL=https://ytfactory-tts-chatterbox-283470729204.${REGION}.run.app|CLOUDRUN_TTS_INDICPARLER_URL=https://ytfactory-tts-indicparler-283470729204.${REGION}.run.app|CLOUDRUN_IMAGE_FLUX2_KLEIN_URL=https://ytfactory-image-flux2-klein-283470729204.${REGION}.run.app|CLOUDRUN_TTS_DISABLE_FALLBACK=1|CLOUDRUN_IMAGE_DISABLE_FALLBACK=1|YTFACTORY_RENDER_MODE=real|YTFACTORY_LLM_BACKEND=azure_openai|YTFACTORY_ASR_PROVIDER=faster_whisper|LOG_LEVEL=INFO"
+  --set-secrets="AZURE_OPENAI_API_KEY=azure-openai-key:latest" \
+  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=ytfactory-prod-v2-artifacts|CLOUDRUN_TTS_CHATTERBOX_URL=https://ytfactory-tts-chatterbox-283470729204.${REGION}.run.app|CLOUDRUN_TTS_INDICPARLER_URL=https://ytfactory-tts-indicparler-283470729204.${REGION}.run.app|CLOUDRUN_IMAGE_FLUX2_KLEIN_URL=https://ytfactory-image-flux2-klein-283470729204.${REGION}.run.app|CLOUDRUN_TTS_DISABLE_FALLBACK=1|CLOUDRUN_IMAGE_DISABLE_FALLBACK=1|YTFACTORY_RENDER_MODE=real|YTFACTORY_LLM_BACKEND=azure_openai|AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}|AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}|AZURE_OPENAI_MODEL=${AZURE_OPENAI_MODEL}|YTFACTORY_ASR_PROVIDER=faster_whisper|LOG_LEVEL=INFO"
 
 echo ""
-echo "==> Job deployed (mode=real, llm=azure_openai)."
+echo "==> Job deployed (mode=real, llm=azure_openai, endpoint=${AZURE_OPENAI_ENDPOINT}, model=${AZURE_OPENAI_MODEL})."
 echo ""
-echo "    PRE-FLIGHT — wire Azure OpenAI secrets onto the JOB:"
-echo "      # The same Azure deployment your chat assistant already uses."
-echo "      gcloud run jobs update ${JOB} \\"
+echo "    Smoke-test preflight without consuming work:"
+echo "      gcloud run jobs execute ${JOB} \\"
 echo "        --project=${PROJECT} --region=${REGION} \\"
-echo "        --update-secrets=AZURE_OPENAI_API_KEY=azure-openai-key:latest \\"
-echo "        --update-env-vars=^|^AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com/|AZURE_OPENAI_MODEL=gpt-4o-mini"
+echo "        --update-env-vars=YTFACTORY_PREFLIGHT_ONLY=1 --wait"
 echo ""
-echo "    Trigger one execution manually:"
+echo "    Trigger one render execution manually:"
 echo "      gcloud run jobs execute ${JOB} \\"
 echo "        --project=${PROJECT} --region=${REGION} \\"
 echo "        --update-env-vars='YTFACTORY_JOB_ID=<some-job-id>'"

@@ -45,7 +45,7 @@ import { ChannelIcon, channelLabel } from "@/components/app/channel-icon";
 import { StatusPill } from "@/components/app/status-pill";
 import { CritiqueChatPanel } from "@/components/app/critique-chat-panel";
 import { jobsApi, pollJob } from "@/lib/api";
-import type { Job, TimelineEntry } from "@/lib/types";
+import type { ArtifactEntry, Job, TimelineEntry } from "@/lib/types";
 import { cn, relativeTime } from "@/lib/utils";
 
 const STAGE_ORDER = ["rewrite", "cast", "images", "tts", "asr", "compose", "upload"];
@@ -150,9 +150,10 @@ export default function RenderDetailPage() {
             <MetaCard job={job} />
           </div>
 
-          {/* Middle — timeline */}
+          {/* Middle — timeline + live artifact previews */}
           <div className="flex flex-col gap-5">
             <StageTimeline job={job} />
+            <LiveArtifactsCard job={job} />
           </div>
 
           {/* Right rail — pipeline-fix chat */}
@@ -509,5 +510,281 @@ function PublishDialog({ job, onPublished }: { job: Job; onPublished: (j: Job) =
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Slice 4 — live artifact previews. Each per-render intermediate (script,
+// narration, beats, images, video) appears here as soon as
+// pipeline.render.artifacts.emit_artifact uploads it to GCS and writes
+// the matching field on the Firestore job doc. The render-detail page's
+// 800 ms poll loop picks up new entries and this component renders
+// inline previews — script as text/blob link, narration as <audio>,
+// images/panels as a responsive grid, intermediate video as a
+// download link. Until the final mp4 is published these are labeled
+// "Intermediate" so the user doesn't confuse a half-rendered job with
+// the shipped output.
+// ---------------------------------------------------------------------------
+
+function LiveArtifactsCard({ job }: { job: Job | null }) {
+  const artifacts = job?.artifacts ?? null;
+  if (!job) return null;
+
+  const script = singleArtifact(artifacts, "script");
+  const envelope = singleArtifact(artifacts, "envelope");
+  const narration = singleArtifact(artifacts, "narration");
+  const beats = singleArtifact(artifacts, "beats");
+  const video = singleArtifact(artifacts, "video");
+  const images = listArtifact(artifacts, "images");
+  const panels = listArtifact(artifacts, "panels");
+
+  const intermediate = job.status === "rendering" || job.status === "uploading";
+
+  const anyArtifacts =
+    !!script || !!narration || !!beats || !!video || !!envelope ||
+    images.length > 0 || panels.length > 0;
+
+  return (
+    <div className="rounded-xl border border-border bg-surface p-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+            Live previews
+          </div>
+          <div className="mt-0.5 text-[13px] font-medium tracking-tight">
+            Stage outputs as they land
+          </div>
+        </div>
+        {intermediate && anyArtifacts && (
+          <span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.15em] text-amber-200">
+            Intermediate
+          </span>
+        )}
+      </div>
+
+      {!anyArtifacts && (
+        <div className="mt-4 flex items-center gap-2 rounded-lg border border-dashed border-border/60 bg-background/50 px-3 py-3 text-[12px] text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Waiting for the first artifact (script lands ~5 s into the render)…
+        </div>
+      )}
+
+      {(script || envelope) && (
+        <ArtifactBlock
+          title={envelope ? "Sectioned envelope (long-form)" : "Script"}
+          subtitle={
+            envelope
+              ? envelopeSubtitle(envelope)
+              : scriptSubtitle(script ?? envelope!)
+          }
+          href={jobsApi.artifactUrl(job.job_id, envelope ? "envelope" : "script")}
+          downloadName={envelope ? "envelope.json" : "script.json"}
+        />
+      )}
+      {narration && (
+        <ArtifactBlock
+          title="Narration"
+          subtitle={narrationSubtitle(narration)}
+          href={jobsApi.artifactUrl(job.job_id, "narration")}
+          audio
+        />
+      )}
+      {beats && (
+        <ArtifactBlock
+          title="Beats / alignment"
+          subtitle={beatsSubtitle(beats)}
+          href={jobsApi.artifactUrl(job.job_id, "beats")}
+          downloadName="beats.json"
+        />
+      )}
+      {(images.length > 0 || panels.length > 0) && (
+        <ImageGalleryBlock
+          jobId={job.job_id}
+          kind={images.length > 0 ? "images" : "panels"}
+          entries={images.length > 0 ? images : panels}
+        />
+      )}
+      {video && (
+        <ArtifactBlock
+          title="Video (intermediate)"
+          subtitle={videoSubtitle(video)}
+          href={jobsApi.artifactUrl(job.job_id, "video")}
+          downloadName="video.mp4"
+        />
+      )}
+    </div>
+  );
+}
+
+function singleArtifact(
+  artifacts: Job["artifacts"],
+  kind: string,
+): ArtifactEntry | null {
+  if (!artifacts) return null;
+  const entry = artifacts[kind];
+  if (!entry || Array.isArray(entry)) return null;
+  if (entry.status !== "ready") return null;
+  return entry;
+}
+
+function listArtifact(
+  artifacts: Job["artifacts"],
+  kind: string,
+): ArtifactEntry[] {
+  if (!artifacts) return [];
+  const entry = artifacts[kind];
+  if (!entry || !Array.isArray(entry)) return [];
+  return entry;
+}
+
+function scriptSubtitle(entry: ArtifactEntry): string {
+  const hook = (entry.hook as string | undefined) || "";
+  const n = (entry.n_words as number | undefined) ?? 0;
+  return [hook ? `"${hook.slice(0, 80)}${hook.length > 80 ? "…" : ""}"` : null, n ? `${n} words` : null]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function envelopeSubtitle(entry: ArtifactEntry): string {
+  const sections = (entry.n_sections as number | undefined) ?? 0;
+  const panels = (entry.n_panels as number | undefined) ?? 0;
+  return `${sections} sections · ${panels} panels`;
+}
+
+function narrationSubtitle(entry: ArtifactEntry): string {
+  const dur = entry.duration_s as number | undefined;
+  if (typeof dur !== "number" || dur <= 0) return "audio ready";
+  const m = Math.floor(dur / 60);
+  const s = Math.round(dur % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function beatsSubtitle(entry: ArtifactEntry): string {
+  const n = entry.n_beats as number | undefined;
+  return typeof n === "number" ? `${n} beats` : "alignment ready";
+}
+
+function videoSubtitle(entry: ArtifactEntry): string {
+  const dur = entry.duration_s as number | undefined;
+  const w = entry.width as number | undefined;
+  const h = entry.height as number | undefined;
+  const parts: string[] = [];
+  if (w && h) parts.push(`${w}×${h}`);
+  if (typeof dur === "number" && dur > 0) {
+    const m = Math.floor(dur / 60);
+    const s = Math.round(dur % 60);
+    parts.push(`${m}:${String(s).padStart(2, "0")}`);
+  }
+  return parts.length ? parts.join(" · ") : "video ready";
+}
+
+function ArtifactBlock({
+  title,
+  subtitle,
+  href,
+  downloadName,
+  audio,
+}: {
+  title: string;
+  subtitle: string;
+  href: string;
+  downloadName?: string;
+  audio?: boolean;
+}) {
+  return (
+    <div className="mt-4 rounded-lg border border-border/70 bg-background/50 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="text-[12.5px] font-medium tracking-tight">{title}</div>
+          <div className="mt-0.5 truncate text-[11.5px] text-muted-foreground">{subtitle}</div>
+        </div>
+        <Button asChild variant="outline" size="sm">
+          <a href={href} download={downloadName} target={audio ? undefined : "_blank"} rel="noreferrer">
+            {audio ? <Play className="h-3.5 w-3.5" /> : <Download className="h-3.5 w-3.5" />}
+            {audio ? "Listen" : "Open"}
+          </a>
+        </Button>
+      </div>
+      {audio && (
+        <audio
+          key={href}
+          controls
+          src={href}
+          className="mt-2 h-8 w-full"
+          preload="none"
+        />
+      )}
+    </div>
+  );
+}
+
+function ImageGalleryBlock({
+  jobId,
+  kind,
+  entries,
+}: {
+  jobId: string;
+  kind: "images" | "panels";
+  entries: ArtifactEntry[];
+}) {
+  const ready = entries.filter((e) => e?.status === "ready");
+  if (ready.length === 0 && entries.length === 0) return null;
+  const total = entries.length;
+  const readyCount = ready.length;
+  return (
+    <div className="mt-4 rounded-lg border border-border/70 bg-background/50 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="text-[12.5px] font-medium tracking-tight">
+            {kind === "panels" ? "Long-form panels" : "Generated images"}
+          </div>
+          <div className="mt-0.5 truncate text-[11.5px] text-muted-foreground">
+            {readyCount} of {total} ready
+          </div>
+        </div>
+      </div>
+      <div className="mt-3 grid grid-cols-4 gap-1.5 sm:grid-cols-6">
+        {entries.map((entry, i) => {
+          const idx = (entry?.i as number | undefined) ?? i;
+          const status = entry?.status ?? "pending";
+          if (status === "ready") {
+            return (
+              // eslint-disable-next-line @next/next/no-img-element
+              <a
+                key={idx}
+                href={jobsApi.artifactUrl(jobId, kind, idx)}
+                target="_blank"
+                rel="noreferrer"
+                className="group relative aspect-square overflow-hidden rounded-md border border-border/40 bg-background"
+              >
+                <img
+                  src={jobsApi.artifactUrl(jobId, kind, idx)}
+                  alt={`${kind} ${idx}`}
+                  className="h-full w-full object-cover transition group-hover:opacity-80"
+                  loading="lazy"
+                />
+              </a>
+            );
+          }
+          return (
+            <div
+              key={idx}
+              className={cn(
+                "flex aspect-square items-center justify-center rounded-md border border-dashed",
+                status === "failed"
+                  ? "border-rose-500/40 bg-rose-500/5 text-rose-300"
+                  : "border-border/50 bg-background/40 text-muted-foreground",
+              )}
+            >
+              {status === "failed" ? (
+                <X className="h-3 w-3" />
+              ) : (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }

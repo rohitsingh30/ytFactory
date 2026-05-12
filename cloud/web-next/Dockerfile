@@ -44,3 +44,5 @@ COPY web-next/next.config.mjs ./next.config.mjs
 EXPOSE 8080
 # Cloud Run sets PORT; next start binds to it via -p.
 CMD ["sh", "-c", "node node_modules/next/dist/bin/next start -p ${PORT:-8080} -H 0.0.0.0"]
+
+COPY otel_init.py ./

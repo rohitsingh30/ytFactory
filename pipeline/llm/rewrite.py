@@ -36,6 +36,81 @@ class Script:
     source: str = ""
 
 
+# ---------------------------------------------------------------------------
+# Length scaling — derive (words band, sentences band, image count target,
+# duration band) from the form's `cfg["duration_max_s"]`. Single source of
+# truth that both _BASE_PROMPT and the orchestrator's RewriteContract read
+# from, so the prompt + the validator can never disagree.
+#
+# Pre-2026-05-12 these were hardcoded ("110-160 words / 10-15 sentences /
+# 22-32 s") and ignored the form's length_s entirely — picking 90s on the
+# Customize step still produced a 25s narration.
+#
+# WPM target (~150) matches the long-form rewriter's convention. The hi/lo
+# bands give the LLM ~15% wiggle either way; sentence band assumes ~12 wpm
+# average sentence length (TTS-friendly subtitle shape).
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_TARGET_DURATION_S = 27  # midpoint of legacy 22-32s band
+# Spoken-narration WPM at the typical Shorts atempo. ~300 wpm matches
+# the legacy "110-160 words / 22-32 s" ratio (140 words / 28 s × 60 ≈
+# 300 wpm). Set as a single tunable here so a future TTS provider
+# swap recalibrates length scaling consistently across the prompt +
+# validator + script_check.
+_TTS_WPM = 300
+
+
+def _length_targets(duration_s: int | None) -> dict[str, int]:
+    """Compute the length-target dict the prompt + validator share.
+
+    Returns a dict of:
+      duration_min, duration_max, words_lo, words_hi, words_aim,
+      underweight_lo, underweight_hi, sentences_lo, sentences_hi,
+      min_image_warning.
+
+    All ints — straight kwargs into ``_BASE_PROMPT.format(...)``.
+
+    ``duration_s`` is the form's target duration (typically
+    ``cfg["duration_max_s"]`` after ``_apply_form_overrides``). When
+    None, falls back to the legacy 22-32 s / 110-160 word band so
+    pre-2026-05-12 callers keep the same output shape.
+    """
+    if duration_s is None or duration_s <= 0:
+        duration_s = _DEFAULT_TARGET_DURATION_S
+
+    # ±20% bands around the target.
+    duration_min = max(8, int(round(duration_s * 0.85)))
+    duration_max = max(duration_min + 4, int(round(duration_s * 1.15)))
+
+    aim_words = int(round(duration_s * _TTS_WPM / 60))
+    words_lo = max(35, int(round(aim_words * 0.80)))
+    words_hi = max(words_lo + 20, int(round(aim_words * 1.15)))
+
+    # "Underweight" example range — calls out 30-50% of target so the
+    # LLM doesn't ship the lazy short version.
+    underweight_lo = max(15, int(round(aim_words * 0.30)))
+    underweight_hi = max(underweight_lo + 10, int(round(aim_words * 0.50)))
+
+    # ~12 wpm avg sentence; sentence count IS image count.
+    sentences_lo = max(5, aim_words // 14)
+    sentences_hi = max(sentences_lo + 3, aim_words // 9)
+    min_image_warning = max(3, sentences_lo // 2)
+
+    return {
+        "duration_min": duration_min,
+        "duration_max": duration_max,
+        "words_lo": words_lo,
+        "words_hi": words_hi,
+        "words_aim": aim_words,
+        "underweight_lo": underweight_lo,
+        "underweight_hi": underweight_hi,
+        "sentences_lo": sentences_lo,
+        "sentences_hi": sentences_hi,
+        "min_image_warning": min_image_warning,
+    }
+
+
 # Subtitle-shape + prosody rules apply identically to ALL narration
 # modes (Part-1 vanilla, Part-1 cliffhanger, Part-2 finale). Extracted
 # into one constant so the rules can't drift between prompts. If you're
@@ -181,18 +256,21 @@ of pauses, emphasis, and breath):
 
 
 _BASE_PROMPT = """\
-You are writing a 22–32 second YouTube Shorts narration in the style of
-top AITA / Reddit-story channels — long enough to actually tell the
-story, short enough to keep retention.
+You are writing a {duration_min}–{duration_max} second YouTube Shorts
+narration in the style of top AITA / Reddit-story channels — long
+enough to actually tell the story, short enough to keep retention.
 
 LENGTH (NON-NEGOTIABLE — short narrations under-deliver on this format):
-- 110–160 words total. Aim for ~140. Under 110 is too thin; do not
-  ship a narration in the 50–80 word range — that produces only 5–7
-  beats and a flat slideshow.
-- 10–15 short sentences. Each sentence becomes ONE image AND ONE
-  caption, so sentence count IS image count. 6 sentences = 6 images
-  = a flat slideshow; we want 12+.
-- Spoken duration ~22–32 seconds at typical TTS pace.
+- {words_lo}–{words_hi} words total. Aim for ~{words_aim}. Under
+  {words_lo} is too thin; do not ship a narration in the
+  {underweight_lo}–{underweight_hi} word range — that produces only
+  a flat slideshow.
+- {sentences_lo}–{sentences_hi} short sentences. Each sentence
+  becomes ONE image AND ONE caption, so sentence count IS image
+  count. {min_image_warning} sentences = {min_image_warning} images
+  = a flat slideshow; we want {sentences_lo}+.
+- Spoken duration ~{duration_min}–{duration_max} seconds at typical
+  TTS pace.
 
 OPENING:
 - Hook in the first ~8 words: a curiosity-gap question, an
@@ -237,12 +315,12 @@ mine the source story for these and put them in):
 
 {shared_rules}
 
-BEFORE YOU RETURN: count your sentences. If under 10, you have not
-followed the brief — go back and break long sentences into more
-short ones, or add a missing escalation/pivot/stakes beat from the
-source story. If under 110 words total, do the same. Then re-read
-your narration aloud: does the rhythm vary, or are all sentences
-the same length? If the latter, rewrite — vary it.
+BEFORE YOU RETURN: count your sentences. If under {sentences_lo}, you
+have not followed the brief — go back and break long sentences into
+more short ones, or add a missing escalation/pivot/stakes beat from
+the source story. If under {words_lo} words total, do the same. Then
+re-read your narration aloud: does the rhythm vary, or are all
+sentences the same length? If the latter, rewrite — vary it.
 
 {closer_block}
 
@@ -254,7 +332,7 @@ Input story (raw — mine the specific details, names, numbers, props):
 Return ONLY a JSON object (no prose, no markdown fences):
 {{
   "hook": "<first ~5–10 words of the narration>",
-  "narration": "<full 110–160 word narration, 10–15 short sentences, including the hook AND the closer>",
+  "narration": "<full {words_lo}–{words_hi} word narration, {sentences_lo}–{sentences_hi} short sentences, including the hook AND the closer>",
   "title_options": ["<click-bait title A>", "<title B>", "<title C>"]
 }}
 """
@@ -563,6 +641,7 @@ def _rewrite_legacy(raw_story: dict, channel_cfg: dict) -> Script:
         shared_rules=_SHARED_CRAFT_RULES,
         story=story_text[:6000],  # cap context size
         closer_block=closer_block,
+        **_length_targets(cfg.get("duration_max_s") if cfg else None),
     )
 
     print(f"[rewrite] authoring narration via claude CLI for {raw_story.get('slug')!r}…")

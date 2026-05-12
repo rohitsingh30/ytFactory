@@ -132,6 +132,16 @@ export interface CritiqueResult {
   notes?: string;
 }
 
+export interface ArtifactEntry {
+  status: "pending" | "ready" | "failed";
+  uri?: string | null;
+  version?: number;
+  // Free-form per-kind extras (duration_s for narration, n_beats for
+  // beats, hook for script, etc). Render-detail page may pluck whichever
+  // it wants; unknown keys are passed through harmlessly.
+  [k: string]: unknown;
+}
+
 export interface Job {
   job_id: string;
   channel?: ChannelKey | string;
@@ -150,6 +160,15 @@ export interface Job {
   critique?: CritiqueResult | null;
   log_tail?: string;
   publish_meta?: Record<string, unknown>;
+  // Slice 4 — live artifact previews. Server-side
+  // pipeline.render.artifacts.emit_artifact populates this map as each
+  // intermediate is produced. Single-entry kinds (script, narration,
+  // beats, video, thumb, envelope) are objects; list-typed kinds
+  // (images, panels) are arrays.
+  artifacts?: Record<string, ArtifactEntry | ArtifactEntry[]> | null;
+  // Slice 1 — resolved RenderSpec. Lets the UI show "the system
+  // interpreted your inputs as kind=long_form, aspect=16:9".
+  render_spec?: Record<string, unknown> | null;
 }
 
 export interface JobListResponse {

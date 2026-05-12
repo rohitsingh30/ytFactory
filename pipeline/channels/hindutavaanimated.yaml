@@ -181,3 +181,41 @@ upload:
     ━━━━━━━━━━━━━━━━━━━━
 
     #shorts #mahabharat #krishna #hindi #kahani #hindumythology #devotional
+
+# ---- Long-form (16:9) — kathaa mode -----------------------------------
+# Added 2026-05-12 (Slice 2 of unified-renderer rollout). Mythology
+# kathaa long-form (60-90 min) — calming devotional narration of
+# Mahabharat / Ramayan / Puraan chapters, image_panels of Amar Chitra
+# Katha-style art with Ken-Burns motion. See /make-katha skill for the
+# narration authoring side.
+long_form:
+  render_mode: image_panels
+  tts_provider: cloudrun_indicparler
+  tts_voice: hf_alpha
+  tts_speed: 0.92
+  tts_post_atempo: 0.95
+  tts_chunk_target_chars: 320           # Hindi chars are heavier — smaller target
+  tts_chunk_join_silence_s: 0.5
+  audio_narration_db: -6
+  audio_music_bed_db: -30               # ambient bhajan bed quieter
+  audio_source_mix: 0.0
+  duration_target_s: [3000, 5400]       # 50-90 min sweet spot
+  duration_max_s: 7200
+  output_resolution: [1920, 1080]
+  output_fps: 30
+  captions_enabled: true                # Devanagari subtitles for accessibility
+  panel_max_count: 24
+  image_provider: cloudrun_flux2_klein
+  image_seed: 1008
+  image_steps: 4
+  image_width: 1344
+  image_height: 768
+  image_style_prefix: |
+    Amar Chitra Katha comic-book illustration style — bold black ink
+    outlines, hand-painted vibrant colours (saffron, deep blue, gold,
+    crimson), traditional Indian iconography (lotus motifs, mandalas,
+    temple architecture). 16:9 horizontal composition with the central
+    deity / scene weighted left-of-centre for Ken-Burns pan-right.
+  panel_crossfade_s: 1.8
+  panel_zoom_factor: 1.06
+  music_bed_default: bhajan_low.mp3

@@ -4,6 +4,20 @@
 > deploy. Two CLASS-OF-BUGs surfaced, both caused by an incomplete
 > understanding of how a "new field on the create page" actually reaches
 > the renderer in production.
+>
+> **2026-05-12 update:** the inline-`_apply_form_overrides` workflow
+> described below was found to be **dead code** (AST-confirmed: 0
+> callers in `_make_short_impl`) — every form pick on the SHORT path
+> silently dropped, AND the long-form path had no equivalent at all
+> (9 of 11 spec fields dropped). Replaced by the descriptor registry —
+> see [`docs/input_descriptor_registry.md`](input_descriptor_registry.md).
+> Adding a new form input is now ONE `CustomizationField(...)`
+> declaration in `pipeline/schemas/customization.py` (with
+> `cfg_targets` / `spec_field` / `apply_handler` / `prompt_patch_fn`
+> metadata) — the registry handles SHORT cfg writes, long-form per-render
+> overlay, and prompt-patch injection automatically. The 3-layer
+> wiring described below is now ONE-layer (the schema declaration).
+> The historical content remains for context on the bug.
 
 ## The rule
 
@@ -22,6 +36,11 @@ maps each known key to a cfg slot, and `--override` accepts any `KEY=VALUE`.
 Adding a new field there is one line in `_apply_form_overrides` plus the
 schema entry above; the worker forward is **already wired** as a pass-everything
 loop, so step 3 is automatic for any future field.
+
+> **2026-05-12 — the above "one line in `_apply_form_overrides`" claim
+> was the bug.** That function had zero callers (AST-confirmed) for an
+> unknown duration. Every entry in its body was inert. Now superseded
+> by the descriptor registry — see [`input_descriptor_registry.md`].
 
 ## Worked example: 2026-05-10 Voice/Song flip + Background visuals
 

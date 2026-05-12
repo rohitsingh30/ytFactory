@@ -61,6 +61,54 @@ import yaml
 from pipeline import observability as obs
 
 
+def _deep_merge_dict(dst: dict, src: dict) -> None:
+    """In-place deep-merge of ``src`` into ``dst``.
+
+    Used by ``_main_impl`` to overlay a per-render YAML (passed via
+    ``--config``) on top of the channel YAML without losing nested
+    keys. Behaviour matches the long-standing variant-overlay pattern
+    in ``RenderPaths.from_channel_yaml`` and the cloud-worker's
+    base+variant cfg merge: scalar / list values in ``src`` REPLACE
+    the same key in ``dst``; sub-dicts are recursively merged so a
+    partial ``long_form:`` overlay (e.g. only ``tts_voice`` set)
+    leaves the rest of the channel's ``long_form:`` block intact.
+    """
+    for k, v in src.items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            _deep_merge_dict(dst[k], v)
+        else:
+            dst[k] = v
+
+
+def _resolve_channel_config_path(paths) -> Path:
+    """Locate the channel YAML for ``paths.channel`` across both layouts.
+
+    Pre-2026-05-10 each channel had ``<channel>/config.yaml`` on disk
+    (the layout ``RenderPaths.config_yaml`` returns by default). The
+    2026-05-10 nuclear cleanup moved every channel YAML to
+    ``pipeline/channels/<slug>.yaml`` — the laptop CLI shim still reads
+    the old path, but cloud-built images have ONLY the central path.
+
+    This helper checks the local path first (laptop compat), then the
+    central path (cloud + post-cleanup). Raises with a clear message
+    listing both candidates if neither exists. Without this helper,
+    long_form.py crashes with a bare ``FileNotFoundError`` when invoked
+    on a channel that uses the central layout exclusively (every
+    channel today, in cloud).
+    """
+    local_path = paths.config_yaml
+    if local_path.exists():
+        return local_path
+    central_path = REPO_ROOT / "pipeline" / "channels" / f"{paths.channel}.yaml"
+    if central_path.exists():
+        return central_path
+    raise SystemExit(
+        f"missing channel config: tried {local_path} (legacy per-channel "
+        f"layout) and {central_path} (central layout, post-2026-05-10). "
+        f"Add the YAML at one of these paths."
+    )
+
+
 # ---------- env loading ----------------------------------------------------
 
 
@@ -1562,6 +1610,14 @@ def main() -> int:
     ap.add_argument("--no-grade", action="store_true",
                     help="skip the visual_grade filter chain — lets the aspect-match "
                          "short-circuit stream-copy 1080p sources (avoids the long-clip crash)")
+    ap.add_argument("--config", default=None,
+                    help="Path to a per-render YAML overlay deep-merged on top of "
+                         "the channel YAML. Lets the unified renderer "
+                         "(pipeline/render/video.py) inject form-override values "
+                         "the user picked (voice / music_bed / output_resolution / "
+                         "etc) into long_form.py without modifying the channel "
+                         "YAML on disk. The overlay is consumed at the start of "
+                         "_main_impl, before any cfg-driven branching.")
     args = ap.parse_args()
 
     # OTel render envelope: pushes RenderContext + opens
@@ -1610,7 +1666,33 @@ def _main_impl(args) -> int:
     paths = RenderPaths.from_channel_dir(args.channel, project_root=REPO_ROOT)
     channel_dir = paths.root  # backward-compat: subsequent code uses channel_dir
 
-    config = yaml.safe_load(paths.config_yaml.read_text())
+    config = yaml.safe_load(_resolve_channel_config_path(paths).read_text())
+
+    # Per-render YAML overlay (Slice-2.P2 — 2026-05-12). When the
+    # unified renderer (pipeline/render/video.py::render_long_form)
+    # writes a per-render overlay derived from the form-driven
+    # RenderSpec, deep-merge it on top of the channel YAML so user
+    # picks (voice / music_bed / output_resolution / render_mode /
+    # etc) take effect WITHOUT mutating the on-disk channel YAML.
+    # Empty overlay (or no --config) leaves cfg untouched — preserves
+    # the laptop CLI workflow where the channel YAML is the
+    # authoritative source.
+    if getattr(args, "config", None):
+        overlay_path = Path(args.config)
+        if overlay_path.exists():
+            try:
+                overlay = yaml.safe_load(overlay_path.read_text()) or {}
+            except Exception as exc:  # noqa: BLE001
+                print(f"[long_form] WARN: failed to parse overlay "
+                      f"{overlay_path}: {exc} — proceeding with channel YAML alone")
+                overlay = {}
+            if isinstance(overlay, dict) and overlay:
+                _deep_merge_dict(config, overlay)
+                print(f"[long_form] applied per-render overlay from {overlay_path}")
+        else:
+            print(f"[long_form] WARN: --config {overlay_path} does not exist — "
+                  "proceeding with channel YAML alone")
+
     narration_path = paths.narration_for(args.slug)
     if not narration_path.exists():
         raise SystemExit(f"missing narration: {narration_path}")

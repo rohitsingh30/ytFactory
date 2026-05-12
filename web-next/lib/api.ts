@@ -232,6 +232,12 @@ export const jobsApi = {
   publish: (jobId: string, body: PublishRequest) =>
     api.post<PublishResponse>(`/api/jobs/${jobId}/publish`, body),
   previewUrl: (jobId: string) => `/api/jobs/${jobId}/preview.mp4`,
+  // Slice 4 — single endpoint for every per-job artifact kind.
+  // Backend signs the GCS URI and 302-redirects.
+  artifactUrl: (jobId: string, kind: string, index?: number) => {
+    const base = `/api/jobs/${jobId}/artifact/${kind}`;
+    return index !== undefined ? `${base}?index=${index}` : base;
+  },
 };
 
 export const renderApi = {

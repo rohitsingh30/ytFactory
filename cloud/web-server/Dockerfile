@@ -91,3 +91,5 @@ WORKDIR /workspace
 
 # Cloud Run sets PORT; uvicorn binds to it.
 CMD ["sh", "-c", "uvicorn web.server:app --host 0.0.0.0 --port ${PORT:-8080}"]
+
+COPY cloud/web-server/otel_init.py /workspace/otel_init.py
