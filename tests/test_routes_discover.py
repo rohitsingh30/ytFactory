@@ -22,12 +22,16 @@ from control.routes.discover_routes import (
     _build_feed,
     _excerpt,
     _filter_avoid,
+    _is_hn_rss,
     _llm_topic_items,
     _native_items_for,
+    _niche_native_items_for,
     _reddit_items,
     _today_in_history_items,
+    _wikipedia_list_items,
     router,
 )
+from pipeline.niche_specs import NicheDoc, NicheSource
 from pipeline.sources.reddit_api import RawStory
 
 
@@ -182,6 +186,464 @@ class TestNativeItemsFor(unittest.TestCase):
             label, items = _native_items_for(ch, DiscoverRequest(), limit=4)
             self.assertEqual(label, "")
             self.assertEqual(items, [])
+
+
+# ---------------------------------------------------------------------------
+# Niche-driven routing (2026-05-12 fix: discover must respect the user's
+# selected niche, NOT the channel-default Wikipedia "On this day" feed).
+# ---------------------------------------------------------------------------
+
+
+def _niche(key: str, kind: str | None, ref: str | None = None,
+           length_kind: str = "long") -> NicheDoc:
+    """Build a NicheDoc for routing tests with the nested source shape
+    that the GCS-persisted JSONs use."""
+    return NicheDoc(
+        key=key,
+        label=key.replace("_", " ").title(),
+        length_kind=length_kind,  # type: ignore[arg-type]
+        source=NicheSource(kind=kind, ref=ref),
+    )
+
+
+class TestWikipediaListItems(unittest.TestCase):
+    """``_wikipedia_list_items`` is the new adapter that scrapes a
+    Wikipedia ``List_of_*`` page (delegating to
+    :func:`pipeline.sources.wikipedia.fetch`) and emits per-entry
+    DiscoverItems."""
+
+    def _wiki_story(self, slug: str, title: str,
+                    page: str = "List_of_wars") -> RawStory:
+        return RawStory(
+            slug=slug,
+            title=title,
+            body="b" * 200,
+            source=f"wikipedia:{page}",
+            url=f"https://en.wikipedia.org/wiki/{page}",
+            metadata={"page": page, "license": "CC-BY-SA"},
+        )
+
+    def test_returns_per_entry_items(self) -> None:
+        stories = [
+            self._wiki_story("hundred-years-war", "Hundred Years' War"),
+            self._wiki_story("ww1", "World War I"),
+        ]
+        with patch("pipeline.sources.wikipedia.fetch", return_value=stories) as f:
+            items = _wikipedia_list_items(page="List_of_wars", limit=5)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0].topic, "Hundred Years' War")
+        self.assertEqual(items[0].source_kind, "wikipedia_topic")
+        self.assertEqual(items[0].source_label, "Wikipedia · List of wars")
+        self.assertEqual(f.call_args.kwargs["page"], "List_of_wars")
+        self.assertEqual(f.call_args.kwargs["limit"], 5)
+
+    def test_per_entry_source_ref_is_unique(self) -> None:
+        """Critical for ``_filter_avoid`` not to nuke the entire page
+        once one entry has been picked. The avoid list compares by
+        ``source_ref``, so every entry must differ."""
+        stories = [
+            self._wiki_story("a", "Entry A"),
+            self._wiki_story("b", "Entry B"),
+            self._wiki_story("c", "Entry C"),
+        ]
+        with patch("pipeline.sources.wikipedia.fetch", return_value=stories):
+            items = _wikipedia_list_items(page="List_of_wars", limit=5)
+        refs = [it.source_ref for it in items]
+        self.assertEqual(len(refs), len(set(refs)))
+        # Each ref is the page URL plus the entry slug as a fragment.
+        for it, st in zip(items, stories):
+            self.assertEqual(it.source_ref, f"{st.url}#{st.slug}")
+            self.assertEqual(it.metadata["page_url"], st.url)
+
+    def test_hub_page_returning_no_entries(self) -> None:
+        """Wikipedia hub pages (e.g. ``Lists_of_disasters``) often
+        return nothing useful. The adapter must return ``[]`` so the
+        caller can fall through to the LLM brainstorm."""
+        with patch("pipeline.sources.wikipedia.fetch", return_value=[]):
+            items = _wikipedia_list_items(page="Lists_of_disasters", limit=5)
+        self.assertEqual(items, [])
+
+
+class TestIsHnRss(unittest.TestCase):
+    """RSS niches with an HN feed URL route to ``_ai_news_items``;
+    every other RSS URL falls through to LLM-only."""
+
+    def test_hn_canonical(self) -> None:
+        self.assertTrue(_is_hn_rss("https://news.ycombinator.com/rss"))
+
+    def test_hn_http_scheme(self) -> None:
+        self.assertTrue(_is_hn_rss("http://news.ycombinator.com/rss"))
+
+    def test_hn_uppercase_host(self) -> None:
+        self.assertTrue(_is_hn_rss("https://NEWS.YCombinator.com/rss"))
+
+    def test_other_feed_rejected(self) -> None:
+        self.assertFalse(_is_hn_rss("https://feeds.bbci.co.uk/news/rss.xml"))
+
+    def test_none_or_empty(self) -> None:
+        self.assertFalse(_is_hn_rss(None))
+        self.assertFalse(_is_hn_rss(""))
+
+    def test_garbage_url_doesnt_raise(self) -> None:
+        # urlparse swallows most malformed URLs; this is a defensive
+        # belt-and-braces test for callers passing junk.
+        self.assertFalse(_is_hn_rss("not a url at all"))
+
+
+class TestNicheNativeItemsFor(unittest.TestCase):
+    """Direct unit tests on ``_niche_native_items_for`` — the heart of
+    the niche-driven dispatch table. One test per branch so the
+    coverage gate pins every routing path."""
+
+    def test_reddit_routes_to_subreddit(self) -> None:
+        n = _niche("malicious", "reddit", "MaliciousCompliance")
+        with patch("pipeline.sources.reddit_api.fetch",
+                   return_value=[_raw_story("Top MC story", "x. " * 20)]) as f:
+            label, items = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+        self.assertEqual(label, "reddit:MaliciousCompliance")
+        self.assertEqual(f.call_args.kwargs["subreddit"], "MaliciousCompliance")
+        self.assertEqual(len(items), 1)
+
+    def test_reddit_strips_leading_r_slash(self) -> None:
+        """Defensive: hand-authored niches sometimes use 'r/Name'."""
+        n = _niche("askh", "reddit", "r/AskHistorians")
+        with patch("pipeline.sources.reddit_api.fetch",
+                   return_value=[_raw_story("ask story", "x. " * 20)]) as f:
+            label, _ = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+        self.assertEqual(label, "reddit:AskHistorians")
+        self.assertEqual(f.call_args.kwargs["subreddit"], "AskHistorians")
+
+    def test_reddit_with_null_ref_returns_empty(self) -> None:
+        n = _niche("misconfigured", "reddit", None)
+        label, items = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+        self.assertEqual((label, items), ("", []))
+
+    def test_reddit_with_only_r_slash_returns_empty(self) -> None:
+        """Defensive: a hand-edited niche with ``ref="r/"`` (no actual
+        sub) strips down to empty and must NOT call reddit_api with
+        an empty subreddit."""
+        for bad in ("r/", "/r/", "/", "//"):
+            n = _niche("only_slash", "reddit", bad)
+            with patch("pipeline.sources.reddit_api.fetch") as f:
+                label, items = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+            self.assertEqual((label, items), ("", []),
+                             msg=f"ref={bad!r} should be treated as null")
+            f.assert_not_called()
+
+    def test_wikipedia_on_this_day_routes_to_today_in_history(self) -> None:
+        n = _niche("history_today", "wikipedia", "On_this_day", length_kind="short")
+        story = _raw_story("Apollo 11 landing", "Moon landing. " * 10)
+        story.metadata["year"] = 1969
+        with patch("pipeline.sources.today_in_history.fetch", return_value=[story]):
+            label, items = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+        self.assertEqual(label, "wikipedia:onthisday")
+        self.assertEqual(items[0].source_kind, "wikipedia_topic")
+
+    def test_wikipedia_list_page_routes_to_list_scraper(self) -> None:
+        """The bug-fix path. ``ancient_civilizations`` niche on
+        ``historyrecapped`` declares
+        ``source: {kind: wikipedia, ref: List_of_ancient_civilizations}``
+        and MUST hit the wiki list scraper, not today_in_history."""
+        n = _niche("ancient_civilizations", "wikipedia",
+                   "List_of_ancient_civilizations")
+        story = RawStory(
+            slug="indus-valley", title="Indus Valley Civilisation",
+            body="The Indus Valley civilisation arose c. 3300 BCE. " * 4,
+            source="wikipedia:List_of_ancient_civilizations",
+            url="https://en.wikipedia.org/wiki/List_of_ancient_civilizations",
+            metadata={"page": "List_of_ancient_civilizations"},
+        )
+        with patch("pipeline.sources.wikipedia.fetch", return_value=[story]) as f:
+            label, items = _niche_native_items_for(n, DiscoverRequest(), limit=5)
+        self.assertEqual(label, "wikipedia:List_of_ancient_civilizations")
+        self.assertEqual(f.call_args.kwargs["page"],
+                         "List_of_ancient_civilizations")
+        self.assertEqual(items[0].topic, "Indus Valley Civilisation")
+        self.assertEqual(items[0].source_kind, "wikipedia_topic")
+
+    def test_wikipedia_with_null_ref_returns_empty(self) -> None:
+        """Niches like ``historical_figures`` / ``wiki_physics`` declare
+        ``wikipedia`` with no ref — they're "use the LLM with this
+        niche label" niches, not native-source niches."""
+        n = _niche("historical_figures", "wikipedia", None)
+        label, items = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+        self.assertEqual((label, items), ("", []))
+
+    def test_rss_hn_url_routes_to_ai_news(self) -> None:
+        n = _niche("ai_tech_daily", "rss", "https://news.ycombinator.com/rss")
+        with patch("pipeline.sources.ai_news.fetch",
+                   return_value=[_raw_story("HN top", "x. " * 20)]):
+            label, items = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+        self.assertEqual(label, "rss:news.ycombinator.com")
+        self.assertEqual(items[0].source_kind, "user_text")
+
+    def test_rss_unsupported_url_returns_empty(self) -> None:
+        n = _niche("breaking_sports_news", "rss", "https://feeds.bbci.co.uk/sport/rss.xml")
+        label, items = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+        self.assertEqual((label, items), ("", []))
+
+    def test_rss_null_ref_returns_empty(self) -> None:
+        n = _niche("breaking_sports_news", "rss", None)
+        label, items = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+        self.assertEqual((label, items), ("", []))
+
+    def test_manual_returns_empty(self) -> None:
+        for ref in (None, "mahabharat"):
+            n = _niche(f"m_{ref or 'none'}", "manual", ref)
+            label, items = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+            self.assertEqual((label, items), ("", []),
+                             msg=f"manual ref={ref!r} should be LLM-only")
+
+    def test_x_twitter_returns_empty(self) -> None:
+        n = _niche("tweet_xfeed", "x_twitter", None)
+        label, items = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+        self.assertEqual((label, items), ("", []))
+
+    def test_unknown_kind_returns_empty(self) -> None:
+        """Forward-compat: a niche with an unknown source kind degrades
+        to LLM-only rather than crashing."""
+        n = _niche("future_kind", "tiktok_unreleased", "foo")
+        label, items = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+        self.assertEqual((label, items), ("", []))
+
+    def test_missing_source_returns_empty(self) -> None:
+        """A NicheDoc with no source field at all (legacy seed)."""
+        n = NicheDoc(key="legacy", label="Legacy")
+        # Wipe the auto-synthesised source so this exercises the
+        # ``src is None`` branch.
+        n.source = None
+        label, items = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+        self.assertEqual((label, items), ("", []))
+
+    def test_source_with_null_kind_returns_empty(self) -> None:
+        n = NicheDoc(key="nul", label="X", source=NicheSource(kind=None, ref=None))
+        label, items = _niche_native_items_for(n, DiscoverRequest(), limit=4)
+        self.assertEqual((label, items), ("", []))
+
+
+class TestNativeItemsForNicheDriven(unittest.TestCase):
+    """Tests the precedence wiring in ``_native_items_for``: niche
+    selection ALWAYS wins over channel-default branches when set."""
+
+    def test_history_ancient_civilizations_skips_today_in_history(self) -> None:
+        """The exact user-reported bug: niche=ancient_civilizations on
+        historyrecapped MUST scrape the wiki list page, NOT call
+        today_in_history."""
+        n = _niche("ancient_civilizations", "wikipedia",
+                   "List_of_ancient_civilizations")
+        story = RawStory(
+            slug="rome", title="Roman Republic",
+            body="Founded 509 BCE. " * 6,
+            source="wikipedia:List_of_ancient_civilizations",
+            url="https://en.wikipedia.org/wiki/List_of_ancient_civilizations",
+            metadata={"page": "List_of_ancient_civilizations"},
+        )
+        with patch("control.routes.discover_routes._resolve_niche_doc",
+                   return_value=n), \
+             patch("pipeline.sources.wikipedia.fetch", return_value=[story]) as wiki, \
+             patch("pipeline.sources.today_in_history.fetch") as tih:
+            label, items = _native_items_for(
+                "historyrecapped",
+                DiscoverRequest(niche_key="ancient_civilizations"),
+                limit=5,
+            )
+        self.assertEqual(label, "wikipedia:List_of_ancient_civilizations")
+        self.assertEqual(items[0].topic, "Roman Republic")
+        wiki.assert_called_once()
+        # CRITICAL: today_in_history must NOT have been hit.
+        tih.assert_not_called()
+
+    def test_history_history_today_routes_to_today_in_history(self) -> None:
+        n = _niche("history_today", "wikipedia", "On_this_day",
+                   length_kind="short")
+        story = _raw_story("Today event", "x. " * 20)
+        with patch("control.routes.discover_routes._resolve_niche_doc",
+                   return_value=n), \
+             patch("pipeline.sources.today_in_history.fetch", return_value=[story]):
+            label, items = _native_items_for(
+                "historyrecapped",
+                DiscoverRequest(niche_key="history_today"),
+                limit=5,
+            )
+        self.assertEqual(label, "wikipedia:onthisday")
+        self.assertEqual(len(items), 1)
+
+    def test_history_askhistorians_routes_to_reddit(self) -> None:
+        n = _niche("askhistorians", "reddit", "AskHistorians",
+                   length_kind="short")
+        with patch("control.routes.discover_routes._resolve_niche_doc",
+                   return_value=n), \
+             patch("pipeline.sources.reddit_api.fetch",
+                   return_value=[_raw_story("ask story", "x. " * 20)]) as f:
+            label, _ = _native_items_for(
+                "historyrecapped",
+                DiscoverRequest(niche_key="askhistorians"),
+                limit=5,
+            )
+        self.assertEqual(label, "reddit:AskHistorians")
+        self.assertEqual(f.call_args.kwargs["subreddit"], "AskHistorians")
+
+    def test_history_history_quotes_manual_returns_empty_NOT_today_in_history(self) -> None:
+        """Critical fallback semantics: a manual niche on historyrecapped
+        MUST return empty native items so the LLM brainstorm carries.
+        It must NOT silently fall back to channel-default
+        today_in_history (the old bug)."""
+        n = _niche("history_quotes", "manual", None, length_kind="short")
+        with patch("control.routes.discover_routes._resolve_niche_doc",
+                   return_value=n), \
+             patch("pipeline.sources.today_in_history.fetch") as tih:
+            label, items = _native_items_for(
+                "historyrecapped",
+                DiscoverRequest(niche_key="history_quotes"),
+                limit=5,
+            )
+        self.assertEqual((label, items), ("", []))
+        tih.assert_not_called()
+
+    def test_history_no_niche_falls_back_to_channel_default(self) -> None:
+        """Back-compat: no niche selected → legacy channel-default
+        today_in_history. The GET feed endpoint without a query string
+        relies on this."""
+        story = _raw_story("Today event", "x. " * 20)
+        with patch("pipeline.sources.today_in_history.fetch", return_value=[story]):
+            label, items = _native_items_for(
+                "historyrecapped",
+                DiscoverRequest(),  # no niche_key
+                limit=5,
+            )
+        self.assertEqual(label, "wikipedia:onthisday")
+        self.assertEqual(len(items), 1)
+
+    def test_history_unresolvable_niche_returns_empty(self) -> None:
+        """niche_key set but lookup returns None (deleted niche, FE
+        cache stale, typo). Must NOT silently fall back to channel
+        default — same precedence rule as ``manual``."""
+        with patch("control.routes.discover_routes._resolve_niche_doc",
+                   return_value=None), \
+             patch("pipeline.sources.today_in_history.fetch") as tih:
+            label, items = _native_items_for(
+                "historyrecapped",
+                DiscoverRequest(niche_key="not_a_real_niche"),
+                limit=5,
+            )
+        self.assertEqual((label, items), ("", []))
+        tih.assert_not_called()
+
+    def test_cosmos_space_missions_routes_to_wiki_list(self) -> None:
+        """Same fix on cosmosdecoded: a wiki-list niche must scrape
+        that page, not the keyword-filtered today_in_history."""
+        n = _niche("space_missions", "wikipedia", "List_of_space_missions")
+        story = RawStory(
+            slug="apollo-11", title="Apollo 11",
+            body="x. " * 50, source="wikipedia:List_of_space_missions",
+            url="https://en.wikipedia.org/wiki/List_of_space_missions",
+            metadata={"page": "List_of_space_missions"},
+        )
+        with patch("control.routes.discover_routes._resolve_niche_doc",
+                   return_value=n), \
+             patch("pipeline.sources.wikipedia.fetch", return_value=[story]), \
+             patch("pipeline.sources.today_in_history.fetch") as tih:
+            label, items = _native_items_for(
+                "cosmosdecoded",
+                DiscoverRequest(niche_key="space_missions"),
+                limit=5,
+            )
+        self.assertEqual(label, "wikipedia:List_of_space_missions")
+        self.assertEqual(items[0].topic, "Apollo 11")
+        tih.assert_not_called()
+
+    def test_mystoriesanimated_malicious_niche_routes_to_reddit(self) -> None:
+        n = _niche("malicious", "reddit", "MaliciousCompliance",
+                   length_kind="short")
+        with patch("control.routes.discover_routes._resolve_niche_doc",
+                   return_value=n), \
+             patch("pipeline.sources.reddit_api.fetch",
+                   return_value=[_raw_story("MC story", "x. " * 20)]) as f:
+            label, _ = _native_items_for(
+                "mystoriesanimated",
+                DiscoverRequest(niche_key="malicious"),
+                limit=5,
+            )
+        self.assertEqual(label, "reddit:MaliciousCompliance")
+        self.assertEqual(f.call_args.kwargs["subreddit"], "MaliciousCompliance")
+
+    def test_mystoriesanimated_wiki_misconceptions_routes_to_list_page(self) -> None:
+        """Behaviour change for the ``wiki_misconceptions`` variant:
+        used to keyword-filter today_in_history; now (correctly)
+        scrapes ``List_of_common_misconceptions``."""
+        n = _niche("wiki_misconceptions", "wikipedia",
+                   "List_of_common_misconceptions", length_kind="short")
+        story = RawStory(
+            slug="napoleon-height", title="Napoleon was not unusually short",
+            body="x. " * 30, source="wikipedia:List_of_common_misconceptions",
+            url="https://en.wikipedia.org/wiki/List_of_common_misconceptions",
+            metadata={"page": "List_of_common_misconceptions"},
+        )
+        with patch("control.routes.discover_routes._resolve_niche_doc",
+                   return_value=n), \
+             patch("pipeline.sources.wikipedia.fetch", return_value=[story]), \
+             patch("pipeline.sources.today_in_history.fetch") as tih:
+            label, items = _native_items_for(
+                "mystoriesanimated",
+                DiscoverRequest(niche_key="wiki_misconceptions"),
+                limit=5,
+            )
+        self.assertEqual(label, "wikipedia:List_of_common_misconceptions")
+        self.assertEqual(items[0].topic,
+                         "Napoleon was not unusually short")
+        tih.assert_not_called()
+
+    def test_no_native_channel_with_niche_returns_empty(self) -> None:
+        """``hindutavaanimated`` has only manual niches — picking one
+        still returns empty native items (LLM brainstorm carries)."""
+        n = _niche("mahabharat", "manual", "mahabharat", length_kind="short")
+        with patch("control.routes.discover_routes._resolve_niche_doc",
+                   return_value=n):
+            label, items = _native_items_for(
+                "hindutavaanimated",
+                DiscoverRequest(niche_key="mahabharat"),
+                limit=5,
+            )
+        self.assertEqual((label, items), ("", []))
+
+
+class TestBuildFeedNicheDriven(unittest.TestCase):
+    """End-to-end: ``_build_feed`` must surface the niche-driven items
+    AND continue to mix in LLM brainstorm. Pins the user-reported bug
+    at the public API boundary."""
+
+    def test_history_ancient_civilizations_does_not_show_today_in_history(self) -> None:
+        """The exact bug regression. User picks niche
+        ``ancient_civilizations``, none of the candidates should be a
+        ``Wikipedia · on this day`` topic."""
+        n = _niche("ancient_civilizations", "wikipedia",
+                   "List_of_ancient_civilizations")
+        wiki_story = RawStory(
+            slug="indus-valley", title="Indus Valley Civilisation",
+            body="x. " * 30, source="wikipedia:List_of_ancient_civilizations",
+            url="https://en.wikipedia.org/wiki/List_of_ancient_civilizations",
+            metadata={"page": "List_of_ancient_civilizations"},
+        )
+        # Even if today_in_history returned a Pope-assassination story,
+        # the new path must never call it. Configure the mock so a
+        # regression produces a clearly wrong topic in the assertion.
+        bogus = _raw_story("On this day in 1982: Pope assassination attempt",
+                           "x. " * 20)
+        with patch("control.routes.discover_routes._resolve_niche_doc",
+                   return_value=n), \
+             patch("pipeline.sources.wikipedia.fetch", return_value=[wiki_story]), \
+             patch("pipeline.sources.today_in_history.fetch", return_value=[bogus]):
+            feed = _build_feed(
+                "historyrecapped",
+                req=DiscoverRequest(niche_key="ancient_civilizations"),
+            )
+        topics = [it.topic for it in feed.items]
+        self.assertIn("Indus Valley Civilisation", topics)
+        self.assertNotIn(
+            "On this day in 1982: Pope assassination attempt", topics,
+            msg="today_in_history must not pollute a niche-driven feed",
+        )
+        self.assertIn("wikipedia:List_of_ancient_civilizations", feed.adapter)
 
 
 class TestFilterAvoid(unittest.TestCase):

@@ -7,20 +7,47 @@ GET  /api/discover/{channel}/feed → up to 10 candidates the user can pick from
 Both endpoints accept an optional :class:`DiscoverRequest` body / query
 string carrying the user's currently selected form context — variant,
 length_kind, language, niche_key, free-form values, and an avoid list of
-topics already shown. Routing rules:
+topics already shown.
 
-* **Reddit adapter** when channel + variant maps to a known subreddit
-  (drives ``mystoriesanimated/{aita, tifu, malicious, prorevenge,
-  aita_cliffhanger}`` and ``scrollpulse`` round-robin).
-* **Wikipedia "On this day"** for ``historyrecapped`` and
-  ``cosmosdecoded`` (cosmos applies a physics/astronomy keyword filter).
-* **LLM brainstorm** is *always* mixed into the candidate pool (per user
-  decision 2026-05-11) so the picked topic respects the selected variant /
-  niche / language / values even on Reddit-backed channels. For channels
-  with no native source (``hindutavaanimated``, ``sportsrecapped``,
-  ``rhymetimejunction``, …) LLM is the sole adapter.
-* The endpoint **never returns 422 for unknown channels** any more — the
-  LLM brainstorm path is universally available so the UI always gets a
+Routing model (2026-05-12 refactor — engineering-level fix for "topic
+unrelated to selected niche"):
+
+* **Niche-driven native routing.** When ``niche_key`` is provided AND
+  resolves to a persisted :class:`pipeline.niche_specs.NicheDoc`, the
+  niche's own ``source: {kind, ref}`` field is the single source of
+  truth. Dispatch is uniform across every channel:
+
+  | source.kind | source.ref                   | adapter          |
+  |-------------|------------------------------|------------------|
+  | reddit      | subreddit name               | reddit           |
+  | wikipedia   | ``On_this_day``              | today_in_history |
+  | wikipedia   | ``List_of_*`` / page title   | wikipedia list   |
+  | wikipedia   | ``None``                     | LLM only         |
+  | rss         | HN feed URL                  | HN top-AI        |
+  | rss         | other / ``None``             | LLM only         |
+  | manual / x_twitter / unknown / missing  | n/a | LLM only |
+
+* **No fallback to channel defaults when a niche is selected.** If the
+  niche resolves but has no actionable native source (manual, unknown,
+  ``wikipedia`` with no ref, …), the native side returns ``[]`` and
+  the LLM brainstorm carries — we deliberately do NOT fall back to a
+  channel-default Wikipedia "On this day" call, which was the original
+  bug source.
+
+* **Channel-default routing only when no niche is selected.** Older
+  callers that hit the GET feed endpoint with no query string fall
+  through to the legacy per-channel branches in
+  :func:`_native_items_for`. Every modern create-flow path passes a
+  niche, so this is a back-compat safety net only.
+
+* **LLM brainstorm is always mixed in** (per user decision 2026-05-11)
+  so the picked topic respects the selected variant / niche / language
+  even on Reddit-backed channels. For channels with no native source
+  (``hindutavaanimated``, ``sportsrecapped``, ``rhymetimejunction``)
+  LLM is the sole adapter.
+
+* The endpoint **never returns 422 for unknown channels** — the LLM
+  brainstorm path is universally available so the UI always gets a
   usable suggestion.
 
 The endpoint is read-only — pulling never enqueues a job. The user
@@ -232,6 +259,46 @@ def _today_in_history_items(limit: int = 8, keyword: str | None = None) -> list[
     return out
 
 
+def _wikipedia_list_items(page: str, limit: int = 8) -> list[DiscoverItem]:
+    """Scrape a Wikipedia list page (``List_of_*`` / ``Lists_of_*``).
+
+    Wraps :func:`pipeline.sources.wikipedia.fetch`, which HTML-scrapes
+    bullet-list and wikitable entries from one page and returns a
+    :class:`pipeline.sources.base.RawStory` per entry. Each emitted
+    :class:`DiscoverItem` gets a UNIQUE ``source_ref`` (page URL + an
+    entry-slug fragment) so :func:`_filter_avoid` can blacklist a single
+    picked entry without nuking the whole page.
+
+    Returns ``[]`` when the page yields no usable entries (e.g.,
+    Wikipedia hub pages that just link to per-era leaf lists). Callers
+    use this signal to fall through to the LLM brainstorm.
+    """
+    from pipeline.sources import wikipedia  # noqa: PLC0415
+
+    stories = wikipedia.fetch(page=page, limit=limit, min_chars=80)
+    out: list[DiscoverItem] = []
+    pretty_page = page.replace("_", " ")
+    for s in stories:
+        # Per-entry source_ref so avoid-list filtering is item-scoped,
+        # not page-scoped. Wikipedia list entries don't have their own
+        # canonical URL (the parser only knows the host page), so we
+        # synthesise a fragment id from the entry slug.
+        entry_ref = f"{s.url}#{s.slug}" if s.url else s.slug
+        out.append(DiscoverItem(
+            topic=s.title,
+            source_kind="wikipedia_topic",
+            source_ref=entry_ref,
+            source_label=f"Wikipedia · {pretty_page}",
+            source_excerpt=_excerpt(s.body),
+            metadata={
+                "page": s.metadata.get("page", page),
+                "page_url": s.url,
+                "license": s.metadata.get("license", "CC-BY-SA"),
+            },
+        ))
+    return out
+
+
 def _ai_news_items(limit: int = 8) -> list[DiscoverItem]:
     from pipeline.sources import ai_news  # noqa: PLC0415
 
@@ -426,17 +493,133 @@ def _llm_topic_items(channel: str, req: DiscoverRequest, *, count: int = LLM_BRA
 # ---------------------------------------------------------------------------
 
 
-def _native_items_for(channel: str, req: DiscoverRequest, *, limit: int) -> tuple[str, list[DiscoverItem]]:
-    """Return (adapter_label, items) for the channel's native source.
+# Hosts whose RSS feed maps to the existing :func:`_ai_news_items`
+# (HN top-AI). Any other ``rss`` niche degrades to LLM-only — adding
+# new RSS sources is a feature, not a bug-fix.
+_HN_RSS_HOSTS: frozenset[str] = frozenset({
+    "news.ycombinator.com",
+})
 
-    No-native channels (hindutavaanimated, sportsrecapped,
-    rhymetimejunction, …) return ``("", [])`` so the caller relies on
-    the LLM brainstorm.
+
+def _is_hn_rss(ref: str | None) -> bool:
+    if not ref:
+        return False
+    try:
+        from urllib.parse import urlparse  # noqa: PLC0415
+        host = (urlparse(ref).hostname or "").lower()
+    except Exception:  # noqa: BLE001  # coverage: defensive guard around urlparse, hard to trigger from string input
+        return False  # coverage: defensive guard around urlparse, hard to trigger from string input
+    return host in _HN_RSS_HOSTS
+
+
+def _niche_native_items_for(
+    niche, req: DiscoverRequest, *, limit: int,
+) -> tuple[str, list[DiscoverItem]]:
+    """Route to a native source based on the *selected niche's* declared
+    ``source: {kind, ref}`` field.
+
+    This is the niche-driven branch — it does NOT consult the channel
+    name. The dispatch table mirrors the one documented in the
+    discover-routes module docstring:
+
+    | kind        | ref                          | adapter |
+    |-------------|------------------------------|---------|
+    | reddit      | subreddit name               | reddit  |
+    | wikipedia   | ``On_this_day``              | today_in_history |
+    | wikipedia   | other page title             | wikipedia list  |
+    | wikipedia   | ``None``                     | none (LLM only) |
+    | rss         | HN feed URL                  | _ai_news_items |
+    | rss         | other URL / ``None``         | none (LLM only) |
+    | manual / x_twitter / unknown / missing | ``*`` | none (LLM only) |
+
+    Returns ``("", [])`` for any niche with no actionable native
+    source. The caller MUST honour that signal — i.e. NOT fall back to
+    a channel-default adapter — otherwise we silently reintroduce the
+    "user picked X niche but got an unrelated topic" bug. See
+    :func:`_native_items_for` for the precedence wiring.
     """
+    src = niche.source
+    if src is None or not src.kind:
+        return ("", [])
+
+    kind = src.kind
+    ref = src.ref
+
+    if kind == "reddit":
+        if not ref:
+            return ("", [])
+        # Strip a leading "r/" / "/r/" if a hand-edited niche uses one.
+        sub = ref.lstrip("/")
+        if sub.lower().startswith("r/"):
+            sub = sub[2:]
+        if not sub:
+            return ("", [])  # ref was just "r/" or "/r/" — treat as null
+        return (f"reddit:{sub}", _reddit_items(sub, "top", "day", limit))
+
+    if kind == "wikipedia":
+        if not ref:
+            return ("", [])
+        if ref == "On_this_day":
+            return ("wikipedia:onthisday", _today_in_history_items(limit))
+        # Any other wiki ref is a list-page title to scrape.
+        return (
+            f"wikipedia:{ref}",
+            _wikipedia_list_items(page=ref, limit=limit),
+        )
+
+    if kind == "rss":
+        if _is_hn_rss(ref):
+            return ("rss:news.ycombinator.com", _ai_news_items(limit))
+        return ("", [])
+
+    # manual / x_twitter / youtube / unknown — LLM brainstorm carries.
+    return ("", [])
+
+
+def _native_items_for(channel: str, req: DiscoverRequest, *, limit: int) -> tuple[str, list[DiscoverItem]]:
+    """Return (adapter_label, items) for the channel + niche combo.
+
+    Routing precedence:
+
+    1. **Niche-driven** (when ``req.niche_key`` is set AND the niche
+       resolves): dispatch on ``niche.source.{kind,ref}`` via
+       :func:`_niche_native_items_for`. If the niche has no actionable
+       native source (e.g. ``manual``, ``wikipedia`` with no ref,
+       ``x_twitter``, unknown kind), this returns ``("", [])`` and the
+       caller falls through to the LLM brainstorm. **We deliberately
+       do NOT fall back to channel defaults here** — picking a niche
+       and getting a channel-default Wikipedia "On this day" topic was
+       the original bug.
+
+    2. **Niche-key set but unresolvable** (typo, deleted niche, lookup
+       failure): also returns ``("", [])`` so LLM brainstorm carries.
+       Logged so operators can spot stale FE caches.
+
+    3. **No niche selected** (``req.niche_key`` absent): legacy
+       channel-default branches kick in. These exist only to keep
+       older clients (and the GET feed endpoint when called with no
+       query string) working — every modern create-flow path passes
+       a niche.
+
+    No-native channels (``hindutavaanimated``, ``sportsrecapped``,
+    ``rhymetimejunction``) return ``("", [])`` so the LLM brainstorm
+    is the sole adapter regardless of which path got us here.
+    """
+    if req.niche_key:
+        niche = _resolve_niche_doc(channel, req.niche_key)
+        if niche is None:
+            logger.info(
+                "discover: niche_key=%r on %s did not resolve; "
+                "skipping native source and relying on LLM brainstorm",
+                req.niche_key, channel,
+            )
+            return ("", [])
+        return _niche_native_items_for(niche, req, limit=limit)
+
+    # ----- No niche selected: legacy channel-default paths ---------------
     variant = req.variant or ""
 
     if channel == "mystoriesanimated":
-        # Variant routing: each variant key maps to its own subreddit.
         sub = VARIANT_SUBREDDIT.get(variant) or CHANNEL_DEFAULT_SUBREDDIT[channel]
         wiki_kw = VARIANT_WIKI_KEYWORD.get(variant)
         if variant in VARIANT_WIKI_KEYWORD:

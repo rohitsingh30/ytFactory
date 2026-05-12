@@ -67,6 +67,121 @@ class TestNicheDocModel(unittest.TestCase):
         self.assertFalse(hasattr(doc, "target_length_s"))
 
 
+class TestNicheSourceShape(unittest.TestCase):
+    """The persisted GCS JSONs carry a nested ``source: {kind, ref}``
+    object. The model must load it natively (not silently drop it via
+    ``extra: ignore`` like the pre-2026-05-12 schema did).
+
+    Backward compat: legacy callers that constructed NicheDoc with
+    flat ``source_kind`` / ``source_ref`` kwargs still work; the
+    before-validator migrates them into the nested ``source`` field
+    so downstream readers (the niche-driven discover routing) have a
+    single shape to read regardless of how the doc was built.
+    """
+
+    def test_loads_nested_source_from_gcs_shape(self):
+        from pipeline.niche_specs import NicheDoc, NicheSource
+        doc = NicheDoc.model_validate({
+            "key": "ancient_civilizations",
+            "label": "Ancient civilizations",
+            "length_kind": "long",
+            "source": {"kind": "wikipedia", "ref": "List_of_ancient_civilizations"},
+        })
+        self.assertIsInstance(doc.source, NicheSource)
+        self.assertEqual(doc.source.kind, "wikipedia")
+        self.assertEqual(doc.source.ref, "List_of_ancient_civilizations")
+        # Nested → flat mirror so legacy readers see the same value.
+        self.assertEqual(doc.source_kind, "wikipedia")
+        self.assertEqual(doc.source_ref, "List_of_ancient_civilizations")
+
+    def test_loads_nested_source_with_null_ref(self):
+        """Niches like ``historical_figures`` declare wikipedia with
+        no ref — the LLM brainstorm uses the niche label/description."""
+        from pipeline.niche_specs import NicheDoc
+        doc = NicheDoc.model_validate({
+            "key": "historical_figures", "label": "Historical figures",
+            "source": {"kind": "wikipedia", "ref": None},
+        })
+        self.assertEqual(doc.source.kind, "wikipedia")
+        self.assertIsNone(doc.source.ref)
+
+    def test_legacy_flat_source_synthesises_nested(self):
+        """Old test fixtures (and any code still constructing NicheDoc
+        with flat kwargs) must keep working. The before-validator
+        builds ``source`` from the flat fields."""
+        from pipeline.niche_specs import NicheDoc
+        doc = NicheDoc(
+            key="legacy", label="Legacy",
+            source_kind="reddit", source_ref="AmItheAsshole",
+        )
+        self.assertEqual(doc.source.kind, "reddit")
+        self.assertEqual(doc.source.ref, "AmItheAsshole")
+        # And the flat fields themselves are unchanged.
+        self.assertEqual(doc.source_kind, "reddit")
+        self.assertEqual(doc.source_ref, "AmItheAsshole")
+
+    def test_nested_source_wins_on_conflict(self):
+        """If both nested and flat are present in incoming data, nested
+        is the source of truth (matches the GCS canonical shape)."""
+        from pipeline.niche_specs import NicheDoc
+        doc = NicheDoc.model_validate({
+            "key": "mix", "label": "Mix",
+            "source": {"kind": "wikipedia", "ref": "List_of_wars"},
+            # These should be overridden by the nested values:
+            "source_kind": "reddit",
+            "source_ref": "wrong",
+        })
+        self.assertEqual(doc.source.kind, "wikipedia")
+        self.assertEqual(doc.source.ref, "List_of_wars")
+        self.assertEqual(doc.source_kind, "wikipedia")
+        self.assertEqual(doc.source_ref, "List_of_wars")
+
+    def test_unknown_source_kind_does_not_poison_flat_literal(self):
+        """Forward-compat: a niche with a future ``source.kind`` value
+        unknown to today's :data:`SourceKind` Literal must load
+        successfully, leaving the flat ``source_kind`` field at its
+        default. Otherwise a single forward-compat rollout would 422
+        every niche on load."""
+        from pipeline.niche_specs import NicheDoc
+        doc = NicheDoc.model_validate({
+            "key": "future", "label": "Future",
+            "source": {"kind": "tiktok_unreleased", "ref": "whatever"},
+        })
+        self.assertEqual(doc.source.kind, "tiktok_unreleased")
+        self.assertEqual(doc.source.ref, "whatever")
+        # Strict Literal field stays at its default (not poisoned):
+        self.assertEqual(doc.source_kind, "manual")
+
+    def test_round_trip_dump_then_load(self):
+        """``model_dump_json → model_validate_json`` must preserve the
+        nested ``source`` field. Otherwise ``save_niche()`` after
+        loading a rich GCS doc would silently rewrite a lossy doc
+        (the pre-fix bug class)."""
+        from pipeline.niche_specs import NicheDoc
+        original = NicheDoc.model_validate({
+            "key": "wars_battles", "label": "Wars & battles",
+            "length_kind": "long",
+            "source": {"kind": "wikipedia", "ref": "List_of_wars"},
+        })
+        dumped = original.model_dump_json()
+        loaded = NicheDoc.model_validate_json(dumped)
+        self.assertEqual(loaded.source.kind, "wikipedia")
+        self.assertEqual(loaded.source.ref, "List_of_wars")
+        self.assertEqual(loaded.label, "Wars & battles")
+
+    def test_missing_source_field_is_none(self):
+        """A NicheDoc constructed with no source info at all (no flat
+        kwargs, no nested object) leaves ``source`` as None. The
+        discover routing treats this as ``no native source`` and
+        falls through to LLM-only."""
+        from pipeline.niche_specs import NicheDoc
+        doc = NicheDoc(key="bare", label="Bare")
+        self.assertIsNone(doc.source)
+        # Flat defaults remain at their defined defaults.
+        self.assertEqual(doc.source_kind, "manual")
+        self.assertIsNone(doc.source_ref)
+
+
 class TestChannelRootValidation(unittest.TestCase):
     def test_valid_key_returns_path(self):
         root = _channel_root("mystoriesanimated")

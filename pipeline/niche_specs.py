@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SourceKind = Literal[
     "reddit", "wikipedia", "manual", "x_twitter", "youtube", "rss"
 ]
+# Mirror as a runtime set so the schema-migration validator can check
+# membership before assigning an unknown value to the strict
+# ``source_kind`` Literal field (which would 422 the whole load).
+_SOURCE_KIND_VALUES: frozenset[str] = frozenset(SourceKind.__args__)  # type: ignore[attr-defined]
+
 NicheFormat = Literal[
     "animated", "text", "cooking", "footage", "split_screen", "rhyme",
     "footage_only", "long_form", "sports_doc",
@@ -70,11 +75,47 @@ LengthKind = Literal["short", "long"]
 CreatedBy = Literal["backfill", "user", "ai_chat"]
 
 
+class NicheSource(BaseModel):
+    """Nested topic-source descriptor on every niche.
+
+    The persisted JSONs (one per ``<channel>/niches/<key>.json`` blob in
+    GCS) use this nested shape, e.g.::
+
+        {"kind": "wikipedia", "ref": "List_of_ancient_civilizations"}
+        {"kind": "reddit",    "ref": "AmItheAsshole"}
+        {"kind": "manual",    "ref": null}
+
+    ``kind`` is intentionally typed as ``str | None`` (not the strict
+    :data:`SourceKind` Literal) so a forward-compat niche with an
+    unknown source kind degrades to LLM-only routing rather than
+    422-failing the whole document load. Discover-side routing checks
+    membership in :data:`_SOURCE_KIND_VALUES` before dispatching.
+    """
+
+    kind: Optional[str] = Field(None, max_length=40)
+    ref: Optional[str] = Field(None, max_length=200)
+
+    model_config = {"extra": "ignore"}
+
+
 class NicheDoc(BaseModel):
     """The fixed-schema niche JSON document.
 
     Persisted at ``<channel>/niches/<key>.json``. ``key`` must match the
     file stem and uniquely identifies the niche within the channel.
+
+    **Source field shape (2026-05-12).** The canonical persisted shape
+    nests source under ``source: {kind, ref}`` (see
+    :class:`NicheSource`). The legacy flat ``source_kind`` /
+    ``source_ref`` fields are kept on the model for back-compat (the
+    test suite + a couple of older callers still construct NicheDoc
+    with flat kwargs) and are kept in sync via
+    :meth:`_migrate_source_shape` — nested wins on conflict, flat is
+    only used to synthesise nested when nested is absent. Adding the
+    ``source`` field as a structured object also fixes a silent schema
+    drift: the GCS JSONs already shipped the nested shape, but the old
+    flat-only model dropped it via ``extra: ignore``, so callers that
+    read ``niche_doc.source_kind`` always saw the default ``"manual"``.
     """
 
     key: str = Field(..., pattern=r"^[a-z0-9][a-z0-9_]*$", max_length=64)
@@ -93,6 +134,14 @@ class NicheDoc(BaseModel):
     )
     voice: str = Field("sarah", max_length=80)
     format: NicheFormat = "animated"
+
+    # Canonical source descriptor (nested shape — what GCS persists).
+    source: Optional[NicheSource] = None
+
+    # Legacy flat aliases kept in sync with ``source`` via the
+    # before-validator. Readers should prefer ``source.kind`` /
+    # ``source.ref``; these stay around so older constructors and the
+    # existing test fixtures keep working without churn.
     source_kind: SourceKind = "manual"
     source_ref: Optional[str] = Field(None, max_length=200)
     hook_template: str = Field("", max_length=240)
@@ -105,9 +154,58 @@ class NicheDoc(BaseModel):
     created_by: CreatedBy = "user"
 
     model_config = {
-        # Tolerate target_length_s left over from older JSONs (we drop it).
+        # Tolerate target_length_s + other forward-compat keys left over
+        # from older JSONs (e.g. routing/templates/aesthetic — those are
+        # GCS-side metadata that the renderer doesn't yet read).
         "extra": "ignore",
     }
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_source_shape(cls, data):
+        """Normalise legacy flat source_kind/source_ref ↔ nested source.
+
+        Precedence: nested ``source`` is canonical when present.
+        - nested + flat both set → nested wins, flat is overwritten.
+        - nested only → flat fields are populated from it (so back-compat
+          readers don't see stale defaults).
+        - flat only → nested ``source`` is synthesised from them so the
+          new niche-source-driven discover routing has a uniform field
+          to read regardless of how the doc was constructed.
+
+        Unknown ``source.kind`` values that aren't in :data:`SourceKind`
+        are deliberately NOT mirrored into the strict ``source_kind``
+        Literal (it stays as the default ``"manual"``) — this lets a
+        future kind degrade gracefully to LLM-only discover routing
+        instead of 422-failing the whole niche load.
+        """
+        if not isinstance(data, dict):
+            return data  # coverage: pydantic forwards non-dict only on model rewrap, hard to hit
+        nested = data.get("source")
+        flat_kind = data.get("source_kind")
+        flat_ref = data.get("source_ref")
+
+        if isinstance(nested, dict):
+            kind = nested.get("kind")
+            ref = nested.get("ref")
+            # Mirror nested → flat (only when nested kind is a known
+            # SourceKind so we don't poison the Literal-typed flat field).
+            if isinstance(kind, str) and kind in _SOURCE_KIND_VALUES:
+                data["source_kind"] = kind
+            if ref is None or isinstance(ref, str):
+                data["source_ref"] = ref
+            return data
+
+        # No nested source provided. If flat fields are present,
+        # synthesise nested from them so downstream readers don't need
+        # to know about the legacy shape.
+        if flat_kind is not None or flat_ref is not None:
+            data["source"] = {
+                "kind": flat_kind if isinstance(flat_kind, str) else None,
+                "ref": flat_ref if isinstance(flat_ref, str) else None,
+            }
+
+        return data
 
 
 # ---------------------------------------------------------------------------
