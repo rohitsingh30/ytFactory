@@ -90,9 +90,27 @@ for df in "${ROOT}"/*/Dockerfile; do
     patched_in_file=0
     for helper in "${OTEL_HELPERS[@]}"; do
         helper_re="${helper//./\\.}"
-        # Skip if either form of the COPY is already present.
-        if grep -qE "^COPY (cloud/[^/]+/)?${helper_re}" "$df"; then
-            continue
+        # Audit Q2.60 — pre-fix this guard fired for ANY existing
+        # COPY of the helper, including ones at the wrong slot
+        # (e.g. AFTER CMD/ENTRYPOINT, the very bug Q2.10 fixed).
+        # Re-running the patch script never normalised those —
+        # it just declared victory and continued. Now check
+        # placement: the COPY must precede the FIRST CMD or
+        # ENTRYPOINT line. If it doesn't, treat it as missing and
+        # let the awk patch re-insert it in the correct slot.
+        copy_line_no=$(grep -nE "^COPY (cloud/[^/]+/)?${helper_re}" "$df" | head -n1 | cut -d: -f1 || true)
+        cmd_line_no=$(grep -nE "^(CMD|ENTRYPOINT) " "$df" | head -n1 | cut -d: -f1 || true)
+        if [[ -n "${copy_line_no}" && -n "${cmd_line_no}" && "${copy_line_no}" -lt "${cmd_line_no}" ]]; then
+            continue  # correctly placed; skip
+        fi
+        if [[ -n "${copy_line_no}" && -z "${cmd_line_no}" ]]; then
+            continue  # no CMD line at all → present-and-fine
+        fi
+        if [[ -n "${copy_line_no}" ]]; then
+            # Misplaced — strip it and re-insert below.
+            grep -vE "^COPY (cloud/[^/]+/)?${helper_re}" "$df" > "${df}.tmp" \
+                && mv "${df}.tmp" "$df"
+            echo "removed misplaced COPY: ${rel} (${helper})"
         fi
 
         if [[ "${ctx}" == "repo-root" ]]; then

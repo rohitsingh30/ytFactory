@@ -36,8 +36,19 @@ const BACKEND_LABEL: Record<string, { label: string; icon: typeof Cloud; tone: s
 
 export default function SettingsPage() {
   const [health, setHealth] = useState<HealthData | null>(null);
+  const [apiBase, setApiBase] = useState<string>("");
   useEffect(() => {
     (healthApi.get() as unknown as Promise<HealthData>).then(setHealth).catch(() => {});
+    // Audit Q2.53 — pre-fix the "API base" row hard-coded
+    // http://127.0.0.1:8766 always. On Cloud Run prod that's a lie
+    // — the actual base lives behind window.location's origin (the
+    // /api/* proxy in app/api/[...path]/route.ts forwards to
+    // YTFACTORY_API_BASE on the server side; the browser only ever
+    // talks to this origin). Read window.location at runtime so the
+    // displayed value matches reality on every environment.
+    if (typeof window !== "undefined") {
+      setApiBase(window.location.origin);
+    }
   }, []);
 
   const backend = (health?.render_backend ?? "sim") as string;
@@ -54,7 +65,7 @@ export default function SettingsPage() {
         <Card title="Operator">
           <Row label="Name" value="Operator" />
           <Row label="Mode" value="Single-tenant" />
-          <Row label="API base" value="http://127.0.0.1:8766" mono />
+          <Row label="API base" value={apiBase || "(loading)"} mono />
         </Card>
 
         <Card title="System">

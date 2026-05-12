@@ -55,7 +55,18 @@ for f in "${ROOT}"/*/server.py "${ROOT}"/*/entrypoint.py "${ROOT}"/*/otel_init.p
 done
 
 # De-dup (entrypoint.py + server.py + otel_init.py in same dir).
-SERVICES=($(printf '%s\n' "${SERVICES[@]}" | sort -u))
+# Audit Q2.61 — pre-fix used ``SERVICES=($(printf … | sort -u))``
+# which word-splits on whitespace. A directory name containing a
+# space (or tab/newline) would have split mid-name and silently
+# corrupted the service list. Use a newline-delimited read loop
+# (mapfile isn't on macOS bash 3.2) so each line stays one element
+# regardless of internal whitespace.
+_DEDUP_SERVICES=()
+while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    _DEDUP_SERVICES+=("${line}")
+done < <(printf '%s\n' "${SERVICES[@]}" | sort -u)
+SERVICES=("${_DEDUP_SERVICES[@]}")
 
 drift=0
 for dir in "${SERVICES[@]}"; do

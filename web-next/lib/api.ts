@@ -35,7 +35,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(
+export async function request<T>(
   path: string,
   init: RequestInit & { json?: unknown } = {},
 ): Promise<T> {
@@ -61,7 +61,19 @@ async function request<T>(
   if (res.status === 204) return undefined as T;
   const ct = res.headers.get("Content-Type") ?? "";
   if (ct.includes("application/json")) return (await res.json()) as T;
-  return (await res.text()) as unknown as T;
+  // Audit Q2.46 — pre-fix this returned ``await res.text() as T`` for
+  // non-JSON 200 responses. An intermediate proxy error page (HTML)
+  // got coerced to whatever T claimed, then crashed downstream on
+  // `.channels` / `.id` / etc with an unhelpful "cannot read property
+  // of undefined" 5 seconds after the actual proxy issue. Now any
+  // non-JSON 200 raises a typed ApiError so the caller surfaces a
+  // clear "expected JSON, got HTML" message in the dashboard chip.
+  const responseBody = await res.text();
+  throw new ApiError(
+    `${res.status} ${path}: expected JSON response, got ${ct || "unknown content-type"}`,
+    res.status,
+    responseBody.slice(0, 500),
+  );
 }
 
 export const api = {
@@ -73,33 +85,89 @@ export const api = {
 };
 
 /** Polling helper used by render-detail for live timeline updates.
- *  Returns an unsubscribe function. */
+ *  Returns an unsubscribe function.
+ *
+ *  Audit Q2.54 — pre-fix:
+ *    1. No `useVisiblePoll` check; polled every 750 ms even when
+ *       the tab was hidden, wasting bandwidth and inflating
+ *       Firestore read quota.
+ *    2. The catch block silently swallowed errors. A failed job
+ *       (404 after the worker cleaned up its record) kept polling
+ *       forever — the unsubscribe function had to be called by
+ *       the caller, but the bug-class is "the timer never knows
+ *       to stop on its own".
+ *
+ *  Both fixed below: poll skips when document.visibilityState ===
+ *  "hidden" (resumes on visibilitychange); catch increments a
+ *  consecutive-error counter and stops after 5 successive failures
+ *  with the LAST error surfaced to opts.onError if provided. */
 export function pollJob(
   jobId: string,
   onUpdate: (job: Job) => void,
-  opts: { intervalMs?: number; stopWhen?: (job: Job) => boolean } = {},
+  opts: {
+    intervalMs?: number;
+    stopWhen?: (job: Job) => boolean;
+    /** Audit Q2.54 — surface terminal errors so the caller can
+     *  show a "polling stopped" toast instead of staring at a
+     *  static timeline forever. */
+    onError?: (err: unknown) => void;
+    /** Maximum consecutive failures before pollJob gives up. */
+    maxConsecutiveErrors?: number;
+  } = {},
 ): () => void {
   let cancelled = false;
   const interval = opts.intervalMs ?? 750;
+  const maxErrs = opts.maxConsecutiveErrors ?? 5;
+  let consecutiveErrors = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
+
+  function isVisible(): boolean {
+    if (typeof document === "undefined") return true;
+    return document.visibilityState !== "hidden";
+  }
 
   async function tick() {
     if (cancelled) return;
+    if (!isVisible()) {
+      // Audit Q2.54 — skip polling while tab is hidden. Resume on
+      // visibilitychange (handler below).
+      timer = setTimeout(tick, interval);
+      return;
+    }
     try {
       const job = await api.get<Job>(`/api/jobs/${jobId}`);
+      consecutiveErrors = 0;
       if (cancelled) return;
       onUpdate(job);
       if (opts.stopWhen?.(job)) return;
-    } catch {
-      /* swallow — keep polling */
+    } catch (err) {
+      consecutiveErrors += 1;
+      if (consecutiveErrors >= maxErrs) {
+        opts.onError?.(err);
+        return;  // give up the poll loop
+      }
     }
     timer = setTimeout(tick, interval);
   }
 
+  function onVisibility() {
+    if (!cancelled && isVisible()) {
+      // Bring the next tick forward when the tab regains focus.
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(tick, 0);
+    }
+  }
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", onVisibility);
+  }
   tick();
   return () => {
     cancelled = true;
     if (timer) clearTimeout(timer);
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", onVisibility);
+    }
   };
 }
 
