@@ -7,6 +7,12 @@ Audit T1.11 — the render-worker-v2 deploy must use
 ``--update-secrets`` (additive) not ``--set-secrets`` (replace) so
 subsequent secret-toggle redeploys don't regress the existing
 secret bindings.
+
+Audit S1.11 — Dockerfiles must NEVER reference ``ARG HF_TOKEN`` (or
+similar leaky build-arg patterns) for secret values. BuildKit's
+``RUN --mount=type=secret,id=...`` is the correct mechanism — the
+secret is present only for the duration of the RUN and never lands
+in the image layer history.
 """
 from __future__ import annotations
 
@@ -22,6 +28,19 @@ CLOUD_DIR = REPO_ROOT / "cloud"
 WEIGHTS_MOUNT_RE = re.compile(
     r"--add-volume-mount=\"volume=weights,mount-path=/models/hf([^\"]*)\""
 )
+
+# Secret-shaped tokens that MUST NOT be passed via ARG. Add new
+# tokens here as they're integrated; the gate fires on ANY
+# match anywhere in any cloud/*/Dockerfile.
+_LEAKY_ARG_NAMES = (
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "OPENAI_API_KEY",
+    "YTFACTORY_AGENT_TOKEN",
+)
+_ARG_RE = re.compile(r"^\s*ARG\s+([A-Z_][A-Z0-9_]*)\b", re.MULTILINE)
 
 
 class TestWeightsMountIsReadonly(unittest.TestCase):
@@ -80,6 +99,32 @@ class TestRenderWorkerSecretsAreAdditive(unittest.TestCase):
                 "render-worker-v2/deploy.sh must not use --set-secrets= "
                 "(destructive) for any active secret flag — see audit T1.11",
             )
+
+
+class TestNoLeakyArgSecrets(unittest.TestCase):
+    """S1.11 — Dockerfiles must NEVER reference secret-shaped tokens
+    via ARG. ARG values are baked into the image layer history,
+    visible to anyone with image-pull access via `docker history`.
+    BuildKit's ``RUN --mount=type=secret,id=...`` is the correct
+    mechanism — see cloud/tts-indicparler/Dockerfile for the
+    canonical pattern."""
+
+    def test_no_dockerfile_uses_leaky_arg_for_secrets(self) -> None:
+        offenders: list[str] = []
+        for df in sorted(CLOUD_DIR.glob("*/Dockerfile")):
+            text = df.read_text()
+            for m in _ARG_RE.finditer(text):
+                arg_name = m.group(1).upper()
+                if arg_name in _LEAKY_ARG_NAMES:
+                    rel = df.relative_to(REPO_ROOT)
+                    offenders.append(f"{rel}: ARG {arg_name} on line "
+                                     f"{text[:m.start()].count(chr(10)) + 1}")
+        self.assertEqual(
+            offenders, [],
+            "Dockerfiles must use BuildKit `RUN --mount=type=secret,id=...` "
+            "for secret values; ARG bakes them into image layer history.\n"
+            "Offenders:\n  " + "\n  ".join(offenders),
+        )
 
 
 if __name__ == "__main__":

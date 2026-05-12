@@ -40,14 +40,27 @@ RUN python -m pip install -r /app/requirements.txt
 RUN python -m pip install "git+https://github.com/huggingface/parler-tts.git"
 
 # Pre-pull Indic Parler weights (~2.6 GB) — gated, needs HF token.
-ARG HF_TOKEN=""
-RUN if [ -n "$HF_TOKEN" ]; then \
+#
+# Audit S1.11 — uses BuildKit secret mount instead of ARG so the
+# token is NOT baked into the image layer history (where anyone
+# with image-pull access could read it via `docker history`). The
+# secret is present at /run/secrets/hf_token only for the duration
+# of this RUN; the resulting layer carries the downloaded weights
+# but no trace of the token.
+#
+# Build invocation requires DOCKER_BUILDKIT=1 (default in modern
+# Docker) and ``--secret id=hf_token,src=...`` (the deploy.sh +
+# cloudbuild.yaml in this dir already pass it).
+RUN --mount=type=secret,id=hf_token \
+    if [ -s /run/secrets/hf_token ]; then \
       echo "Pulling Indic Parler weights with HF token…"; \
-      python -c "import os; os.environ['HF_TOKEN']='${HF_TOKEN}'; \
-        from huggingface_hub import snapshot_download; \
-        snapshot_download('ai4bharat/indic-parler-tts', token=os.environ['HF_TOKEN'])"; \
+      HF_TOKEN_VALUE="$(cat /run/secrets/hf_token)" \
+        python -c "import os; \
+          from huggingface_hub import snapshot_download; \
+          snapshot_download('ai4bharat/indic-parler-tts', \
+            token=os.environ['HF_TOKEN_VALUE'])"; \
     else \
-      echo "WARN: HF_TOKEN not provided; weights will download on first /readyz call"; \
+      echo "WARN: hf_token secret not provided; weights will download on first /readyz call"; \
     fi
 
 WORKDIR /app

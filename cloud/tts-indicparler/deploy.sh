@@ -31,23 +31,23 @@ if [ -f "$(dirname "$0")/../../.env" ]; then
   . "$(dirname "$0")/../../.env"
   set +a
 fi
-# Use the cloudbuild.yaml so HF_TOKEN flows as a Docker build-arg.
-# Falls back to plain `docker build` if HF_TOKEN unset (weights then
-# download on first /readyz instead).
-if [ -n "${HF_TOKEN:-}" ]; then
-  echo "  (HF_TOKEN found — pre-pulling gated weights into image)"
-  gcloud builds submit . \
-    --config=cloudbuild.yaml \
-    --project="${PROJECT}" \
-    --timeout=5400s \
-    --substitutions=_IMAGE="${IMAGE}",_HF_TOKEN="${HF_TOKEN}"
-else
-  echo "  (HF_TOKEN unset — gated weights will download on first /readyz call)"
-  gcloud builds submit . \
-    --tag="${IMAGE}" \
-    --project="${PROJECT}" \
-    --timeout=5400s
-fi
+# Audit S1.11 — HF_TOKEN now flows via Cloud Build's
+# availableSecrets → BuildKit secret mount, NOT via --build-arg
+# (which would bake it into the image layer history). The cloudbuild.yaml
+# reads `hf-token` from Secret Manager. Operators must:
+#
+#   1. Store the token: gcloud secrets create hf-token --replication-policy=automatic
+#      printf '%s' "$HF_TOKEN" | gcloud secrets versions add hf-token --data-file=-
+#   2. Grant the Cloud Build SA secretmanager.secretAccessor on it.
+#
+# When the secret is missing, the build still succeeds (weights
+# download on first /readyz call instead).
+echo "  (HF_TOKEN delivered via Secret Manager → BuildKit secret)"
+gcloud builds submit . \
+  --config=cloudbuild.yaml \
+  --project="${PROJECT}" \
+  --timeout=5400s \
+  --substitutions=_IMAGE="${IMAGE}"
 
 echo "==> Deploying ${SERVICE} to Cloud Run (L4 GPU, ${REGION})"
 # max-instances=2 per single-model service so 3 services × 2 = 6 GPUs

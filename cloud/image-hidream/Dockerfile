@@ -42,16 +42,24 @@ RUN git clone --depth 1 https://github.com/HiDream-ai/HiDream-I1.git /opt/HiDrea
 
 # Pre-pull HiDream-I1-Full weights (~17 GB) + Llama-3.1-8B (~16 GB)
 # text encoder. Total ~33 GB on disk.
-# NOTE: Llama-3.1-8B is gated on HF — needs HF_TOKEN at build time
-# OR use a non-gated equivalent. Trying meta-llama path first; if
-# gating bites, fall back to HiDream's redistribution.
-ARG HF_TOKEN=""
-RUN python -c "from huggingface_hub import snapshot_download; \
-    snapshot_download('HiDream-ai/HiDream-I1-Full')" && \
-    python -c "import os; from huggingface_hub import snapshot_download; \
-    snapshot_download('meta-llama/Meta-Llama-3.1-8B-Instruct', \
-        token=os.environ.get('HF_TOKEN') or None)" || \
-    echo "Llama-3.1-8B gated download failed; will retry on first inference"
+#
+# Audit S1.11 — uses BuildKit secret mount instead of ARG HF_TOKEN
+# so the token isn't baked into the image layer history (visible
+# via `docker history`). Llama-3.1-8B is gated on HF; the secret
+# unlocks it. Without the secret the Llama download fails fast and
+# the model loads on first inference instead.
+RUN --mount=type=secret,id=hf_token \
+    python -c "from huggingface_hub import snapshot_download; \
+      snapshot_download('HiDream-ai/HiDream-I1-Full')" && \
+    if [ -s /run/secrets/hf_token ]; then \
+      HF_TOKEN_VALUE="$(cat /run/secrets/hf_token)" \
+      python -c "import os; from huggingface_hub import snapshot_download; \
+        snapshot_download('meta-llama/Meta-Llama-3.1-8B-Instruct', \
+          token=os.environ['HF_TOKEN_VALUE'])" \
+      || echo "Llama-3.1-8B gated download failed; will retry on first inference"; \
+    else \
+      echo "hf_token secret not provided; Llama-3.1-8B will load on first inference"; \
+    fi
 
 WORKDIR /app
 COPY server.py ./
