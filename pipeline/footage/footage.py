@@ -18,10 +18,14 @@ CLI smoke test:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import os
 import re
 import subprocess
 import sys
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,22 +82,57 @@ def _has_audio_stream(path: Path) -> bool:
 
 
 def _download_source(url: str, cache_dir: Path) -> Path:
-    """Download the source video. Cached by video id — re-runs no-op."""
+    """Download the source video. Cached by video id — re-runs no-op.
+
+    **Audit T1.18 — concurrent-download safety.** Pre-fix two parallel
+    renders pulling the same source URL would both see ``dest.exists()
+    == False``, both spawn yt-dlp writing to the same path, and the
+    loser would overwrite the winner's complete file with a partial
+    buffer (yt-dlp's tempfile dance is local to its own subprocess so
+    sibling subprocesses can't see each other's progress).
+
+    Now: we acquire an exclusive ``fcntl.flock`` on a sibling
+    ``<video_id>.lock`` file before checking + downloading. Other
+    processes block until we release. Inside the lock we re-check
+    ``dest.exists()`` (the other process may have just finished). The
+    download itself goes to a per-process tempfile (``<video_id>.tmp.<pid>``)
+    and is atomically renamed to ``dest`` only on success — so a crash
+    mid-download leaves the cache empty (correct) instead of poisoned
+    (the pre-fix mode where downstream renders would happily
+    fetch-and-truncate the half-file).
+    """
     video_id = _extract_video_id(url)
     cache_dir.mkdir(parents=True, exist_ok=True)
     dest = cache_dir / f"{video_id}.mp4"
     if dest.exists():
         return dest
 
-    # Invoke as a Python module so the venv's yt-dlp is found without
-    # requiring the venv's bin to be on PATH. Falls back to the binary
-    # only if the module form fails (e.g. yt-dlp installed system-wide
-    # via Homebrew but not pip).
+    lock_path = cache_dir / f".{video_id}.lock"
+    lock_path.touch(exist_ok=True)
+    with lock_path.open("w") as lock_fp:
+        # Block waiting for any sibling process holding this lock.
+        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+        try:
+            # Re-check inside the lock: if the sibling process completed
+            # while we were waiting, no work to do.
+            if dest.exists():
+                return dest
+            return _download_source_locked(video_id, dest)
+        finally:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+
+
+def _download_source_locked(video_id: str, dest: Path) -> Path:
+    """Inner download driver. Caller MUST hold the per-video lock.
+    Audit T1.18 — writes to a per-process tempfile then atomically
+    renames into place so a crash mid-download leaves the cache empty
+    (correct) instead of poisoned with a partial mp4."""
+    tmp_dest = dest.with_suffix(f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}.mp4")
     cmd_base = [
         # Prefer mp4 + m4a so ffmpeg doesn't have to remux exotic codecs.
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "--merge-output-format", "mp4",
-        "-o", str(dest),
+        "-o", str(tmp_dest),
         f"https://www.youtube.com/watch?v={video_id}",
     ]
     # Cookie strategy (added 2026-05-05): YouTube blocks anonymous
@@ -175,6 +214,10 @@ def _download_source(url: str, cache_dir: Path) -> Path:
     if not ok:
         ok = _try(cmd_base)
     if not ok:
+        # Audit T1.18 — clean up the empty/partial tmp_dest so future
+        # downloads don't see stray turds in the cache dir.
+        with contextlib.suppress(FileNotFoundError):
+            tmp_dest.unlink()
         raise RuntimeError(
             f"yt-dlp could not download {video_id} — set "
             f"YTFACTORY_YTDLP_COOKIES=/path/to/cookies.txt (preferred; "
@@ -182,8 +225,13 @@ def _download_source(url: str, cache_dir: Path) -> Path:
             f"session), or quit Chrome and grant Keychain access on the "
             f"YTFACTORY_YTDLP_BROWSER live-extraction fallback"
         )
-    if not dest.exists():
-        raise RuntimeError(f"yt-dlp did not produce {dest}")
+    if not tmp_dest.exists():
+        raise RuntimeError(f"yt-dlp did not produce {tmp_dest}")
+    # Audit T1.18 — atomic rename. POSIX guarantees rename(2) is atomic
+    # within the same filesystem; the dest either has the complete file
+    # or doesn't exist (no half-state). Sibling renders that race past
+    # the lock will see dest.exists() and short-circuit.
+    tmp_dest.replace(dest)
     return dest
 
 

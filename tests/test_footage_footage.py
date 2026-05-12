@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -172,7 +173,14 @@ class TestDownloadSource(unittest.TestCase):
         dest = self.cache / "dQw4w9WgXcQ.mp4"
 
         def fake_run(cmd, *args, **kwargs):
-            dest.write_bytes(b"downloaded")
+            # Audit T1.18 — yt-dlp now writes to a per-process tempfile
+            # which the caller atomically renames to dest. Materialise
+            # the file at whatever -o path was passed so the rename
+            # succeeds.
+            cmd_list = list(cmd)
+            if "-o" in cmd_list:
+                out_path = Path(cmd_list[cmd_list.index("-o") + 1])
+                out_path.write_bytes(b"downloaded")
             return MagicMock(returncode=0)
 
         env = {"YTFACTORY_YTDLP_COOKIES": "", "YTFACTORY_YTDLP_BROWSER": ""}
@@ -182,6 +190,8 @@ class TestDownloadSource(unittest.TestCase):
                 "https://www.youtube.com/watch?v=dQw4w9WgXcQ", self.cache
             )
         self.assertEqual(result, dest)
+        # T1.18 — atomic rename means dest now exists with the downloaded bytes.
+        self.assertTrue(dest.exists())
 
     def test_cookies_file_used_when_exists(self):
         """YTFACTORY_YTDLP_COOKIES points to existing file → --cookies arg used."""
@@ -192,8 +202,10 @@ class TestDownloadSource(unittest.TestCase):
         calls = []
 
         def fake_run(cmd, *args, **kwargs):
-            calls.append(list(cmd))
-            dest.write_bytes(b"downloaded")
+            cmd_list = list(cmd)
+            calls.append(cmd_list)
+            if "-o" in cmd_list:
+                Path(cmd_list[cmd_list.index("-o") + 1]).write_bytes(b"downloaded")
             return MagicMock(returncode=0)
 
         env = {
@@ -213,7 +225,9 @@ class TestDownloadSource(unittest.TestCase):
         dest = self.cache / "dQw4w9WgXcQ.mp4"
 
         def fake_run(cmd, *args, **kwargs):
-            dest.write_bytes(b"downloaded")
+            cmd_list = list(cmd)
+            if "-o" in cmd_list:
+                Path(cmd_list[cmd_list.index("-o") + 1]).write_bytes(b"downloaded")
             return MagicMock(returncode=0)
 
         env = {
@@ -238,7 +252,9 @@ class TestDownloadSource(unittest.TestCase):
             call_count[0] += 1
             if call_count[0] == 1:
                 raise subprocess.CalledProcessError(1, cmd, stderr="auth fail")
-            dest.write_bytes(b"downloaded")
+            cmd_list = list(cmd)
+            if "-o" in cmd_list:
+                Path(cmd_list[cmd_list.index("-o") + 1]).write_bytes(b"downloaded")
             return MagicMock(returncode=0)
 
         env = {
@@ -281,8 +297,11 @@ class TestDownloadSource(unittest.TestCase):
             # First two calls (cookies file + browser) both fail
             if call_count[0] <= 2:
                 raise subprocess.CalledProcessError(1, cmd, stderr="auth fail")
-            # Third call (anonymous) succeeds
-            dest.write_bytes(b"downloaded")
+            # Third call (anonymous) succeeds — write to whatever -o
+            # path was passed (T1.18 atomic-rename pattern).
+            cmd_list = list(cmd)
+            if "-o" in cmd_list:
+                Path(cmd_list[cmd_list.index("-o") + 1]).write_bytes(b"downloaded")
             return MagicMock(returncode=0)
 
         env = {
@@ -307,8 +326,10 @@ class TestDownloadSource(unittest.TestCase):
                 raise subprocess.CalledProcessError(
                     1, cmd, stderr="No module named yt_dlp"
                 )
-            # binary call succeeds
-            dest.write_bytes(b"downloaded")
+            # binary call succeeds — write to -o path (T1.18).
+            cmd_list = list(cmd)
+            if "-o" in cmd_list:
+                Path(cmd_list[cmd_list.index("-o") + 1]).write_bytes(b"downloaded")
             return MagicMock(returncode=0)
 
         env = {"YTFACTORY_YTDLP_COOKIES": "", "YTFACTORY_YTDLP_BROWSER": ""}
@@ -367,6 +388,84 @@ class TestDownloadSource(unittest.TestCase):
                     "https://www.youtube.com/watch?v=dQw4w9WgXcQ", self.cache
                 )
         self.assertIn("did not produce", str(ctx.exception))
+
+    def test_concurrent_download_lock_prevents_race(self):
+        """Audit T1.18 — two parallel _download_source calls for the
+        same video_id must NOT both spawn yt-dlp on the same dest;
+        the second caller must block on the lock, then short-circuit
+        when it sees dest.exists()."""
+        import threading
+        dest = self.cache / "dQw4w9WgXcQ.mp4"
+        spawn_count = [0]
+        spawn_lock = threading.Lock()
+
+        def fake_run(cmd, *args, **kwargs):
+            with spawn_lock:
+                spawn_count[0] += 1
+            cmd_list = list(cmd)
+            if "-o" in cmd_list:
+                Path(cmd_list[cmd_list.index("-o") + 1]).write_bytes(b"X" * 100)
+            # Slow yt-dlp simulation so the second caller actually
+            # waits on the lock.
+            time.sleep(0.05)
+            return MagicMock(returncode=0)
+
+        env = {"YTFACTORY_YTDLP_COOKIES": "", "YTFACTORY_YTDLP_BROWSER": ""}
+        results: list[Path] = []
+
+        def worker():
+            with patch("subprocess.run", side_effect=fake_run), \
+                 patch.dict(os.environ, env, clear=False):
+                results.append(_download_source(
+                    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    self.cache,
+                ))
+
+        # Two threads racing for the same video.
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0], dest)
+        self.assertEqual(results[1], dest)
+        # Critical: only ONE spawn even though two threads raced. The
+        # other observed dest.exists() inside the lock and short-circuited.
+        self.assertEqual(
+            spawn_count[0], 1,
+            f"expected exactly 1 yt-dlp spawn for the racing pair; "
+            f"got {spawn_count[0]} (the lock didn't fence the race)",
+        )
+
+    def test_atomic_rename_no_poisoned_cache_on_failure(self):
+        """Audit T1.18 — yt-dlp crashing mid-download must NOT leave
+        a partial mp4 at dest. The pre-fix mode wrote directly to
+        dest, so a half-written file would survive in the cache and
+        downstream renders would happily fetch-and-truncate it."""
+        dest = self.cache / "dQw4w9WgXcQ.mp4"
+
+        def fake_run(cmd, *args, **kwargs):
+            cmd_list = list(cmd)
+            if "-o" in cmd_list:
+                # Write a partial file, then "crash" with non-zero rc.
+                Path(cmd_list[cmd_list.index("-o") + 1]).write_bytes(b"PARTIAL")
+            raise subprocess.CalledProcessError(1, cmd, stderr="crashed mid-stream")
+
+        env = {"YTFACTORY_YTDLP_COOKIES": "", "YTFACTORY_YTDLP_BROWSER": ""}
+        with patch("subprocess.run", side_effect=fake_run), \
+             patch.dict(os.environ, env, clear=False):
+            with self.assertRaises(RuntimeError):
+                _download_source(
+                    "https://www.youtube.com/watch?v=dQw4w9WgXcQ", self.cache
+                )
+        # dest must NOT exist — the partial file was a tempfile,
+        # cleaned up after the failure, never atomically renamed in.
+        self.assertFalse(
+            dest.exists(),
+            f"{dest} exists after failed download — atomic rename "
+            f"didn't fence the partial-file failure",
+        )
 
 
 # ---------------------------------------------------------------------------
