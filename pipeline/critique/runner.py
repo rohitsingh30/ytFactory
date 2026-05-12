@@ -338,7 +338,19 @@ def _stage_and_commit(repo_root: Path, message: str) -> str:
     Called only AFTER all gates pass — never trust the agent's
     self-reported success.
     """
-    subprocess.run(["git", "add", "-A"], cwd=str(repo_root), check=True)
+    # Audit Q2.3: bare ``git add -A`` with check=True propagated as
+    # an unhelpful CalledProcessError on .git/index.lock contention
+    # against another git process. Capture and re-format via
+    # _git_failure_diag so the chat surfaces an actionable cause.
+    add_proc = subprocess.run(
+        ["git", "add", "-A"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if add_proc.returncode != 0:
+        raise RuntimeError(_git_failure_diag("git add -A", add_proc, repo_root))  # coverage: defensive — git add -A failure is index-lock contention
     # ``-c commit.gpgsign=false`` so a missing GPG key on the laptop
     # doesn't block the commit. The user can opt back in via env if
     # they want signing.
@@ -350,7 +362,7 @@ def _stage_and_commit(repo_root: Path, message: str) -> str:
         check=False,
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"git commit failed: {proc.stderr.strip()}")
+        raise RuntimeError(_git_failure_diag("git commit", proc, repo_root))
     sha_proc = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=str(repo_root),
@@ -361,13 +373,43 @@ def _stage_and_commit(repo_root: Path, message: str) -> str:
     return sha_proc.stdout.strip()
 
 
+class PushFailed(RuntimeError):
+    """Raised by :func:`_push` when ``git push`` fails for any reason
+    (auth, network, non-fast-forward, branch protection). Distinct
+    type so the daemon loop can route push failures through a
+    recovery path that drops the orphaned local commit instead of
+    leaving it stranded on the local branch (audit T1.5)."""
+
+
 def _push(repo_root: Path, *, remote: str, branch: str) -> None:
-    """Push the just-committed change to ``<remote>/<branch>``."""
-    subprocess.run(
+    """Push the just-committed change to ``<remote>/<branch>``.
+
+    Audit T1.5 — pre-fix this used ``subprocess.run(check=True)``
+    with zero exception handling. A failed push (auth lapse, network
+    hiccup, non-fast-forward, branch-protection rejection) raised
+    ``CalledProcessError`` which the outer ``except Exception`` in
+    ``run_forever`` swallowed into a generic "runner crashed; see
+    laptop logs" — and the local critique commit stayed on the
+    branch tip. The next critique stacked ITS commit on top, the
+    second push bundled both, and Firestore only recorded the second
+    sha. Net effect: silently entangled critiques and missing
+    provenance.
+
+    Now: capture stderr, raise typed :class:`PushFailed` with
+    ``_git_failure_diag`` body. Caller MUST handle (the recovery
+    path resets HEAD to drop the orphan).
+    """
+    proc = subprocess.run(
         ["git", "push", remote, branch],
         cwd=str(repo_root),
-        check=True,
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    if proc.returncode != 0:
+        raise PushFailed(
+            _git_failure_diag(f"git push {remote} {branch}", proc, repo_root)
+        )
 
 
 def _build_commit_message(critique_id: str, summary: dict | None) -> str:
@@ -564,11 +606,20 @@ def process_user_message(
     )
 
     # Stage everything the agent did so the gates see new files too.
-    subprocess.run(
+    # Audit Q2.3: capture errors via _git_failure_diag instead of bare
+    # CalledProcessError so .git/index.lock contention surfaces
+    # something actionable in the chat.
+    add_proc = subprocess.run(
         ["git", "add", "-A"],
         cwd=str(config.repo_root),
-        check=True,
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    if add_proc.returncode != 0:
+        raise RuntimeError(  # coverage: defensive — git add -A failure is index-lock contention
+            _git_failure_diag("git add -A", add_proc, config.repo_root)
+        )
 
     report = gates_mod.run_all_gates(
         config.repo_root,
@@ -629,7 +680,48 @@ def process_user_message(
         action=msg_mod.ACTION_PUSH_PENDING,
         text=f"pushing to {config.push_remote}/{config.push_branch}…",
     )
-    _push(config.repo_root, remote=config.push_remote, branch=config.push_branch)
+    try:
+        _push(
+            config.repo_root,
+            remote=config.push_remote,
+            branch=config.push_branch,
+        )
+    except PushFailed as exc:
+        # Audit T1.5 — drop the orphaned local commit before bubbling
+        # so the next critique doesn't stack on top + double-push the
+        # entanglement. Use --keep so any later inspection can still
+        # see what we attempted to commit (it lives in the reflog).
+        reset = subprocess.run(
+            ["git", "reset", "--mixed", "HEAD~1"],
+            cwd=str(config.repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        # Worst case: a torn HEAD where reset itself fails — fall back
+        # to a hard reset so subsequent critiques are unblocked.
+        if reset.returncode != 0:  # coverage: defensive — torn HEAD where reset --mixed fails
+            subprocess.run(
+                ["git", "reset", "--hard", "HEAD~1"],
+                cwd=str(config.repo_root),
+                check=False,
+            )
+        msg_mod.add_action_message(
+            client, critique_id,
+            action=msg_mod.ACTION_AGENT_FINISHED,
+            text=(
+                f"push failed → orphan commit {sha[:8]} dropped from local "
+                f"branch (reachable via reflog). Fix the upstream issue "
+                f"(auth, branch protection, network) and re-open the "
+                f"critique. Detail: {exc}"
+            ),
+            action_data={"sha": sha, "error": str(exc)},
+        )
+        return STATUS_FAILED, {
+            "error": "push_failed",
+            "detail": str(exc),
+            "rolled_back_sha": sha,
+        }, failed_turns_so_far
     msg_mod.add_action_message(
         client, critique_id,
         action=msg_mod.ACTION_PUSHED,

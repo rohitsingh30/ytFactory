@@ -923,6 +923,74 @@ class ProcessUserMessageTests(unittest.TestCase):
             subprocess.run(["rm", "-rf", str(repo), str(remote) if remote else ""],
                            check=False)
 
+    def test_push_failure_recovery_drops_orphan_via_process_user_message(self):
+        """Audit T1.5 end-to-end — when push fails inside
+        process_user_message, the orphan commit is dropped from the
+        local branch tip, the critique status is FAILED, the chat gets
+        an actionable diagnostic, and the next critique can run cleanly
+        without inheriting an entangled local state."""
+        # Build a repo whose 'origin' points at a non-existent path so
+        # git push fails synchronously (no network).
+        repo, _ = _make_clean_repo(with_remote=False)
+        _git(repo, "remote", "add", "origin", "/nonexistent/.git")
+        client = _FakeFirestoreClient()
+        cfg = runner_mod.RunnerConfig(
+            repo_root=repo,
+            push_remote="origin",
+            push_branch="main",
+            agent_timeout_s=30,
+            gate_timeout_s=30,
+            poll_interval_s=0.05,
+        )
+        head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        try:
+            with self._patch_for_runner():
+                # Same happy-path agent as test_happy_path_commits_and_pushes.
+                def fake_run_agent_turn(agent_kind, prompt, **kwargs):
+                    (repo / "mod.py").write_text(
+                        "def f():\n    return 1\n\n"
+                        "def g():\n    return 2\n"
+                    )
+                    (repo / "tests" / "test_mod.py").write_text(
+                        "import mod\n"
+                        "def test_f(): assert mod.f() == 1\n"
+                        "def test_g(): assert mod.g() == 2\n"
+                    )
+                    return agent_mod.AgentTurnResult(
+                        action="done", text="…",
+                        summary={
+                            "type": "agent_summary", "action": "done",
+                            "files_changed": ["mod.py"],
+                            "tests_added": ["tests/test_mod.py"],
+                            "rationale": "x", "follow_up_questions": [],
+                        },
+                        stdout_tail="", stderr_tail="", exit_code=0, duration_s=0.1,
+                    )
+                with mock.patch.object(agent_mod, "run_agent_turn", side_effect=fake_run_agent_turn):
+                    next_status, extra, _fc = runner_mod.process_user_message(
+                        client, "cid",
+                        {"agent": "claude", "channel": "test"},
+                        "fix",
+                        cfg,
+                    )
+            self.assertEqual(next_status, "failed")
+            self.assertEqual(extra["error"], "push_failed")
+            self.assertIn("rolled_back_sha", extra)
+            self.assertTrue(extra["detail"].startswith(
+                "git push origin main failed"
+            ))
+            # Critically: the local branch tip is BACK to head_before so
+            # the orphan didn't stack.
+            head_after = _git(repo, "rev-parse", "HEAD").stdout.strip()
+            self.assertEqual(head_after, head_before)
+            # Chat got the actionable AGENT_FINISHED message.
+            messages = msg_mod.fetch_messages(client, "cid")
+            actions = [m.action for m in messages if m.action]
+            self.assertIn(msg_mod.ACTION_AGENT_FINISHED, actions)
+            self.assertNotIn(msg_mod.ACTION_PUSHED, actions)
+        finally:
+            subprocess.run(["rm", "-rf", str(repo)], check=False)
+
     def test_agent_failed_short_circuits_to_failed_status(self):
         repo, remote = _make_clean_repo(with_remote=True)
         client = _FakeFirestoreClient()
@@ -1160,6 +1228,83 @@ class CommitMessageTests(unittest.TestCase):
         self.assertIn("critique-fix:", msg)
         self.assertIn("(no rationale provided)", msg)
         self.assertIn("critiques/cid-456", msg)
+
+
+class PushFailedTests(unittest.TestCase):
+    """Audit T1.5 — _push must raise PushFailed (not bare CalledProcessError)
+    so the daemon loop's recovery path can drop the orphaned local commit
+    instead of leaving it stranded for the next critique to stack on."""
+
+    def test_push_failure_raises_typed_exception_with_diagnostic(self):
+        repo, _ = _make_clean_repo(with_remote=False)
+        try:
+            # Add a fake "remote" pointing at a non-existent path so the
+            # push fails synchronously with a clear error.
+            _git(repo, "remote", "add", "origin", "/nonexistent/.git")
+            (repo / "x.txt").write_text("x")
+            _git(repo, "add", "-A")
+            _git(repo, "commit", "-q", "-m", "second commit")
+            with self.assertRaises(runner_mod.PushFailed) as ctx:
+                runner_mod._push(repo, remote="origin", branch="main")
+            # The diagnostic should include the failed command label so
+            # the chat surfaces something the user can act on.
+            self.assertIn("git push origin main", str(ctx.exception))
+        finally:
+            subprocess.run(["rm", "-rf", str(repo)], check=False)
+
+    def test_push_failure_drops_orphan_commit_at_call_site(self):
+        """Integration: simulate process_user_message hitting a push
+        failure → the local branch tip rolls back so the next critique
+        doesn't stack a second commit on top of the orphan."""
+        repo, _ = _make_clean_repo(with_remote=False)
+        try:
+            _git(repo, "remote", "add", "origin", "/nonexistent/.git")
+            head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+            # Drive the push-failure recovery the same way
+            # process_user_message does.
+            (repo / "y.txt").write_text("y")
+            sha = runner_mod._stage_and_commit(repo, "critique-fix: x")
+            head_after_commit = _git(repo, "rev-parse", "HEAD").stdout.strip()
+            self.assertNotEqual(head_before, head_after_commit)
+
+            with self.assertRaises(runner_mod.PushFailed):
+                runner_mod._push(repo, remote="origin", branch="main")
+
+            # Recovery: caller does git reset --mixed HEAD~1 so the
+            # orphan commit drops from the branch tip.
+            subprocess.run(
+                ["git", "reset", "--mixed", "HEAD~1"],
+                cwd=str(repo), check=True,
+            )
+            head_after_reset = _git(repo, "rev-parse", "HEAD").stdout.strip()
+            self.assertEqual(head_after_reset, head_before)
+            # The orphan still lives in the reflog (not gone forever).
+            self.assertIn(sha[:7], _git(repo, "reflog").stdout)
+        finally:
+            subprocess.run(["rm", "-rf", str(repo)], check=False)
+
+
+class StageAndCommitDiagnosticTests(unittest.TestCase):
+    """Audit Q2.3 — git add -A failures must surface via _git_failure_diag
+    instead of as bare CalledProcessError, so .git/index.lock contention
+    against another git process becomes actionable in the chat."""
+
+    def test_git_commit_failure_includes_diagnostic(self):
+        repo, _ = _make_clean_repo(with_remote=False)
+        try:
+            # Empty staging area + commit attempt → git commit exits
+            # non-zero with "nothing to commit". The runner used to
+            # raise the raw stderr; now it raises a formatted diag
+            # carrying returncode + cwd.
+            with self.assertRaises(RuntimeError) as ctx:
+                runner_mod._stage_and_commit(repo, "msg")
+            err = str(ctx.exception)
+            self.assertIn("git commit failed", err)
+            self.assertIn("rc=", err)
+            self.assertIn(str(repo), err)
+        finally:
+            subprocess.run(["rm", "-rf", str(repo)], check=False)
 
 
 if __name__ == "__main__":  # pragma: no cover
