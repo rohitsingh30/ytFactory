@@ -296,6 +296,12 @@ git --no-pager diff --stat HEAD
 #      *.py modified  → PYTHONPATH=. .venv/bin/python -m pytest \
 #                         <touched test files> -x -q
 #      web-next/**    → (cd web-next && npm run typecheck)
+#      .claude/skills/*/SKILL.md modified  →
+#         .venv/bin/python scripts/lint_skill_md.py
+#         (catches the 1024-char overflow + YAML-colon nested-mapping
+#          failures that silently make a skill unloadable next session
+#          — heuristics 30b + 30c. 2026-05-12 wired in after 10 skills
+#          shipped broken across two waves.)
 #
 # 3. Stage everything and write ONE descriptive commit. Do NOT split
 #    into per-file commits — the whole point is that /update-docs

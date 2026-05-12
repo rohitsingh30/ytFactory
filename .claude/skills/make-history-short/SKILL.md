@@ -966,6 +966,7 @@ learnings_consulted:
   - feedback_dual_save_memory_and_docs.md (project doc + memory entry)
   - feedback_pronunciation_pretts.md (phonetic respelling pre-TTS)
   - feedback_skill_description_1024_cap.md (frontmatter description ≤1024 chars)
+  - feedback_skill_description_yaml_colon_safety.md (use `description: >-` if it contains `key: value` patterns; heuristic 30c)
   - shorts_caption_emoji_density.md (one emoji per 3-5 spoken words; cross-channel)
 
 ## Section 11 — Post-upload analysis (cross-channel rule, 2026-05-08)
