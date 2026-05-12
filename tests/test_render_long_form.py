@@ -911,7 +911,9 @@ class MainBase(unittest.TestCase):
         write_big(fake_video)
         fake_music = channel_dir / "cache" / slug / "music_bed.wav"
         write_wav(fake_music)
-        out_mp4 = channel_dir / "shorts" / f"{slug}.mp4"
+        # Audit T1.14 — long-form output now lands in <channel>/long_form/,
+        # not <channel>/shorts/.
+        out_mp4 = channel_dir / "long_form" / f"{slug}.mp4"
         write_big(out_mp4)
         caption_png = channel_dir / "cache" / slug / "captions" / "x.png"
         write_big(caption_png)
@@ -1130,6 +1132,28 @@ class MainFunctionTests(MainBase):
             result, mocks = self._run_main(tmp, channel_dir, slug)
         self.assertEqual(result, 0)
         mocks["reset_mlx_state"].assert_called_once()
+
+    def test_output_lands_in_long_form_dir_not_shorts(self):
+        # Audit T1.14 — long-form mp4 must write to <channel>/long_form/,
+        # NOT <channel>/shorts/. Pre-fix the renderer wrote into the
+        # shorts dir which broke the canonical paths.long_form_for(slug)
+        # lookup downstream + confused operators inspecting the channel
+        # artifact tree.
+        with local_tempdir() as tmp:
+            channel_dir, slug = self._setup_channel(tmp)
+            result, mocks = self._run_main(tmp, channel_dir, slug)
+        self.assertEqual(result, 0)
+        # final_mux is the last stage of the renderer; its `out_path`
+        # kwarg pins the actual mp4 location.
+        out_path = mocks["final_mux"].call_args.kwargs.get("out_path")
+        if out_path is None:  # try positional
+            out_path = mocks["final_mux"].call_args.args[-1]
+        self.assertIn("long_form", str(out_path))
+        self.assertNotIn(
+            "shorts/", str(out_path),
+            "long-form output must NOT land in shorts/ — pre-fix this "
+            "regressed paths.long_form_for(slug) lookup downstream",
+        )
 
     def test_archival_footage_calls_build_video_track(self):
         with local_tempdir() as tmp:

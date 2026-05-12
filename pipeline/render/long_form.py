@@ -2013,7 +2013,12 @@ def _main_impl(args) -> int:
         print("[cap] captions_enabled=false — skipping subtitle burn")
 
     # Stage 5 — final mux (asks are inline in narration; no separate stage)
-    out_dir = channel_dir / "shorts"
+    # Audit T1.14 — long-form output goes to <channel>/long_form/, NOT
+    # <channel>/shorts/. Pre-fix it landed in shorts/ which broke
+    # downstream pipeline/render/video.py::long_form_for(slug) lookup
+    # (which falls through to a slow rglob over the whole channel) and
+    # confused operators inspecting the channel artifact tree.
+    out_dir = channel_dir / "long_form"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{args.slug}.mp4"
     nb = float(lf.get("audio_narration_db", -6.0))
