@@ -759,20 +759,25 @@ def _call_azure_openai(
         "prompt_chars": len(prompt),
         "schema": json_schema is not None,
         "stage": stage,
+        "token_param": _azure_token_param(deployment),
     }
 
+    # Cap output tokens per stage. Without this, Azure deployments default
+    # to ~4096 → long-form rewrite truncates the script mid-stream. See
+    # _DEFAULT_MAX_TOKENS_BY_STAGE for the table and the 2026-05-12
+    # 17-min-vs-30-min post-mortem (job 8413e79d).
+    #
+    # The KEY is deployment-dependent: gpt-4o + chat-completions models
+    # accept ``max_tokens``; gpt-5.x / o1 / o3 reasoning deployments require
+    # ``max_completion_tokens`` and reject ``max_tokens`` outright (Azure
+    # 400 unsupported_parameter). _azure_token_param() consults the env
+    # override + per-deployment process cache so the second call onward in
+    # this process skips the discovery handshake.
+    token_param = _azure_token_param(deployment)
     kwargs: dict[str, Any] = {
         "model": deployment,
         "messages": [{"role": "user", "content": user_prompt}],
-        # Cap output tokens per stage. Without this, Azure deployments
-        # default to ~4096 → long-form rewrite truncates the script
-        # mid-stream. See _DEFAULT_MAX_TOKENS_BY_STAGE for the table
-        # and the 2026-05-12 17-min-vs-30-min post-mortem (job
-        # 8413e79d). Azure accepts `max_tokens` for gpt-4o (chat
-        # completions API); reasoning-model deployments (o1 / o3)
-        # would need `max_completion_tokens` instead — bridge that
-        # if/when the opus tier moves to a reasoning deployment.
-        "max_tokens": max_tokens_for(stage),
+        token_param: max_tokens_for(stage),
     }
     if output_json:
         if json_schema is not None:
@@ -791,29 +796,43 @@ def _call_azure_openai(
     try:
         resp = client.chat.completions.create(**kwargs)
     except Exception as e:
-        # On a `response_format`-related rejection (older deployments
-        # don't support either json_schema or json_object), retry once
-        # WITHOUT response_format.
-        # On a `max_tokens`-vs-`max_completion_tokens` rejection
-        # (gpt-5.x / o-series reasoning deployments require the latter,
-        # gpt-4o accepts the former — we can't tell at config time
-        # which deployment Azure has wired up), retry once with the
-        # token cap key swapped. This is the same self-healing pattern
-        # the docstring promised for "if/when the opus tier moves to
-        # a reasoning deployment" (see _DEFAULT_MAX_TOKENS_BY_STAGE
-        # comment) — the moment finally arrived 2026-05-12 when
-        # gpt-5.3-chat started rejecting `max_tokens`.
+        # Two known self-healing recoveries:
+        #
+        # (1) ``max_tokens`` ↔ ``max_completion_tokens`` swap. gpt-5.x /
+        # o1 / o3 reasoning deployments require ``max_completion_tokens``
+        # and reject ``max_tokens``; gpt-4o + chat-completions accept the
+        # opposite. We can't tell at config time which the operator
+        # wired up, so we try the cached/default key and on the
+        # well-known 400 ("Unsupported parameter: 'max_tokens' is not
+        # supported with this model. Use 'max_completion_tokens'"
+        # — and the symmetric reverse) we swap once, retry, AND remember
+        # via _remember_azure_token_param so subsequent calls in this
+        # process skip the round-trip. Also remembered: a successful
+        # first-try also warms the cache (below) so the env-default of
+        # ``max_tokens`` is overridden if discovery contradicts it.
+        # Set ``AZURE_OPENAI_TOKEN_PARAM=max_completion_tokens`` in env
+        # to skip discovery entirely (recommended in production where
+        # the deployment is fixed and known — gpt-5.3-chat in cloud
+        # render-worker, see cloud/render-worker-v2/deploy.sh).
+        #
+        # (2) ``response_format``-related rejection. Older deployments
+        # don't support either json_schema or json_object. Retry once
+        # WITHOUT response_format, parse client-side.
+        #
         # Any other failure → ClaudeCLIError.
         msg = str(e)
         retry_label: str | None = None
+        swap_to: str | None = None
 
-        if (
-            "max_tokens" in msg
-            and "max_completion_tokens" in msg
-            and "max_tokens" in kwargs
-        ):
-            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
-            retry_label = "max_completion_tokens"
+        if "max_tokens" in msg and "max_completion_tokens" in msg:
+            if "max_tokens" in kwargs:
+                kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+                swap_to = "max_completion_tokens"
+                retry_label = "max_completion_tokens"
+            elif "max_completion_tokens" in kwargs:
+                kwargs["max_tokens"] = kwargs.pop("max_completion_tokens")
+                swap_to = "max_tokens"
+                retry_label = "max_tokens"
         elif (
             output_json
             and "response_format" in msg
@@ -834,12 +853,25 @@ def _call_azure_openai(
                 raise ClaudeCLIError(
                     f"azure_openai chat error (post-retry={retry_label}): {e2}"
                 ) from e2
+            # Retry succeeded — if it was the token-param swap, cache the
+            # discovery so the next call in this process picks the right
+            # key on the FIRST try.
+            if swap_to:
+                _remember_azure_token_param(deployment, swap_to)
         else:
             _tlm.track("llm_call", category="llm", success=False,
                        duration_ms=int((time.time() - t0) * 1000),
                        job_id=job_id,
                        metadata={**tlm_meta, "error": msg[:200]})
             raise ClaudeCLIError(f"azure_openai chat error: {e}") from e
+    else:
+        # First-try success — also warm the cache so the cache reflects
+        # observed truth (matters when the deployment was switched out
+        # under us mid-process and the cached value is stale, or when
+        # the very first call succeeded with the default ``max_tokens``
+        # and we want subsequent calls to skip even the cache lookup
+        # cost). Cheap; idempotent.
+        _remember_azure_token_param(deployment, token_param)
 
     text = (resp.choices[0].message.content or "").strip()
     usage = getattr(resp, "usage", None)

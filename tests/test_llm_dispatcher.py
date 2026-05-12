@@ -32,6 +32,7 @@ def _clear_backend_env(monkey_keys: list[str] | None = None) -> dict[str, str]:
         "AZURE_OPENAI_MODEL",
         "AZURE_OPENAI_MODEL_HAIKU",
         "AZURE_OPENAI_MODEL_OPUS",
+        "AZURE_OPENAI_TOKEN_PARAM",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_MODEL_OPUS",
     ]
@@ -232,6 +233,9 @@ class AzureBackendTest(unittest.TestCase):
         fake_openai = types.ModuleType("openai")
         fake_openai.AzureOpenAI = MagicMock(return_value=self._fake_client)  # type: ignore[attr-defined]
         sys.modules["openai"] = fake_openai
+        # Per-deployment process cache leaks across tests if we don't
+        # clear it; many tests share the default deployment "gpt-4o".
+        llm_cli._AZURE_TOKEN_PARAM_BY_DEPLOYMENT.clear()
 
     def tearDown(self) -> None:
         if self._saved_module is not None:
@@ -240,6 +244,7 @@ class AzureBackendTest(unittest.TestCase):
             sys.modules.pop("openai", None)
         _clear_backend_env()
         _restore_env(self._saved)
+        llm_cli._AZURE_TOKEN_PARAM_BY_DEPLOYMENT.clear()
 
     def _make_resp(self, content: str, *, prompt_tokens: int = 10,
                    completion_tokens: int = 20):
@@ -391,6 +396,171 @@ class AzureBackendTest(unittest.TestCase):
         )
         kwargs = self._fake_client.chat.completions.create.call_args.kwargs
         self.assertEqual(kwargs["model"], "gpt-4o-mini-deploy")
+
+    # ----- Per-deployment token-param cache + AZURE_OPENAI_TOKEN_PARAM env -----
+    # These three tests pin the "fix this once for all" behaviour: the swap
+    # from `max_tokens` → `max_completion_tokens` must be remembered across
+    # calls in the same process (no fail-then-retry on EVERY LLM call when
+    # the deployment is gpt-5.x), and the operator must be able to skip
+    # discovery entirely via env.
+
+    def test_token_param_cache_avoids_retry_on_subsequent_calls(self) -> None:
+        # First call: default `max_tokens` → 400 → swap → success.
+        # Second call: cache says `max_completion_tokens` → first try
+        # succeeds (no retry, no failed round-trip).
+        ok = self._make_resp('{"x": 1}')
+        bad = Exception(
+            "Unsupported parameter: 'max_tokens' is not supported with "
+            "this model. Use 'max_completion_tokens' instead."
+        )
+        self._fake_client.chat.completions.create.side_effect = [bad, ok, ok]
+        for _ in range(2):
+            out = llm_cli._call_azure_openai(
+                "x", output_json=True, json_schema=None,
+                model="opus", timeout_s=30, stage="rewrite",
+            )
+            self.assertEqual(out, {"x": 1})
+        # 3 SDK calls total: 1 fail + 1 retry + 1 cached-success.
+        # Without the cache it would be 4 (1 fail + 1 retry + 1 fail + 1 retry).
+        self.assertEqual(self._fake_client.chat.completions.create.call_count, 3)
+        third_kwargs = self._fake_client.chat.completions.create.call_args_list[2].kwargs
+        self.assertIn("max_completion_tokens", third_kwargs)
+        self.assertNotIn("max_tokens", third_kwargs)
+
+    def test_env_token_param_skips_discovery_first_call(self) -> None:
+        # AZURE_OPENAI_TOKEN_PARAM=max_completion_tokens → the FIRST call
+        # uses max_completion_tokens. No fail-then-retry handshake at all.
+        # This is what cloud/render-worker-v2/deploy.sh wires up so production
+        # gpt-5.x renders never pay the discovery cost.
+        os.environ["AZURE_OPENAI_TOKEN_PARAM"] = "max_completion_tokens"
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{"y": 2}')
+        out = llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite",
+        )
+        self.assertEqual(out, {"y": 2})
+        self.assertEqual(self._fake_client.chat.completions.create.call_count, 1)
+        kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        self.assertIn("max_completion_tokens", kwargs)
+        self.assertNotIn("max_tokens", kwargs)
+
+    def test_env_token_param_max_tokens_for_legacy_deployment(self) -> None:
+        # Symmetric: AZURE_OPENAI_TOKEN_PARAM=max_tokens forces the
+        # legacy chat-completions key (gpt-4o + earlier).
+        os.environ["AZURE_OPENAI_TOKEN_PARAM"] = "max_tokens"
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{"z": 3}')
+        llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite",
+        )
+        kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        self.assertIn("max_tokens", kwargs)
+        self.assertNotIn("max_completion_tokens", kwargs)
+
+    def test_invalid_env_token_param_falls_through_to_default(self) -> None:
+        # Garbage env value → ignored, default `max_tokens` used.
+        os.environ["AZURE_OPENAI_TOKEN_PARAM"] = "not_a_real_key"
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{}')
+        llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite",
+        )
+        kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        self.assertIn("max_tokens", kwargs)
+        self.assertNotIn("max_completion_tokens", kwargs)
+
+    def test_env_token_param_pins_against_cache_pollution(self) -> None:
+        # Even if the swap retry happens (operator wired the env to the
+        # WRONG key), the env override must still win on the next call —
+        # the cache must NOT pollute over the env intent. This protects
+        # the "operator says it's max_completion_tokens, period" contract.
+        os.environ["AZURE_OPENAI_TOKEN_PARAM"] = "max_completion_tokens"
+        # Pre-pollute the cache with the wrong answer (simulating a
+        # prior swap-retry that flipped to max_tokens).
+        llm_cli._AZURE_TOKEN_PARAM_BY_DEPLOYMENT["gpt-4o"] = "max_tokens"
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{}')
+        llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite",
+        )
+        kwargs = self._fake_client.chat.completions.create.call_args.kwargs
+        self.assertIn("max_completion_tokens", kwargs)
+        self.assertNotIn("max_tokens", kwargs)
+
+    def test_remember_skipped_when_env_override_set(self) -> None:
+        # If env pins the param, swap-retry must NOT pollute the cache —
+        # otherwise an unsetting of the env later would surface stale,
+        # contradictory cache entries. Verify the cache stays empty.
+        os.environ["AZURE_OPENAI_TOKEN_PARAM"] = "max_tokens"
+        # Force a swap-retry path: env says max_tokens, Azure rejects,
+        # we swap to max_completion_tokens, retry, succeed.
+        self._fake_client.chat.completions.create.side_effect = [
+            Exception(
+                "Unsupported parameter: 'max_tokens' is not supported with "
+                "this model. Use 'max_completion_tokens' instead."
+            ),
+            self._make_resp('{}'),
+        ]
+        llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite",
+        )
+        # Cache stays empty because env is in charge.
+        self.assertEqual(llm_cli._AZURE_TOKEN_PARAM_BY_DEPLOYMENT, {})
+
+    def test_telemetry_metadata_records_token_param(self) -> None:
+        # Operators viewing the dashboard need to know which token-cap
+        # key Azure actually used — useful when debugging "why is this
+        # tier slow / why did this stage hit a limit".
+        os.environ["AZURE_OPENAI_TOKEN_PARAM"] = "max_completion_tokens"
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp('{}')
+        captured: list[dict] = []
+        with patch.object(
+            llm_cli._tlm, "track",
+            side_effect=lambda *a, **kw: captured.append(kw.get("metadata") or {}),
+        ):
+            llm_cli._call_azure_openai(
+                "x", output_json=True, json_schema=None,
+                model="opus", timeout_s=30, stage="rewrite",
+            )
+        self.assertTrue(captured)
+        self.assertEqual(captured[0].get("token_param"), "max_completion_tokens")
+
+    def test_reverse_swap_max_completion_tokens_to_max_tokens(self) -> None:
+        # Symmetric reverse: env or cache pinned `max_completion_tokens`
+        # but the deployment actually wants `max_tokens` (e.g. operator
+        # flipped the AZURE_OPENAI_MODEL env to a legacy gpt-4o
+        # deployment without updating AZURE_OPENAI_TOKEN_PARAM). We
+        # MUST swap the other direction and recover, otherwise every
+        # call hard-fails until the operator notices.
+        llm_cli._AZURE_TOKEN_PARAM_BY_DEPLOYMENT["gpt-4o"] = "max_completion_tokens"
+        self._fake_client.chat.completions.create.side_effect = [
+            Exception(
+                "Unsupported parameter: 'max_completion_tokens' is not "
+                "supported with this model. Use 'max_tokens' instead."
+            ),
+            self._make_resp('{"ok": true}'),
+        ]
+        out = llm_cli._call_azure_openai(
+            "x", output_json=True, json_schema=None,
+            model="opus", timeout_s=30, stage="rewrite",
+        )
+        self.assertEqual(out, {"ok": True})
+        self.assertEqual(self._fake_client.chat.completions.create.call_count, 2)
+        retry_kwargs = self._fake_client.chat.completions.create.call_args_list[1].kwargs
+        self.assertIn("max_tokens", retry_kwargs)
+        self.assertNotIn("max_completion_tokens", retry_kwargs)
+        # Cache flipped to the discovered direction so subsequent calls
+        # in this process pick the right key on the first try.
+        self.assertEqual(
+            llm_cli._AZURE_TOKEN_PARAM_BY_DEPLOYMENT.get("gpt-4o"),
+            "max_tokens",
+        )
 
 
 class AnthropicBackendTest(unittest.TestCase):

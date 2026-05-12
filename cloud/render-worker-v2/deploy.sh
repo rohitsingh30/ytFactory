@@ -42,11 +42,19 @@ gcloud builds submit . \
 # `bash deploy.sh` is sufficient.
 #
 # Override per-deploy by exporting AZURE_OPENAI_ENDPOINT / _API_VERSION /
-# _MODEL before invoking the script. Defaults match the chat assistant's
-# Azure deployment (ytfactory-web service env, 2026-05-12).
+# _MODEL / _TOKEN_PARAM before invoking the script. Defaults match the chat
+# assistant's Azure deployment (ytfactory-web service env, 2026-05-12).
+#
+# AZURE_OPENAI_TOKEN_PARAM: gpt-5.x / o1 / o3 reasoning deployments require
+# `max_completion_tokens` and reject `max_tokens` outright. Setting this
+# env upfront skips the runtime fail-then-retry handshake on EVERY LLM call
+# (a long-form render does dozens). Default = max_completion_tokens
+# because the live model (gpt-5.3-chat) is a reasoning deployment. Set to
+# `max_tokens` if you flip the model env back to gpt-4o or earlier.
 AZURE_OPENAI_ENDPOINT="${AZURE_OPENAI_ENDPOINT:-https://testshoffer.openai.azure.com}"
 AZURE_OPENAI_API_VERSION="${AZURE_OPENAI_API_VERSION:-2025-04-01-preview}"
 AZURE_OPENAI_MODEL="${AZURE_OPENAI_MODEL:-gpt-5.3-chat}"
+AZURE_OPENAI_TOKEN_PARAM="${AZURE_OPENAI_TOKEN_PARAM:-max_completion_tokens}"
 
 echo "==> Creating/updating Cloud Run JOB ${JOB}"
 gcloud run jobs deploy "${JOB}" \
@@ -59,7 +67,7 @@ gcloud run jobs deploy "${JOB}" \
   --max-retries=0 \
   --task-timeout=3600 \
   --update-secrets="AZURE_OPENAI_API_KEY=azure-openai-key:latest" \
-  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=ytfactory-prod-v2-artifacts|CLOUDRUN_TTS_CHATTERBOX_URL=https://ytfactory-tts-chatterbox-283470729204.${REGION}.run.app|CLOUDRUN_TTS_INDICPARLER_URL=https://ytfactory-tts-indicparler-283470729204.${REGION}.run.app|CLOUDRUN_IMAGE_FLUX2_KLEIN_URL=https://ytfactory-image-flux2-klein-283470729204.${REGION}.run.app|CLOUDRUN_TTS_DISABLE_FALLBACK=1|CLOUDRUN_IMAGE_DISABLE_FALLBACK=1|YTFACTORY_RENDER_MODE=real|YTFACTORY_LLM_BACKEND=azure_openai|AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}|AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}|AZURE_OPENAI_MODEL=${AZURE_OPENAI_MODEL}|YTFACTORY_ASR_PROVIDER=faster_whisper|LOG_LEVEL=INFO"
+  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=ytfactory-prod-v2-artifacts|CLOUDRUN_TTS_CHATTERBOX_URL=https://ytfactory-tts-chatterbox-283470729204.${REGION}.run.app|CLOUDRUN_TTS_INDICPARLER_URL=https://ytfactory-tts-indicparler-283470729204.${REGION}.run.app|CLOUDRUN_IMAGE_FLUX2_KLEIN_URL=https://ytfactory-image-flux2-klein-283470729204.${REGION}.run.app|CLOUDRUN_TTS_DISABLE_FALLBACK=1|CLOUDRUN_IMAGE_DISABLE_FALLBACK=1|YTFACTORY_RENDER_MODE=real|YTFACTORY_LLM_BACKEND=azure_openai|AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}|AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}|AZURE_OPENAI_MODEL=${AZURE_OPENAI_MODEL}|AZURE_OPENAI_TOKEN_PARAM=${AZURE_OPENAI_TOKEN_PARAM}|YTFACTORY_ASR_PROVIDER=faster_whisper|LOG_LEVEL=INFO"
 
 # Audit T1.11 — was --set-secrets="AZURE_OPENAI_API_KEY=...".
 # --set-secrets is REPLACE-not-merge, so any subsequent
@@ -70,7 +78,7 @@ gcloud run jobs deploy "${JOB}" \
 # safe to repeat.
 
 echo ""
-echo "==> Job deployed (mode=real, llm=azure_openai, endpoint=${AZURE_OPENAI_ENDPOINT}, model=${AZURE_OPENAI_MODEL})."
+echo "==> Job deployed (mode=real, llm=azure_openai, endpoint=${AZURE_OPENAI_ENDPOINT}, model=${AZURE_OPENAI_MODEL}, token_param=${AZURE_OPENAI_TOKEN_PARAM})."
 echo ""
 echo "    Smoke-test preflight without consuming work:"
 echo "      gcloud run jobs execute ${JOB} \\"
