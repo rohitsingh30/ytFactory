@@ -90,16 +90,66 @@ class TestPublicBaseUrl(unittest.TestCase):
             result = _public_base_url(mock_request)
         self.assertEqual(result, "https://example.com")
 
-    def test_from_headers(self) -> None:
+    def test_from_headers_falls_back_to_host_when_no_allowlist(self) -> None:
+        # Audit S1.8 — without YTFACTORY_ALLOWED_HOSTS configured we
+        # MUST NOT trust X-Forwarded-Host (an attacker-controlled
+        # header in some edge configurations); fall back to the
+        # actual Host header which the load balancer rewrites.
         mock_request = MagicMock(spec=Request)
         mock_request.headers = {
             "x-forwarded-proto": "https",
-            "x-forwarded-host": "myhost.com",
+            "x-forwarded-host": "evil.example",
+            "host": "myhost.com",
         }
         mock_request.url.scheme = "http"
-        with patch.dict(os.environ, {"YTFACTORY_PUBLIC_BASE_URL": ""}):
+        mock_request.url.hostname = "myhost.com"
+        with patch.dict(os.environ, {"YTFACTORY_PUBLIC_BASE_URL": "",
+                                     "YTFACTORY_ALLOWED_HOSTS": ""}):
             result = _public_base_url(mock_request)
         self.assertEqual(result, "https://myhost.com")
+
+    def test_xfh_honoured_when_in_allowlist(self) -> None:
+        # When the operator explicitly allowlists hosts, XFH IS
+        # honoured (this matches Cloud Run's dual-URL behaviour).
+        mock_request = MagicMock(spec=Request)
+        mock_request.headers = {
+            "x-forwarded-proto": "https",
+            "x-forwarded-host": "ytfactory-web-7hwnzw7lya-as.a.run.app",
+            "host": "internal-host",
+        }
+        mock_request.url.scheme = "http"
+        mock_request.url.hostname = "internal-host"
+        with patch.dict(os.environ, {
+            "YTFACTORY_PUBLIC_BASE_URL": "",
+            "YTFACTORY_ALLOWED_HOSTS": (
+                "ytfactory-web-7hwnzw7lya-as.a.run.app, "
+                "ytfactory-web-283470729204.as.run.app"
+            ),
+        }):
+            result = _public_base_url(mock_request)
+        self.assertEqual(
+            result, "https://ytfactory-web-7hwnzw7lya-as.a.run.app",
+        )
+
+    def test_xfh_NOT_in_allowlist_raises_400(self) -> None:
+        # An XFH that's not in the allowlist must NOT silently
+        # fall back to the attacker-controlled value — refuse the
+        # request so OAuth can't be routed off-host.
+        from fastapi import HTTPException
+        mock_request = MagicMock(spec=Request)
+        mock_request.headers = {
+            "x-forwarded-host": "evil.example",
+            "host": "also-not-allowed.example",
+        }
+        mock_request.url.scheme = "http"
+        mock_request.url.hostname = "also-not-allowed.example"
+        with patch.dict(os.environ, {
+            "YTFACTORY_PUBLIC_BASE_URL": "",
+            "YTFACTORY_ALLOWED_HOSTS": "ytfactory-web-7hwnzw7lya-as.a.run.app",
+        }):
+            with self.assertRaises(HTTPException) as ctx:
+                _public_base_url(mock_request)
+            self.assertEqual(ctx.exception.status_code, 400)
 
     def test_from_request_url(self) -> None:
         mock_request = MagicMock(spec=Request)
@@ -348,6 +398,80 @@ class TestHtmlDone(unittest.TestCase):
         resp = _html_done()
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Unknown error", resp.body.decode())
+
+    def test_account_xss_escaped(self) -> None:
+        # Audit S1.2 — account is HTML-escaped so a crafted
+        # ?account=foo"><script>... can't execute.
+        attack = 'foo"><script>alert(1)</script>'
+        resp = _html_done(success=True, account=attack)
+        body = resp.body.decode()
+        self.assertNotIn("<script>alert(1)</script>", body)
+        self.assertIn("&lt;script&gt;", body)
+
+    def test_error_msg_xss_escaped(self) -> None:
+        attack = '<img src=x onerror=alert(1)>'
+        resp = _html_done(error_msg=attack)
+        body = resp.body.decode()
+        self.assertNotIn("<img src=x", body)
+        self.assertIn("&lt;img", body)
+
+    def test_return_to_off_origin_clamped_to_default(self) -> None:
+        # Audit S1.3 — open-redirect defence. An off-origin
+        # return_to (//evil.example, https://evil) collapses to
+        # the safe default.
+        for attack in (
+            "//evil.example/x",
+            "https://evil.example/x",
+            "javascript:alert(1)",
+            "../../etc/passwd",
+        ):
+            with self.subTest(attack=attack):
+                resp = _html_done(success=True, account="x", return_to=attack)
+                body = resp.body.decode()
+                # Default safe return_to lands instead.
+                self.assertIn("/app/channels", body)
+                # The attack string is NOT injected raw into the JS literal.
+                self.assertNotIn(attack, body)
+
+    def test_return_to_attribute_in_error_path_is_quoted_and_escaped(self) -> None:
+        # On the error page the return_to value lands inside an
+        # ``href="…"`` attribute too. Even if it survives the
+        # safe-clamp (i.e. is a legit same-origin path) it MUST be
+        # HTML-escaped so a path containing ``"`` can't escape the
+        # attribute and inject arbitrary HTML.
+        resp = _html_done(error_msg="bad", return_to='/app/x"><script>alert(1)</script>')
+        body = resp.body.decode()
+        self.assertNotIn('"><script>alert(1)</script>', body)
+
+
+class TestSafeReturnTo(unittest.TestCase):
+    """Audit S1.3 — _safe_return_to clamps to same-origin path."""
+
+    def test_safe_path_passes(self) -> None:
+        from control.routes.oauth_web_routes import _safe_return_to
+        self.assertEqual(_safe_return_to("/app/channels"), "/app/channels")
+        self.assertEqual(_safe_return_to("/foo/bar?x=1"), "/foo/bar?x=1")
+
+    def test_protocol_relative_collapses(self) -> None:
+        from control.routes.oauth_web_routes import _safe_return_to
+        self.assertEqual(_safe_return_to("//evil.example/x"), "/app/channels")
+
+    def test_absolute_url_collapses(self) -> None:
+        from control.routes.oauth_web_routes import _safe_return_to
+        self.assertEqual(_safe_return_to("https://evil.example"), "/app/channels")
+
+    def test_javascript_scheme_collapses(self) -> None:
+        from control.routes.oauth_web_routes import _safe_return_to
+        self.assertEqual(_safe_return_to("javascript:alert(1)"), "/app/channels")
+
+    def test_relative_path_collapses(self) -> None:
+        from control.routes.oauth_web_routes import _safe_return_to
+        self.assertEqual(_safe_return_to("../etc/passwd"), "/app/channels")
+
+    def test_none_or_empty_collapses(self) -> None:
+        from control.routes.oauth_web_routes import _safe_return_to
+        self.assertEqual(_safe_return_to(None), "/app/channels")
+        self.assertEqual(_safe_return_to(""), "/app/channels")
 
 
 class TestStartEndpoint(unittest.IsolatedAsyncioTestCase):

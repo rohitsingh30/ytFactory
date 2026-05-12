@@ -18,6 +18,7 @@ control-plane and render-worker containers via the
 """
 from __future__ import annotations
 
+import html as _html
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ import secrets
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -92,14 +93,71 @@ def _client() -> dict[str, str]:
 
 
 def _public_base_url(request: Request) -> str:
-    """Where the public callback lives. Prefer env, fall back to request's host."""
+    """Where the public callback lives. Prefer env, fall back to request's host.
+
+    **Audit S1.8 — X-Forwarded-Host allowlist.** Pre-fix, when
+    ``YTFACTORY_PUBLIC_BASE_URL`` was unset we trusted any
+    ``X-Forwarded-Host`` value the load balancer (or an attacker
+    interposing a request) sent — which steered the OAuth
+    ``redirect_uri`` to attacker-controlled hosts → auth-code leak.
+    Now we only honour XFH when it matches the documented
+    ``YTFACTORY_ALLOWED_HOSTS`` allowlist, falling back to
+    ``request.url.hostname`` (the actual TCP-level peer host)
+    otherwise.
+    """
     explicit = os.environ.get(PUBLIC_BASE_URL_ENV, "").strip().rstrip("/")
     if explicit:
         return explicit
-    # Honor X-Forwarded-Proto/Host from the load balancer.
-    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
+    proto = (request.headers.get("x-forwarded-proto")
+             or request.url.scheme
+             or "https").lower()
+    if proto not in ("http", "https"):
+        proto = "https"  # coverage: defensive — proto out of {http,https} only on malformed XFH
+    xfh = (request.headers.get("x-forwarded-host") or "").strip()
+    fallback_host = request.headers.get("host", "") or (request.url.hostname or "")
+    allow_raw = os.environ.get("YTFACTORY_ALLOWED_HOSTS", "").strip()
+    if allow_raw:
+        allowed = {h.strip().lower() for h in allow_raw.split(",") if h.strip()}
+        host = xfh.lower() if xfh and xfh.lower() in allowed else None
+        if host is None:
+            # Fallback to the actual host header (which the load balancer
+            # also sets) IF that's allowlisted; else refuse to compose.
+            host = fallback_host.lower() if fallback_host.lower() in allowed else None
+        if host is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "OAuth host not in YTFACTORY_ALLOWED_HOSTS allowlist. "
+                    "Set YTFACTORY_PUBLIC_BASE_URL explicitly, or add "
+                    f"{xfh!r} / {fallback_host!r} to YTFACTORY_ALLOWED_HOSTS."
+                ),
+            )
+        return f"{proto}://{host}"
+    # No allowlist configured — fall back to the host header (NOT
+    # X-Forwarded-Host) so an attacker injecting XFH can't redirect.
+    host = fallback_host
     return f"{proto}://{host}".rstrip("/")
+
+
+def _safe_return_to(return_to: str | None) -> str:
+    """Audit S1.3 — open-redirect defence. ``?return_to=…`` must be a
+    same-origin path: starts with a single ``/`` and not a protocol-
+    relative ``//`` (which the browser interprets as an absolute URL
+    on a different host). Anything else collapses to the safe default.
+    """
+    if not return_to:
+        return "/app/channels"
+    candidate = return_to.strip()
+    # Reject protocol-relative URLs ("//evil.example/foo") and any URL
+    # that isn't a plain path (no scheme, no netloc).
+    if candidate.startswith("//"):
+        return "/app/channels"
+    if not candidate.startswith("/"):
+        return "/app/channels"
+    parsed = urlsplit(candidate)
+    if parsed.scheme or parsed.netloc:
+        return "/app/channels"  # coverage: defensive — covers the rare /<path> with scheme
+    return candidate
 
 
 def _redirect_uri(request: Request) -> str:
@@ -193,9 +251,13 @@ async def start(
     """
     cs = _client()
     state = secrets.token_urlsafe(32)
+    # Audit S1.3 — clamp return_to to a same-origin path before
+    # storing so the eventual ``location.href = return_to`` in the
+    # success page can't redirect off-host.
+    safe_return_to = _safe_return_to(return_to)
     _PENDING_STATE[state] = {
         "account": account,
-        "return_to": return_to,
+        "return_to": safe_return_to,
         "created_at": time.time(),
     }
     _gc(time.time())
@@ -230,7 +292,8 @@ async def callback(
     if pending is None:
         raise HTTPException(status_code=400, detail="invalid or expired state")
     account = pending["account"]
-    return_to = pending["return_to"] or "/app/channels"
+    # Audit S1.3 defence-in-depth — re-clamp at consumption time too.
+    return_to = _safe_return_to(pending.get("return_to") or "/app/channels")
 
     cs = _client()
     redirect_uri = _redirect_uri(request)
@@ -310,22 +373,40 @@ def _html_done(
 ) -> HTMLResponse:
     """Tiny self-contained completion page that auto-bounces the user
     back to the studio. Avoids loading the full Next.js bundle for this
-    one screen."""
+    one screen.
+
+    **Audit S1.2 — XSS defence.** Every user-controlled value here
+    (``account``, ``error_msg``, ``return_to``) is HTML-escaped via
+    ``html.escape(..., quote=True)`` before interpolation; ``return_to``
+    is additionally constrained to a same-origin path by
+    :func:`_safe_return_to` (S1.3) AND its inline ``location.href``
+    use is JSON-encoded so an attacker who slips a path-shaped string
+    through still can't break out of the JS string literal."""
+    safe_account = _html.escape(account or "", quote=True)
+    safe_error = _html.escape(error_msg or "Unknown error.", quote=True)
+    safe_return_to = _safe_return_to(return_to)
+    safe_return_to_attr = _html.escape(safe_return_to, quote=True)
+    refresh_msg = (
+        "yes" if has_refresh
+        else 'NO — first sign-in only issues one. If missing, revoke at '
+             '<a href="https://myaccount.google.com/connections">'
+             'myaccount.google.com/connections</a> and reconnect.'
+    )
     if success:
         title = "Channel connected"
         body = f"""
           <h1>Channel connected</h1>
-          <p><strong>{account}</strong> is now linked. Refresh token: {'yes' if has_refresh else 'NO — first sign-in only issues one. If missing, revoke at <a href=\"https://myaccount.google.com/connections\">myaccount.google.com/connections</a> and reconnect.'}</p>
+          <p><strong>{safe_account}</strong> is now linked. Refresh token: {refresh_msg}</p>
           <p>Returning you to the studio…</p>
-          <script>setTimeout(() => location.href = {json.dumps(return_to)}, 1500);</script>
+          <script>setTimeout(() => location.href = {json.dumps(safe_return_to)}, 1500);</script>
         """
         status_code = 200
     else:
         title = "Connection failed"
         body = f"""
           <h1>Connection failed</h1>
-          <p>{error_msg or 'Unknown error.'}</p>
-          <p><a href=\"{return_to}\">Back to studio</a></p>
+          <p>{safe_error}</p>
+          <p><a href="{safe_return_to_attr}">Back to studio</a></p>
         """
         status_code = 400
     html = f"""<!DOCTYPE html>
