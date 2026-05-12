@@ -45,6 +45,39 @@ class _Base(unittest.TestCase):
             except ValueError:
                 pass
 
+    def _seed_full_render(self) -> None:
+        """Two complete renders so /renders + /stage_latency have
+        data shaped like a real dashboard hit (envelope + child
+        stages, with one failure to exercise the success aggregation).
+        """
+        # Render 1: short, fully successful. envelope wraps stages so
+        # they all share channel/slug/render_kind context.
+        with obs.render_envelope(channel="historyrecapped",
+                                 slug="aita-001",
+                                 render_kind="short"):
+            with obs.timed("tts_synth", category="tts",
+                           metadata={"provider": "cloudrun_chatterbox"}):
+                pass
+            with obs.timed("image_gen", category="image",
+                           metadata={"provider": "cloudrun_flux2_klein"}):
+                pass
+            with obs.timed("compose", category="render"):
+                pass
+            with obs.timed("upload_short", category="upload"):
+                pass
+        # Render 2: long_form, image_gen failed.
+        with obs.render_envelope(channel="historyrecapped",
+                                 slug="napoleon-collapse",
+                                 render_kind="long_form"):
+            with obs.timed("tts_synth", category="tts",
+                           metadata={"provider": "cloudrun_chatterbox"}):
+                pass
+            try:
+                with obs.timed("image_gen", category="image"):
+                    raise RuntimeError("flux down")
+            except RuntimeError:
+                pass
+
 
 class TestInitStatus(_Base):
     def test_returns_inmemory_mode(self) -> None:
@@ -52,6 +85,106 @@ class TestInitStatus(_Base):
         self.assertTrue(r["initialised"])
         self.assertEqual(r["exporter"], "inmemory")
         self.assertFalse(r["has_gcp_exporter"])
+        # Cross-service Cloud Logging reader is gcp-only — must
+        # report unavailable in inmemory mode so the dashboard
+        # doesn't claim a feature it can't use.
+        self.assertFalse(r["cloud_logging_reader_available"])
+
+
+class TestStageLatency(_Base):
+    def test_returns_per_stage_p50_p95(self) -> None:
+        self._seed_full_render()
+        r = self.client.get("/api/telemetry/stage_latency?hours=1").json()
+        names = {s["stage"] for s in r["stages"]}
+        # All four stage events from the successful render plus the
+        # render envelopes themselves end up in the latency rollup.
+        self.assertIn("tts_synth", names)
+        self.assertIn("image_gen", names)
+        self.assertIn("compose", names)
+        self.assertIn("upload_short", names)
+        # Envelopes are render-pipeline events too — they should
+        # appear so the operator can read total render duration off
+        # the same chart.
+        self.assertTrue(any(n.startswith("render.") for n in names))
+        # Non-stage events MUST be excluded so the chart isn't
+        # dominated by 0-ms bookkeeping.
+        obs.track("cache_hit", category="cache")
+        obs.track("cloud.health.sweep", category="cloud", duration_ms=15000)
+        r2 = self.client.get("/api/telemetry/stage_latency?hours=1").json()
+        names2 = {s["stage"] for s in r2["stages"]}
+        self.assertNotIn("cache_hit", names2)
+        self.assertNotIn("cloud.health.sweep", names2)
+
+    def test_failed_stage_counted(self) -> None:
+        self._seed_full_render()
+        r = self.client.get("/api/telemetry/stage_latency?hours=1").json()
+        image = next(s for s in r["stages"] if s["stage"] == "image_gen")
+        self.assertGreaterEqual(image["failed"], 1)
+
+    def test_sorted_by_p95_desc(self) -> None:
+        self._seed_full_render()
+        r = self.client.get("/api/telemetry/stage_latency?hours=1").json()
+        p95s = [s["p95_ms"] for s in r["stages"]]
+        self.assertEqual(p95s, sorted(p95s, reverse=True))
+
+
+class TestRenders(_Base):
+    def test_returns_one_row_per_render(self) -> None:
+        self._seed_full_render()
+        r = self.client.get("/api/telemetry/renders?hours=1").json()
+        slugs = {row["slug"] for row in r["renders"]}
+        self.assertEqual(slugs, {"aita-001", "napoleon-collapse"})
+
+    def test_render_carries_stage_breakdown(self) -> None:
+        self._seed_full_render()
+        r = self.client.get("/api/telemetry/renders?hours=1").json()
+        aita = next(row for row in r["renders"] if row["slug"] == "aita-001")
+        stage_names = [s["name"] for s in aita["stages"]]
+        # All four child stages must be present.
+        self.assertIn("tts_synth", stage_names)
+        self.assertIn("image_gen", stage_names)
+        self.assertIn("compose", stage_names)
+        self.assertIn("upload_short", stage_names)
+        self.assertEqual(aita["render_kind"], "short")
+        self.assertGreaterEqual(aita["total_ms"], 0)
+        self.assertTrue(aita["has_envelope"])
+        self.assertTrue(aita["success"])
+
+    def test_render_marked_failed_when_any_stage_failed(self) -> None:
+        self._seed_full_render()
+        r = self.client.get("/api/telemetry/renders?hours=1").json()
+        nap = next(row for row in r["renders"]
+                   if row["slug"] == "napoleon-collapse")
+        self.assertFalse(nap["success"])
+        self.assertEqual(nap["render_kind"], "long_form")
+
+    def test_channel_filter(self) -> None:
+        self._seed_full_render()
+        with obs.render_envelope(channel="mystoriesanimated",
+                                 slug="other-slug",
+                                 render_kind="short"):
+            with obs.timed("tts_synth", category="tts"):
+                pass
+        r = self.client.get(
+            "/api/telemetry/renders?hours=1&channel=historyrecapped",
+        ).json()
+        channels = {row["channel"] for row in r["renders"]}
+        self.assertEqual(channels, {"historyrecapped"})
+
+    def test_sorted_newest_first(self) -> None:
+        self._seed_full_render()
+        r = self.client.get("/api/telemetry/renders?hours=1").json()
+        starts = [row["started_at"] for row in r["renders"]]
+        self.assertEqual(starts, sorted(starts, reverse=True))
+
+    def test_renders_without_channel_or_slug_excluded(self) -> None:
+        # An obs.timed with no ctx → no channel/slug in metadata →
+        # not a render. Must be silently dropped instead of showing
+        # up as a "?" / "?" row.
+        with obs.timed("tts_synth", category="tts"):
+            pass
+        r = self.client.get("/api/telemetry/renders?hours=1").json()
+        self.assertEqual(r["renders"], [])
 
 
 class TestOverview(_Base):

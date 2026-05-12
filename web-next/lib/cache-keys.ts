@@ -45,6 +45,8 @@ export const CK = {
   telemetryServices: (hours: number) => `telemetry:services:${hours}`,
   telemetryErrors: (hours: number) => `telemetry:errors:${hours}`,
   telemetryTimeline: (hours: number) => `telemetry:timeline:${hours}`,
+  telemetryStageLatency: (hours: number) => `telemetry:stage_latency:${hours}`,
+  telemetryRenders: (hours: number) => `telemetry:renders:${hours}`,
   telemetryInitStatus: "telemetry:init_status",
 } as const;
 
@@ -103,6 +105,8 @@ export const ROUTE_PREFETCHES: Record<string, PrimerEntry[]> = {
     // cache key tracks the URL identity by hours alone (limit is fixed in code).
     { key: CK.telemetryErrors(24), fetcher: () => api.get("/api/telemetry/errors?hours=24&limit=20") },
     { key: CK.telemetryTimeline(24), fetcher: () => api.get("/api/telemetry/timeline?hours=24") },
+    { key: CK.telemetryStageLatency(24), fetcher: () => api.get("/api/telemetry/stage_latency?hours=24") },
+    { key: CK.telemetryRenders(24), fetcher: () => api.get("/api/telemetry/renders?hours=24&limit=30") },
     { key: CK.telemetryInitStatus, fetcher: () => api.get("/api/telemetry/init_status") },
   ],
 };

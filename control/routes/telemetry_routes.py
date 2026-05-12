@@ -10,6 +10,16 @@ What this surfaces:
   the laptop happens to keep.
 * ``GET /api/telemetry/stages?hours=24`` — per-stage p50/p95/error
   rate from the same log stream.
+* ``GET /api/telemetry/stage_latency?hours=24`` — p50/p95/mean/max
+  for every render-pipeline stage (tts_synth, image_gen, llm_call,
+  compose, upload_*, stage.* / render.*). Backs the "where is time
+  being spent?" bar chart on /app/telemetry. Excludes background
+  bookkeeping events so the chart isn't dominated by 0-ms noise.
+* ``GET /api/telemetry/renders?hours=24&limit=30&channel=...`` —
+  per-render breakdown (one row per channel + slug + render_kind)
+  with total wall-clock duration AND ordered per-stage timings.
+  Backs the "Recent renders" table — the operator's first stop for
+  "how long did slug X take + where did its time go?".
 * ``GET /api/telemetry/timeline?hours=24`` — per-minute event count
   bucket (sparkline data).
 * ``GET /api/telemetry/errors?hours=24&limit=50`` — most recent
@@ -251,6 +261,175 @@ def telemetry_services(
         })
     out.sort(key=lambda r: r["count"], reverse=True)
     return {"hours": hours, "services": out}
+
+
+# Stage-level events the dashboard cares about. Anything matching
+# either the explicit set or the ``stage.*`` / ``render.*`` prefixes
+# is a "render-pipeline" event whose duration belongs in the latency
+# charts. Everything else (cache_hit, http requests, llm tokens,
+# health probes) is excluded so the bar chart isn't dominated by
+# 0-ms bookkeeping events.
+_STAGE_EVENT_NAMES: set[str] = {
+    "tts_synth", "image_gen", "llm_call",
+    "asr_transcribe", "compose", "upload_short", "youtube_upload",
+    "x_post", "post_short", "authenticate",
+    "cast_author", "shotlist_author", "rewrite", "critic", "imitate",
+}
+
+
+def _is_stage_event(name: str | None) -> bool:
+    if not name:
+        return False
+    if name in _STAGE_EVENT_NAMES:
+        return True
+    return name.startswith("stage.") or name.startswith("render.")
+
+
+@router.get("/api/telemetry/stage_latency")
+def telemetry_stage_latency(
+    hours: int = 24,
+    authorization: str | None = Header(None),
+) -> dict[str, Any]:
+    """Per-stage latency for the dashboard's "where is time being
+    spent?" bar chart.
+
+    Returns one row per distinct stage name with count, mean / p50 /
+    p95 / max duration in ms. Sorted by p95 descending so the chart
+    foregrounds the slowest stages — that's the operator's first
+    "what should I optimise?" signal.
+
+    Filters to `render-pipeline` events (`tts_synth`, `image_gen`,
+    `llm_call`, `compose`, `upload_*`, plus anything matching
+    ``stage.*`` / ``render.*``). Excludes background bookkeeping
+    (`cache_hit`, `cloud.health.sweep`, etc.) so the chart actually
+    answers "where did the render spend its time?".
+    """
+    _require_auth(authorization)
+    events = _read_events(hours)
+    by_stage: dict[str, list[int]] = defaultdict(list)
+    fails: dict[str, int] = defaultdict(int)
+    for e in events:
+        name = e.get("event")
+        if not _is_stage_event(name):
+            continue
+        d = e.get("duration_ms")
+        if d is None:
+            continue
+        by_stage[name].append(int(d))
+        if not e.get("success"):
+            fails[name] += 1
+
+    out = []
+    for name, durs in by_stage.items():
+        out.append({
+            "stage": name,
+            "count": len(durs),
+            "failed": fails.get(name, 0),
+            "mean_ms": round(sum(durs) / len(durs)) if durs else 0,
+            "p50_ms": round(_percentile(durs, 0.5)) if durs else 0,
+            "p95_ms": round(_percentile(durs, 0.95)) if durs else 0,
+            "max_ms": int(max(durs)) if durs else 0,
+            "total_ms": int(sum(durs)),
+        })
+    out.sort(key=lambda r: r["p95_ms"], reverse=True)
+    return {"hours": hours, "stages": out}
+
+
+@router.get("/api/telemetry/renders")
+def telemetry_renders(
+    hours: int = 24,
+    limit: int = 30,
+    channel: str | None = None,
+    authorization: str | None = Header(None),
+) -> dict[str, Any]:
+    """Per-render breakdown — one row per (channel, slug, render_kind)
+    with total duration AND per-stage time spent.
+
+    This is the "how long did each video take + where did the time
+    go?" view that turns `cloud.health.sweep`-only dashboards into
+    something you can act on. Each row carries:
+
+    * ``channel`` / ``slug`` / ``render_kind`` (short / long_form /
+      footage_only / sports_doc).
+    * ``total_ms`` — wall-clock duration of the ``render.<kind>``
+      envelope span. Falls back to the sum of stage durations when
+      the envelope event isn't in the window.
+    * ``stages`` — ordered list of ``{name, duration_ms, success}``
+      for every stage event tied to this render via
+      ``metadata.channel + metadata.slug``.
+    * ``success`` — false if ANY child stage or the envelope failed.
+    * ``started_at`` / ``ended_at`` — earliest / latest stage ts.
+
+    Sorted newest-first. ``limit`` caps the number of renders
+    returned. Optional ``channel=`` filter narrows to one channel
+    when the dashboard wants per-channel detail.
+    """
+    _require_auth(authorization)
+    events = _read_events(hours)
+
+    grouped: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for e in events:
+        md = e.get("metadata") or {}
+        ch = md.get("channel")
+        slug = md.get("slug")
+        rk = md.get("render_kind") or ""
+        if not ch or not slug:
+            continue
+        if channel and ch != channel:
+            continue
+        if not _is_stage_event(e.get("event")) and \
+                not str(e.get("event") or "").startswith("render."):
+            continue
+        grouped[(ch, slug, rk)].append(e)
+
+    out = []
+    for (ch, slug, rk), evts in grouped.items():
+        envelope = next(
+            (e for e in evts
+             if str(e.get("event") or "").startswith("render.")),
+            None,
+        )
+        stage_evts = [e for e in evts
+                      if not str(e.get("event") or "").startswith("render.")]
+        # Sort stages by start time (oldest first) for a stable
+        # left-to-right reading order in the UI.
+        stage_evts.sort(key=lambda e: e.get("ts") or 0)
+        stages = []
+        for e in stage_evts:
+            stages.append({
+                "name": e.get("event"),
+                "duration_ms": e.get("duration_ms"),
+                "success": bool(e.get("success", True)),
+                "ts": e.get("ts"),
+                "provider": (e.get("metadata") or {}).get("provider"),
+            })
+        sum_stage_ms = sum(int(s["duration_ms"] or 0) for s in stages)
+        total_ms = (
+            int(envelope["duration_ms"])
+            if envelope and envelope.get("duration_ms") is not None
+            else sum_stage_ms
+        )
+        all_success = all(e.get("success", True) for e in evts)
+        ts_values = [e.get("ts") for e in evts if e.get("ts")]
+        started_at = min(ts_values) if ts_values else None
+        ended_at = max(ts_values) if ts_values else None
+
+        out.append({
+            "channel": ch,
+            "slug": slug,
+            "render_kind": rk or (envelope and (envelope.get("metadata") or {}).get("render_kind")) or "?",
+            "total_ms": total_ms,
+            "stage_total_ms": sum_stage_ms,
+            "stages": stages,
+            "success": all_success,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "has_envelope": envelope is not None,
+        })
+
+    out.sort(key=lambda r: r["started_at"] or 0, reverse=True)
+    out = out[:max(1, min(limit, 200))]
+    return {"hours": hours, "renders": out}
 
 
 @router.get("/api/telemetry/timeline")

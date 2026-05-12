@@ -10,6 +10,8 @@ import { Button } from "@/components/ui/button";
 import { TelemetryOverviewSection } from "./overview-section";
 import { TelemetryServicesSection } from "./services-section";
 import { TelemetryTimelineSection } from "./timeline-section";
+import { TelemetryStageLatencySection } from "./stage-latency-section";
+import { TelemetryRendersSection } from "./renders-section";
 import { TelemetryErrorsSection } from "./errors-section";
 import { TelemetryLinksSection } from "./links-section";
 
@@ -59,6 +61,8 @@ export default function TelemetryPage() {
 
       <div className="flex flex-1 flex-col gap-12 px-6 py-8 md:px-8">
         <TelemetryOverviewSection refreshKey={tick} />
+        <TelemetryStageLatencySection refreshKey={tick} />
+        <TelemetryRendersSection refreshKey={tick} />
         <TelemetryTimelineSection refreshKey={tick} />
         <TelemetryServicesSection refreshKey={tick} />
         <TelemetryErrorsSection refreshKey={tick} />
