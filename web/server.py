@@ -4834,9 +4834,38 @@ def _serve_script_job_mp4(rec: dict):
             return RedirectResponse(url, status_code=302)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(500, f"failed to sign GCS URL: {e}")
-    if not Path(mp4).exists():
+    # Audit Q2.38 — path-traversal containment check.
+    # Pre-fix _resolve_mp4_for_script_job walked upward via
+    # ``p.parent.parent.parent`` with no bound check, and this
+    # handler then handed whatever path landed in mp4_path
+    # straight to FileResponse. A state.json with an mp4_path of
+    # ``/etc/passwd`` would have served /etc/passwd. Now resolve
+    # the absolute path and verify it's under PROJECT_ROOT (the
+    # repo) or under YTFACTORY_RENDER_OUT_DIR (cloud render
+    # workers' OUTPUT_DIR), and require .mp4 extension.
+    resolved = Path(mp4).resolve()
+    if resolved.suffix.lower() != ".mp4":
+        raise HTTPException(400, "refusing to serve non-mp4 path")
+    allowed_roots = [PROJECT_ROOT.resolve()]
+    extra = os.environ.get("YTFACTORY_RENDER_OUT_DIR", "").strip()
+    if extra:
+        allowed_roots.append(Path(extra).resolve())
+    if not any(_is_relative_to(resolved, r) for r in allowed_roots):
         raise HTTPException(404, "mp4 not yet available for this job")
-    return FileResponse(mp4, media_type="video/mp4", filename=Path(mp4).name)
+    if not resolved.exists():
+        raise HTTPException(404, "mp4 not yet available for this job")
+    return FileResponse(str(resolved), media_type="video/mp4",
+                        filename=resolved.name)
+
+
+def _is_relative_to(child: Path, parent: Path) -> bool:
+    """``Path.is_relative_to`` was added in 3.9; use the manual fallback
+    for safety (no behavioural difference on supported Pythons)."""
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 
 @app.get("/api/jobs/{job_id}/short/{seed_idx}")

@@ -223,7 +223,12 @@ class ShortMp4FallthroughTests(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient
         self.client = TestClient(server.app)
+        # Audit Q2.38 — path-traversal containment requires the served
+        # mp4 to be under PROJECT_ROOT or YTFACTORY_RENDER_OUT_DIR.
+        # Use the latter so the tempdir-based tests still work.
         self.tmp = Path(tempfile.mkdtemp())
+        self._render_out_env = os.environ.get("YTFACTORY_RENDER_OUT_DIR")
+        os.environ["YTFACTORY_RENDER_OUT_DIR"] = str(self.tmp)
         self.created: list[str] = []
 
     def tearDown(self):
@@ -231,6 +236,10 @@ class ShortMp4FallthroughTests(unittest.TestCase):
         for jid in self.created:
             server.SCRIPT_JOBS.pop(jid, None)
         shutil.rmtree(self.tmp, ignore_errors=True)
+        if self._render_out_env is None:
+            os.environ.pop("YTFACTORY_RENDER_OUT_DIR", None)
+        else:
+            os.environ["YTFACTORY_RENDER_OUT_DIR"] = self._render_out_env
 
     def test_local_mp4_is_served(self):
         mp4 = self.tmp / "render.mp4"
