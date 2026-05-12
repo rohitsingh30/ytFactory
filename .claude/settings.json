@@ -2,6 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(ffprobe *)",
+      "Bash(gcloud run services describe *)",
+      "Bash(gcloud run services list *)",
+      "Bash(gcloud secrets list *)",
+      "Bash(gcloud run jobs describe *)",
+      "Bash(gcloud builds list *)",
+      "Bash(gcloud org-policies describe *)",
       "mcp__playwright__browser_snapshot"
     ]
   }

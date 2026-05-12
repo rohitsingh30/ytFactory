@@ -37,8 +37,12 @@ Concrete bugs that surfaced (the trigger for this refactor):
 
 ## The schema
 
-`pipeline/niche_specs.py:NicheDoc` is the canonical model. Composed
-sub-specs group conceptually-related fields:
+`pipeline/niche_specs.py:NicheDoc` is the canonical model. As of
+2026-05-12 the model is **partially nested** — only the `source`
+field is structured; the other "should-be-nested" fields
+(`hook_template`, `image_style`, …) are still flat on the model
+itself, and the `routing` / `templates` / `aesthetic` keys present in
+the persisted GCS JSONs are silently dropped via `extra: ignore`.
 
 ```python
 class NicheDoc(BaseModel):
@@ -53,16 +57,50 @@ class NicheDoc(BaseModel):
                          "split_screen", "rhyme", "footage_only",
                          "long_form", "sports_doc"]
 
-    # composed
-    source:    NicheSource     # { kind, ref }
-    routing:   NicheRouting    # { channel, state_subdir, variant_yaml }
-    templates: NicheTemplates  # { prompt_style_guide, hook, closer }
-    aesthetic: NicheAesthetic  # { image_style, music_bed, thumbnail_style_key }
+    # composed (the only nested sub-spec actually loaded today)
+    source: NicheSource | None  # { kind, ref } — populated from the
+                                # nested GCS shape OR synthesised from
+                                # the legacy flat source_kind/source_ref
+                                # by `_migrate_source_shape`. See
+                                # docs/pydantic_flat_to_nested_compat.md.
+
+    # legacy flat fields kept on the model for back-compat. The
+    # source_kind/source_ref pair is mirrored from `source` (and
+    # vice-versa) by the before-validator. Other flat fields below are
+    # the actual storage; the GCS JSONs' nested {templates, aesthetic,
+    # routing} keys are silently dropped on load.
+    source_kind:        SourceKind = "manual"
+    source_ref:         Optional[str]
+    prompt_style_guide: str
+    hook_template:      str
+    closer_template:    str
+    image_style:        str
+    music_bed:          Optional[str]
 
     # provenance
     created_at: str
     created_by: Literal["backfill", "user", "ai_chat"]
 ```
+
+**Why `source` got the nested treatment first (2026-05-12):** the
+discover endpoint needed `niche.source.{kind,ref}` to drive
+niche-aware topic generation (see
+[`docs/discover_topic_generation.md`](discover_topic_generation.md)).
+Pre-fix, the flat-only model with `extra: ignore` silently dropped
+the nested `source` key from the GCS JSONs, so
+`niche_doc.source_kind` always returned the default `"manual"`,
+defeating any downstream attempt to dispatch on it. The fix added
+`class NicheSource` + a `model_validator(mode="before")` that keeps
+nested ↔ flat in sync (nested wins on conflict; unknown source
+kinds degrade to LLM-only routing instead of 422-failing the load).
+
+**Still TODO:** `routing`, `templates`, `aesthetic` are documented
+above as "should be nested sub-specs" but the model doesn't actually
+declare them. The persisted GCS JSONs ship them under those keys; the
+loader silently drops them. Adding analogous `model_validator` +
+nested classes + read-side properties for those three fields is a
+follow-up. See `docs/pydantic_flat_to_nested_compat.md` § "How far
+this is shipped" for the per-field status.
 
 **Voice is deliberately not a niche field.** Voice picks live in the
 standalone voice catalog (`web/server.py:VOICES` + `pipeline/voice_refs/`)

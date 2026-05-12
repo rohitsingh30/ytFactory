@@ -29,31 +29,96 @@ sources, and respects the form context.
 Both endpoints return either a `DiscoverItem` or `DiscoverFeed` —
 schemas live in `control/routes/discover_routes.py`.
 
-## Adapter routing
+## Adapter routing — niche-source-driven (2026-05-12)
 
-`_native_items_for(channel, req)` returns `(adapter_label, items)`:
+> **Channel-wide engineering fix (commit `c4bf4fc`, 2026-05-12).**
+> Pre-fix, `_native_items_for(channel, req)` hard-coded per-channel
+> routing (`historyrecapped` → always today_in_history, etc.) and
+> ignored `req.niche_key` entirely. A user picking the
+> `ancient_civilizations` niche on `historyrecapped` got a Wikipedia
+> "On this day in 1982: Pope assassination attempt" — utterly
+> unrelated. Post-fix, dispatch is driven by the **selected niche's
+> persisted `source: {kind, ref}` field** uniformly across every
+> channel.
+
+### How dispatch works now
+
+`_native_items_for(channel, req, limit)`:
+
+1. **Niche-driven** (when `req.niche_key` resolves to a NicheDoc):
+   call `_niche_native_items_for(niche, req, limit)`. This is the
+   ONLY native source; the function MUST NOT fall back to a
+   channel-default adapter.
+2. **Niche-key set but unresolvable** (deleted niche, FE cache stale,
+   typo): return `("", [])` and let the LLM brainstorm carry.
+3. **No niche selected** (`req.niche_key` absent — older clients,
+   GET feed without query string): legacy channel-default branches
+   kick in (the table below). Back-compat safety net only.
+
+### Niche-source dispatch table
+
+`_niche_native_items_for(niche, req, limit)` switches on
+`niche.source.{kind, ref}`. The same table applies regardless of
+which channel hosts the niche:
+
+| `source.kind` | `source.ref`                              | adapter                                   |
+| ------------- | ----------------------------------------- | ----------------------------------------- |
+| `reddit`      | subreddit name (or `r/<name>`)            | `_reddit_items(sub, "top", "day")`        |
+| `reddit`      | `null` / `r/` (no actual sub)             | `("", [])` — LLM-only                     |
+| `wikipedia`   | `On_this_day`                             | `_today_in_history_items`                  |
+| `wikipedia`   | `List_of_*` / `Lists_of_*` / page title   | `_wikipedia_list_items(page=ref)`         |
+| `wikipedia`   | `null`                                    | `("", [])` — LLM-only                     |
+| `rss`         | HN feed URL (`news.ycombinator.com`)      | `_ai_news_items`                           |
+| `rss`         | other URL / `null`                        | `("", [])` — LLM-only                     |
+| `manual` / `x_twitter` / `youtube` / unknown / missing | `*`              | `("", [])` — LLM-only                     |
+
+**No fallback to channel defaults when a niche is selected.** This is
+a deliberate precedence rule — falling back to (e.g.)
+`historyrecapped → today_in_history` for a niche with `source.kind =
+manual` would silently reintroduce the original "wrong topic" bug.
+LLM brainstorm is the always-available second leg.
+
+### `_wikipedia_list_items(page, limit)`
+
+Thin wrapper around `pipeline.sources.wikipedia.fetch(page=...)`. Each
+DiscoverItem gets a UNIQUE `source_ref` of the form
+`https://en.wikipedia.org/wiki/<page>#<entry-slug>` so the
+`avoid` filter blacklists individual picks, NOT the whole page after
+the first "Generate another" click.
+
+### Legacy channel-default branches (no-niche fallback only)
+
+These run only when `req.niche_key` is absent. Every modern create-
+flow path passes a niche, so these are effectively a back-compat
+shim for older clients and ad-hoc `GET /feed` calls without a query
+string.
 
 | channel             | variant                   | adapter                                    |
 | ------------------- | ------------------------- | ------------------------------------------ |
 | `mystoriesanimated` | `aita` (default)          | `reddit:AmItheAsshole`                     |
-| `mystoriesanimated` | `aita_cliffhanger`        | `reddit:AmItheAsshole`                     |
-| `mystoriesanimated` | `tifu`                    | `reddit:tifu`                              |
-| `mystoriesanimated` | `malicious`               | `reddit:MaliciousCompliance`               |
-| `mystoriesanimated` | `prorevenge`              | `reddit:ProRevenge`                        |
-| `mystoriesanimated` | `oddities`                | `wikipedia:onthisday`                      |
-| `mystoriesanimated` | `tih`                     | `wikipedia:onthisday`                      |
-| `mystoriesanimated` | `wiki_misconceptions`     | `wikipedia:onthisday · misconception`      |
-| `mystoriesanimated` | `aita_cooking`            | `(no native — LLM only)`                   |
+| `mystoriesanimated` | `tifu` / `malicious` / `prorevenge` | `reddit:<sub>` per `VARIANT_SUBREDDIT` |
+| `mystoriesanimated` | `oddities` / `tih` / `wiki_misconceptions` | `wikipedia:onthisday[ · keyword]` |
 | `scrollpulse`       | any                       | `reddit:<random> (round-robin)`            |
 | `historyrecapped`   | any                       | `wikipedia:onthisday`                      |
 | `cosmosdecoded`     | any                       | `wikipedia:onthisday (physics)`            |
-| `hindutavaanimated` | any                       | `(no native — LLM only)`                   |
-| `sportsrecapped`    | any                       | `(no native — LLM only)`                   |
-| `rhymetimejunction` | any                       | `(no native — LLM only)`                   |
+| `hindutavaanimated` / `sportsrecapped` / `rhymetimejunction` | any | `("", [])` — LLM only |
 
-Variants → subreddits are mapped via `VARIANT_SUBREDDIT` /
-`VARIANT_WIKI_KEYWORD` in `discover_routes.py`. Adding a new variant is a
-one-line entry there.
+`VARIANT_SUBREDDIT` and `VARIANT_WIKI_KEYWORD` in `discover_routes.py`
+remain for this fallback; they're NOT consulted on the niche-driven
+path. Adding a new variant on a channel means seeding the niche JSON
+under `<channel>/niches/<key>.json` with the right `source: {kind,
+ref}` — no code change needed.
+
+### Behaviour change for `wiki_misconceptions` / `wiki_oddities`
+
+Pre-fix, these mystoriesanimated variants used `today_in_history`
+filtered by the keyword `misconception` (essentially "today's events
+that happen to mention the word misconception"). Post-fix, when the
+user selects them as a niche, dispatch routes through
+`niche.source = {kind: wikipedia, ref: List_of_common_misconceptions}`
+(or `List_of_unusual_deaths` for oddities) and scrapes the actual
+list page. This is the intended improvement — narrower, on-topic
+topics.
 
 ## LLM brainstorm
 
@@ -115,7 +180,18 @@ so successive "Generate another" clicks don't repeat).
 `tests/test_routes_discover.py` covers:
 
 * All adapter branches (Reddit per-variant, Wikipedia onthisday,
-  cosmos physics filter, no-native channels).
+  cosmos physics filter, no-native channels) — via the legacy
+  channel-default fallback path.
+* **Niche-driven dispatch (2026-05-12)** — every branch in
+  `_niche_native_items_for` (reddit / wikipedia+On_this_day /
+  wikipedia+List_of_* / wikipedia+null / rss+HN / rss+other /
+  manual / x_twitter / unknown / missing source / `r/`-only ref)
+  pinned at unit + integration + end-to-end levels. The exact
+  user-reported regression (historyrecapped + ancient_civilizations
+  → must NOT call today_in_history) is asserted in
+  `TestBuildFeedNicheDriven::test_history_ancient_civilizations_does_not_show_today_in_history`.
+* `_wikipedia_list_items` adapter — per-entry `source_ref` is unique
+  (so `_filter_avoid` doesn't nuke the whole page after one pick).
 * `_filter_avoid` — case-insensitive match on topic and on `source_ref`.
 * LLM brainstorm: env-disabled, parsed-list, raw-string payload,
   upstream failure, dedup.
