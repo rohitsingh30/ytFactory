@@ -99,10 +99,17 @@ gcloud builds submit . \
   --timeout=1800s
 
 echo "==> Deploying ${SERVICE} to Cloud Run"
+# Audit S1.22 — pin to the dedicated web-next SA so a compromised
+# Next.js container can't inherit the default Compute Engine SA's
+# broad project privileges. Operator: create the SA with
+#   gcloud iam service-accounts create web-next-runner --project="${PROJECT}"
+# and grant it ONLY what the Next.js server actually needs (run.invoker
+# on the upstream control-plane API service for the /api/* proxy).
 gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --project="${PROJECT}" \
   --region="${REGION}" \
+  --service-account="web-next-runner@${PROJECT}.iam.gserviceaccount.com" \
   --execution-environment=gen2 \
   --memory=512Mi --cpu=1 --cpu-boost \
   --concurrency=80 \

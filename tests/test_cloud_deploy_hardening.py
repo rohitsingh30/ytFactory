@@ -101,6 +101,74 @@ class TestRenderWorkerSecretsAreAdditive(unittest.TestCase):
             )
 
 
+class TestNoPlaintextApiKeysInSetEnvVars(unittest.TestCase):
+    """Audit S1.15 — secret-shaped values (API keys, HF tokens) MUST
+    NOT land in --set-env-vars (which `gcloud run services describe`
+    surfaces in plaintext to anyone with roles/run.viewer). They
+    flow via Secret Manager (--set-secrets / --update-secrets)
+    instead."""
+
+    LEAKY_VAR_PATTERNS = (
+        re.compile(r"AZURE_OPENAI_API_KEY=\$\{?[A-Z_][A-Z0-9_]*\}?"),
+        re.compile(r"AZURE_OPENAI_WHISPER_API_KEY=\$\{?[A-Z_][A-Z0-9_]*\}?"),
+        re.compile(r"HF_TOKEN=\$\{?[A-Z_][A-Z0-9_]*\}?"),
+        re.compile(r"OPENAI_API_KEY=\$\{?[A-Z_][A-Z0-9_]*\}?"),
+        re.compile(r"ANTHROPIC_API_KEY=\$\{?[A-Z_][A-Z0-9_]*\}?"),
+    )
+
+    def test_no_deploy_passes_secrets_in_env_vars(self) -> None:
+        offenders: list[str] = []
+        for deploy in sorted(CLOUD_DIR.glob("*/deploy.sh")):
+            text = deploy.read_text()
+            for ln_no, line in enumerate(text.splitlines(), 1):
+                stripped = line.lstrip()
+                if stripped.startswith("#"):
+                    continue
+                # Only inspect --set-env-vars / --update-env-vars args.
+                if "env-vars" not in line and "ENV_VARS" not in line:
+                    continue
+                for pat in self.LEAKY_VAR_PATTERNS:
+                    m = pat.search(line)
+                    if m:
+                        offenders.append(
+                            f"{deploy.relative_to(REPO_ROOT)}:{ln_no}: "
+                            f"{m.group(0)}"
+                        )
+        self.assertEqual(
+            offenders, [],
+            "Cloud Run deploys must route API keys / HF tokens via "
+            "Secret Manager (--update-secrets), not --set-env-vars "
+            "(which leaks via `gcloud run services describe`).\n"
+            "Offenders:\n  " + "\n  ".join(offenders),
+        )
+
+
+class TestDeployUsesNonDefaultServiceAccount(unittest.TestCase):
+    """Audit S1.22 — every cloud/<svc>/deploy.sh must pin a
+    --service-account= so the runtime SA isn't the broadly-privileged
+    default Compute Engine one."""
+
+    def test_every_deploy_specifies_service_account(self) -> None:
+        offenders: list[str] = []
+        for deploy in sorted(CLOUD_DIR.glob("*/deploy.sh")):
+            text = deploy.read_text()
+            # Skip files that don't actually run a deploy (some are
+            # IAM-only helpers under cloud/iam/).
+            if not (
+                "gcloud run deploy" in text
+                or "gcloud run jobs deploy" in text
+            ):
+                continue
+            if "--service-account=" not in text:
+                offenders.append(str(deploy.relative_to(REPO_ROOT)))
+        self.assertEqual(
+            offenders, [],
+            "Cloud Run deploys must pin --service-account= to a "
+            "purpose-specific SA, not the default Compute Engine SA.\n"
+            "Offenders:\n  " + "\n  ".join(offenders),
+        )
+
+
 class TestNoLeakyArgSecrets(unittest.TestCase):
     """S1.11 — Dockerfiles must NEVER reference secret-shaped tokens
     via ARG. ARG values are baked into the image layer history,

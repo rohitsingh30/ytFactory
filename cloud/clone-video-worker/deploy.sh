@@ -57,8 +57,21 @@ gcloud builds submit . \
 echo "==> Deploying ${SERVICE} (CPU-only) to Cloud Run, ${REGION}"
 
 # Build env-var arg, omitting optional Whisper deployment when not set.
+# Audit S1.15 — API keys (AZURE_OPENAI_API_KEY,
+# AZURE_OPENAI_WHISPER_API_KEY) are now passed via Secret Manager
+# (--set-secrets) instead of plaintext --set-env-vars. Anyone with
+# roles/run.viewer on the project would have read the plaintext via
+# `gcloud run services describe`. Required Secret Manager secrets:
+#   azure-openai-key            (canonical Azure OpenAI key)
+#   azure-openai-whisper-key    (only when AZURE_OPENAI_WHISPER_*
+#                                set is in use; create with the same
+#                                key when both endpoints share auth)
+# Operator: create with
+#   printf '%s' "$KEY" | gcloud secrets create azure-openai-key \
+#       --data-file=- --replication-policy=automatic
+# and grant the run-tts-runner SA secretmanager.secretAccessor.
+SECRETS=("AZURE_OPENAI_API_KEY=azure-openai-key:latest")
 ENV_VARS="AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}"
-ENV_VARS+=",AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}"
 ENV_VARS+=",AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}"
 ENV_VARS+=",AZURE_OPENAI_MODEL=${AZURE_OPENAI_MODEL}"
 if [ -n "${AZURE_OPENAI_WHISPER:-}" ]; then
@@ -71,7 +84,9 @@ if [ -n "${AZURE_OPENAI_WHISPER_ENDPOINT:-}" ]; then
   ENV_VARS+=",AZURE_OPENAI_WHISPER_ENDPOINT=${AZURE_OPENAI_WHISPER_ENDPOINT}"
 fi
 if [ -n "${AZURE_OPENAI_WHISPER_API_KEY:-}" ]; then
-  ENV_VARS+=",AZURE_OPENAI_WHISPER_API_KEY=${AZURE_OPENAI_WHISPER_API_KEY}"
+  # When the Whisper endpoint uses a distinct key, route it via
+  # Secret Manager too (same SA grant as the canonical Azure key).
+  SECRETS+=("AZURE_OPENAI_WHISPER_API_KEY=azure-openai-whisper-key:latest")
 fi
 if [ -n "${AZURE_OPENAI_WHISPER_API_VERSION:-}" ]; then
   ENV_VARS+=",AZURE_OPENAI_WHISPER_API_VERSION=${AZURE_OPENAI_WHISPER_API_VERSION}"
@@ -101,6 +116,7 @@ gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --project="${PROJECT}" \
   --region="${REGION}" \
+  --service-account="tts-runner@${PROJECT}.iam.gserviceaccount.com" \
   --memory=4Gi \
   --cpu=2 \
   --cpu-boost \
@@ -111,7 +127,11 @@ gcloud run deploy "${SERVICE}" \
   --no-allow-unauthenticated \
   --execution-environment=gen2 \
   --set-env-vars="${ENV_VARS}" \
+  --update-secrets="$(IFS=,; echo "${SECRETS[*]}")" \
   "${COOKIES_ARGS[@]}"
+# Audit S1.22 — pinned to the dedicated tts-runner SA so a
+# compromised clone-video-worker container can't borrow the
+# default Compute Engine SA's broad project privileges.
 
 URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="${PROJECT}" --format="value(status.url)")
 echo ""

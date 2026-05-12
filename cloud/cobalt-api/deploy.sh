@@ -37,6 +37,7 @@ gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --project="${PROJECT}" \
   --region="${REGION}" \
+  --service-account="tts-runner@${PROJECT}.iam.gserviceaccount.com" \
   --memory=2Gi \
   --cpu=2 \
   --cpu-boost \
@@ -47,6 +48,9 @@ gcloud run deploy "${SERVICE}" \
   --no-allow-unauthenticated \
   --execution-environment=gen2 \
   --port=8080
+# Audit S1.22 — pin to the dedicated tts-runner SA so the
+# default Compute Engine SA's broad project privileges aren't
+# inherited by a yt-dlp / cobalt downloader container.
 
 URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="${PROJECT}" --format="value(status.url)")
 

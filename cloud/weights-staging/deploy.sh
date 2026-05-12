@@ -43,6 +43,13 @@ echo "==> Creating/updating Cloud Run Job ${SERVICE}"
 # from an Asia POP at ~300-400 Mbps → 13 GB in ~5-7 min. Discovered
 # 2026-05-07 during Phase-1 image-weights staging. Same fix applies
 # at the laptop (~5× speedup, 45→250 Mbps from BLR).
+# Audit S1.15 — HF_TOKEN now flows via Secret Manager
+# (--update-secrets) instead of plaintext --set-env-vars. Anyone
+# with roles/run.viewer would have read the token via
+# `gcloud run jobs describe`. Operator: create with
+#   printf '%s' "$HF_TOKEN" | gcloud secrets create hf-token \
+#       --data-file=- --replication-policy=automatic
+# and grant the tts-runner SA secretmanager.secretAccessor.
 gcloud run jobs deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --project="${PROJECT}" \
@@ -52,7 +59,8 @@ gcloud run jobs deploy "${SERVICE}" \
   --memory=32Gi --cpu=8 \
   --max-retries=1 \
   --task-timeout=7200 \
-  --set-env-vars="STAGE_ROOT=/tmp/hf-stage,BUCKET_NAME=${BUCKET},HF_TOKEN=${HF_TOKEN_VAL},HF_HUB_ENABLE_HF_TRANSFER=1,HF_HUB_DISABLE_XET=1,UPLOAD_WORKERS=16,LOG_LEVEL=INFO"
+  --set-env-vars="STAGE_ROOT=/tmp/hf-stage,BUCKET_NAME=${BUCKET},HF_HUB_ENABLE_HF_TRANSFER=1,HF_HUB_DISABLE_XET=1,UPLOAD_WORKERS=16,LOG_LEVEL=INFO" \
+  --update-secrets="HF_TOKEN=hf-token:latest"
 
 echo "==> Job ready. Execute with:"
 echo "    gcloud run jobs execute ${SERVICE} --project=${PROJECT} --region=${REGION} --wait"
