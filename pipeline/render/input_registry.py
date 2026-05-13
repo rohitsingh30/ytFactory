@@ -201,13 +201,21 @@ def _apply_voice(cfg: dict, value: Any, channel_meta: dict) -> None:
     - ``"/" in value`` (path-style ref WAV) → write to ``cfg["tts_voice"]``
       AND ``cfg["long_form"]["tts_voice"]``; provider untouched.
     - bare voice id on a cloud channel (``cloudrun_*``/``azure_*``) →
-      logged + ignored (cloud images don't ship ``kokoro_onnx``).
+      try to resolve to a path (catalog / clones / web / kokoro);
+      fall through to the laptop branch if found, else drop loudly.
     - bare voice id on a laptop channel → write voice id, flip provider
       to ``"kokoro"``, drop ``tts_ref_text``.
 
     Mirrors the carve-out previously hand-coded at
     ``pipeline/render/shorts.py:1044-1062``. Centralised here so a
     future TTS-provider change is one edit, not five.
+
+    2026-05-13 — added bare-id → path resolution so wizard picks like
+    ``lv-alex-foster`` (LibriVox web voice) actually flow through to
+    the cloud worker. Pre-fix the carve-out silently dropped every
+    bare id on cloud channels and Sarah default kicked in — every
+    user voice pick on a cloud channel (which is all 16 channel
+    YAMLs except ``tifu``) was a lie.
     """
     v = str(value or "").strip()
     if not v:
@@ -218,18 +226,63 @@ def _apply_voice(cfg: dict, value: Any, channel_meta: dict) -> None:
         cfg["tts_voice"] = v
         cfg.setdefault("long_form", {})["tts_voice"] = v
         return
+    # Bare voice id: try to resolve to a path under pipeline/voice_refs/
+    # Mirrors voices_routes._voice_path's candidate list so the worker
+    # accepts every key the wizard catalog can return.
+    resolved = _resolve_voice_id_to_path(v)
+    if resolved is not None:
+        # Treat as path-style ref — both providers (cloud + laptop kokoro)
+        # accept a path argument; cloud TTS uses it as the speaker ref.
+        cfg["tts_voice"] = resolved
+        cfg.setdefault("long_form", {})["tts_voice"] = resolved
+        return
     if is_cloud:
-        _logger.warning(
-            "[input_registry] voice=%r ignored — channel uses cloud "
-            "provider %r which requires a path-style ref WAV "
-            "(channel default kept). Bare-name voice presets are "
-            "laptop-Kokoro only.", v, current_provider,
+        msg = (
+            f"voice={v!r} ignored — channel uses cloud provider "
+            f"{current_provider!r}, no ref WAV found at any of "
+            f"pipeline/voice_refs/{{{v}/ref.wav, clones/{v}/ref.wav, "
+            f"web/{v}/ref.wav, {v}.wav, web/static/voice_samples/{v}.wav}} "
+            f"— channel default kept"
         )
+        _logger.warning("[input_registry] %s", msg)
+        # Surface the dropped-input warning to the worker via cfg so the
+        # entrypoint can publish it to Firestore as a job-level warning.
+        cfg.setdefault("_dropped_inputs", []).append({
+            "field": "voice", "value": v, "reason": msg,
+        })
         return
     cfg["tts_voice"] = v
     cfg["tts_provider"] = "kokoro"
     cfg.pop("tts_ref_text", None)
     cfg.setdefault("long_form", {})["tts_voice"] = v
+
+
+def _resolve_voice_id_to_path(voice_key: str) -> str | None:
+    """Resolve a bare voice id to a relative path under the repo root.
+
+    Mirrors ``control/routes/voices_routes.py::_voice_path`` so the
+    worker accepts every key the wizard's voice catalog can return.
+    Returns a *relative* path (string) so the same value works on
+    both laptop and cloud worker (where the repo lives at
+    ``/workspace/`` per the Dockerfile COPY).
+
+    Order matches the route handler's lookup order. Returns ``None``
+    if no candidate exists on disk.
+    """
+    import os  # noqa: PLC0415
+    # Repo root: this file is pipeline/render/input_registry.py.
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    candidates = [
+        f"pipeline/voice_refs/{voice_key}/ref.wav",
+        f"pipeline/voice_refs/clones/{voice_key}/ref.wav",
+        f"pipeline/voice_refs/web/{voice_key}/ref.wav",
+        f"pipeline/voice_refs/{voice_key}.wav",
+        f"web/static/voice_samples/{voice_key}.wav",
+    ]
+    for rel in candidates:
+        if os.path.exists(os.path.join(root, rel)):
+            return rel
+    return None
 
 
 @register_apply_handler("apply_song_style")

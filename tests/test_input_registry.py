@@ -163,20 +163,78 @@ def test_apply_overrides_off_value_transformed_to_empty():
 
 
 def test_apply_overrides_apply_handler_voice_cloud_carveout():
-    """Voice on a cloud channel: bare name ignored, path-style WAV written."""
+    """Voice on a cloud channel, full contract:
+
+    - Path-style ref WAV → written to BOTH cfg locations.
+    - Bare voice id that resolves to an existing ref WAV (e.g. Kokoro
+      preset, LibriVox web voice, user clone) → resolved to a relative
+      path and written to BOTH cfg locations.
+    - Bare voice id that does NOT resolve to a file → dropped, but
+      LOUDLY (warning logged + ``cfg["_dropped_inputs"]`` populated)
+      so the worker can surface the lost input to Firestore.
+    """
     desc = _voice_field("sarah", "en")
 
-    # Path-style writes BOTH locations.
+    # 1. Path-style ref writes BOTH locations.
     cfg = {"tts_provider": "cloudrun_chatterbox"}
     apply_overrides(cfg, {"voice": "pipeline/voice_refs/sarah.wav"}, descriptors=[desc])
     assert cfg["tts_voice"] == "pipeline/voice_refs/sarah.wav"
     assert cfg["long_form"]["tts_voice"] == "pipeline/voice_refs/sarah.wav"
 
-    # Bare name on cloud channel: ignored (logged, no mutation).
+    # 2. Bare voice id `af_sarah` (Kokoro preset shipped at
+    # web/static/voice_samples/af_sarah.wav) → resolved to the
+    # relative path and written to BOTH locations. Pre-fix this was
+    # silently dropped and Sarah default kicked in.
     cfg = {"tts_provider": "cloudrun_chatterbox"}
     apply_overrides(cfg, {"voice": "af_sarah"}, descriptors=[desc])
+    assert cfg["tts_voice"] == "web/static/voice_samples/af_sarah.wav"
+    assert cfg["long_form"]["tts_voice"] == "web/static/voice_samples/af_sarah.wav"
+    assert "_dropped_inputs" not in cfg, "resolvable voice id must not be dropped"
+
+    # 3. Bare voice id that points at a real LibriVox web voice
+    # (`pipeline/voice_refs/web/lv-alex-foster/ref.wav`) — the exact
+    # case the user hit on 2026-05-13 when the wizard pick was lost.
+    cfg = {"tts_provider": "cloudrun_chatterbox"}
+    apply_overrides(cfg, {"voice": "lv-alex-foster"}, descriptors=[desc])
+    assert cfg["tts_voice"] == "pipeline/voice_refs/web/lv-alex-foster/ref.wav"
+    assert cfg["long_form"]["tts_voice"] == "pipeline/voice_refs/web/lv-alex-foster/ref.wav"
+
+    # 4. Unresolvable bare voice id on cloud → DROPPED LOUDLY:
+    #    cfg["tts_voice"] is NOT set, AND cfg["_dropped_inputs"] gets
+    #    a structured entry the worker can surface to Firestore.
+    cfg = {"tts_provider": "cloudrun_chatterbox"}
+    apply_overrides(cfg, {"voice": "this-voice-id-does-not-exist"}, descriptors=[desc])
     assert "tts_voice" not in cfg
     assert "long_form" not in cfg
+    assert "_dropped_inputs" in cfg
+    assert len(cfg["_dropped_inputs"]) == 1
+    assert cfg["_dropped_inputs"][0]["field"] == "voice"
+    assert cfg["_dropped_inputs"][0]["value"] == "this-voice-id-does-not-exist"
+    assert "no ref WAV" in cfg["_dropped_inputs"][0]["reason"]
+
+
+def test_resolve_voice_id_to_path_covers_every_layout():
+    """``_resolve_voice_id_to_path`` checks every voice-storage layout
+    the dashboard's voice catalog endpoint can return — built-in
+    catalog, user clones, web (LibriVox), flat-WAV, Kokoro presets.
+
+    Mirrors ``control/routes/voices_routes.py::_voice_path``. If
+    these two ever drift, the wizard will offer voice ids the worker
+    can't resolve, and we'll regress the silent-drop bug.
+    """
+    from pipeline.render.input_registry import _resolve_voice_id_to_path  # noqa: PLC0415
+    # Voice that must exist on disk for this test to be meaningful — pick
+    # one we know ships in the repo (curated in pipeline/voice_refs/).
+    sarah_flat = _resolve_voice_id_to_path("sarah")
+    assert sarah_flat == "pipeline/voice_refs/sarah.wav"
+    # Kokoro preset (lives in web/static/voice_samples/)
+    af_sarah = _resolve_voice_id_to_path("af_sarah")
+    assert af_sarah == "web/static/voice_samples/af_sarah.wav"
+    # LibriVox web voice (lives in pipeline/voice_refs/web/<key>/ref.wav)
+    alex = _resolve_voice_id_to_path("lv-alex-foster")
+    assert alex == "pipeline/voice_refs/web/lv-alex-foster/ref.wav"
+    # Unknown voice id returns None.
+    assert _resolve_voice_id_to_path("not-a-real-voice-id-xyz") is None
 
 
 def test_apply_overrides_per_channel_lookup_via_get_customization_schema():

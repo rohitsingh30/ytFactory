@@ -168,10 +168,11 @@ class EnvAndAdapterTests(unittest.TestCase):
         from unittest.mock import MagicMock
         with local_tempdir() as tmp:
             wavs = [write_wav(tmp / "a.wav"), write_wav(tmp / "b.wav")]
-            # Mock ffprobe to return 22050 Hz mono.
+            # Mock ffprobe to return 22050 Hz mono in keyed format
+            # (matches `-of default=nokey=0:noprint_wrappers=1`).
             fake_probe = MagicMock()
             fake_probe.returncode = 0
-            fake_probe.stdout = "22050\n1\nmono\n"
+            fake_probe.stdout = "sample_rate=22050\nchannel_layout=mono\nchannels=1\n"
             with patch.object(render_long_form, "_ffmpeg") as ff, \
                  patch("subprocess.run", return_value=fake_probe):
                 render_long_form._wav_concat_with_silence(
@@ -185,23 +186,32 @@ class EnvAndAdapterTests(unittest.TestCase):
             self.assertNotIn("anullsrc=r=44100", cmd_str)
 
     def test_probe_wav_params_falls_back_to_channels_count_when_layout_absent(self):
-        # Covers the channel_layout-empty fallback path: ffprobe didn't
-        # surface channel_layout for some odd containers, but channels
-        # count was reported. _probe_wav_params derives mono/stereo/Nc
-        # from the count.
+        # Covers the channel_layout-empty / "unknown" fallback path:
+        # ffprobe doesn't surface channel_layout for cloud-TTS WAVs
+        # whose RIFF header has no WAVEFORMATEXT extension. Parser
+        # MUST derive layout from channels count instead of forwarding
+        # ``unknown`` → ``anullsrc=cl=unknown`` (which crashed job
+        # 2cb1a44165a6443eaec1843657118baf on 2026-05-13).
         from unittest.mock import MagicMock
         with local_tempdir() as tmp:
             wav = write_wav(tmp / "x.wav")
-            for n_channels, expected_layout in [
-                ("1", "mono"),
-                ("2", "stereo"),
-                ("6", "6c"),
+            for n_channels, raw_layout, expected_layout in [
+                ("1", "unknown", "mono"),
+                ("2", "unknown", "stereo"),
+                ("1", "", "mono"),
+                ("2", "", "stereo"),
+                ("6", "unknown", "5.1"),
+                ("8", "unknown", "7.1"),
+                ("3", "unknown", "3c"),
             ]:
-                with self.subTest(n_channels=n_channels):
+                with self.subTest(n_channels=n_channels, layout=raw_layout):
                     fake_probe = MagicMock()
                     fake_probe.returncode = 0
-                    # Two-line output: rate + channels (no layout line).
-                    fake_probe.stdout = f"48000\n{n_channels}\n"
+                    fake_probe.stdout = (
+                        f"sample_rate=48000\n"
+                        f"channel_layout={raw_layout}\n"
+                        f"channels={n_channels}\n"
+                    )
                     with patch("subprocess.run", return_value=fake_probe):
                         rate, layout = render_long_form._probe_wav_params(wav)
                     self.assertEqual(rate, 48000)
@@ -214,7 +224,7 @@ class EnvAndAdapterTests(unittest.TestCase):
             wavs = [write_wav(tmp / "a.wav"), write_wav(tmp / "b.wav")]
             fake_probe = MagicMock()
             fake_probe.returncode = 0
-            fake_probe.stdout = "48000\n2\nstereo\n"
+            fake_probe.stdout = "sample_rate=48000\nchannel_layout=stereo\nchannels=2\n"
             with patch.object(render_long_form, "_ffmpeg") as ff, \
                  patch("subprocess.run", return_value=fake_probe):
                 render_long_form._wav_concat_with_silence(

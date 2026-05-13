@@ -242,30 +242,78 @@ def _probe_wav_params(wav: Path) -> tuple[int, str]:
     cloud Chatterbox / Higgs / IndicF5 routinely return 22050 Hz or
     stereo, breaking the concat with "Non-monotonous DTS" errors or
     forcing ffmpeg to refuse -c copy.
+
+    2026-05-13 — additional hardening for the cloud-TTS "unknown"
+    layout case. Cloud Chatterbox emits 24kHz mono WAVs whose RIFF
+    header has no channel_layout field, so ``ffprobe`` reports
+    ``channel_layout=unknown``. The pre-fix parser (a) had a comment
+    that said the entries appeared in (sample_rate, channels,
+    channel_layout) order but ffprobe actually emits them in the
+    order *requested* (here: sample_rate, channel_layout, channels),
+    and (b) accepted any non-digit string as a valid layout — so
+    ``"unknown"`` rode through to ``anullsrc=cl=unknown`` and ffmpeg
+    failed the entire long-form render with
+    ``Invalid channel layout "unknown"``.
+
+    The fix:
+
+    1. Parse by *name*, not positional index — request each entry
+       individually with ``-show_entries`` ``stream=key=value`` plus
+       a sentinel separator and key-prefixed output via
+       ``-of csv=p=0`` is fragile across ffprobe versions, so instead
+       request all three in one shot and key the output via
+       ``-of default=nokey=0:noprint_wrappers=1`` so each line is
+       ``key=value``. Then we can match by key regardless of order.
+    2. Whitelist layout values (mono, stereo, 5.1, 7.1) before
+       passing to ``anullsrc``. Anything else (incl. "unknown" and
+       empty string) → derive from channels count.
     """
     probe = subprocess.run(
         [
             "ffprobe", "-v", "error",
             "-select_streams", "a:0",
             "-show_entries", "stream=sample_rate,channel_layout,channels",
-            "-of", "default=nokey=1:noprint_wrappers=1",
+            "-of", "default=nokey=0:noprint_wrappers=1",
             str(wav),
         ],
         capture_output=True, text=True, check=False,
     )
     rate = 44100
     layout = "mono"
+    n_channels: int | None = None
+    raw_layout = ""
     if probe.returncode == 0:
-        lines = [ln.strip() for ln in (probe.stdout or "").splitlines() if ln.strip()]
-        # Output order matches the entries order: sample_rate, channels, channel_layout
-        if lines and lines[0].isdigit():
-            rate = int(lines[0])
-        # Prefer explicit channel_layout if present; else derive from channel count.
-        if len(lines) >= 3 and lines[2] and not lines[2].isdigit():
-            layout = lines[2]
-        elif len(lines) >= 2 and lines[1].isdigit():
-            n = int(lines[1])
-            layout = "mono" if n == 1 else ("stereo" if n == 2 else f"{n}c")
+        for ln in (probe.stdout or "").splitlines():
+            ln = ln.strip()
+            if not ln or "=" not in ln:
+                continue  # coverage: empty/no-eq lines pass through; ffprobe never emits them in practice
+            key, _, val = ln.partition("=")
+            key = key.strip()
+            val = val.strip()
+            if key == "sample_rate" and val.isdigit():
+                rate = int(val)
+            elif key == "channel_layout":
+                raw_layout = val
+            elif key == "channels" and val.isdigit():
+                n_channels = int(val)
+    # Whitelist of layouts ffmpeg's anullsrc accepts as `cl=<name>`.
+    # "unknown" / empty / unexpected strings → derive from channels.
+    _VALID_LAYOUTS = {"mono", "stereo", "2.1", "3.0", "4.0", "4.1", "5.0", "5.1", "6.1", "7.1"}
+    if raw_layout in _VALID_LAYOUTS:
+        layout = raw_layout
+    elif n_channels is not None:
+        if n_channels == 1:
+            layout = "mono"
+        elif n_channels == 2:
+            layout = "stereo"
+        elif n_channels == 6:
+            layout = "5.1"
+        elif n_channels == 8:
+            layout = "7.1"
+        else:
+            # ffmpeg accepts numeric channel-count syntax (e.g. "3c") for
+            # exotic layouts. Falls back to mono if probe gave us 0.
+            layout = f"{n_channels}c" if n_channels > 0 else "mono"
     return rate, layout
 
 
