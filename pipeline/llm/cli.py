@@ -139,6 +139,7 @@ class ClaudeCLIError(RuntimeError):
 _DEFAULT_MODEL_BY_STAGE: dict[str, str] = {
     "cast": "opus",
     "rewrite": "opus",
+    "rewrite_long_form": "opus",  # Audit D3.47 — explicit so the env var is discoverable
     "prompts": "opus",
     "critic": "opus",
     "audio_critic": "opus",

@@ -22,8 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/local/bin/python
 
-# Chatterbox-tts wants torch==2.6.0; cu124 wheels don't exist for 2.6,
-# so use cu126 which is the closest ABI match and works with cu124 driver.
+# Audit D3.50 — pre-fix the comment said "use cu126" but the install
+# index was actually `cu124`. Comment-vs-code drift. The cu124 wheels
+# DO exist for torch==2.6.0 (verified at
+# https://download.pytorch.org/whl/cu124/torch/ on 2026-05-13), so
+# the install URL is correct; the comment was out of date.
 RUN python -m pip install --upgrade pip setuptools wheel && \
     python -m pip install \
         torch==2.6.0 \

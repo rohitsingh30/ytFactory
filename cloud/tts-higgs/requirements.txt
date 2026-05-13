@@ -36,12 +36,17 @@ librosa==0.10.2
 # when installing higgs-audio, so list its runtime imports here.
 # All pinned to current-stable to avoid resolver depth.
 #
-# NOTE: descript-audio-codec is NOT here even though Higgs's upstream
-# requirements.txt lists it. Higgs uses a VENDORED copy of DAC at
-# boson_multimodal/audio_processing/descriptaudiocodec/, not the pip
-# package — verified by reading higgs_audio_tokenizer.py imports.
-# Including it from pip drags in descript-audiotools<3.20-protobuf
-# which conflicts with google-cloud-storage. Skip it.
+# Audit D3.51 — pre-fix this NOTE claimed "descript-audio-codec is
+# NOT here ... Higgs uses a VENDORED copy ... Skip it." That was
+# stale: the Dockerfile DOES install descript-audio-codec==1.0.0
+# (and descript-audiotools==0.7.2) explicitly because Higgs's
+# vendored DAC at boson_multimodal/audio_processing/descriptaudiocodec/
+# imports from the pip packages (`from dac.nn.layers import Snake1d`
+# + `from audiotools import AudioSignal`). The vendoring is partial,
+# not full. Updated to reflect reality: these are installed via the
+# Dockerfile's explicit RUN block (not here, because they need to
+# be the LAST install so their deps can resolve against the
+# higgs-audio constraints).
 dacite==1.8.1
 json-repair==0.30.3
 pandas==2.2.3

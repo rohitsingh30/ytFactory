@@ -75,11 +75,12 @@ MEMORY_DIR = Path(
 # stay non-production.
 PRODUCTION_CHANNELS = {"mystoriesanimated", "sportsrecapped"}
 
-# Top-level dirs that are NOT channel dirs.
-_NON_CHANNEL_DIRS = {
-    "pipeline", "web", "data", "docs", "tests", "scripts",
-    "workers", "control", "node_modules", "venv", ".venv", ".git",
-}
+# Audit D3.44 — pre-fix this list drifted from the canonical one in
+# pipeline/research/youtube.py:_NON_CHANNEL_DIRS (was missing
+# `web-next` and `cloud`, which meant aggregator surfaced them as
+# fake "channels" in the dashboard). Now: import the canonical
+# version directly so any future addition lands in one place.
+from pipeline.research.youtube import _NON_CHANNEL_DIRS  # noqa: E402, PLC0415
 
 
 # ---- helpers ------------------------------------------------------------

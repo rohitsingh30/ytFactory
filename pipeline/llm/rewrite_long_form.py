@@ -376,11 +376,16 @@ def rewrite_long_form(
         section_count_target, panel_count_target,
     )
 
+    # Audit D3.47 — pre-fix this hardcoded model="opus" so the
+    # YTFACTORY_MODEL_REWRITE_LONG_FORM env override (which the
+    # dispatcher's model_for() helper respects) was silently ignored.
+    # Now: route through model_for("rewrite_long_form") so an operator
+    # can flip to sonnet/haiku for fast iteration without a code edit.
     raw = _llm.call_claude_cli(
         prompt,
         output_json=True,
         json_schema=_SCHEMA,
-        model="opus",  # long-form benefits from the larger context model
+        model=_llm.model_for("rewrite_long_form"),
         stage="rewrite_long_form",
     )
 
