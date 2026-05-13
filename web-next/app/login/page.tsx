@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -20,38 +20,7 @@ export default function LoginPage() {
 function LoginInner() {
   const sp = useSearchParams();
   const errorParam = sp.get("error");
-
-  // **2026-05-13 simplification.** Pre-fix this page rendered a
-  // "checking session…" spinner that fetched /api/auth/whoami and
-  // either router.replace()'d to /app or revealed the Sign-in button
-  // based on the response. Three failure modes traced over the last
-  // 2h to that flow:
-  //
-  //   1. Browser cached the HTML shell with old chunk hashes; the
-  //      JS that drives the fetch never ran → spinner forever.
-  //   2. Service worker (now retired, public/sw.js is a self-destruct
-  //      kill-switch) intercepted the fetch and served stale.
-  //   3. Auth-loop: middleware lacked YTFACTORY_SESSION_SECRET, so a
-  //      valid cookie failed verification at the edge → redirect to
-  //      /login → /login's whoami succeeded → router.replace("/app")
-  //      → middleware bounced again → infinite loop visible only as
-  //      the spinner re-mounting.
-  //
-  // The right architecture is "let the middleware decide". The
-  // middleware on /app/* already redirects unauthenticated users to
-  // /login. /login itself does NOT need to ping whoami — if the
-  // user is already authenticated, the chrome-side click on
-  // "Continue with Google" is a no-op (OAuth round-trip ends at
-  // /api/auth/google/callback which sets the cookie + redirects to
-  // /app). If the user IS authenticated and lands here by typing
-  // the URL, the "Continue with Google" link still goes to the
-  // OAuth start URL, which the backend's
-  // pipeline.auth.routes.start_login() short-circuits to a redirect
-  // to /app for already-authenticated users (existing behaviour;
-  // see web/server.py).
-  //
-  // Net: no client-side state, no fetch, no spinner. The page
-  // always shows "Continue with Google" instantly.
+  const debug = sp.get("debug") === "1";
 
   return (
     <main className="relative flex min-h-screen items-center justify-center px-6">
@@ -108,6 +77,8 @@ function LoginInner() {
                 : `Sign-in failed: ${errorParam}`}
             </div>
           )}
+
+          {debug && <DebugPanel />}
         </div>
 
         <div className="mt-5 text-center font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
@@ -115,6 +86,87 @@ function LoginInner() {
         </div>
       </div>
     </main>
+  );
+}
+
+interface DebugInfo {
+  whoami_status?: number;
+  whoami_body?: string;
+  whoami_error?: string;
+  app_status?: number;
+  app_redirect?: string;
+  app_error?: string;
+  cookie_present?: boolean;
+  cookie_preview?: string;
+  cookie_parts?: number;
+  history?: string;
+}
+
+function DebugPanel() {
+  const [info, setInfo] = useState<DebugInfo>({});
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const out: DebugInfo = {};
+
+      // Cookie present? (only HttpOnly cookies are NOT visible here, but
+      // we can at least see if document.cookie has anything.)
+      const allCookies = document.cookie;
+      out.cookie_present = allCookies.includes("yt_session");
+      out.cookie_preview = allCookies ? `len=${allCookies.length} (httponly cookies invisible)` : "(empty)";
+
+      // whoami test
+      try {
+        const r = await fetch("/api/auth/whoami", {
+          credentials: "include",
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+        });
+        out.whoami_status = r.status;
+        out.whoami_body = (await r.text()).slice(0, 300);
+        try {
+          const parsed = JSON.parse(out.whoami_body);
+          out.cookie_parts = parsed.signed_in ? 3 : 0;
+        } catch { /* ignore */ }
+      } catch (e) {
+        out.whoami_error = String(e);
+      }
+
+      // /app middleware test (manual redirect handling)
+      try {
+        const r = await fetch("/app", {
+          credentials: "include",
+          cache: "no-store",
+          redirect: "manual",
+        });
+        out.app_status = r.status;
+        // If middleware redirected, response.type is "opaqueredirect"
+        out.app_redirect = r.type;
+      } catch (e) {
+        out.app_error = String(e);
+      }
+
+      out.history = `path=${window.location.pathname}${window.location.search}; nav-type=${(performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined)?.type ?? "?"}`;
+
+      setInfo(out);
+      setDone(true);
+    })();
+  }, []);
+
+  return (
+    <div className="mt-6 rounded-md border border-border bg-background/50 p-3 font-mono text-[10px]">
+      <div className="text-[9px] uppercase tracking-[0.22em] text-muted-foreground">
+        debug
+      </div>
+      {!done ? (
+        <div className="mt-2 text-muted-foreground">running diagnostics…</div>
+      ) : (
+        <pre className="mt-2 whitespace-pre-wrap break-all text-foreground">
+          {JSON.stringify(info, null, 2)}
+        </pre>
+      )}
+    </div>
   );
 }
 
