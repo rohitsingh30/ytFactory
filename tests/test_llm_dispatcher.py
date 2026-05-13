@@ -600,9 +600,14 @@ class AzureBackendTest(unittest.TestCase):
         kwargs = self._fake_client.chat.completions.create.call_args.kwargs
         self.assertEqual(kwargs.get("reasoning_effort"), "minimal")
 
-    def test_reasoning_effort_medium_for_long_form_rewrite(self) -> None:
-        # rewrite_long_form genuinely benefits from reasoning (planning
-        # a coherent 30-min script) — keep it at "medium" by default.
+    def test_reasoning_effort_minimal_for_long_form_rewrite(self) -> None:
+        # 2026-05-13: dropped from "medium" → "minimal". With 30-min
+        # rewrite output budget already strained (8k narration + 2-5k
+        # panels + 1k JSON ~ 12-15k tokens), giving away another 5-8k
+        # to invisible reasoning tokens caused mid-section truncation
+        # on jobs b318a787 + 0947ea51 + 7dca182d. The new niche-tonal
+        # contract + length validator handle the planning structure
+        # that "medium" was nominally for.
         self._fake_client.chat.completions.create.return_value = \
             self._make_resp('{"ok": true}')
         llm_cli._call_azure_openai(
@@ -610,7 +615,7 @@ class AzureBackendTest(unittest.TestCase):
             model="opus", timeout_s=30, stage="rewrite_long_form",
         )
         kwargs = self._fake_client.chat.completions.create.call_args.kwargs
-        self.assertEqual(kwargs.get("reasoning_effort"), "medium")
+        self.assertEqual(kwargs.get("reasoning_effort"), "minimal")
 
     def test_reasoning_effort_env_override_per_stage(self) -> None:
         # Operator can promote a stage to a different effort via env
@@ -699,7 +704,10 @@ class AzureBackendTest(unittest.TestCase):
                 model="opus", timeout_s=30, stage="rewrite_long_form",
             )
         self.assertTrue(captured)
-        self.assertEqual(captured[0].get("reasoning_effort"), "medium")
+        # 2026-05-13: rewrite_long_form reasoning_effort dropped from
+        # "medium" → "minimal" to free up output-token budget for the
+        # 30-min long-form schema.
+        self.assertEqual(captured[0].get("reasoning_effort"), "minimal")
 
     # ----- finish_reason=length truncation handling (2026-05-13) -----
 
@@ -709,6 +717,11 @@ class AzureBackendTest(unittest.TestCase):
         # the JSON cut off mid-string. We auto-retry once with doubled
         # budget so the typical render recovers without operator
         # intervention.
+        # Note: post-2026-05-13 the default rewrite_long_form cap is
+        # 64000. Override to 32000 here so the doubled-cap retry
+        # (64000) doesn't hit the auto-bump ceiling and skip the retry.
+        os.environ["YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM"] = "32000"
+        self.addCleanup(os.environ.pop, "YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM", None)
         truncated = self._make_resp(
             '{"hook": "story…", "thesis": "cut off mid-',
             finish_reason="length",
@@ -790,6 +803,9 @@ class AzureBackendTest(unittest.TestCase):
         # filter, timeout, rate-limit), surface a message that names
         # both budgets so the operator can disambiguate "first call
         # truncated" from "retry call exploded".
+        # Override default cap so doubled-cap retry doesn't skip.
+        os.environ["YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM"] = "32000"
+        self.addCleanup(os.environ.pop, "YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM", None)
         truncated = self._make_resp(
             '{"hook": "cut off',
             finish_reason="length",
@@ -806,6 +822,9 @@ class AzureBackendTest(unittest.TestCase):
                 model="opus", timeout_s=30, stage="rewrite_long_form",
             )
         msg = str(ctx.exception)
+        # The dispatcher's retry-failure format names both budgets so
+        # the operator can disambiguate "first call truncated" from
+        # "retry call exploded".
         self.assertIn("post-retry=max_tokens_doubled", msg)
         self.assertIn("rate_limit_exceeded", msg)
 

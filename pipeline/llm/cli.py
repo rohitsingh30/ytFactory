@@ -275,7 +275,20 @@ def _reasoning_tokens(usage: Any) -> int | None:
 # Set to ``off`` / ``none`` to omit the param entirely (useful when
 # diagnosing a stage that needs the deployment default).
 _DEFAULT_REASONING_EFFORT_BY_STAGE: dict[str, str] = {
-    "rewrite_long_form": "medium",  # planning a 30-min script benefits from reasoning
+    # 2026-05-13 calibration: dropped from "medium" → "minimal".
+    # Long-form rewrite for a 30-min target needs to emit ~6000
+    # narration words = ~8k output tokens, plus 24-60 panel scenes
+    # = 2-5k tokens, plus JSON syntax = ~1k tokens, total ~12-15k
+    # CONTENT tokens. With reasoning_effort=medium, gpt-5.3-chat
+    # was burning 5-8k INVISIBLE reasoning tokens BEFORE output,
+    # combined with the 32k → 64k cap we still hit truncation
+    # mid-section on jobs b318a787 + 0947ea51 + 7dca182d.
+    # Switching to "minimal" frees the full 64k for actual output.
+    # The new niche-tonal contract + length validator (validate_long_form_envelope)
+    # provide the planning structure that "medium" reasoning was
+    # nominally meant to bring — so we get the same content quality
+    # without the reasoning-token overhead.
+    "rewrite_long_form": "minimal",
     "critic":            "medium",  # we want thoughtful critique
 }
 _FALLBACK_REASONING_EFFORT = "minimal"
@@ -818,9 +831,150 @@ def _parse_inner_json(text: str) -> dict | list:
                     except json.JSONDecodeError:
                         break
 
+    # Last-ditch salvager (added 2026-05-13): recover from output
+    # truncation. gpt-5.x reasoning deployments sometimes emit JSON
+    # that's cut mid-string AND mid-bracket (e.g. cap was hit, or the
+    # reasoning model just decided to "stop" with finish_reason="stop"
+    # despite incomplete output). The salvager:
+    #   1. finds the start `{` or `[`
+    #   2. tracks string/bracket state
+    #   3. when EOF is reached: closes any open string with `"`, then
+    #      closes any open object/array with the matching brackets
+    #   4. if the last value was incomplete (e.g. `"narration":` with
+    #      no value), backs up to the last completed key:value pair
+    #      and closes there
+    # The result may have FEWER fields than the schema demands — but
+    # that's the validator's job to surface. Better to return a
+    # partial dict the validator can flag as "missing sections" than
+    # raise opaque "could not parse JSON" with no actionable feedback.
+    salvaged = _salvage_truncated_json(s)
+    if salvaged is not None:
+        return salvaged
+
     raise ClaudeCLIError(
         f"could not parse JSON from model output:\n{text[:1000]}"
     )
+
+
+def _salvage_truncated_json(s: str) -> dict | list | None:
+    """Best-effort recovery of a truncated JSON object/array.
+
+    Returns the parsed structure (potentially missing trailing fields)
+    or None if the prefix can't be recovered into valid JSON.
+
+    Strategy:
+    1. Locate the outermost opener (`{` or `[`).
+    2. Walk the string tracking depth + in-string state.
+    3. On EOF (no balanced close found): close any open string, then
+       trim back to the last completed sibling, then add the right
+       number of closers.
+    4. Try to parse. If still invalid, trim further. Up to 50 attempts
+       so a few trailing partial fields don't sink the whole salvage.
+    """
+    if not s:
+        return None
+    # Find first opener
+    open_idx = None
+    open_ch = None
+    for k, ch in enumerate(s):
+        if ch in "{[":
+            open_idx = k
+            open_ch = ch
+            break
+    if open_idx is None:
+        return None
+    close_ch = "}" if open_ch == "{" else "]"
+
+    # Track string state through the whole input
+    body = s[open_idx:]
+    in_str = False
+    escape = False
+    last_complete_value_end = open_idx  # index in `s`
+    depth = 0
+    bracket_stack: list[str] = []
+    for j, ch in enumerate(body):
+        absolute = open_idx + j
+        if escape:
+            escape = False
+            continue
+        if in_str:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+                last_complete_value_end = absolute + 1
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch in "{[":
+            bracket_stack.append("}" if ch == "{" else "]")
+            depth += 1
+            continue
+        if ch in "}]":
+            if not bracket_stack:
+                return None
+            bracket_stack.pop()
+            depth -= 1
+            last_complete_value_end = absolute + 1
+            if depth == 0:
+                # Already balanced — let the main loop handle it.
+                return None
+            continue
+        if ch == "," and depth == 1:
+            # End of a top-level array element / object pair
+            last_complete_value_end = absolute
+        if ch.isdigit() or ch in "tfn-":
+            # Bare value; we conservatively don't advance
+            # last_complete_value_end on these — only on quoted strings,
+            # commas, and balanced closes — which keeps salvage simple.
+            pass
+
+    # We hit EOF while still inside the structure. Try a few cuts.
+    for attempt in range(50):
+        cut = max(open_idx + 1, last_complete_value_end - attempt)
+        prefix = s[:cut].rstrip().rstrip(",: \t\n")
+        # Close any unterminated string by eyeballing the last quote
+        # parity in `prefix`.
+        in_str_p = False
+        escape_p = False
+        depth_p = 0
+        stack_p: list[str] = []
+        for ch in prefix[open_idx:]:
+            if escape_p:
+                escape_p = False
+                continue
+            if in_str_p:
+                if ch == "\\":
+                    escape_p = True
+                elif ch == '"':
+                    in_str_p = False
+                continue
+            if ch == '"':
+                in_str_p = True
+                continue
+            if ch in "{[":
+                stack_p.append("}" if ch == "{" else "]")
+                depth_p += 1
+            elif ch in "}]":
+                if stack_p:
+                    stack_p.pop()
+                    depth_p -= 1
+        candidate = prefix
+        if in_str_p:
+            candidate += '"'
+        # Trim a trailing `:` or `"key":` — those are incomplete pairs.
+        candidate = re.sub(r',\s*"[^"\\]*"\s*:\s*$', "", candidate)
+        candidate = re.sub(r'"[^"\\]*"\s*:\s*$', "", candidate)
+        candidate = candidate.rstrip().rstrip(",")
+        # Add closers in reverse order
+        for closer in reversed(stack_p):
+            candidate += closer
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------
