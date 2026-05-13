@@ -279,6 +279,16 @@ def timed(
     try:
         with _trace_use_span(span):
             yield handle
+    except (KeyboardInterrupt, SystemExit):
+        # Audit D3.54 — pre-fix this caught BaseException and recorded
+        # KeyboardInterrupt + SystemExit as ERROR-status spans. These
+        # are CONTROL-FLOW exceptions, not failures: a Ctrl-C during a
+        # render shouldn't pollute the dashboard's error rate. Re-
+        # raise without any error decoration so the calling cleanup
+        # path runs and the span closes cleanly (success=True since
+        # the work IN-progress wasn't a failure, just an interruption).
+        _close_span(span, handle, start_ns, success=True)
+        raise
     except BaseException as e:
         # Build final attrs (with whatever the user .add()'d) before
         # marking failure.

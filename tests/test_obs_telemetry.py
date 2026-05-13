@@ -199,5 +199,48 @@ class TestMetricAttrsCarryRenderContext(unittest.TestCase):
         self.assertEqual(attrs.get("job_id"), "abc-123")
 
 
+class TestTimedKeyboardInterruptD354(unittest.TestCase):
+    """Audit D3.54 — pre-fix `with obs.timed("...")` caught
+    BaseException and recorded the span as ERROR. KeyboardInterrupt
+    + SystemExit are control-flow exceptions, not failures: a
+    user's Ctrl-C during a render shouldn't pollute the dashboard's
+    error rate. Now: those two re-raise without error decoration
+    and the span closes with success=True."""
+
+    def test_keyboard_interrupt_does_not_record_as_error(self) -> None:
+        from unittest.mock import patch as _patch
+        from pipeline.observability import telemetry as obs_t
+
+        with _patch.object(obs_t, "record_exception") as record_mock:
+            with self.assertRaises(KeyboardInterrupt):
+                with obs.timed("user_interrupted") as h:
+                    raise KeyboardInterrupt()
+        # KeyboardInterrupt MUST NOT be recorded as an exception on
+        # the span (pre-fix this fired record_exception(fatal=True)).
+        record_mock.assert_not_called()
+
+    def test_system_exit_does_not_record_as_error(self) -> None:
+        from unittest.mock import patch as _patch
+        from pipeline.observability import telemetry as obs_t
+
+        with _patch.object(obs_t, "record_exception") as record_mock:
+            with self.assertRaises(SystemExit):
+                with obs.timed("system_exit") as h:
+                    raise SystemExit(0)
+        record_mock.assert_not_called()
+
+    def test_real_exception_still_recorded_as_error(self) -> None:
+        # Sanity: the carve-out only covers KeyboardInterrupt /
+        # SystemExit. A regular Exception STILL fires record_exception.
+        from unittest.mock import patch as _patch
+        from pipeline.observability import telemetry as obs_t
+
+        with _patch.object(obs_t, "record_exception") as record_mock:
+            with self.assertRaises(RuntimeError):
+                with obs.timed("real_failure"):
+                    raise RuntimeError("boom")
+        record_mock.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
