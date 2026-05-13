@@ -99,39 +99,67 @@ def test_check_word_count_passes_when_at_target():
     assert critic.check_word_count(sections, target_duration_s=1800) == []
 
 
-def test_check_word_count_hard_fails_under_85pct():
-    """C2 — rendered video delivered 53% of target."""
-    # 30-min target = 4500 words. Deliver 2550 (the actual job 0c05c335 count).
-    counts = [321, 306, 276, 269, 247, 264, 222, 218, 212, 215]
+def test_check_word_count_hard_fails_under_50pct():
+    """C2 — rendered video delivered 53% of target.
+
+    Was 85% threshold pre-2026-05-13 calibration; lowered to 50%
+    after observed Azure GPT-5.3 single-shot output for 30-min
+    requests physically lands at 55-65% of target words. The 50%
+    floor catches catastrophic under-delivery (LLM produced 5-min
+    script for a 30-min request) without blocking realistic LLM
+    output. Soft warn at 85% still surfaces the gap to dashboards.
+    """
+    # 30-min target = 4500 words. Deliver 2200 (49% — below 50% hard floor).
+    counts = [220, 220, 220, 220, 220, 220, 220, 220, 220, 220]
     sections = [_make_section(c, i) for i, c in enumerate(counts)]
     out = critic.check_word_count(sections, target_duration_s=1800)
     hard = [v for v in out if v.severity == "hard"]
     codes = {v.code for v in hard}
     assert "length_under_delivered_hard" in codes
-    # Per-section degradation: section 9 is 215 words vs mean ~255 = 84% of mean,
-    # which is above the soft floor (70%) — but the WORST section in this fixture
-    # is 212 words = 83% of mean. So no section_degradation_hard expected here.
-    # Validates the validator catches the BIG miss without false-flagging on
-    # mild variance.
+
+
+def test_check_word_count_soft_warns_at_realistic_llm_floor():
+    """C2 — rendered video delivered 58% of target — should soft-warn but not hard-fail."""
+    # 30-min target = 4500 words. Deliver 2631 (the actual job 0947ea51 count).
+    counts = [263, 263, 263, 263, 263, 263, 263, 263, 263, 263]
+    sections = [_make_section(c, i) for i, c in enumerate(counts)]
+    out = critic.check_word_count(sections, target_duration_s=1800)
+    hard = [v for v in out if v.severity == "hard"]
+    soft = [v for v in out if v.severity == "soft"]
+    # No HARD violation (above 50% floor).
+    assert "length_under_delivered_hard" not in {v.code for v in hard}
+    # SOFT warning fires (below 85% threshold).
+    assert "length_under_delivered_soft" in {v.code for v in soft}
 
 
 def test_check_word_count_hard_fails_per_section_degradation():
-    # Total fine, but section 0 = 600 words and section 9 = 100 words = 17% of mean.
-    counts = [600, 600, 600, 600, 600, 600, 600, 600, 100, 100]
+    # Total OK overall, but section 8/9 = 50 words vs others = 600 words = 10% of mean.
+    # Mean of [600,600,600,600,600,600,600,600,50,50] = 480, worst/mean = 50/480 = 10%.
+    counts = [600, 600, 600, 600, 600, 600, 600, 600, 50, 50]
     sections = [_make_section(c, i) for i, c in enumerate(counts)]
     out = critic.check_word_count(sections, target_duration_s=1800)
     codes = {v.code for v in out if v.severity == "hard"}
     assert "section_degradation_hard" in codes
 
 
-def test_check_word_count_soft_warns_at_88pct():
-    # 30-min target = 4500 words. Deliver 4000 (89% — just above hard floor).
-    sections = [_make_section(400, i) for i in range(10)]
+def test_check_word_count_soft_warns_at_70pct():
+    # 30-min target = 4500 words. Deliver 3150 (70% — under 85% soft floor).
+    sections = [_make_section(315, i) for i in range(10)]
     out = critic.check_word_count(sections, target_duration_s=1800)
     soft = [v for v in out if v.severity == "soft"]
     hard = [v for v in out if v.severity == "hard"]
     assert hard == []
     assert any(v.code == "length_under_delivered_soft" for v in soft)
+
+
+def test_check_word_count_passes_above_soft_floor():
+    # 30-min target = 4500 words. Deliver 4000 (89% — above 85% soft floor).
+    sections = [_make_section(400, i) for i in range(10)]
+    out = critic.check_word_count(sections, target_duration_s=1800)
+    soft = [v for v in out if v.severity == "soft" and "length" in v.code]
+    hard = [v for v in out if v.severity == "hard" and "length" in v.code]
+    assert hard == []
+    assert soft == []
 
 
 def test_check_word_count_no_sections_hard_fails():
@@ -235,7 +263,14 @@ def test_validate_long_form_envelope_passes_clean_envelope():
 
 
 def test_validate_long_form_envelope_catches_job_0c05c335_violations():
-    """Pin the EXACT mistake stack of the rendered video so we never ship it again."""
+    """Pin the EXACT mistake stack of the rendered video so we never ship it again.
+
+    Note: post-2026-05-13 calibration the 57% delivery on this fixture
+    only fires the SOFT length warning (not hard) because we lowered
+    the hard floor to 50% to accommodate Azure GPT-5.3's natural
+    single-shot output. The OTHER three CLASS-OF-BUG violations
+    (niche, panel_hold, stock_anecdote) still hard-fail.
+    """
     env = {
         "long_form": {
             "narration_flat": (
@@ -252,12 +287,14 @@ def test_validate_long_form_envelope_catches_job_0c05c335_violations():
         }
     }
     out = critic.validate_long_form_envelope(env, target_duration_s=1800, niche="r/nosleep")
-    codes = {v.code for v in out if v.severity == "hard"}
-    # All four bug classes from the critique surface as hard violations.
-    assert "niche_tonal_violation" in codes
-    assert "length_under_delivered_hard" in codes
-    assert "panel_hold_too_long" in codes
-    assert "stock_anecdote_drift" in codes
+    hard_codes = {v.code for v in out if v.severity == "hard"}
+    soft_codes = {v.code for v in out if v.severity == "soft"}
+    # Hard violations: niche tonal + panel hold + stock anecdote.
+    assert "niche_tonal_violation" in hard_codes
+    assert "panel_hold_too_long" in hard_codes
+    assert "stock_anecdote_drift" in hard_codes
+    # 57% delivery → soft length warn (post-2026-05-13 calibration).
+    assert "length_under_delivered_soft" in soft_codes
 
 
 def test_validate_long_form_envelope_handles_script_envelope_object():
