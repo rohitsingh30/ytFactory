@@ -23,7 +23,10 @@ LOG_DIR="${ROOT}/deploy_logs"
 mkdir -p "${LOG_DIR}"
 
 DRY_RUN=0
-SELECTED=()
+# Audit D3.27 — bash 3.2 (macOS default) crashes on empty-array
+# expansion under `set -u`. Initialise SELECTED with a dummy
+# placeholder when no args, then strip it before iteration.
+SELECTED=("__none__")
 for arg in "$@"; do
     if [[ "$arg" == "--dry-run" ]]; then
         DRY_RUN=1
@@ -31,6 +34,12 @@ for arg in "$@"; do
         SELECTED+=("$arg")
     fi
 done
+# Drop the placeholder by re-creating from elements 1..end.
+if [[ ${#SELECTED[@]} -gt 1 ]]; then
+    SELECTED=("${SELECTED[@]:1}")
+else
+    SELECTED=()
+fi
 
 # (service-dir, deploy-cmd) pairs. The deploy.sh signatures vary per
 # service — encode them here so the orchestrator stays stupid-simple.
@@ -69,7 +78,9 @@ for entry in "${SERVICES[@]}"; do
     cmd="${entry#*|}"
     if [[ ${#SELECTED[@]} -gt 0 ]]; then
         skip=1
-        for s in "${SELECTED[@]}"; do
+        # Audit D3.27 — guard the loop body itself in case bash 3.x
+        # tries to expand an empty array even after the count check.
+        for s in ${SELECTED[@]+"${SELECTED[@]}"}; do
             [[ "$svc" == "$s" ]] && skip=0
         done
         [[ $skip -eq 1 ]] && continue

@@ -89,6 +89,21 @@ Re-running any deploy.sh rebuilds the image and rolls the service
 forward. Cloud Run keeps the previous revision; flip back with
 `gcloud run services update-traffic`.
 
+**Silent-failure traps to know about (2026-05-13).** Two recurring
+classes of "the deploy looked successful but nothing happened" caught
+during the burner-system rip:
+
+1. `(cd web-next && npm run build >/dev/null)` swallows pre-build
+   `tsc --noEmit` errors. Operators see exit 0 and an empty log.
+2. `--service-account=<feature>-runner@…` references SAs that may
+   never have been created in IAM; gcloud fails opaquely with
+   `actAs ... (or it may not exist)`.
+
+Per-trap fix + sweep recipe in
+[`docs/cloud_deploy_script_safety.md`](./cloud_deploy_script_safety.md).
+Always wrap deploy invocations with `set -o pipefail` so a non-zero
+exit anywhere in a pipe surfaces.
+
 **`Permission denied on secret` at deploy step (post-S1.21)?** When
 S1.21 (per-service runtime SAs) flipped a service from the legacy
 `tts-runner@` to its dedicated SA (`web-runner@`, `render-runner@`,

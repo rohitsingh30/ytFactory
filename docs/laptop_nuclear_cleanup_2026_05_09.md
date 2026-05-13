@@ -1,5 +1,14 @@
 # Laptop nuclear cleanup (2026-05-09)
 
+> **2026-05-13 update — generalised.** The full per-layer
+> system-removal procedure (covering Firestore tasks + GCS state
+> + Secret Manager + IAM + launchd + redeploy verification) lives
+> at [`docs/system_removal_checklist.md`](./system_removal_checklist.md).
+> This doc is the historical record of the FIRST application of
+> that pattern (the channel-data nuke); the burner-channel rip on
+> 2026-05-13 was the second. Any future system removal MUST follow
+> the checklist doc, not improvise.
+
 User correction: the previous architecture summary still listed
 Whisper, ffmpeg compose, YouTube upload, and Claude CLI as
 "intentionally on the laptop." That was stale — the cloud render-

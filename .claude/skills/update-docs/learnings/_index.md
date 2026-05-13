@@ -5,6 +5,28 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
 
 ## CLASS-OF-BUG (rule changes to SKILL.md)
 
+- 2026-05-13 — **Big-rip findings: cleanup-finally overwrite + deploy
+  silent failures + system-removal checklist.** A single session that
+  ripped out the burner-channel system surfaced three durable
+  cross-channel rules. (1) `_bump_action(state, "Chrome left running …")`
+  in a `finally` block overwrote the diagnostic `"brand-account
+  switch failed …"` written by the `try` body — masked the actual
+  failure cause across 20 runs and materially contributed to retiring
+  the system instead of fixing it. Pattern: gate info-bumps on
+  `state.phase != "failed"` (`docs/finally_cleanup_overwrite_guard.md`).
+  (2) `cloud/web-next/deploy.sh` uses `(cd web-next && npm run build >/dev/null)`
+  which swallows pre-build TS errors, and hardcodes `--service-account=
+  web-next-runner@…` referencing a SA that never existed in IAM
+  (live service was on default compute SA all along). Two-trap fix
+  in `docs/cloud_deploy_script_safety.md`. (3) Removing a multi-layer
+  system needs the full per-layer checklist in
+  `docs/system_removal_checklist.md` — code + tests + docs + cloud
+  (Firestore tasks, GCS blobs, Secrets, IAM) + local (launchd, /tmp,
+  ~/.config/) + redeploy verification. Sweep recipes in each doc.
+  Memory: `feedback_finally_cleanup_overwrite_guard.md` +
+  `feedback_cloud_deploy_silent_failures.md` +
+  `feedback_system_removal_checklist.md`.
+
 - 2026-05-13 — **Firestore `jobs/*` collection has no stuck-pending
   reaper.** `web/server.py::_periodic_queue_reaper` only walks
   `agent_tasks/*` (laptop-agent leasing). When a Cloud Run JOB

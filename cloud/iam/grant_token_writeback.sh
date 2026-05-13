@@ -28,9 +28,22 @@
 
 set -euo pipefail
 
+# Audit D3.23 — bypass interactive gcloud reauth via ADC.
+# Source the shared helper so a single `gcloud auth
+# application-default login` covers every wire-up script.
+source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
+
 PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
 RUNTIME_SA="${RUNTIME_SA:-tts-runner@${PROJECT}.iam.gserviceaccount.com}"
+# Audit D3.29 — pre-fix any typo (--dryrun, --help, --whatever)
+# silently slipped past as "not --dry-run" and ran live grants. Now
+# explicitly validate so unknown flags abort.
 DRY_RUN="${1:-}"
+if [[ -n "${DRY_RUN}" && "${DRY_RUN}" != "--dry-run" ]]; then
+  echo "ERROR: unknown argument: ${DRY_RUN}" >&2
+  echo "usage: $(basename "$0") [--dry-run]" >&2
+  exit 2
+fi
 
 # Per the 2026-05-09 cutover (docs/full_cloud_cutover_2026_05_09.md §1a)
 # these are the canonical 9 secrets — one per OAuth-distinct YouTube

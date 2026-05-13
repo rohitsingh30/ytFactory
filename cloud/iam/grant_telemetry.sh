@@ -42,9 +42,22 @@
 # ============================================================================
 set -euo pipefail
 
+# Audit D3.23 — bypass interactive gcloud reauth via ADC.
+# Source the shared helper so a single `gcloud auth
+# application-default login` covers every wire-up script.
+source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
+
 PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
 RUNTIME_SA="${RUNTIME_SA:-tts-runner@${PROJECT}.iam.gserviceaccount.com}"
+# Audit D3.29 — pre-fix any typo (--dryrun, --help, --whatever)
+# silently slipped past as "not --dry-run" and ran live grants. Now
+# explicitly validate so unknown flags abort.
 DRY_RUN="${1:-}"
+if [[ -n "${DRY_RUN}" && "${DRY_RUN}" != "--dry-run" ]]; then
+  echo "ERROR: unknown argument: ${DRY_RUN}" >&2
+  echo "usage: $(basename "$0") [--dry-run]" >&2
+  exit 2
+fi
 
 ROLES=(
   roles/cloudtrace.agent
@@ -69,8 +82,16 @@ for role in "${ROLES[@]}"; do
     printf '%s\n' "${cmd[*]}"
   else
     echo "==> ${role}"
-    if ! "${cmd[@]}" >/dev/null; then
-      echo "    grant failed for ${role} (already present?)"
+    # Audit D3.28 — pre-fix this caught failure as "already present?"
+    # but add-iam-policy-binding is idempotent: it never errors when
+    # the binding already exists. Real failures (auth expired,
+    # missing role, wrong project) were silently swallowed. Now:
+    # capture stderr and surface it; exit non-zero on any failure
+    # so the caller knows the grant didn't land.
+    if ! err=$("${cmd[@]}" 2>&1); then
+      echo "    GRANT FAILED for ${role}:" >&2
+      echo "${err}" | sed 's/^/      /' >&2
+      exit 1
     fi
   fi
 done

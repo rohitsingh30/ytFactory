@@ -14,7 +14,7 @@ set -euo pipefail
 # file feedback_gcloud_reauth_use_adc_bypass.md for the full why.
 source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 
-SERVICE="${1:?usage: ./deploy.sh <service-name> [tag]}"
+SERVICE="${1:-tts-higgs}"  # Audit D3.22 — default to dir name; pass arg only to override
 TAG="${2:-$(date +%Y%m%d-%H%M%S)}"
 
 PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"

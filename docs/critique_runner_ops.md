@@ -57,11 +57,39 @@ tail -f /Users/rohit/.config/ytfactory/critique-runner.log
 ```
 
 Restart after pulling new runner code (e.g. after this PR ships):
-
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.ytfactory.critique-runner.plist
 launchctl load   ~/Library/LaunchAgents/com.ytfactory.critique-runner.plist
 ```
+
+On modern macOS (Sonoma+, 2023+) the legacy `unload`/`load` pair is
+sometimes a no-op when the agent was previously `bootout`'d AND the
+persistent `Disabled` flag is still set. The reliable revival triple
+that always brings the agent back up:
+
+```bash
+U=$(id -u)
+launchctl enable    gui/$U/com.ytfactory.critique-runner
+launchctl bootstrap gui/$U ~/Library/LaunchAgents/com.ytfactory.critique-runner.plist
+launchctl kickstart -k gui/$U/com.ytfactory.critique-runner
+launchctl print     gui/$U/com.ytfactory.critique-runner | grep -E 'state|pid ='
+# expect: state = running, pid = N
+```
+
+Diagnosis when the agent is silently dead:
+
+```bash
+launchctl print gui/$(id -u)/com.ytfactory.critique-runner 2>&1 | head -3
+```
+
+* `state = running` → agent is up; investigate elsewhere.
+* `Could not find service` / `=> disabled` → run the enable+bootstrap+
+  kickstart triple above. The **same lifecycle pattern** (silent stuck-
+  in-disabled state) bit `com.ytfactory.laptop-agent` for ~24h on
+  2026-05-13 before that whole subsystem was retired —
+  see [`docs/finally_cleanup_overwrite_guard.md`](./finally_cleanup_overwrite_guard.md)
+  for an analogous "diagnostic message clobbered" pattern that made
+  the launchd-disabled state hard to spot.
 
 **Do NOT restart while a critique is `in_progress`** — the in-flight
 agent turn loses context. Wait for the current critique to reach

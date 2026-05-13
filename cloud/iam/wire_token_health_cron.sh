@@ -31,6 +31,11 @@
 
 set -euo pipefail
 
+# Audit D3.23 — bypass interactive gcloud reauth via ADC.
+# Source the shared helper so a single `gcloud auth
+# application-default login` covers every wire-up script.
+source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
+
 PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
 REGION="${GCP_REGION:-asia-southeast1}"
 WEB_SERVICE="${WEB_SERVICE:-ytfactory-web}"

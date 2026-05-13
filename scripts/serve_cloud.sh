@@ -31,7 +31,10 @@ fi
 pkill -f "uvicorn control.server_dev" 2>/dev/null || true
 sleep 0.5
 
-RELOAD_FLAGS=(--reload --reload-dir control --reload-dir web --reload-dir shared)
+RELOAD_FLAGS=(--reload --reload-dir control --reload-dir web)
+# Audit D3.26 — pre-fix this listed `--reload-dir shared` but the
+# repo has no `shared/` dir, so uvicorn warned at startup and
+# silently dropped the entry. Watch the dirs that actually exist.
 if [ "${1:-}" = "--no-reload" ]; then
   RELOAD_FLAGS=()
 fi

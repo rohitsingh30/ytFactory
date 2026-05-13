@@ -40,13 +40,36 @@ GSUTIL_FLAGS="-m -q"
 sync_dir() {
   local local_path="$1" gs_path="$2"
   if [[ ! -d "$local_path" ]]; then return 0; fi
-  gsutil $GSUTIL_FLAGS rsync -r "$local_path" "$gs_path" 2>&1 | grep -vE '^$' || true
+  # Audit D3.24 — pre-fix this swallowed ALL errors via `|| true`
+  # (auth expired / bucket missing / network down → silent forever).
+  # Now: capture stderr+exit, log non-zero exits explicitly, and only
+  # ignore the empty-output noise via grep — NOT the gsutil exit code.
+  local out
+  set +e
+  out=$(gsutil $GSUTIL_FLAGS rsync -r "$local_path" "$gs_path" 2>&1)
+  local rc=$?
+  set -e
+  echo "$out" | grep -vE '^$' || true
+  if [[ $rc -ne 0 ]]; then
+    log "WARN gsutil rsync $local_path → $gs_path failed (rc=$rc)"
+    return $rc
+  fi
 }
 
 sync_file() {
   local local_path="$1" gs_path="$2"
   if [[ ! -f "$local_path" ]]; then return 0; fi
-  gsutil -q cp "$local_path" "$gs_path" 2>&1 | grep -vE '^$' || true
+  # Audit D3.24 — same as sync_dir; surface real failures.
+  local out
+  set +e
+  out=$(gsutil -q cp "$local_path" "$gs_path" 2>&1)
+  local rc=$?
+  set -e
+  echo "$out" | grep -vE '^$' || true
+  if [[ $rc -ne 0 ]]; then
+    log "WARN gsutil cp $local_path → $gs_path failed (rc=$rc)"
+    return $rc
+  fi
 }
 
 log "begin sync to gs://$BUCKET"

@@ -232,6 +232,16 @@ deploy.sh wiring (mandatory — every cloud/<svc>/deploy.sh):
     exact snippet, and feedback_gcloud_reauth_use_adc_bypass.md for
     why this is mandatory (escalated to a hard rule on 2026-05-12
     after firing twice in one day).
+[ ] Service-account preflight: if the script hardcodes
+    `--service-account=<feature>-runner@…`, the SA must actually
+    exist in IAM (verify with `gcloud iam service-accounts describe`)
+    OR the script must fall back to the live service's existing SA.
+    See docs/cloud_deploy_script_safety.md (2026-05-13). Without
+    this, deploys fail opaquely with `actAs … (or it may not exist)`.
+[ ] No `>/dev/null` on `npm run build` / `gcloud builds submit` /
+    `gcloud run deploy` invocations — output suppression masks
+    pre-build failures and produces "deploy looked successful but
+    nothing happened" (2026-05-13 trap, same doc).
 
 After first build:
 [ ] /readyz returns {"status":"ready", "warm_s":<n>}

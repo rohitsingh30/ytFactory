@@ -24,16 +24,23 @@ help:
 #   - claude or copilot CLI on PATH (the runner spawns whichever the
 #     critique doc selected)
 #   - gcloud ADC pointing at ytfactory-prod-v2 (for Firestore reads).
+#
+# Audit D3.20 — use the venv interpreter explicitly so dev (`make
+# critique-runner`) and prod (launchd plist:
+# /Users/rohit/Library/LaunchAgents/com.ytfactory.critique-runner.plist)
+# pick up the same Python + the same site-packages every time.
+PY = .venv/bin/python
+
 critique-runner:
 	@echo "[critique-runner] starting daemon — Ctrl-C to stop"
-	@python scripts/critique_runner.py
+	@$(PY) -u scripts/critique_runner.py
 
 critique-once:
 	@echo "[critique-runner] one-shot mode — process one critique then exit"
-	@python scripts/critique_runner.py --once
+	@$(PY) -u scripts/critique_runner.py --once
 
 critique-runner-tests:
-	@python -m pytest tests/test_critique_runner.py tests/test_critique_gates.py tests/test_critique_routes.py -v
+	@$(PY) -m pytest tests/test_critique_runner.py tests/test_critique_gates.py tests/test_critique_routes.py -v
 
 test:
-	@python -m pytest -q
+	@$(PY) -m pytest -q
