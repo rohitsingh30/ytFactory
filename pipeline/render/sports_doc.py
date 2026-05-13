@@ -99,14 +99,11 @@ from pipeline.render.long_form import (  # type: ignore
 
 
 def _load_env(repo_root: Path) -> None:
-    env_path = repo_root / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    """Audit D3.48 — delegates to the shared loader so all three
+    render entry points (long_form / sports_doc / footage_only) use
+    the same parser, including outer-quote stripping."""
+    from pipeline.render._env_loader import load_dotenv_into_environ
+    load_dotenv_into_environ(repo_root)
 
 
 # ---------- tone overrides -------------------------------------------------

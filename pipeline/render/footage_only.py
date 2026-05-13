@@ -926,15 +926,13 @@ def main() -> None:
     except Exception:  # noqa: BLE001
         pass
 
-    # Source .env for any provider env vars (HF tokens, etc.).
-    env_path = REPO_ROOT / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
+    # Audit D3.48 — pre-fix this had its own .env parser that did
+    # NOT strip outer quotes (long_form.py + sports_doc.py both did),
+    # so HF_TOKEN="hf_..." in .env wrote the LITERAL "hf_..." string
+    # (with quotes) to os.environ. Now: shared loader enforces
+    # consistent parsing across all three render entry points.
+    from pipeline.render._env_loader import load_dotenv_into_environ
+    load_dotenv_into_environ(REPO_ROOT)
 
     render(args.channel, args.slug, do_upload=args.upload, aspect_override=args.aspect)
 
