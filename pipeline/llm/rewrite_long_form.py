@@ -87,11 +87,7 @@ keys:
                     illustration should show during this section.
   panels          — array of {{scene, hold_s}} objects. AT LEAST
                     {panel_min_per_section} panels per section
-                    (target {panel_count_target} total panels —
-                    HARD MAX 24, do NOT exceed). The renderer
-                    rejects any script with more than 24 panels
-                    because Metal command-buffer timeouts hit
-                    beyond that point. scene
+                    (target {panel_count_target} total panels). scene
                     is a detailed image-gen prompt (the channel's
                     image_style_prefix is prepended at render time, so
                     DON'T repeat aesthetic instructions like "flat 2D
@@ -327,13 +323,12 @@ def _planned_sections_and_panels(duration_s: int) -> tuple[int, int, int, int, i
     section_words_floor = int(section_words_target * 0.70)
     # Panels: target one per ~6-8 s of narration so panels never hold
     # >12 s on screen (post-2026-05-13 fix — was one per ~30-45 s).
-    # Capped at 24 (the renderer's PANEL_HARD_CAP for image_panels mode
-    # — beyond 24 panels Metal command-buffer timeouts hit. See
-    # docs/long_form_model_inventory.md). 30-min videos with the new
-    # density still get ~7s avg hold via the renderer's
-    # narration_duration / panel_count distribution.
+    # No prompt-side ceiling on count: the renderer's PANEL_HARD_CAP is
+    # mode-aware (24 on local mflux, 60 on Cloud Run NVIDIA L4 where
+    # the Metal command-buffer watchdog doesn't exist). Truncation
+    # happens at parse time as defense-in-depth if the LLM ever exceeds.
     panel_seconds = 7
-    panel_count_target = max(8, min(24, max(1, duration_s // panel_seconds)))
+    panel_count_target = max(8, max(1, duration_s // panel_seconds))
     # At least 4 panels per section so no section has 30+ s of static.
     panel_min_per_section = max(4, panel_count_target // max(1, section_count_target))
     return (
@@ -603,19 +598,19 @@ def rewrite_long_form(
             )
             for p in raw.get("panels") or []
         ]
-        # Defensive truncation: the renderer enforces PANEL_HARD_CAP=24
-        # for image_panels mode (Metal command-buffer timeouts beyond
-        # that). Even though the prompt says HARD MAX 24, the LLM may
-        # exceed — drop the excess instead of crashing the renderer.
-        # Job 0195e59d hit this on 2026-05-13 when the LLM emitted 28
-        # panels from a 30-min request.
-        if len(panels) > 24:
+        # Defensive truncation: the renderer enforces PANEL_HARD_CAP
+        # (24 on local mflux, 60 on Cloud Run NVIDIA L4). The mode-
+        # aware ceiling lives in pipeline/render/long_form.py — we
+        # truncate here at the more permissive Cloud Run ceiling so
+        # cloud-bound renders aren't artificially limited. Local
+        # renders re-truncate downstream against their lower cap.
+        if len(panels) > 60:
             _logger.warning(
-                "rewrite_long_form: LLM emitted %d panels; truncating to 24 "
-                "(renderer's PANEL_HARD_CAP)",
+                "rewrite_long_form: LLM emitted %d panels; truncating to 60 "
+                "(renderer's max PANEL_HARD_CAP across providers)",
                 len(panels),
             )
-            panels = panels[:24]
+            panels = panels[:60]
 
         long_form = LongFormScript(
             hook=str(raw["hook"]).strip(),

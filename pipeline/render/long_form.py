@@ -2228,8 +2228,23 @@ def _main_impl(args) -> int:
     out_w, out_h = lf.get("output_resolution", [1920, 1080])
     fps = int(lf.get("output_fps", 30))
     render_mode = (args.render_mode or lf.get("render_mode") or "archival_footage").strip()
-    PANEL_HARD_CAP = int(lf.get("panel_max_count", 24))
     image_provider = lf.get("image_provider", "z_image_turbo")
+    # Cap origin (2026-05-04): the western-front-1914-1918-sleep render
+    # crashed on the laptop at panel 51/89 with Metal's
+    # kIOGPUCommandBufferCallbackErrorTimeout. The cap protects laptop
+    # mflux/Z-Image from blowing up under unified-memory pressure.
+    #
+    # 2026-05-13 fix: this watchdog DOES NOT exist on Cloud Run NVIDIA
+    # L4 (where every cloudrun_* image provider runs). The 24 cap was
+    # rejecting cloud-bound long-form scripts with realistic panel
+    # density (one per ~6-8s) for no real reason. Now: when the channel
+    # is configured for a cloud image provider, default the cap to 60
+    # (lifted but bounded — keeps a safety net against an accidental
+    # 200-panel runaway). Local providers stay at 24. Channel YAML
+    # `panel_max_count` still wins over the default.
+    _is_cloud_image_provider = isinstance(image_provider, str) and image_provider.startswith("cloudrun_")
+    _default_panel_cap = 60 if _is_cloud_image_provider else 24
+    PANEL_HARD_CAP = int(lf.get("panel_max_count", _default_panel_cap))
 
     # Resolve render-mode inputs (panels / shotlist) up-front so we can
     # validate AND submit the dur-independent half before TTS starts.

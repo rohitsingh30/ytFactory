@@ -168,15 +168,17 @@ def test_rewrite_caps_panel_hold_s_at_parse_time():
     assert all(p.hold_s <= 12.0 for p in env.long_form.panels)
 
 
-def test_rewrite_truncates_panels_at_hard_cap_24():
-    """Renderer's PANEL_HARD_CAP=24 (Metal timeout). Defense in depth:
-    if LLM still returns >24 panels (despite the prompt saying HARD MAX
-    24), the parse step truncates to 24 instead of crashing the
-    renderer. Job 0195e59d hit this on 2026-05-13 when the LLM emitted
-    28 panels for a 30-min request."""
+def test_rewrite_truncates_panels_at_60_for_cloud_renderer():
+    """Renderer's PANEL_HARD_CAP is mode-aware (24 on local mflux, 60
+    on Cloud Run NVIDIA L4 — Metal watchdog only exists on Apple
+    Silicon). Defense in depth: rewrite truncates at the more
+    permissive Cloud Run ceiling so cloud-bound renders aren't
+    artificially limited. Job 0195e59d hit the laptop-era cap on
+    2026-05-13 when the LLM emitted 28 panels — that should now
+    pass through unchanged."""
     raw_story = {"slug": "x", "title": "T", "body": "B"}
     payload = _ok_rewrite_payload()
-    # Force the LLM to emit 28 panels (the failing job's count).
+    # 28 panels (the failing job's count) → should pass unchanged.
     payload["panels"] = [
         {"scene": f"panel scene {i} with shadow watching", "hold_s": 6.0}
         for i in range(28)
@@ -186,20 +188,40 @@ def test_rewrite_truncates_panels_at_hard_cap_24():
             raw_story, channel_cfg={"niche": "r/nosleep"},
             target_duration_s=1800,
         )
-    # Truncated to 24 (the renderer's hard cap).
-    assert len(env.long_form.panels) == 24, \
-        f"expected truncation to 24 panels, got {len(env.long_form.panels)}"
+    assert len(env.long_form.panels) == 28, \
+        f"28 panels should pass unchanged on cloud rendering; got {len(env.long_form.panels)}"
 
 
-def test_planned_panels_capped_at_24_in_prompt_targets():
-    """The prompt-planner MUST cap panel_count_target at 24 so we
-    never ASK the LLM for more than the renderer accepts."""
-    # 30 min × (1 panel / 7s) = 257 panels → MUST cap at 24.
+def test_rewrite_truncates_panels_at_60_when_runaway():
+    """Beyond 60 we still truncate as defense-in-depth — guards against
+    accidental 200-panel runaway."""
+    raw_story = {"slug": "x", "title": "T", "body": "B"}
+    payload = _ok_rewrite_payload()
+    payload["panels"] = [
+        {"scene": f"panel scene {i} with shadow watching", "hold_s": 6.0}
+        for i in range(75)
+    ]
+    with patch.object(_rlf._llm, "call_claude_cli", return_value=payload):
+        env = _rlf.rewrite_long_form(
+            raw_story, channel_cfg={"niche": "r/nosleep"},
+            target_duration_s=1800,
+        )
+    assert len(env.long_form.panels) == 60, \
+        f"runaway panel count should truncate to 60; got {len(env.long_form.panels)}"
+
+
+def test_planned_panels_NOT_capped_at_24():
+    """The prompt-planner does NOT artificially cap at 24 — the
+    renderer's mode-aware cap (24 local, 60 cloud) is the source of
+    truth, not the prompt. Pre-2026-05-13 the planner was prompt-side
+    capped at 24 to satisfy a stale laptop-only constraint."""
+    # 30 min × (1 panel / 7s) = 257 → planner returns 257 (renderer
+    # truncates downstream against its mode-aware cap).
     out = _rlf._planned_sections_and_panels(1800)
     panel_count_target = out[6]
-    assert panel_count_target <= 24, \
-        f"panel_count_target {panel_count_target} exceeds renderer's PANEL_HARD_CAP=24"
-    # 1-min target → 8 (the floor — minimum panel density even on short long-form).
+    assert panel_count_target > 24, \
+        f"prompt should ask for natural density (>24 panels), got {panel_count_target}"
+    # 1-min target → 8 (the floor).
     out = _rlf._planned_sections_and_panels(60)
     assert out[6] == 8
 

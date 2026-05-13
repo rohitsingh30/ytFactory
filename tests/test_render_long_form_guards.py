@@ -338,6 +338,65 @@ class MainImagePanelsGuardTests(unittest.TestCase):
                 )
             self.assertEqual(str(cm.exception), "image-gen-reached")
 
+    def test_cloud_image_provider_lifts_default_cap_to_60(self):
+        """2026-05-13: when image_provider is a cloudrun_* one, the
+        Metal command-buffer watchdog doesn't apply (Cloud Run runs on
+        NVIDIA L4, not Apple Silicon). Default cap is lifted to 60 in
+        that mode so cloud-bound long-form renders can have realistic
+        panel density (one per ~6-8s). 40 panels with cloudrun_flux2_klein
+        and NO explicit panel_max_count override should pass the guard."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            panels = [{"scene": f"s{i}", "hold_s": 8} for i in range(40)]
+            channel_dir, slug = _write_minimal_long_form_setup(
+                tmp, render_mode="image_panels",
+                panels=panels,
+                extra_lf={"image_provider": "cloudrun_flux2_klein"},
+            )
+            with self.assertRaises(RuntimeError) as cm:
+                self._run_main_with_mocks(
+                    channel_dir, slug, image_gen_sentinel=True,
+                )
+            self.assertEqual(str(cm.exception), "image-gen-reached")
+
+    def test_cloud_image_provider_still_caps_at_60_runaway(self):
+        """The lifted cloud-mode cap is bounded — a 75-panel runaway
+        should still trip the guard."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            panels = [{"scene": f"s{i}", "hold_s": 8} for i in range(75)]
+            channel_dir, slug = _write_minimal_long_form_setup(
+                tmp, render_mode="image_panels",
+                panels=panels,
+                extra_lf={"image_provider": "cloudrun_flux2_klein"},
+            )
+            with self.assertRaises(SystemExit) as cm:
+                self._run_main_with_mocks(channel_dir, slug)
+            msg = str(cm.exception)
+            self.assertIn("75 panels", msg)
+            self.assertIn("PANEL_HARD_CAP=60", msg)
+
+    def test_local_image_provider_keeps_24_default_cap(self):
+        """Local mflux providers (z_image_turbo etc) keep the 24 cap —
+        the Metal watchdog still applies to them. 25 panels on
+        z_image_turbo (the default) should still trip."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            panels = [{"scene": f"s{i}", "hold_s": 8} for i in range(25)]
+            channel_dir, slug = _write_minimal_long_form_setup(
+                tmp, render_mode="image_panels",
+                panels=panels,
+                extra_lf={"image_provider": "z_image_turbo"},
+            )
+            with self.assertRaises(SystemExit) as cm:
+                self._run_main_with_mocks(channel_dir, slug)
+            msg = str(cm.exception)
+            self.assertIn("25 panels", msg)
+            self.assertIn("PANEL_HARD_CAP=24", msg)
+
 
 class PreflightPowerCheckTests(unittest.TestCase):
     """Guards against the macOS WindowServer watchdog crash class
