@@ -453,29 +453,95 @@ hint. Any channel can opt in via YAML `long_form.footage_finder.enabled: true`.
 
 Effort: ~300 LOC + 3 API integrations. Schedule: AFTER P-clean lands.
 
-**P-extend-2 — Image-style preset library**
+**P-extend-2 — Image-style preset library (with wizard UI surface)**
 
 Today: each channel YAML embeds a free-form `image_style_prefix`
 string ("flat 2D crayon, pastel cream background, ..."). Hard to
-reuse, hard to A/B test, hard to know what's available.
+reuse, hard to A/B test, hard to know what's available. **And the
+user can't pick a different style at render time** — it's locked
+to whatever the channel YAML says.
 
-Goal: `pipeline/images/styles.py` with named presets:
+Goal:
+
+1. **Backend**: `pipeline/images/styles.py` with named presets:
 
 ```python
 STYLES = {
-    "kawaii_crayon_pastel":    StyleSpec(prefix="...", neg="...", lora="..."),
-    "amar_chitra_katha":       StyleSpec(prefix="...", neg="...", lora="..."),
-    "war_history_sepia":       StyleSpec(prefix="...", neg="...", lora="..."),
-    "noir_thriller":           StyleSpec(prefix="...", neg="...", lora="..."),
-    "studio_ghibli_softlight": StyleSpec(prefix="...", neg="...", lora="..."),
+    # Curated by channel today (one preset per channel — keep MINIMAL):
+    "kawaii_crayon_pastel":    StyleSpec(prefix="...", neg="...", lora=None),  # mystoriesanimated
+    "amar_chitra_katha":       StyleSpec(prefix="...", neg="...", lora=None),  # hindutavaanimated
+    "war_history_sepia":       StyleSpec(prefix="...", neg="...", lora=None),  # historyrecapped
+    "editorial_lineart_cream": StyleSpec(prefix="...", neg="...", lora=None),  # sportsrecapped
+    "kids_book_pastel":        StyleSpec(prefix="...", neg="...", lora=None),  # rhymetimejunction
+    # Plus 1-2 cross-channel options for experimentation:
+    "noir_thriller":           StyleSpec(prefix="...", neg="...", lora=None),
+    "studio_ghibli_softlight": StyleSpec(prefix="...", neg="...", lora=None),
 }
 ```
 
-Channel YAML: `image_style_preset: kawaii_crayon_pastel`. Free-form
-override still possible via `image_style_prefix_override` for one-off
-experiments.
+Channel YAML default: `image_style_preset: kawaii_crayon_pastel`.
+Free-form override possible via `image_style_prefix_override`.
 
-Effort: ~100 LOC + curation of ~10-15 presets.
+2. **Wizard UI surface (NEW — user requested 2026-05-13)**:
+   The wizard's `visual_source` picker today is "AI generations /
+   Real footage / Both". When user picks **"AI generations"** or
+   **"Both"**, surface a SECOND picker for the image style:
+
+```
+   ○ AI generations          ← (already exists)
+   ○ Real footage
+   ● Both
+   
+   [if AI or Both selected — NEW:]
+   Image style:
+   ○ Kawaii crayon pastel    (mystoriesanimated default)
+   ○ Amar Chitra Katha       (hindutavaanimated default)
+   ○ War history sepia       (historyrecapped default)
+   ○ Editorial line-art      (sportsrecapped default)
+   ○ Kids book pastel        (rhymetimejunction default)
+   ○ Noir thriller           (cross-channel experiment)
+   ○ Studio Ghibli soft      (cross-channel experiment)
+```
+
+   Default: the channel's current preset (so the wizard pre-selects
+   the existing house style and changing it is opt-in — same UX
+   pattern as `visual_source`'s `_visual_source_default_for`).
+
+   **Keep MINIMAL for v1:** 5 channel-default presets + 2
+   cross-channel options = 7 total. We can grow the library by
+   curating new presets into `STYLES`, no wizard code change needed.
+
+3. **Wiring** (mirrors how `visual_source` already plumbs through):
+   - `CustomizationField` in `pipeline/schemas/customization.py`,
+     keyed `image_style_preset`, kind=`select`, options derived from
+     `STYLES.keys()`. Show only when `visual_source in ("ai", "both")`.
+   - `cfg_targets`: writes to `cfg["image_style_preset"]` AND
+     `cfg["long_form"]["image_style_preset"]`.
+   - `pipeline/images/styles.py::resolve_style(cfg)`: reads
+     `image_style_preset` (or falls back to the channel's
+     `image_style_prefix`/`image_style_prefix_override` for backward
+     compat). Returns the prefix string the renderer injects into
+     each panel's image-gen prompt.
+   - The renderer (`pipeline/render/long_form.py:_main_impl`) already
+     reads `lf["image_style_prefix"]` — change to call
+     `resolve_style(lf)` instead.
+
+Effort: ~100 LOC for the preset library + ~80 LOC for the
+`CustomizationField` wiring + ~50 LOC for `resolve_style` and
+back-compat adapter + ~30 LOC for migrating each channel YAML.
+Curation of 7 presets ≈ ~2 hours (pull existing channel
+`image_style_prefix` strings + write 2 new cross-channel ones).
+
+**Quality preservation tactic:** start with the 5 existing
+channel-default presets being EXACT copies of each channel's
+current `image_style_prefix`. Default selection in the wizard is
+the channel's preset. Result: zero visual change unless the user
+explicitly picks a different preset. Cross-channel experiments
+(`noir_thriller`, `studio_ghibli_softlight`) are opt-in only.
+
+**Schedule:** Phase 3 (week of 2026-05-26). Depends on P-clean
+landing first so we have a clean per-channel YAML surface to add
+the new field to.
 
 **P-extend-3 — Thumbnail template library**
 
