@@ -48,5 +48,21 @@
     <string>/tmp/ytfactory-state-sync.out</string>
     <key>StandardErrorPath</key>
     <string>/tmp/ytfactory-state-sync.err</string>
+
+    <!-- Audit D3.18 — pre-fix this plist had no EnvironmentVariables -->
+    <!-- so launchd inherited only its minimal PATH. gsutil failed -->
+    <!-- silently with "command not found"; state-sync appeared to -->
+    <!-- "run" but actually never uploaded anything. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/rohit</string>
+        <key>PATH</key>
+        <string>/Users/rohit/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/rohit/google-cloud-sdk/bin</string>
+        <key>CLOUDSDK_CONFIG</key>
+        <string>/Users/rohit/.config/gcloud</string>
+        <key>GOOGLE_CLOUD_PROJECT</key>
+        <string>ytfactory-prod-v2</string>
+    </dict>
 </dict>
 </plist>

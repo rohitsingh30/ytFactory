@@ -43,4 +43,11 @@ critique-runner-tests:
 	@$(PY) -m pytest tests/test_critique_runner.py tests/test_critique_gates.py tests/test_critique_routes.py -v
 
 test:
-	@$(PY) -m pytest -q
+	# Audit D3.21 — pre-fix this was bare `python -m pytest -q` with no
+	# path filter; pytest's `collect_ignore_glob` (conftest.py:21) only
+	# excludes cloud/_bench. Now scope to tests/ explicitly so any
+	# accidental test-shaped file outside tests/ doesn't slip into the
+	# suite and so node_modules / .venv / cloud/<svc>/ test files
+	# (which need their own venvs) don't get collected by the laptop
+	# venv. Use --ignore=cloud as belt-and-braces.
+	@$(PY) -m pytest -q tests/ --ignore=cloud

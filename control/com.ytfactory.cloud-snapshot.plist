@@ -32,5 +32,21 @@
     <string>/tmp/ytfactory-cloud-snapshot.log</string>
     <key>StandardErrorPath</key>
     <string>/tmp/ytfactory-cloud-snapshot.log</string>
+
+    <!-- Audit D3.18 — pre-fix this plist had no EnvironmentVariables, -->
+    <!-- so launchd inherited only its (very minimal) PATH. gcloud / -->
+    <!-- gsutil / git failed silently with "command not found"; the -->
+    <!-- snapshot script appeared to "run" but produced empty output. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/rohit</string>
+        <key>PATH</key>
+        <string>/Users/rohit/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/rohit/google-cloud-sdk/bin</string>
+        <key>CLOUDSDK_CONFIG</key>
+        <string>/Users/rohit/.config/gcloud</string>
+        <key>GOOGLE_CLOUD_PROJECT</key>
+        <string>ytfactory-prod-v2</string>
+    </dict>
 </dict>
 </plist>

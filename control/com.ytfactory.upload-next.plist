@@ -32,12 +32,20 @@
   <!--
     Source .env explicitly so CLOUDRUN_* + GCP creds are visible to
     the upload subprocess. launchd ignores user shell init.
+
+    Audit D3.19 — pre-fix this used a RELATIVE venv path
+    (`.venv/bin/python`); critique-runner / cloud-snapshot use
+    absolute venv paths (`/Users/rohit/ytFactory/.venv/bin/python`).
+    Normalise to the absolute path so the plist is portable to any
+    user's shell context (launchd quirks: WorkingDirectory is set
+    BEFORE -c expansion but RELATIVE paths still resolve from the
+    spawning launchctl context, not always from WorkingDirectory).
   -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>cd /Users/rohit/ytFactory &amp;&amp; set -a &amp;&amp; source .env &amp;&amp; set +a &amp;&amp; PYTHONPATH=. .venv/bin/python scripts/ops/upload_next.py --count 1</string>
+    <string>cd /Users/rohit/ytFactory &amp;&amp; set -a &amp;&amp; source .env &amp;&amp; set +a &amp;&amp; PYTHONPATH=. /Users/rohit/ytFactory/.venv/bin/python -u scripts/ops/upload_next.py --count 1</string>
   </array>
 
   <key>StandardOutPath</key>
@@ -47,5 +55,23 @@
 
   <key>RunAtLoad</key>
   <false/>
+
+  <!-- Audit D3.18 — pre-fix this plist had no EnvironmentVariables, -->
+  <!-- so launchd inherited only its minimal PATH. The upload_next -->
+  <!-- subprocess shells out to ffmpeg + gcloud + git; all three -->
+  <!-- failed silently with "command not found" inside launchd. -->
+  <!-- Audit D3.19 — also normalising to the absolute-venv + module -->
+  <!-- form used by critique-runner.plist for cross-plist consistency. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/rohit</string>
+    <key>PATH</key>
+    <string>/Users/rohit/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/rohit/google-cloud-sdk/bin</string>
+    <key>CLOUDSDK_CONFIG</key>
+    <string>/Users/rohit/.config/gcloud</string>
+    <key>GOOGLE_CLOUD_PROJECT</key>
+    <string>ytfactory-prod-v2</string>
+  </dict>
 </dict>
 </plist>

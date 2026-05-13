@@ -36,7 +36,49 @@
         "condition": {
           "age": 1,
           "matchesPrefix": ["jobs/"],
-          "matchesSuffix": [".png"]
+          "matchesSuffix": ["/frames/.png"]
+        }
+      }
+    ]
+  }
+}
+    "rule": [
+      {
+        "action": { "type": "Delete" },
+        "condition": {
+          "age": 7,
+          "matchesPrefix": ["jobs/"],
+          "matchesSuffix": ["/short.mp4"]
+        }
+      },
+      {
+        "action": { "type": "Delete" },
+        "condition": {
+          "age": 30,
+          "matchesPrefix": ["jobs/"],
+          "matchesSuffix": ["/thumb.png", "/proposal.json"]
+        }
+      },
+      {
+        "action": { "type": "Delete" },
+        "condition": {
+          "age": 1,
+          "matchesPrefix": ["jobs/"],
+          "matchesSuffix": [
+            "/voice.wav",
+            "/captions.srt",
+            "/prompts.json",
+            "/script.json",
+            "/cast.json"
+          ]
+        }
+      },
+      {
+        "action": { "type": "Delete" },
+        "condition": {
+          "age": 1,
+          "matchesPrefix": ["jobs/"],
+          "matchesSuffix": ["/frames/.png"]
         }
       }
     ]
