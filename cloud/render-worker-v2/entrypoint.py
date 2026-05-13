@@ -854,6 +854,27 @@ _REGEX_COMPOSE_START = re.compile(r"^\[4/4\] ffmpeg compose")
 _REGEX_COMPOSE_RECOMPOSE = re.compile(r"^\[critic\] recomposing")
 _REGEX_COMPOSE_DONE = re.compile(r"^\[compose\] wrote (.+\.mp4)")
 
+# Long-form (`pipeline.render.long_form`) prints with different prefixes
+# than the SHORT renderer. Adding these so the dashboard surfaces
+# per-chunk + per-panel progress on long-form renders too. Pre-fix the
+# long-form pills froze at "Generating images / Synthesizing
+# narration" with no granularity (user couldn't tell if the render
+# was making progress or stuck).
+_REGEX_LF_TTS_PLAN = re.compile(r"^\[tts\] (\d+) chars → (\d+) chunks via (\S+)")
+_REGEX_LF_TTS_CLOUD_FANOUT = re.compile(r"^\[tts\] cloud fan-out: (\d+) chunks × (\d+) workers")
+_REGEX_LF_TTS_CLOUD_CHUNK = re.compile(r"^\[tts\] cloud chunk (\d+)/(\d+):")
+_REGEX_LF_TTS_LOCAL_CHUNK = re.compile(r"^\[tts\] chunk (\d+)/(\d+):")
+_REGEX_LF_TTS_ALL_CACHED = re.compile(r"^\[tts\] all (\d+) chunks already cached")
+_REGEX_LF_TTS_DONE = re.compile(r"^\[1/5\] narration (\d+) chunks → \S+ ([\d.]+)s")
+_REGEX_LF_PANEL_GEN = re.compile(r"^\[panel\] (\d+)/(\d+) gen → (\S+) \(seed (\d+)\)")
+_REGEX_LF_PANEL_FILL = re.compile(r"^\[2/5\] panels total ([\d.]+)s [<>] narration ([\d.]+)s")
+_REGEX_LF_PANEL_SEG = re.compile(r"^\[seg \] (\d+)/(\d+) ([\d.]+)s zoom")
+_REGEX_LF_PANEL_XFADE = re.compile(r"^\[xfade\] (\d+) panels → (\S+)")
+_REGEX_LF_VIDEO_DONE = re.compile(r"^\[2/5\] video → \S+ ([\d.]+)s")
+_REGEX_LF_CAP_PNG = re.compile(r"^\[cap\] (\d+) (?:authored )?sentence PNGs")
+_REGEX_LF_MUX_START = re.compile(r"^\[4/4\] muxing video")
+_REGEX_LF_MUX_DONE = re.compile(r"^\[done\] (\S+\.mp4) — ([\d.]+)s")
+
 
 def _classify_renderer_line(line: str) -> tuple[str, str] | None:
     """Translate a single renderer-stdout line into ``(stage_key,
@@ -871,8 +892,14 @@ def _classify_renderer_line(line: str) -> tuple[str, str] | None:
 
     Pure function — no I/O, no globals — so it's trivially testable
     and safe to call from the tailer thread.
+
+    Handles BOTH short-renderer prefixes (``[1/4]``-``[4/4]``) AND
+    long-form-renderer prefixes (``[tts] cloud chunk N/M``, ``[panel]
+    N/M gen``, ``[seg ] N/M``, ``[1/5]``-``[2/5]``, etc).
     """
     s = line.rstrip("\r\n")
+
+    # ---- SHORT renderer (pipeline.render.shorts) -----------------------
 
     if _REGEX_TTS_CACHED.match(s):
         return ("tts", "Reusing cached narration")
@@ -905,6 +932,56 @@ def _classify_renderer_line(line: str) -> tuple[str, str] | None:
         return ("compose", "Recomposing after critic patch")
     if (m := _REGEX_COMPOSE_DONE.match(s)):
         return ("compose", f"Wrote {Path(m.group(1)).name}")
+
+    # ---- LONG-FORM renderer (pipeline.render.long_form) ----------------
+
+    # TTS substage progress
+    if (m := _REGEX_LF_TTS_PLAN.match(s)):
+        return ("tts",
+                f"Planning {m.group(2)} TTS chunks ({m.group(1)} chars) via {m.group(3)}")
+    if (m := _REGEX_LF_TTS_CLOUD_FANOUT.match(s)):
+        return ("tts",
+                f"Cloud TTS fan-out: {m.group(1)} chunks × {m.group(2)} workers")
+    if (m := _REGEX_LF_TTS_ALL_CACHED.match(s)):
+        return ("tts", f"All {m.group(1)} TTS chunks cached — skipping")
+    if (m := _REGEX_LF_TTS_CLOUD_CHUNK.match(s)):
+        # 0-indexed in the renderer; show user-friendly 1-indexed.
+        idx = int(m.group(1)) + 1
+        total = int(m.group(2)) + 1
+        return ("tts", f"TTS cloud chunk {idx}/{total}")
+    if (m := _REGEX_LF_TTS_LOCAL_CHUNK.match(s)):
+        idx = int(m.group(1)) + 1
+        total = int(m.group(2)) + 1
+        return ("tts", f"TTS local chunk {idx}/{total}")
+    if (m := _REGEX_LF_TTS_DONE.match(s)):
+        return ("tts",
+                f"Synthesised {m.group(1)} chunks → {m.group(2)}s of narration")
+
+    # Image / panel substage progress
+    if (m := _REGEX_LF_PANEL_GEN.match(s)):
+        return ("images",
+                f"Panel {m.group(1)}/{m.group(2)} → {Path(m.group(3)).name}")
+    if (m := _REGEX_LF_PANEL_FILL.match(s)):
+        return ("images",
+                f"Panel timing fit: {m.group(1)}s panels vs {m.group(2)}s narration")
+    if (m := _REGEX_LF_PANEL_SEG.match(s)):
+        return ("images",
+                f"Rendering panel {m.group(1)}/{m.group(2)} ({m.group(3)}s Ken-Burns)")
+    if (m := _REGEX_LF_PANEL_XFADE.match(s)):
+        return ("images",
+                f"Crossfading {m.group(1)} panel segments → video track")
+    if (m := _REGEX_LF_VIDEO_DONE.match(s)):
+        return ("images", f"Video track ready ({m.group(1)}s)")
+
+    # Caption substage
+    if (m := _REGEX_LF_CAP_PNG.match(s)):
+        return ("asr", f"Authored {m.group(1)} caption PNGs")
+
+    # Compose / mux
+    if _REGEX_LF_MUX_START.match(s):
+        return ("compose", "Muxing video + narration + music")
+    if (m := _REGEX_LF_MUX_DONE.match(s)):
+        return ("compose", f"Wrote {Path(m.group(1)).name} ({m.group(2)}s)")
 
     return None
 

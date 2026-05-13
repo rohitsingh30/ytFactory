@@ -165,6 +165,114 @@ class ClassifyRendererLineTests(unittest.TestCase):
         self.assertEqual(a, ("images", "Image 3 of 22"))
 
 
+class ClassifyLongFormRendererLineTests(unittest.TestCase):
+    """Long-form (`pipeline.render.long_form`) prints with different
+    prefixes than the SHORT renderer. Regexes added 2026-05-13 so the
+    dashboard surfaces per-chunk + per-panel progress on long-form
+    renders too. Pre-fix the long-form pills froze at "Generating
+    images / Synthesizing narration" with no granularity.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ep = _load_entrypoint()
+
+    # TTS substage
+    def test_lf_tts_plan(self):
+        ev = self.ep._classify_renderer_line(
+            "[tts] 38421 chars → 89 chunks via cloudrun_chatterbox (target 380 chars each)"
+        )
+        self.assertEqual(ev, ("tts", "Planning 89 TTS chunks (38421 chars) via cloudrun_chatterbox"))
+
+    def test_lf_tts_cloud_fanout(self):
+        ev = self.ep._classify_renderer_line(
+            "[tts] cloud fan-out: 89 chunks × 6 workers"
+        )
+        self.assertEqual(ev, ("tts", "Cloud TTS fan-out: 89 chunks × 6 workers"))
+
+    def test_lf_tts_all_cached(self):
+        ev = self.ep._classify_renderer_line(
+            "[tts] all 89 chunks already cached; nothing to synth"
+        )
+        self.assertEqual(ev, ("tts", "All 89 TTS chunks cached — skipping"))
+
+    def test_lf_tts_cloud_chunk_progress(self):
+        # Renderer prints 0-indexed; we surface 1-indexed for users.
+        ev = self.ep._classify_renderer_line(
+            "[tts] cloud chunk 0042/0088: 4.2s 380 chars → /tmp/cache/c0042.wav"
+        )
+        self.assertEqual(ev, ("tts", "TTS cloud chunk 43/89"))
+
+    def test_lf_tts_local_chunk_progress(self):
+        ev = self.ep._classify_renderer_line(
+            "[tts] chunk 0010/0088: 2.1s 220 chars → /tmp/cache/c0010.wav"
+        )
+        self.assertEqual(ev, ("tts", "TTS local chunk 11/89"))
+
+    def test_lf_tts_done(self):
+        ev = self.ep._classify_renderer_line(
+            "[1/5] narration 89 chunks → narration.wav 1322.4s (22.0 min)"
+        )
+        self.assertEqual(ev, ("tts", "Synthesised 89 chunks → 1322.4s of narration"))
+
+    # Image / panel substage
+    def test_lf_panel_gen_progress(self):
+        ev = self.ep._classify_renderer_line(
+            "[panel] 7/24 gen → panel_007.png (seed 4242)"
+        )
+        self.assertEqual(ev, ("images", "Panel 7/24 → panel_007.png"))
+
+    def test_lf_panel_fill_message(self):
+        ev = self.ep._classify_renderer_line(
+            "[2/5] panels total 190.0s < narration 1322.4s — extending each by 47.2s to fill"
+        )
+        self.assertEqual(ev, ("images", "Panel timing fit: 190.0s panels vs 1322.4s narration"))
+
+    def test_lf_panel_seg_render(self):
+        ev = self.ep._classify_renderer_line(
+            "[seg ] 12/24 8.0s zoom→1.10 (240f) → seg_012.mp4"
+        )
+        self.assertEqual(ev, ("images", "Rendering panel 12/24 (8.0s Ken-Burns)"))
+
+    def test_lf_panel_xfade(self):
+        ev = self.ep._classify_renderer_line(
+            "[xfade] 24 panels → video_track.mp4 (crossfade=0.5s)"
+        )
+        self.assertEqual(ev, ("images", "Crossfading 24 panel segments → video track"))
+
+    def test_lf_video_done(self):
+        ev = self.ep._classify_renderer_line(
+            "[2/5] video → video_track.mp4 1322.4s"
+        )
+        self.assertEqual(ev, ("images", "Video track ready (1322.4s)"))
+
+    # Caption substage
+    def test_lf_caption_pngs(self):
+        ev = self.ep._classify_renderer_line(
+            "[cap] 142 sentence PNGs (cached: 0)"
+        )
+        self.assertEqual(ev, ("asr", "Authored 142 caption PNGs"))
+
+    def test_lf_caption_pngs_authored_variant(self):
+        ev = self.ep._classify_renderer_line(
+            "[cap] 142 authored sentence PNGs across 89 chunks"
+        )
+        self.assertEqual(ev, ("asr", "Authored 142 caption PNGs"))
+
+    # Compose / mux
+    def test_lf_mux_start(self):
+        ev = self.ep._classify_renderer_line(
+            "[4/4] muxing video + (narration -6dB + music -28dB) + captions (142 PNG cues) + watermark → my-video.mp4…"
+        )
+        self.assertEqual(ev, ("compose", "Muxing video + narration + music"))
+
+    def test_lf_mux_done(self):
+        ev = self.ep._classify_renderer_line(
+            "[done] /tmp/render/abc/mystoriesanimated/long_form/my-video.mp4 — 1322.4s (22.0 min), 87 MB, mean_volume=-16.0 dB"
+        )
+        self.assertEqual(ev, ("compose", "Wrote my-video.mp4 (1322.4s)"))
+
+
 class TailRendererLogTests(unittest.TestCase):
     """The tailer must:
       - invoke the callback for every changed substep,

@@ -159,7 +159,13 @@ export default function RenderDetailPage() {
           {/* Middle — timeline + live artifact previews */}
           <div className="flex flex-col gap-5">
             <StageTimeline job={job} />
-            <LiveArtifactsCard job={job} />
+            {/* LiveArtifactsCard removed 2026-05-13 — the user found
+                the "Waiting for the first artifact (script lands ~5 s
+                into the render)" placeholder misleading on long-form
+                (script doesn't land for ~3 min) and footage_only (no
+                script artifact at all). Per-stage progress lives in
+                the StageTimeline above; live downloadable artifacts
+                are surfaced via the GCS artifact links on the JobView. */}
           </div>
 
           {/* Right rail — pipeline-fix chat */}
