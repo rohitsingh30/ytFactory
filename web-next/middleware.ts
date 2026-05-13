@@ -93,7 +93,33 @@ export async function middleware(req: NextRequest) {
  * closed by returning false → redirect to /login. The backend then
  * returns 503 for the API call and the operator sees a clear error.
  */
-async function verifySessionCookie(cookie: string): Promise<boolean> {
+async function verifySessionCookie(rawCookie: string): Promise<boolean> {
+  // **2026-05-13 root-cause fix.** Python's http.cookies.Morsel
+  // auto-wraps cookie values in double-quotes when the value contains
+  // any character outside its LegalChars set. The set excludes `@`,
+  // so every yt_session cookie (which embeds an email address) gets
+  // serialized as Set-Cookie: yt_session="email|issued|sig" (with
+  // literal quote characters as the first and last byte of the value).
+  //
+  // Python's http.cookies.SimpleCookie un-quotes on read, so the
+  // backend's verify_session() sees "email|issued|sig" without
+  // quotes and HMAC matches. But Next.js's req.cookies.get().value
+  // returns the RAW byte sequence — quotes included — and the
+  // middleware then HMAC'd "<quoted-email>|issued" which never
+  // matches what Python signed. Result: every cookie containing an
+  // `@` (i.e. every Google-OAuth user's session) was rejected at
+  // the edge and the user got auth-looped on /app/* even though
+  // /api/auth/whoami (which goes to the backend) accepted them.
+  //
+  // The right fix is to un-quote on read here, matching Python's
+  // SimpleCookie behaviour. RFC 6265 stores the literal octets, so
+  // any client-side quote-stripping must be done by the
+  // verifier, not by the cookie store.
+  let cookie = rawCookie;
+  if (cookie.length >= 2 && cookie.startsWith('"') && cookie.endsWith('"')) {
+    cookie = cookie.slice(1, -1);
+  }
+
   const parts = cookie.split("|");
   if (parts.length !== 3) {
     console.warn(`[mw] reject: parts=${parts.length} (expected 3) cookie_len=${cookie.length}`);
@@ -140,9 +166,6 @@ async function verifySessionCookie(cookie: string): Promise<boolean> {
     const expected = base64UrlEncodeNoPad(new Uint8Array(expectedRaw));
     const ok = constantTimeEqual(expected, sigB64);
     if (!ok) {
-      // SAFE truncation: print only sig length + first/last 4 chars.
-      // Email + timestamp aren't secrets, fine to log in full so the
-      // operator can correlate against the backend's signed cookie.
       console.warn(
         `[mw] reject: hmac mismatch email=${email} issued=${issuedStr} ` +
         `secret_len=${secret.length} expected=${expected.slice(0,4)}..${expected.slice(-4)} ` +
