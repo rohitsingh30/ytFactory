@@ -95,18 +95,34 @@ export async function middleware(req: NextRequest) {
  */
 async function verifySessionCookie(cookie: string): Promise<boolean> {
   const parts = cookie.split("|");
-  if (parts.length !== 3) return false;
+  if (parts.length !== 3) {
+    console.warn(`[mw] reject: parts=${parts.length} (expected 3) cookie_len=${cookie.length}`);
+    return false;
+  }
   const [email, issuedStr, sigB64] = parts;
-  if (!email || !issuedStr || !sigB64) return false;
+  if (!email || !issuedStr || !sigB64) {
+    console.warn(`[mw] reject: empty part email=${!!email} issued=${!!issuedStr} sig=${!!sigB64}`);
+    return false;
+  }
   const issued = Number.parseInt(issuedStr, 10);
-  if (!Number.isFinite(issued)) return false;
+  if (!Number.isFinite(issued)) {
+    console.warn(`[mw] reject: non-numeric issued=${issuedStr}`);
+    return false;
+  }
   const ttlSec = Number.parseInt(
     process.env.YT_SESSION_TTL_S ?? "604800", 10,
   );
-  if (Date.now() / 1000 - issued > ttlSec) return false;
+  const ageSec = Date.now() / 1000 - issued;
+  if (ageSec > ttlSec) {
+    console.warn(`[mw] reject: expired age_s=${ageSec.toFixed(0)} ttl_s=${ttlSec}`);
+    return false;
+  }
 
   const secret = process.env.YTFACTORY_SESSION_SECRET;
-  if (!secret) return false;
+  if (!secret) {
+    console.warn(`[mw] reject: no YTFACTORY_SESSION_SECRET env`);
+    return false;
+  }
   try {
     const enc = new TextEncoder();
     const key = await crypto.subtle.importKey(
@@ -122,8 +138,20 @@ async function verifySessionCookie(cookie: string): Promise<boolean> {
       enc.encode(`${email}|${issuedStr}`),
     );
     const expected = base64UrlEncodeNoPad(new Uint8Array(expectedRaw));
-    return constantTimeEqual(expected, sigB64);
-  } catch {
+    const ok = constantTimeEqual(expected, sigB64);
+    if (!ok) {
+      // SAFE truncation: print only sig length + first/last 4 chars.
+      // Email + timestamp aren't secrets, fine to log in full so the
+      // operator can correlate against the backend's signed cookie.
+      console.warn(
+        `[mw] reject: hmac mismatch email=${email} issued=${issuedStr} ` +
+        `secret_len=${secret.length} expected=${expected.slice(0,4)}..${expected.slice(-4)} ` +
+        `cookie=${sigB64.slice(0,4)}..${sigB64.slice(-4)} sig_lens=${expected.length}/${sigB64.length}`,
+      );
+    }
+    return ok;
+  } catch (e) {
+    console.warn(`[mw] reject: subtle-crypto error ${String(e)}`);
     return false;
   }
 }
