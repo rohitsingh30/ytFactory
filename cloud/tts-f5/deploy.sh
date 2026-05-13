@@ -22,7 +22,15 @@ source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
-SERVICE="ytfactory-tts"
+# Audit D3.41 — the legacy production service is named `ytfactory-tts`
+# (predates the `ytfactory-<flavor>` convention adopted by every later
+# TTS service: ytfactory-tts-higgs, ytfactory-tts-cosyvoice,
+# ytfactory-tts-indicparler, ...). Renaming would change the Cloud
+# Run service URL and require coordinated env-var updates across
+# every caller (CLOUDRUN_TTS_F5_URL on prod web, render-worker, etc.).
+# Default kept for backward compat; SERVICE_NAME env lets a fresh
+# install opt into the consistent `ytfactory-tts-f5` name.
+SERVICE="${SERVICE_NAME:-ytfactory-tts}"
 TAG="${1:-$(date +%Y%m%d-%H%M%S)}"
 
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/server:${TAG}"

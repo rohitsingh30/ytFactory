@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -672,6 +673,48 @@ class TestCLIIngestWithHolds(_Base):
         with contextlib.redirect_stdout(buf):
             self._run("ingest", "p")
         self.assertIn("cross-cutting", buf.getvalue())
+
+
+class DefaultEvalsRootTest(unittest.TestCase):
+    """Audit D3.7 — pre-fix EVALS_ROOT only fell back to the
+    hardcoded `/Users/rohit/evals` when YTFACTORY_EVALS_ROOT was
+    unset. Now: env override first, then a repo-sibling `evals/`
+    dir, then the legacy laptop path. Tests pin all three branches.
+    """
+
+    def test_env_override_wins(self):
+        from pipeline.quality import evals as _evals
+        with patch.dict(os.environ, {"YTFACTORY_EVALS_ROOT": "/custom/path"}):
+            self.assertEqual(_evals._default_evals_root(), Path("/custom/path"))
+
+    def test_repo_sibling_used_when_present(self):
+        from pipeline.quality import evals as _evals
+        env = {k: v for k, v in os.environ.items()
+               if k != "YTFACTORY_EVALS_ROOT"}
+        with tempfile.TemporaryDirectory() as tmp:
+            # Layout: <tmp>/repo + <tmp>/evals (sibling).
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            sibling = Path(tmp) / "evals"
+            sibling.mkdir()
+            with patch.dict(os.environ, env, clear=True), \
+                 patch.object(_evals, "PROJECT_ROOT", repo):
+                self.assertEqual(_evals._default_evals_root(), sibling)
+
+    def test_legacy_fallback_when_neither_present(self):
+        from pipeline.quality import evals as _evals
+        env = {k: v for k, v in os.environ.items()
+               if k != "YTFACTORY_EVALS_ROOT"}
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            # No sibling `evals/` dir exists.
+            with patch.dict(os.environ, env, clear=True), \
+                 patch.object(_evals, "PROJECT_ROOT", repo):
+                self.assertEqual(
+                    _evals._default_evals_root(),
+                    Path("/Users/rohit/evals"),
+                )
 
 
 if __name__ == "__main__":

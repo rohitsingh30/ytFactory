@@ -37,6 +37,16 @@ RUN python -m pip install -r /app/requirements.txt
 # fight (we already installed compatible cu124 wheels above).
 RUN python -m pip install --no-deps chatterbox-tts==0.1.7
 
+# Audit D3.40 — pre-fix this had no smoke-test step (Higgs and IndicF5
+# Dockerfiles do have one). When --no-deps drops a critical transitive
+# dep, the failure only surfaces at FIRST request — minutes after a
+# successful build that rolled out into prod. Smoke-importing the
+# model module here makes such a regression a build-time failure
+# instead of a runtime one. Note: weights download is best-effort
+# (|| true) below, so the smoke-test only checks the import surface,
+# not the actual inference.
+RUN python -c "from chatterbox.tts import ChatterboxTTS; print('chatterbox import OK')"
+
 # Pre-pull Chatterbox weights
 RUN python -c "from huggingface_hub import snapshot_download; \
     snapshot_download('ResembleAI/chatterbox')" || true

@@ -30,7 +30,23 @@ from pathlib import Path
 from typing import Iterable
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-EVALS_ROOT = Path(os.environ.get("YTFACTORY_EVALS_ROOT", "/Users/rohit/evals"))
+# Audit D3.7 — pre-fix this hardcoded `/Users/rohit/evals` as the
+# only fallback. Now: env override (preferred), else look for an
+# `evals/` sibling of this repo, else the legacy laptop path.
+def _default_evals_root() -> Path:
+    """Discover the eval workspace via env, repo-sibling, then legacy."""
+    env_val = os.environ.get("YTFACTORY_EVALS_ROOT")
+    if env_val:
+        return Path(env_val)
+    sibling = PROJECT_ROOT.parent / "evals"
+    if sibling.exists():
+        return sibling
+    # Legacy default for the original laptop. Only hit on machines
+    # that have neither YTFACTORY_EVALS_ROOT nor a repo-sibling
+    # `evals/` dir — rare in practice but kept for back-compat.
+    return Path("/Users/rohit/evals")
+
+EVALS_ROOT = _default_evals_root()
 
 # Audit D3.10 — scrollpulse was listed despite its render-config YAML
 # (pipeline/channels/scrollpulse.yaml) not existing on disk; the channel
