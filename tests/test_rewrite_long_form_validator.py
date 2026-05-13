@@ -168,8 +168,44 @@ def test_rewrite_caps_panel_hold_s_at_parse_time():
     assert all(p.hold_s <= 12.0 for p in env.long_form.panels)
 
 
+def test_rewrite_truncates_panels_at_hard_cap_24():
+    """Renderer's PANEL_HARD_CAP=24 (Metal timeout). Defense in depth:
+    if LLM still returns >24 panels (despite the prompt saying HARD MAX
+    24), the parse step truncates to 24 instead of crashing the
+    renderer. Job 0195e59d hit this on 2026-05-13 when the LLM emitted
+    28 panels for a 30-min request."""
+    raw_story = {"slug": "x", "title": "T", "body": "B"}
+    payload = _ok_rewrite_payload()
+    # Force the LLM to emit 28 panels (the failing job's count).
+    payload["panels"] = [
+        {"scene": f"panel scene {i} with shadow watching", "hold_s": 6.0}
+        for i in range(28)
+    ]
+    with patch.object(_rlf._llm, "call_claude_cli", return_value=payload):
+        env = _rlf.rewrite_long_form(
+            raw_story, channel_cfg={"niche": "r/nosleep"},
+            target_duration_s=1800,
+        )
+    # Truncated to 24 (the renderer's hard cap).
+    assert len(env.long_form.panels) == 24, \
+        f"expected truncation to 24 panels, got {len(env.long_form.panels)}"
+
+
+def test_planned_panels_capped_at_24_in_prompt_targets():
+    """The prompt-planner MUST cap panel_count_target at 24 so we
+    never ASK the LLM for more than the renderer accepts."""
+    # 30 min × (1 panel / 7s) = 257 panels → MUST cap at 24.
+    out = _rlf._planned_sections_and_panels(1800)
+    panel_count_target = out[6]
+    assert panel_count_target <= 24, \
+        f"panel_count_target {panel_count_target} exceeds renderer's PANEL_HARD_CAP=24"
+    # 1-min target → 8 (the floor — minimum panel density even on short long-form).
+    out = _rlf._planned_sections_and_panels(60)
+    assert out[6] == 8
+
+
 def test_default_panel_hold_when_missing_is_six_seconds():
-    """C5 — pre-2026-05-13 default was 30.0 (the silent-mp4 root)."""
+    """C5 — pre-2026-05-13 default was 30.0 (the silent-mp4 partner-bug)."""
     raw_story = {"slug": "x", "title": "T", "body": "B"}
     payload = _ok_rewrite_payload()
     # Strip hold_s from every panel so the parse default fires.
