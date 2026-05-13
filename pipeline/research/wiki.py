@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from urllib.parse import quote
@@ -39,13 +40,23 @@ from pipeline.llm import cli as llm
 
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 WIKI_REST = "https://en.wikipedia.org/api/rest_v1"
-USER_AGENT = "ytFactory/0.1 (https://github.com/local; sports event research)"
+# Audit D3.45 — pre-fix this hardcoded "(sports event research)" but
+# pipeline/research/wiki.py is now used by every channel niche
+# (history, science, mythology, etc.). Generalise the descriptor and
+# allow override via env so per-channel research can identify itself
+# (Wikipedia's UA policy: descriptive UA improves rate-limit headroom).
+USER_AGENT = os.environ.get(
+    "YTFACTORY_WIKI_USER_AGENT",
+    "ytFactory/0.1 (https://github.com/local; channel research)",
+)
 TIMEOUT = 30
 
 # Cap article body sent to LLM. Wikipedia match articles can run 50k+
 # chars; opus handles it but we don't need the full thing — first ~15k
 # covers lead + match summary + goalscorers, which is what we want.
-MAX_ARTICLE_CHARS = 15_000
+# Audit D3.46 — exposed as env so callers handling longer articles
+# (full battles, century-spanning bios) can bump without a code edit.
+MAX_ARTICLE_CHARS = int(os.environ.get("YTFACTORY_WIKI_MAX_ARTICLE_CHARS", "15000"))
 
 
 def _slug_to_title(slug: str) -> str | None:

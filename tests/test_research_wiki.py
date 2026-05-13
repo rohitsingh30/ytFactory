@@ -469,3 +469,57 @@ class WikiCLITest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnvOverridesTest(unittest.TestCase):
+    """Audit D3.45 / D3.46 — USER_AGENT and MAX_ARTICLE_CHARS are
+    now driven by env vars. Reload the module under patched env
+    to verify the overrides take effect."""
+
+    def test_user_agent_default_when_env_unset(self):
+        import importlib
+        import os as _os
+        env = {k: v for k, v in _os.environ.items()
+               if k != "YTFACTORY_WIKI_USER_AGENT"}
+        with patch.dict(_os.environ, env, clear=True):
+            importlib.reload(wiki_mod)
+            try:
+                self.assertIn("ytFactory", wiki_mod.USER_AGENT)
+                self.assertIn("channel research", wiki_mod.USER_AGENT)
+            finally:
+                # Restore the module as the test framework loaded it.
+                importlib.reload(wiki_mod)
+
+    def test_user_agent_env_override(self):
+        import importlib
+        import os as _os
+        with patch.dict(_os.environ,
+                         {"YTFACTORY_WIKI_USER_AGENT": "custom/1.2 (test)"}):
+            importlib.reload(wiki_mod)
+            try:
+                self.assertEqual(wiki_mod.USER_AGENT, "custom/1.2 (test)")
+            finally:
+                importlib.reload(wiki_mod)
+
+    def test_max_article_chars_default_when_env_unset(self):
+        import importlib
+        import os as _os
+        env = {k: v for k, v in _os.environ.items()
+               if k != "YTFACTORY_WIKI_MAX_ARTICLE_CHARS"}
+        with patch.dict(_os.environ, env, clear=True):
+            importlib.reload(wiki_mod)
+            try:
+                self.assertEqual(wiki_mod.MAX_ARTICLE_CHARS, 15000)
+            finally:
+                importlib.reload(wiki_mod)
+
+    def test_max_article_chars_env_override(self):
+        import importlib
+        import os as _os
+        with patch.dict(_os.environ,
+                         {"YTFACTORY_WIKI_MAX_ARTICLE_CHARS": "30000"}):
+            importlib.reload(wiki_mod)
+            try:
+                self.assertEqual(wiki_mod.MAX_ARTICLE_CHARS, 30000)
+            finally:
+                importlib.reload(wiki_mod)

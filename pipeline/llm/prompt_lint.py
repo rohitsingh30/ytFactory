@@ -155,8 +155,11 @@ def check_prompts(
             ))
 
         # Cast-drift soft check.
+        # Audit D3.42 — pre-fix this also computed
+        # `mentioned = _mentioned_cast_names(scene, cast_names)` but
+        # never read it. The `unknown` line below is the only real
+        # check (proper-noun-not-in-cast). Removed the dead variable.
         if cast_names:
-            mentioned = _mentioned_cast_names(scene, cast_names)
             unknown = [n for n in _proper_nouns(scene) if n not in cast_names
                        and n.lower() not in {m.lower() for m in cast_names}]
             if unknown:
@@ -216,10 +219,6 @@ def _gather_cast_names(cast: dict) -> set[str]:
         for a in s.get("aliases") or []:
             names.add(str(a).strip())
     return names
-
-
-def _mentioned_cast_names(scene: str, cast_names: set[str]) -> set[str]:
-    return {n for n in cast_names if n and n in scene}
 
 
 # ---------------------------------------------------------------------------
