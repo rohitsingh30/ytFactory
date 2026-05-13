@@ -323,6 +323,193 @@ def test_long_form_overlay_from_spec_projects_spec_to_overlay():
     assert overlay["long_form"]["music_bed_default"] == "ambient_med.mp3"
     assert overlay["long_form"]["captions_density"] == "minimal"
     assert overlay["long_form"]["duration_max_s"] == 600
+    # 2026-05-13: voice descriptor uses apply_handler, not cfg_targets.
+    # Pre-fix the long-form overlay didn't dispatch apply_handlers, so
+    # path-style voice picks were lost. Now both paths are honoured.
+    assert overlay["tts_voice"] == "pipeline/voice_refs/sarah.wav"
+    assert overlay["long_form"]["tts_voice"] == "pipeline/voice_refs/sarah.wav"
+
+
+def test_long_form_overlay_resolves_bare_voice_id_via_apply_handler():
+    """The exact case that broke job 1b5002eca4d84378a79ada87039fc05b
+    on 2026-05-13: wizard sends voice='lv-alex-foster' (LibriVox web
+    voice). Pre-fix the long-form overlay didn't dispatch
+    apply_handlers, so the bare voice id was dropped before reaching
+    _apply_voice — channel default kicked in, render produced Sarah's
+    voice instead of Alex Foster's.
+
+    With the fix, long_form_overlay_from_spec walks apply_handlers AND
+    cfg_targets, so the bare id is resolved to its ref WAV path
+    (pipeline/voice_refs/web/lv-alex-foster/ref.wav) and written into
+    the overlay. long_form.py merges the overlay onto the channel
+    YAML, so the worker uses Alex Foster's voice.
+    """
+    spec = build_spec(
+        {
+            "channel": "mystoriesanimated",
+            "format": "aita_animated",
+            "length_s": 1800,
+            "channel_overrides": {"voice": "lv-alex-foster"},
+        },
+        channel_yaml_path=REPO_ROOT / "pipeline/channels/mystoriesanimated.yaml",
+        variant_yaml_path=REPO_ROOT
+        / "pipeline/variants/mystoriesanimated/aita_animated.yaml",
+    )
+    overlay = long_form_overlay_from_spec(spec)
+    # The bare id MUST be resolved to its actual ref WAV path.
+    assert overlay["tts_voice"] == "pipeline/voice_refs/web/lv-alex-foster/ref.wav"
+    assert overlay["long_form"]["tts_voice"] == "pipeline/voice_refs/web/lv-alex-foster/ref.wav"
+    # The channel-meta seed (tts_provider) MUST NOT leak into the
+    # overlay — overlay should only carry user-changed fields, not
+    # mirror the channel YAML.
+    assert "tts_provider" not in overlay
+
+
+def test_long_form_overlay_unresolvable_voice_id_drops_loudly():
+    """Bare voice id that doesn't resolve to any ref WAV — overlay
+    must NOT carry tts_voice (channel default kicks in), and the
+    apply_handler's _dropped_inputs marker MUST appear so the worker
+    can surface it.
+    """
+    spec = build_spec(
+        {
+            "channel": "mystoriesanimated",
+            "format": "aita_animated",
+            "length_s": 1800,
+            "channel_overrides": {"voice": "this-voice-id-does-not-exist"},
+        },
+        channel_yaml_path=REPO_ROOT / "pipeline/channels/mystoriesanimated.yaml",
+        variant_yaml_path=REPO_ROOT
+        / "pipeline/variants/mystoriesanimated/aita_animated.yaml",
+    )
+    overlay = long_form_overlay_from_spec(spec)
+    assert "tts_voice" not in overlay
+    # No long_form.tts_voice either — that key only exists when a voice
+    # actually wins.
+    if "long_form" in overlay:
+        assert "tts_voice" not in overlay["long_form"]
+    # The handler's structured-warning marker MUST be in the overlay.
+    assert "_dropped_inputs" in overlay
+    assert overlay["_dropped_inputs"][0]["field"] == "voice"
+
+
+def test_long_form_overlay_unknown_apply_handler_logs_and_skips():
+    """If a descriptor references an apply_handler name not in the
+    registry, long_form_overlay_from_spec must log + skip without
+    raising. Pre-fix this branch existed for cfg_targets but not
+    apply_handlers; the new path needs the same defensiveness.
+    """
+    from pipeline.render.input_registry import (  # noqa: PLC0415
+        long_form_overlay_from_spec as _build,
+    )
+    from dataclasses import dataclass, field
+    from typing import Any as _Any
+
+    @dataclass
+    class _FakeDesc:
+        key: str = "x"
+        spec_field: str = "voice_id"
+        apply_handler: str = "this_handler_does_not_exist"
+        cfg_targets: tuple = ()
+        prompt_patch_fn: _Any = None
+
+    @dataclass
+    class _FakeSpec:
+        channel: str = "mystoriesanimated"
+        voice_id: str = "lv-alex-foster"
+
+    # Patch _resolve_descriptors to return our fake descriptor with the
+    # unknown handler name. Use the public API as the entry point.
+    import pipeline.render.input_registry as ir  # noqa: PLC0415
+
+    def _fake_resolve(_):
+        return [_FakeDesc()]
+
+    orig = ir._resolve_descriptors
+    ir._resolve_descriptors = _fake_resolve
+    try:
+        # Should not raise — just log + skip.
+        out = _build(_FakeSpec())
+        # The unknown-handler descriptor contributes nothing → overlay
+        # should not have tts_voice.
+        assert "tts_voice" not in out
+    finally:
+        ir._resolve_descriptors = orig
+
+
+def test_long_form_overlay_apply_handler_raise_does_not_propagate():
+    """If an apply_handler raises mid-dispatch, the overlay builder
+    must catch + log + continue with the next descriptor — never
+    propagate (would crash render_long_form before any subprocess
+    fires).
+    """
+    from pipeline.render.input_registry import (  # noqa: PLC0415
+        long_form_overlay_from_spec as _build,
+        register_apply_handler,
+    )
+    from dataclasses import dataclass
+    import pipeline.render.input_registry as ir  # noqa: PLC0415
+
+    register_apply_handler("test_raises_handler")(
+        lambda _cfg, _val, _meta: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+
+    @dataclass
+    class _FakeDesc:
+        key: str = "x"
+        spec_field: str = "voice_id"
+        apply_handler: str = "test_raises_handler"
+        cfg_targets: tuple = ()
+        prompt_patch_fn: object = None
+
+    @dataclass
+    class _FakeSpec:
+        channel: str = "mystoriesanimated"
+        voice_id: str = "lv-alex-foster"
+
+    def _fake_resolve(_):
+        return [_FakeDesc()]
+
+    orig = ir._resolve_descriptors
+    ir._resolve_descriptors = _fake_resolve
+    try:
+        out = _build(_FakeSpec())
+        # Handler raised → overlay didn't grow from this descriptor.
+        assert "tts_voice" not in out
+    finally:
+        ir._resolve_descriptors = orig
+
+
+def test_channel_meta_for_overlay_handles_missing_channel():
+    """_channel_meta_for_overlay must return an empty dict when the
+    channel key is None or the YAML doesn't exist — never raise.
+    """
+    from pipeline.render.input_registry import _channel_meta_for_overlay  # noqa: PLC0415
+    assert _channel_meta_for_overlay(None) == {}
+    assert _channel_meta_for_overlay("") == {}
+    assert _channel_meta_for_overlay("nonexistent_channel_xyz") == {}
+
+
+def test_channel_meta_for_overlay_handles_corrupt_yaml(tmp_path, monkeypatch):
+    """If the channel YAML is corrupt (parse error), the helper must
+    return {} not propagate the exception — the overlay path is on
+    the critical render flow and one bad YAML shouldn't kill it.
+    """
+    # Make a fake channel YAML that's invalid YAML.
+    import pipeline.render.input_registry as ir  # noqa: PLC0415
+    fake_repo = tmp_path
+    (fake_repo / "pipeline" / "channels").mkdir(parents=True)
+    (fake_repo / "pipeline" / "channels" / "broken.yaml").write_text("not: [valid: yaml")
+    # Monkeypatch the repo-root resolution by shimming os.path.exists+open.
+    import os, builtins  # noqa: PLC0415, E401
+    orig_dirname = os.path.dirname
+    def _dn(p):
+        if p == ir.__file__:
+            return str(fake_repo / "pipeline" / "render")
+        return orig_dirname(p)
+    monkeypatch.setattr(os.path, "dirname", _dn)
+    out = ir._channel_meta_for_overlay("broken")
+    assert out == {}
 
 
 def test_long_form_overlay_empty_spec_returns_empty_dict():

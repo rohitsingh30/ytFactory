@@ -507,14 +507,35 @@ def long_form_overlay_from_spec(spec: Any) -> dict:
     Returns an empty dict when no descriptors mirror to spec fields,
     which is harmless (long_form.py treats empty overlay as "use
     channel YAML alone").
+
+    2026-05-13 — also dispatches ``apply_handler`` if a descriptor
+    declares one. Pre-fix, descriptors with NO ``cfg_targets`` (the
+    voice carve-out is the prime example — it uses
+    ``apply_handler="apply_voice_with_cloud_carveout"`` because the
+    cloud-vs-laptop logic doesn't fit the simple path-projection
+    shape) were silently dropped from the long-form overlay. So
+    every wizard voice pick on a long-form render was lost — the
+    channel YAML default kicked in, regardless of what the user
+    chose. Same bug class can hit any future apply_handler-driven
+    descriptor (song style threading, narrator visual mode, …).
+
+    The fix walks descriptors twice: once for ``cfg_targets`` (the
+    pre-existing path), once for ``apply_handler`` against the same
+    overlay dict. The handler signature is ``(cfg, value,
+    channel_meta)`` — the overlay IS the cfg here, and channel_meta
+    is taken from the channel YAML's top-level keys (provider, etc.)
+    so the cloud-carve-out can branch on ``tts_provider``.
     """
     if spec is None:
         return {}
 
     channel_key = _attr(spec, "channel")
     descriptors = _resolve_descriptors(channel_key)
+    channel_meta = _channel_meta_for_overlay(channel_key)
 
-    overlay: dict = {}
+    overlay: dict = dict(channel_meta)  # seed with provider/etc so handlers can branch
+    seeded_keys = set(channel_meta.keys())
+
     for desc in descriptors:
         spec_field = _attr(desc, "spec_field")
         if not spec_field:
@@ -528,6 +549,7 @@ def long_form_overlay_from_spec(spec: Any) -> dict:
         if hasattr(spec_val, "value"):  # Enum-shaped — emit the str value.
             spec_val = spec_val.value
 
+        # Path 1 (pre-existing): walk cfg_targets if present.
         targets = _attr(desc, "cfg_targets") or ()
         for tgt in targets:
             path = _attr(tgt, "path") or ()
@@ -545,7 +567,66 @@ def long_form_overlay_from_spec(spec: Any) -> dict:
                     continue
             _set_path(overlay, list(path), t_value)
 
+        # Path 2 (2026-05-13): dispatch apply_handler if present.
+        # This is what makes the wizard's voice pick survive into
+        # long-form renders. Without it, _apply_voice never runs on
+        # the long-form path and the channel default kicks in.
+        apply_handler = _attr(desc, "apply_handler")
+        if apply_handler:
+            handler = _APPLY_HANDLERS.get(apply_handler)
+            if handler is None:
+                _logger.warning(
+                    "[input_registry] descriptor %r references unknown "
+                    "apply_handler %r — long-form overlay will not honour "
+                    "this input", _attr(desc, "key"), apply_handler,
+                )
+                continue
+            try:
+                handler(overlay, spec_val, channel_meta)
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "[input_registry] apply_handler %r raised in long-form "
+                    "overlay for %r: %s — input dropped",
+                    apply_handler, _attr(desc, "key"), exc,
+                )
+
+    # Strip the seed channel_meta keys that the handler didn't touch,
+    # so the overlay stays minimal (only what the user picked, not a
+    # mirror of the channel YAML).
+    for k in list(overlay.keys()):
+        if k in seeded_keys and overlay[k] == channel_meta[k]:
+            del overlay[k]
+
     return overlay
+
+
+def _channel_meta_for_overlay(channel_key: str | None) -> dict:
+    """Read the channel YAML's top-level provider keys so the
+    apply_handlers can branch on ``tts_provider`` etc.
+
+    Returns an empty dict if the channel YAML can't be loaded — the
+    handler's fallback paths must tolerate missing context.
+    """
+    if not channel_key:
+        return {}
+    try:
+        import os  # noqa: PLC0415
+        import yaml  # noqa: PLC0415
+        # Resolve relative to the repo root (this file is pipeline/render/input_registry.py).
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        path = os.path.join(root, "pipeline", "channels", f"{channel_key}.yaml")
+        if not os.path.exists(path):
+            return {}
+        with open(path) as fp:
+            data = yaml.safe_load(fp) or {}
+        # Only carry the provider keys the handlers branch on. Don't seed
+        # the entire YAML or the overlay sparseness logic breaks.
+        return {
+            k: data[k] for k in ("tts_provider", "image_provider", "asr_provider")
+            if k in data and isinstance(data[k], str)
+        }
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def prompt_patches_for(
