@@ -377,5 +377,159 @@ class TestServiceAccountIsolation(unittest.TestCase):
                          "tts-runner@ leak:\n  " + "\n  ".join(offenders))
 
 
+# ---------------------------------------------------------------------------
+# 2026-05-13 — IAM completeness for `web-runner@` (post-mortem regression
+# fence for the silent OAuth-callback 500).
+#
+# The 2026-05-12 SA flip from `tts-runner@` to `web-runner@` lost
+# Firestore + bucket + signBlob + run.invoker grants because they don't
+# fail at deploy time — only at first user request. 13-hour outage.
+#
+# These tests pin three properties:
+#
+#   1. Every role mentioned in docs/iam_per_service.md § "web-runner"
+#      appears as a literal role string in cloud/iam/grant_web_runner.sh.
+#      So adding a role to the doc forces adding it to the script.
+#
+#   2. cloud/iam/verify_web_runner.sh expects the same role set.
+#
+#   3. Every deploy.sh that pins `web-runner@` invokes verify_web_runner.sh
+#      as preflight — so the next time grants drift, the deploy aborts
+#      with a concrete fix command instead of "Deployed: <url>" + a
+#      latent 500 waiting for the next user click.
+# ---------------------------------------------------------------------------
+
+GRANT_SCRIPT = CLOUD_DIR / "iam" / "grant_web_runner.sh"
+VERIFY_SCRIPT = CLOUD_DIR / "iam" / "verify_web_runner.sh"
+IAM_DOC = REPO_ROOT / "docs" / "iam_per_service.md"
+
+# Match role lines in the doc's per-SA fenced code block. Examples
+# the regex matches:
+#   "roles/datastore.user                    # Firestore: ..."
+#   "roles/storage.objectAdmin    on gs://ytfactory-prod-v2-state"
+_DOC_ROLE_RE = re.compile(r"^\s*(roles/[a-zA-Z0-9._-]+)\b", re.MULTILINE)
+
+
+def _extract_web_runner_roles_from_doc() -> set[str]:
+    """Pull the role list under '### web-runner' in docs/iam_per_service.md.
+
+    Returns the bare role strings (no resource/scope decoration). Empty
+    set means parser failed — the test surfaces that loudly so a doc
+    refactor doesn't silently disable the gate.
+    """
+    text = IAM_DOC.read_text()
+    # Find the '### web-runner' section, stop at the next '### ' or end-of-file.
+    m = re.search(
+        r"^###\s+web-runner\s*\n(.*?)(?=^###\s+|\Z)",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not m:
+        return set()
+    block = m.group(1)
+    return set(_DOC_ROLE_RE.findall(block))
+
+
+class TestWebRunnerGrantsAreComplete(unittest.TestCase):
+    """2026-05-13 regression fence — see header comment above."""
+
+    def test_grant_script_exists_and_is_executable(self) -> None:
+        self.assertTrue(
+            GRANT_SCRIPT.is_file(),
+            f"missing canonical grant script {GRANT_SCRIPT.relative_to(REPO_ROOT)}",
+        )
+        # Bit-test via stat so we don't need to shell out.
+        mode = GRANT_SCRIPT.stat().st_mode
+        self.assertTrue(
+            mode & 0o100,
+            f"{GRANT_SCRIPT.relative_to(REPO_ROOT)} is not user-executable",
+        )
+
+    def test_verify_script_exists_and_is_executable(self) -> None:
+        self.assertTrue(
+            VERIFY_SCRIPT.is_file(),
+            f"missing preflight verifier {VERIFY_SCRIPT.relative_to(REPO_ROOT)}",
+        )
+        mode = VERIFY_SCRIPT.stat().st_mode
+        self.assertTrue(
+            mode & 0o100,
+            f"{VERIFY_SCRIPT.relative_to(REPO_ROOT)} is not user-executable",
+        )
+
+    def test_doc_lists_a_nonempty_role_set_for_web_runner(self) -> None:
+        """If this fails, the doc parser regex broke (likely a doc
+        section rename) — the role-completeness test below would
+        silently degrade to vacuous true. Catch it explicitly."""
+        roles = _extract_web_runner_roles_from_doc()
+        self.assertGreater(
+            len(roles), 0,
+            f"could not parse any roles under '### web-runner' in "
+            f"{IAM_DOC.relative_to(REPO_ROOT)} — fix the doc heading or "
+            f"update _extract_web_runner_roles_from_doc() in this file.",
+        )
+
+    def test_every_doc_role_appears_in_grant_script(self) -> None:
+        """The grant script is the executable contract for the doc.
+        Every role the doc says web-runner needs must be a literal
+        string in the script — otherwise a role added to the doc only
+        is a footgun: the next operator running the script gets a
+        false sense of completeness.
+        """
+        doc_roles = _extract_web_runner_roles_from_doc()
+        script_text = GRANT_SCRIPT.read_text()
+        missing = sorted(r for r in doc_roles if r not in script_text)
+        self.assertEqual(
+            missing, [],
+            "Roles in docs/iam_per_service.md § web-runner that are "
+            "NOT mentioned in cloud/iam/grant_web_runner.sh:\n  "
+            + "\n  ".join(missing)
+            + "\n\nFix: add the role(s) to the corresponding section of "
+            "grant_web_runner.sh (PROJECT_ROLES / SELF_BINDING_ROLES / "
+            "BUCKET_BINDINGS / ACCESSOR_SECRETS / WRITEBACK_ACCOUNTS).",
+        )
+
+    def test_every_doc_role_appears_in_verify_script(self) -> None:
+        """Same contract for the verifier — operator running it should
+        see every role the doc claims web-runner needs."""
+        doc_roles = _extract_web_runner_roles_from_doc()
+        script_text = VERIFY_SCRIPT.read_text()
+        missing = sorted(r for r in doc_roles if r not in script_text)
+        self.assertEqual(
+            missing, [],
+            "Roles in docs/iam_per_service.md § web-runner that are "
+            "NOT mentioned in cloud/iam/verify_web_runner.sh:\n  "
+            + "\n  ".join(missing)
+            + "\n\nFix: add the role(s) to PROJECT_ROLES / SELF_BINDING_ROLES "
+            "/ BUCKET_BINDINGS in verify_web_runner.sh.",
+        )
+
+    def test_every_web_runner_deploy_sh_invokes_verifier(self) -> None:
+        """Every cloud/<svc>/deploy.sh that pins web-runner@ as the
+        runtime SA MUST run verify_web_runner.sh as preflight — so the
+        next IAM drift fails the deploy with a concrete fix instead of
+        silently 500-ing on the next user request."""
+        offenders: list[str] = []
+        for svc, sa_prefix in EXPECTED_RUNTIME_SA.items():
+            if sa_prefix != "web-runner":
+                continue
+            deploy_sh = CLOUD_DIR / svc / "deploy.sh"
+            if not deploy_sh.exists():
+                continue
+            text = deploy_sh.read_text()
+            if "verify_web_runner.sh" not in text:
+                offenders.append(
+                    f"{svc}/deploy.sh pins web-runner@ but does NOT invoke "
+                    f"cloud/iam/verify_web_runner.sh as preflight."
+                )
+        self.assertEqual(
+            offenders, [],
+            "Missing IAM preflight on web-runner deploy(s):\n  "
+            + "\n  ".join(offenders)
+            + "\n\nFix: add the verifier call right after auth_setup.sh, e.g.\n"
+            '    echo "==> Verifying web-runner IAM bindings (preflight)"\n'
+            '    "$(cd "$(dirname "$0")" && pwd)/../iam/verify_web_runner.sh"',
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

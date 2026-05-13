@@ -36,20 +36,30 @@ bash cloud/iam/grant_per_service_telemetry.sh
 # 3. Grant per-service-specific roles (see "Roles per SA" below).
 #    These are PARTIALLY scripted — operator runs each `gcloud projects
 #    add-iam-policy-binding` manually for small (1-3 grants) lists,
-#    but per-secret bindings have grown beyond the eyeballs-budget for
-#    web-runner so a dedicated idempotent grant script exists:
+#    but per-SA grants for web-runner have grown beyond the
+#    eyeballs-budget so a dedicated idempotent grant script exists:
 #
-#      bash cloud/iam/grant_web_runner_secrets.sh
-#        # Grants secretAccessor on the 7 secrets web-server mounts.
-#        # Idempotent — safe to re-run after adding a secret to
-#        # cloud/web-server/deploy.sh::--set-secrets (also add it to
-#        # the SECRETS=() array in the script).
-#        # Caught 2026-05-13 when the first post-S1.21 web-server deploy
-#        # failed at deploy-step with "Permission denied on secret" x7.
+#      bash cloud/iam/grant_web_runner.sh
+#        # Grants ALL roles web-runner needs in one idempotent pass:
+#        # secretAccessor (7 secrets) + secretVersionAdder (9 youtube-token-*)
+#        # + datastore.user + storage.objectAdmin (state + artifacts)
+#        # + iam.serviceAccountTokenCreator (self) + run.invoker.
+#        # Auto-invoked as preflight by cloud/web-server/deploy.sh and
+#        # cloud/clone-video-worker/deploy.sh via the read-only verifier
+#        # cloud/iam/verify_web_runner.sh — deploy aborts loudly if any
+#        # binding has drifted, with the exact one-liner to repair it.
+#        #
+#        # Caught the second time: 2026-05-13 OAuth-callback silent 500
+#        # (Firestore PermissionDenied) 13h after the S1.21 SA flip.
+#        # First time: 2026-05-13 morning, "Permission denied on secret"
+#        # x7 at deploy time. Both classes covered by this single script.
+#        #
+#        # Memory: feedback_web_runner_iam_silent_post_deploy_500.md.
 #
 #    Sibling scripts:
 #      cloud/iam/grant_token_writeback.sh  — secretVersionAdder for
-#        YouTube OAuth refresh-token rotation (T1.20).
+#        YouTube OAuth refresh-token rotation on a different runtime SA
+#        (RUNTIME_SA env override). web-runner already covered above.
 #      cloud/iam/grant_per_service_telemetry.sh — OTel logs/trace/metrics.
 #
 # 3b. (2026-05-13 add-on) Grant the deploying user `roles/iam.serviceAccountUser`
@@ -77,7 +87,7 @@ bash cloud/iam/grant_per_service_telemetry.sh
 | `tts-runner`             | ✅      | ✅         | ✅ (pre-existing) | legacy SA — full role set inherited |
 | `image-runner`           | ✅ 05-13 | ✅        | ⚠️ pending      | needs storage.objectViewer on weights bucket |
 | `render-runner`          | ✅ 05-13 | ✅        | ✅ 05-13       | secretAccessor + datastore.user + storage.objectAdmin + run.invoker + iam.serviceAccountTokenCreator + cloudtasks.enqueuer |
-| `web-runner`             | ✅ 05-13 | ✅        | ✅ 05-13 (secretAccessor) / ⚠️ partial (secretVersionAdder + datastore.user + run.invoker still pending) | secretAccessor wired via `cloud/iam/grant_web_runner_secrets.sh`; surfaced when first deploy after S1.21 SA flip failed with "Permission denied on secret" 7x |
+| `web-runner`             | ✅ 05-13 | ✅        | ✅ 05-13 (full set: secretAccessor + secretVersionAdder + datastore.user + storage.objectAdmin × 2 + iam.serviceAccountTokenCreator + run.invoker) | Wired via `cloud/iam/grant_web_runner.sh` (mutator) + `cloud/iam/verify_web_runner.sh` (preflight invoked by both web-server + clone-video-worker deploys). The 5 missing grants surfaced 2026-05-13 when the OAuth callback 500'd on first user sign-in 13h after the S1.21 SA flip — see `feedback_web_runner_iam_silent_post_deploy_500.md`. |
 | `weights-runner`         | ✅ 05-13 | ✅        | ⚠️ pending      | needs HF_HOME bucket write |
 | `cobalt-runner`          | ✅ 05-13 | ✅        | ⚠️ none needed | network-egress only; no GCS/Firestore |
 | `stats-refresh-runner`   | ✅ 05-13 | ✅        | ⚠️ pending      | YouTube API key secret access + GCS write |
@@ -115,13 +125,43 @@ roles/cloudtasks.enqueuer                         # render queue
 
 ```
 roles/secretmanager.secretAccessor               # OAuth client secret, session secret,
-                                                  # admin pin, every API key
-roles/secretmanager.secretVersionAdder            # OAuth refresh-token writeback (T1.20)
-roles/datastore.user                              # Firestore jobs/* + scheduler state
-roles/storage.objectAdmin    on gs://ytfactory-state-v2
-roles/run.invoker                                 # callouts to render-worker-v2 + cloud/*
-roles/cloudtasks.enqueuer                         # /api/agent/lease task creation
+                                                  # admin pin, every API key. Per-secret
+                                                  # binding on the 7 secrets web-server
+                                                  # mounts via --set-secrets.
+roles/secretmanager.secretVersionAdder            # OAuth refresh-token writeback (T1.20).
+                                                  # Per-secret on each youtube-token-* secret.
+roles/datastore.user                              # Firestore: auth_users (sign-in),
+                                                  # oauth_tokens (channel auth), jobs/*,
+                                                  # scheduler state.
+roles/storage.objectAdmin    on gs://ytfactory-prod-v2-state      # YTFACTORY_STATE_BUCKET
+roles/storage.objectAdmin    on gs://ytfactory-prod-v2-artifacts  # YTFACTORY_BUCKET (job
+                                                                   # artifacts, signed URLs)
+roles/iam.serviceAccountTokenCreator              # SELF-binding. Used by
+                                                  # control/core/storage.py for IAM-signBlob
+                                                  # signed-URL fallback when no SA private
+                                                  # key is mounted.
+roles/run.invoker                                 # Invoke render-worker-v2 Cloud Run JOB
+                                                  # (control/core/cloud_run.py).
 ```
+
+**Two operator scripts manage these grants:**
+
+```bash
+bash cloud/iam/grant_web_runner.sh       # mutates IAM — applies all 7 role categories
+bash cloud/iam/verify_web_runner.sh      # read-only — preflight; lists missing grants
+```
+
+The deploy scripts `cloud/web-server/deploy.sh` and
+`cloud/clone-video-worker/deploy.sh` (both pin `web-runner@`) invoke
+`verify_web_runner.sh` as preflight; the deploy aborts loudly with the
+exact fix command if any binding has drifted.
+
+**Why so much machinery for one SA?** See the 2026-05-12 → 13 post-mortem
+in `~/.claude/projects/-Users-rohit-ytFactory/memory/feedback_web_runner_iam_silent_post_deploy_500.md`.
+TL;DR — at the S1.21 SA flip the new SA was missing 5 of 7 categories;
+only the secret-accessor failure tripped at deploy time. The rest only
+fail at first-user-request, so the deploy looked green and the user
+discovered the breakage 13h later when they tried to sign in.
 
 ### weights-runner
 

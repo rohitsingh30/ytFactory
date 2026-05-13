@@ -19,6 +19,14 @@ set -euo pipefail
 # file feedback_gcloud_reauth_use_adc_bypass.md for the full why.
 source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 
+# Preflight: this service shares the `web-runner@` runtime SA with
+# ytfactory-web. Verify it has the full role set before deploying so we
+# don't repeat the 2026-05-13 silent OAuth-callback 500 on the sibling
+# service. See cloud/iam/verify_web_runner.sh + memory file
+# feedback_web_runner_iam_silent_post_deploy_500.md.
+echo "==> Verifying web-runner IAM bindings (preflight)"
+"$(cd "$(dirname "$0")" && pwd)/../iam/verify_web_runner.sh"
+
 TAG="${1:-$(date +%Y%m%d-%H%M%S)}"
 
 PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"

@@ -2158,11 +2158,43 @@ async def google_callback(
         logger.exception("OAuth callback failed")
         return JSONResponse({"error": f"OAuth failed: {e}"}, status_code=400)
 
-    user = upsert_user(
-        email=info["email"],
-        name=info.get("name", ""),
-        picture=info.get("picture", ""),
-    )
+    # 2026-05-13 — wrap upsert_user separately so an IAM regression on
+    # the runtime SA (Firestore PermissionDenied) surfaces as an
+    # actionable redirect instead of a bare 500. The 2026-05-12 SA
+    # flip from tts-runner@ to web-runner@ silently lost
+    # roles/datastore.user; first user sign-in 13h later 500'd with
+    # zero user-facing context. See cloud/iam/verify_web_runner.sh +
+    # memory file feedback_web_runner_iam_silent_post_deploy_500.md.
+    try:
+        user = upsert_user(
+            email=info["email"],
+            name=info.get("name", ""),
+            picture=info.get("picture", ""),
+        )
+    except Exception as e:  # noqa: BLE001
+        # google.api_core.exceptions.PermissionDenied subclasses
+        # GoogleAPICallError which subclasses Exception; we widen the
+        # catch so any storage backend surface (Firestore, Datastore
+        # mode, even a future SQL backend) routes the same way.
+        is_perm_denied = type(e).__name__ in {
+            "PermissionDenied", "Forbidden", "AccessDenied",
+        } or "Permission" in type(e).__name__
+        logger.exception(
+            "OAuth callback: storage layer error during upsert_user "
+            "(email=%s, exc=%s)",
+            info.get("email"), type(e).__name__,
+        )
+        # Tell the user what to do, not just "Internal Server Error".
+        # Operator sees the structured exception in Cloud Logging.
+        if is_perm_denied:
+            return RedirectResponse(
+                "/login?error=auth_storage_permission",
+                status_code=302,
+            )
+        return RedirectResponse(
+            "/login?error=auth_storage_unavailable",
+            status_code=302,
+        )
 
     status = user.get("status")
     if status == USER_STATUS_APPROVED:

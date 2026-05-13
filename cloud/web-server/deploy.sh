@@ -21,26 +21,34 @@
 # (YTFACTORY_RENDER_BACKEND=cloudrun is baked into the image).
 set -euo pipefail
 
-# Pre-flight reminder (post-S1.21 trap, caught 2026-05-13):
+# Pre-flight reminder (post-S1.21 + post-2026-05-13 silent-Firestore-500 trap):
 #
-# If the `gcloud run deploy` step below fails with one or more
-# `Permission denied on secret … must be granted
-# roles/secretmanager.secretAccessor` lines (Cloud Build will have
-# succeeded), the per-service `web-runner@` SA is missing the
-# accessor binding on the 7 secrets we mount via --set-secrets.
-# Run the idempotent grant script first, then re-run this:
+# The `web-runner@` SA needs MORE than just secret accessor — it needs
+# Firestore, both state + artifacts buckets, IAM signBlob, and
+# run.invoker. The 2026-05-12 SA flip from `tts-runner@` lost all of
+# those silently because none fail at deploy time — they only fail
+# on first user request (Firestore: sign-in callback; signBlob: any
+# signed-URL endpoint; run.invoker: render kickoff). 13-hour outage.
 #
-#   bash cloud/iam/grant_web_runner_secrets.sh
-#   bash cloud/web-server/deploy.sh
+# Now we BOTH:
+#   1. Run a read-only IAM verifier as preflight (this script, below).
+#      Aborts the deploy if any required binding is missing.
+#   2. Surface a one-liner repair command (`bash cloud/iam/grant_web_runner.sh`).
 #
-# Memory: feedback_web_runner_secret_accessor_post_s121.md.
-# Doc: docs/iam_per_service.md § "Roles per SA → web-runner".
+# Memory: feedback_web_runner_iam_silent_post_deploy_500.md
+# Doc:    docs/iam_per_service.md § "Roles per SA → web-runner".
 
 # Bake in the ADC-token auth bypass so deploys don't die mid-build with
 # "Reauthentication failed" when the user-account access token has expired
 # but ADC is still fresh. See cloud/_shared/auth_setup.sh + the memory
 # file feedback_gcloud_reauth_use_adc_bypass.md for the full why.
 source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
+
+# Preflight: IAM bindings for the runtime SA. Aborts deploy with a
+# concrete grant command if anything is missing. Read-only — never
+# mutates IAM (operator may not have project-IAM-admin).
+echo "==> Verifying web-runner IAM bindings (preflight)"
+"$(cd "$(dirname "$0")" && pwd)/../iam/verify_web_runner.sh"
 
 PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
 REGION="${GCP_REGION:-asia-southeast1}"
