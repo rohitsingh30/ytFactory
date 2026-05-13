@@ -47,13 +47,21 @@ def extract_from_dict(carrier: Mapping[str, str]) -> otel_context.Context:
 # ---- Cloud Run JOB env -------------------------------------------------
 
 
-def inject_into_env(env: Optional[MutableMapping[str, str]] = None) -> dict[str, str]:
+def inject_into_env(env: Optional[MutableMapping[str, str]] = None) -> MutableMapping[str, str]:
     """Capture the active trace context as ``YTFACTORY_TRACEPARENT`` (+
     optional ``YTFACTORY_TRACESTATE``) in the supplied mapping.
 
-    Returns the same mapping (or a fresh dict if none supplied) so
-    callers can pass it straight to ``gcloud run jobs execute
-    --update-env-vars``.
+    Returns the SAME mapping that was passed in (or a fresh ``dict`` if
+    none was supplied). Callers can pass the return value straight to
+    ``gcloud run jobs execute --update-env-vars``.
+
+    Audit D3.66 — pre-fix this returned ``dict(sink)`` (a copy) when
+    ``env`` was None and ``env`` (the original) otherwise, which is
+    inconsistent with the docstring's "Returns the same mapping"
+    claim AND lied about the typing — annotation said
+    ``dict[str, str]`` even when the input was a non-dict
+    MutableMapping. Now both branches return the same instance and
+    the annotation is widened to ``MutableMapping``.
     """
     sink = env if env is not None else {}
     headers: dict[str, str] = {}
@@ -64,7 +72,7 @@ def inject_into_env(env: Optional[MutableMapping[str, str]] = None) -> dict[str,
         sink[ENV_VAR] = tp
     if ts:
         sink[ENV_STATE] = ts
-    return dict(sink) if env is None else env
+    return sink
 
 
 def extract_from_env(

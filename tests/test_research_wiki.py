@@ -117,6 +117,88 @@ class WikiExtractTest(unittest.TestCase):
             result = wiki_mod._wiki_extract("Title")
         self.assertIsNone(result)
 
+    def test_picks_lowest_pageid_on_disambiguation(self):
+        """Audit D3.74 — pre-fix this returned the FIRST page in
+        ``pages.values()`` iteration order, which is API-response
+        dependent (Wikipedia returns page-ids in arbitrary order on
+        disambiguation/redirect chains). Now sorted by page-id so
+        the same query always returns the same extract."""
+        resp = MagicMock()
+        # Three pages — 5 (lowest), 100, 42. Pre-fix any of these
+        # could be picked. Now: page 5's extract is the canonical
+        # winner.
+        resp.json.return_value = {
+            "query": {
+                "pages": {
+                    "100": {"extract": "page-100 extract"},
+                    "5":   {"extract": "page-5 extract"},
+                    "42":  {"extract": "page-42 extract"},
+                }
+            }
+        }
+        resp.raise_for_status = MagicMock()
+        with patch("requests.get", return_value=resp):
+            result = wiki_mod._wiki_extract("Test Article")
+        self.assertEqual(result, "page-5 extract")
+
+    def test_skips_pageid_with_no_extract(self):
+        # Page 1 has no extract; page 9 does. Result: page 9 is picked
+        # despite having a higher id, because page 1 yields nothing.
+        resp = MagicMock()
+        resp.json.return_value = {
+            "query": {
+                "pages": {
+                    "1": {"title": "no-extract"},
+                    "9": {"extract": "page-9 extract"},
+                }
+            }
+        }
+        resp.raise_for_status = MagicMock()
+        with patch("requests.get", return_value=resp):
+            result = wiki_mod._wiki_extract("Test Article")
+        self.assertEqual(result, "page-9 extract")
+
+    def test_negative_pageid_missing_pages_handled(self):
+        # Wikipedia uses negative page-ids for missing pages.
+        # Negative sorts BEFORE positive but typically has no extract,
+        # so the real positive-id page wins.
+        resp = MagicMock()
+        resp.json.return_value = {
+            "query": {
+                "pages": {
+                    "-1": {"missing": True},  # no extract
+                    "7": {"extract": "page-7 extract"},
+                }
+            }
+        }
+        resp.raise_for_status = MagicMock()
+        with patch("requests.get", return_value=resp):
+            result = wiki_mod._wiki_extract("Test Article")
+        self.assertEqual(result, "page-7 extract")
+
+    def test_unparseable_pageid_falls_back_to_string_sort(self):
+        # Audit D3.74 — defensive: if Wikipedia ever returns a
+        # non-numeric page-id (it doesn't today, but the schema is
+        # technically string-typed), fall back to lexicographic sort
+        # rather than crashing on int(k). Both pages have an extract;
+        # bucket-1 (string-sorted) entries come AFTER bucket-0
+        # (int-sorted) so the int-id page wins. This pins the helper
+        # branch.
+        resp = MagicMock()
+        resp.json.return_value = {
+            "query": {
+                "pages": {
+                    "weird-id": {"extract": "weird page extract"},
+                    "5": {"extract": "page-5 extract"},
+                }
+            }
+        }
+        resp.raise_for_status = MagicMock()
+        with patch("requests.get", return_value=resp):
+            result = wiki_mod._wiki_extract("Test Article")
+        # Numeric-id page sorts first (bucket 0), so it wins.
+        self.assertEqual(result, "page-5 extract")
+
 
 # ---------------------------------------------------------------------------
 # fetch_article

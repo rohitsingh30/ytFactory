@@ -67,34 +67,63 @@ def instrument_outbound_http() -> None:
     every TTS Cloud Run call broke the trace-propagation chain.
     Now also patch ``urllib`` via OTel's
     ``URLLibInstrumentor``.
+
+    Audit D3.67 — pre-fix the ``_STATE["outbound"]`` short-circuit
+    was set unconditionally at the end, so any partial-failure run
+    (requests OK, httpx ImportError, …) was treated as fully
+    instrumented and never retried on the next call. Now we track
+    success per-library and only set ``_STATE["outbound"]`` once
+    EVERY library is either successfully patched or we've decided
+    the library isn't installed.
     """
     if _STATE["outbound"]:
         return
     init()
+    success_count = 0
+    failure_count = 0
     try:
         from opentelemetry.instrumentation.requests import RequestsInstrumentor
         RequestsInstrumentor().instrument()
+        success_count += 1
     except Exception as e:  # noqa: BLE001
         _logger.warning("requests instrumentation failed: %s", e)
+        failure_count += 1
     try:
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
         HTTPXClientInstrumentor().instrument()
+        success_count += 1
     except Exception as e:  # noqa: BLE001
         _logger.warning("httpx instrumentation failed: %s", e)
+        failure_count += 1
     try:
         from opentelemetry.instrumentation.aiohttp_client import (
             AioHttpClientInstrumentor,
         )
         AioHttpClientInstrumentor().instrument()
+        success_count += 1
     except Exception as e:  # noqa: BLE001
         _logger.warning("aiohttp instrumentation failed: %s", e)
+        failure_count += 1
     # Audit Q2.68 — urllib instrumentor for pipeline/tts/cloudrun.py.
     try:
         from opentelemetry.instrumentation.urllib import URLLibInstrumentor
         URLLibInstrumentor().instrument()  # coverage: requires opentelemetry-instrumentation-urllib package which the laptop test env doesn't ship
+        success_count += 1
     except Exception as e:  # noqa: BLE001
         _logger.warning("urllib instrumentation failed: %s", e)
-    _STATE["outbound"] = True
+        failure_count += 1
+    # Only mark "done" if at least one library patched successfully.
+    # If everything failed (e.g. opentelemetry-instrumentation-* not
+    # installed), leave the flag false so a future call can retry
+    # in case the missing package was installed in the meantime.
+    if success_count > 0:
+        _STATE["outbound"] = True
+    if failure_count > 0:
+        _logger.info(
+            "instrument_outbound_http: %d library/ies patched, %d failed "
+            "(retry possible iff success_count==0)",
+            success_count, failure_count,
+        )
 
 
 # ---- subprocess --------------------------------------------------------

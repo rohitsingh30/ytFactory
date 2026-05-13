@@ -97,7 +97,16 @@ def _wiki_search(query: str) -> str | None:
 
 
 def _wiki_extract(title: str) -> str | None:
-    """Fetch the plaintext extract of a Wikipedia article by title."""
+    """Fetch the plaintext extract of a Wikipedia article by title.
+
+    Audit D3.74 — pre-fix this iterated ``pages.values()`` and
+    returned the first page with an extract. ``pages`` is a dict
+    keyed by page-id (CPython 3.7+ preserves insertion order, but
+    the Wikipedia API's response order is undefined for redirect/
+    disambiguation chains — the same query could return different
+    extracts on different API calls). Now sort by page-id (as int)
+    so the choice is deterministic across runs.
+    """
     params = {
         "action": "query",
         "prop": "extracts",
@@ -118,7 +127,17 @@ def _wiki_extract(title: str) -> str | None:
     except (requests.RequestException, ValueError) as e:
         print(f"[wiki] extract failed for {title!r}: {e}")
         return None
-    for page in pages.values():
+    # Wikipedia returns negative page-ids for missing pages; positive
+    # for real pages. Sort numerically (asc) to pick the lowest-id
+    # real page, which is the canonical article ID Wikipedia assigned
+    # earliest. Fall back to string sort on un-parseable keys.
+    def _key(item):
+        k = item[0]
+        try:
+            return (0, int(k))
+        except (TypeError, ValueError):
+            return (1, str(k))
+    for _pageid, page in sorted(pages.items(), key=_key):
         text = page.get("extract")
         if text:
             return text

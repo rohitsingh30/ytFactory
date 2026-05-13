@@ -90,6 +90,45 @@ class TestOutboundIdempotent(_Base):
             "urllib calls show up in Cloud Trace.",
         )
 
+    def test_audit_d367_failure_doesnt_block_retry(self) -> None:
+        """Audit D3.67 — pre-fix `_STATE['outbound']` was set
+        unconditionally at the end, so any partial-failure run
+        (some library raised ImportError mid-way) was treated as
+        fully-instrumented and never retried. Now, if EVERY library
+        fails (success_count == 0), `_STATE['outbound']` stays False
+        so a future call can retry once the missing packages are
+        installed."""
+        import sys as _sys
+        from unittest.mock import patch as _patch
+        # Reset the flag and force every import to fail by mapping
+        # the targeted submodules to ImportError-raising stubs.
+        inst._STATE["outbound"] = False
+
+        # Pre-pop any cached imports of the targeted instrumentors so
+        # the import statements re-run inside instrument_outbound_http.
+        for mod_name in (
+            "opentelemetry.instrumentation.requests",
+            "opentelemetry.instrumentation.httpx",
+            "opentelemetry.instrumentation.aiohttp_client",
+            "opentelemetry.instrumentation.urllib",
+        ):
+            _sys.modules.pop(mod_name, None)
+        # Stub each as None so a fresh import raises ImportError per
+        # PEP 328 sentinel semantics.
+        stubs = {
+            "opentelemetry.instrumentation.requests": None,
+            "opentelemetry.instrumentation.httpx": None,
+            "opentelemetry.instrumentation.aiohttp_client": None,
+            "opentelemetry.instrumentation.urllib": None,
+        }
+        with _patch.object(inst, "init", return_value=None), \
+             _patch.dict(_sys.modules, stubs):
+            inst.instrument_outbound_http()
+        # All-failed → flag must STAY False so future retry is possible.
+        self.assertFalse(inst._STATE["outbound"],
+                         "outbound flag must stay False when every "
+                         "library failed, so retry is possible")
+
 
 class TestInstallAll(_Base):
     def test_install_all_runs(self) -> None:

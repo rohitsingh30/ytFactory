@@ -228,10 +228,41 @@ class TestDownloadErrors(unittest.TestCase):
 
     @patch("pipeline.footage.yt_dlp_cloudrun._id_token", return_value=None)
     @patch("requests.post")
-    def test_504_raises_failed(self, mock_post, _tok):
+    def test_504_raises_unavailable_when_no_local_fallback(self, mock_post, _tok):
+        # Audit D3.59 — pre-fix this raised CloudRunYtDlpFailed (final),
+        # but a 504 is a SERVICE-side timeout: the same URL might
+        # succeed on the laptop's faster network. Now classified as
+        # CloudRunYtDlpUnavailable so the caller's local fallback
+        # path can take over. With fallback_to_local=False (or no
+        # local backend available) it still raises Unavailable.
         mock_post.return_value = _fake_resp(status_code=504, text="timeout")
-        with self.assertRaises(CloudRunYtDlpFailed):
-            download("https://youtube.com/watch?v=abc", self.out)
+        with self.assertRaises(CloudRunYtDlpUnavailable):
+            download(
+                "https://youtube.com/watch?v=abc",
+                self.out,
+                fallback_to_local=False,
+            )
+
+    @patch("pipeline.footage.yt_dlp_cloudrun._local_fallback_enabled", return_value=True)
+    @patch("pipeline.footage.yt_dlp_cloudrun._local_fallback_download")
+    @patch("pipeline.footage.yt_dlp_cloudrun._id_token", return_value=None)
+    @patch("requests.post")
+    def test_504_falls_back_to_local_when_enabled(
+        self, mock_post, _tok, mock_local, _enabled
+    ):
+        # Audit D3.59 — when both fallback_to_local=True (default)
+        # AND _local_fallback_enabled() is true, a 504 must route to
+        # the local fallback path (not raise Failed terminating the
+        # whole chain).
+        mock_post.return_value = _fake_resp(status_code=504, text="timeout")
+        mock_local.return_value = self.out
+        result = download(
+            "https://youtube.com/watch?v=abc",
+            self.out,
+            fallback_to_local=True,
+        )
+        self.assertEqual(result, self.out)
+        mock_local.assert_called_once()
 
     @patch("pipeline.footage.yt_dlp_cloudrun._id_token", return_value=None)
     @patch("requests.post")

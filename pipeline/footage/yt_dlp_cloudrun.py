@@ -171,7 +171,26 @@ def download(
             f"cloud yt-dlp 400: {resp.text[:300]}"
         )
     if resp.status_code == 504:
-        raise CloudRunYtDlpFailed(f"cloud yt-dlp timeout: {resp.text[:200]}")
+        # Audit D3.59 — pre-fix this raised CloudRunYtDlpFailed (no
+        # local retry), but a 504 is a SERVICE-side timeout: the same
+        # URL might succeed on the laptop's faster network or under
+        # the laptop's longer timeout budget. Reclassify as
+        # CloudRunYtDlpUnavailable so the fallback path is taken.
+        if fallback_to_local and _local_fallback_enabled():
+            logger.warning(
+                "cloudrun yt-dlp: HTTP 504 timeout (%s) → falling back to local",
+                resp.text[:200],
+            )
+            return _local_fallback_download(
+                url, out_path,
+                format_string=format_string,
+                audio_only=audio_only, audio_ext=audio_ext,
+                sections=sections, extra_args=extra_args,
+                timeout_s=timeout_s,
+            )
+        raise CloudRunYtDlpUnavailable(
+            f"cloud yt-dlp timeout: {resp.text[:200]}"
+        )
     if resp.status_code != 200:
         # 401/403/5xx → service issue; fall back to laptop.
         if fallback_to_local and _local_fallback_enabled():

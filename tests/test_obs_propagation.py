@@ -53,6 +53,20 @@ class TestEnvRoundtrip(_Base):
         ctx = propagation.extract_from_env({})
         self.assertIsInstance(ctx, otel_context.Context)
 
+    def test_inject_returns_same_instance_when_env_supplied(self) -> None:
+        """Audit D3.66 — pre-fix this returned ``dict(sink)`` (a copy)
+        when env was None and ``env`` (the original) otherwise. Now
+        always returns the SAME instance the caller passed in (or a
+        fresh dict if none) so callers can rely on identity AND on
+        the in-place mutation working as documented."""
+        with obs.timed("outer"):
+            user_env: dict[str, str] = {"PRE_EXISTING": "value"}
+            returned = propagation.inject_into_env(user_env)
+        self.assertIs(returned, user_env, "must return same dict instance")
+        self.assertEqual(returned["PRE_EXISTING"], "value",
+                         "pre-existing keys must be preserved")
+        self.assertIn(propagation.ENV_VAR, returned)
+
 
 if __name__ == "__main__":
     unittest.main()
