@@ -180,12 +180,24 @@ _DEFAULT_MAX_TOKENS_BY_STAGE: dict[str, int] = {
     # (capped at 64k) as a safety net for stages that go even bigger.
     #
     # Cost note: gpt-5.3-chat charges per OUTPUT token, including
-    # reasoning. 32000 max means up to 32000 × $/tok price — but most
+    # reasoning. 64000 max means up to 64000 × $/tok price — but most
     # calls finish well under cap, so the typical render isn't
     # affected. Override down via YTFACTORY_MAX_TOKENS_REWRITE_LONG_FORM
     # if a particular channel runs gpt-4o (no reasoning) and 12k is
     # plenty.
-    "rewrite_long_form": 32000,
+    #
+    # Bumped 2026-05-13 (32000 → 64000): the new long-form prompt
+    # (post-critic_long_form contract) demands a hard MIN of 0.92 *
+    # target_words. For a 30-min target = 4500 words narration ≈ 6000
+    # output tokens, PLUS 24 panels × 100 tokens each = 2400 tokens,
+    # PLUS hook + thesis + 10 section titles + visual_briefs ≈ 1500
+    # tokens, PLUS JSON syntax overhead ≈ 1000 tokens — that's ~11k
+    # CONTENT tokens. Azure gpt-5.3 reasoning typically burns 5-15k
+    # tokens BEFORE producing the first output token. Combined the
+    # 32k cap was getting hit mid-stream, producing truncated JSON
+    # that crashed the renderer with "could not parse JSON from model
+    # output". Job b318a78769e74556bb91570dc41ce301 was the canary.
+    "rewrite_long_form": 64000,
     # Shorts rewrite + cast + prompts run on much shorter outputs.
     # 2026-05-13 — bumped 4096 → 8192 to give reasoning deployments
     # the same headroom. Short-form output is ~1500 prose tokens, but
