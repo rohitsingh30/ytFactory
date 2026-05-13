@@ -63,12 +63,28 @@ class CloudLoggingLogExporter(LogExporter):
         """Best-effort write of every record. We never raise; failure
         logs locally and reports SUCCESS so the SDK doesn't retry the
         whole batch (we'd rather drop a record than block the pipeline).
+
+        Audit D3.70 — pre-fix this swallowed every per-record exception
+        AND always returned SUCCESS, making Cloud Logging client
+        failures invisible to the SDK (no retry, no per-batch error
+        metric). Now: count failures and return PARTIAL_SUCCESS-ish
+        signal via FAILURE when MORE THAN HALF the batch failed (the
+        SDK won't retry SimpleLogRecordProcessor's batch-of-1 anyway,
+        but BatchLogRecordProcessor will retry on FAILURE — better
+        than silently dropping the whole batch on transient cloud
+        outages). Successes still drop the failed records, not block.
         """
+        ok = 0
+        fail = 0
         for ld in batch:
             try:
                 self._write_one(ld)
+                ok += 1
             except Exception as e:  # noqa: BLE001
+                fail += 1
                 _logger.warning("Cloud Logging write failed: %s", e)
+        if fail and fail > ok:
+            return LogRecordExportResult.FAILURE
         return LogRecordExportResult.SUCCESS
 
     def shutdown(self) -> None:
@@ -87,7 +103,21 @@ class CloudLoggingLogExporter(LogExporter):
         if rec.attributes:
             struct.update(dict(rec.attributes))
 
-        severity = self.SEVERITY_MAP.get(rec.severity_number.value, "DEFAULT")
+        # Audit D3.69 — pre-fix this was `rec.severity_number.value`,
+        # which assumed the SeverityNumber enum surface. Older OTel
+        # versions exposed the field as a plain int (no `.value`); the
+        # AttributeError raised here was caught by export()'s blanket
+        # `except Exception` and logged as a generic write failure
+        # ("Cloud Logging write failed: 'int' object has no attribute
+        # 'value'") with no diagnostic context. Now: defensive get-int
+        # so both the new enum and the old int surface work.
+        severity_number = rec.severity_number
+        sev_value = (
+            severity_number.value
+            if hasattr(severity_number, "value")
+            else int(severity_number)
+        )
+        severity = self.SEVERITY_MAP.get(sev_value, "DEFAULT")
 
         kwargs: dict = {"severity": severity}
         if rec.trace_id and rec.trace_id != 0:
