@@ -361,3 +361,94 @@ lives there too.
   surface of the same root cause (gcloud user-auth fragility)
 - gcloud docs:
   https://cloud.google.com/sdk/docs/authorizing#user-accounts
+
+## 2026-05-13 — SA impersonation: when ADC alone isn't enough
+
+The 2026-05-12 ADC bypass (above) buys hours, not days. The org's
+Workspace reauth policy eventually catches up to the ADC subsystem
+too — after ~8-12h of inactivity the `gcloud auth application-default
+print-access-token` call returns the same `Reauthentication failed`
+error, and the bypass becomes a no-op.
+
+A frustrated user mid-deploy is not a debugging context. The
+permanent fix is **service-account impersonation** via the IAM
+Credentials REST API, bootstrapped from whatever ADC token IS
+available (even one that's about to expire — minting an SA token
+takes <1s).
+
+### Why not a downloadable SA key file
+
+Org policy enforces
+`constraints/iam.disableServiceAccountKeyCreation`. Trying to create
+a JSON key returns `Key creation is not allowed on this service
+account`. Workspace security baseline; can't be bypassed
+client-side. SA impersonation is the policy-compliant alternative.
+
+### Why not `gcloud --impersonate-service-account=…`
+
+That flag bootstraps from **user-account creds**, not ADC. It hits
+the same reauth wall the original bypass was trying to avoid. We
+sidestep this by calling the IAM Credentials REST endpoint
+directly with the ADC token in the Authorization header.
+
+### One-time setup (per project — already done for ytfactory-prod-v2)
+
+```bash
+PROJECT=ytfactory-prod-v2
+SA=ytfactory-deployer
+SA_EMAIL=${SA}@${PROJECT}.iam.gserviceaccount.com
+
+gcloud iam service-accounts create $SA \
+  --project=$PROJECT \
+  --display-name="ytFactory laptop-side deployer"
+
+# Grant deploy roles
+for ROLE in roles/run.admin roles/cloudbuild.builds.editor \
+            roles/artifactregistry.writer roles/iam.serviceAccountUser \
+            roles/storage.admin roles/secretmanager.secretAccessor \
+            roles/run.developer roles/secretmanager.admin \
+            roles/cloudbuild.builds.viewer roles/logging.viewer; do
+  gcloud projects add-iam-policy-binding $PROJECT \
+    --member="serviceAccount:$SA_EMAIL" \
+    --role="$ROLE" --condition=None
+done
+
+# Grant impersonation rights to every operator
+for USER in rohittomar@docx.co.in rsinghtomar54@gmail.com; do
+  gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
+    --project=$PROJECT \
+    --member="user:$USER" \
+    --role="roles/iam.serviceAccountTokenCreator"
+done
+```
+
+### Per-deploy runtime (built into auth_setup.sh)
+
+`cloud/_shared/auth_setup.sh` now does this in three tiers:
+
+1. **Tier 1 (preferred):** mint an SA access token via the IAM
+   Credentials REST `generateAccessToken` endpoint, using the ADC
+   token as the bootstrap auth in the Authorization header. The
+   resulting token is valid for 1h and is NOT subject to the org's
+   user-account reauth policy.
+2. **Tier 2 (fallback):** plain ADC token (the 2026-05-12 bypass).
+   Used when impersonation is unconfigured.
+3. **Tier 3 (hard error):** if both fail, prints ONE clear
+   instruction to re-auth ADC + exits non-zero.
+
+The token length tells you which tier fired: SA impersonation token
+is ~1024 chars, plain ADC token is ~253 chars.
+
+### Effect
+
+After this fix, every `cloud/<svc>/deploy.sh` mints a fresh SA
+token from whatever ADC the laptop has. The user re-auths ADC
+roughly once per 8-12h (the hardest org cap on the user-account
+refresh-token chain) and from then on every deploy in between is
+silent — no "please re-login" stalls, no mid-build failures.
+
+### Memory pointer
+
+`~/.claude/projects/-Users-rohit-ytFactory/memory/feedback_deploy_sa_impersonation.md`
+— full reproduction recipe + the diagnosis path that found the
+SA-key-creation block.

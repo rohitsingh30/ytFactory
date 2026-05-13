@@ -200,6 +200,19 @@ suffixes). Edge-side 308 is the only correct layer.
 - Two-frontend layout this composes with: `docs/two_frontend_topology.md`
 - Pre-build mechanic this rides on top of:
   `docs/cloudrun_web_next_prebuild.md`
-- Memory: `feedback_cloudrun_dual_url_oauth_state_mismatch.md`
+- **Cookie verification at the edge (next-day follow-up bug):**
+  [`docs/web_next_session_cookie.md`](./web_next_session_cookie.md)
+  — Python's `http.cookies.Morsel` auto-quotes cookie values
+  containing `@`, and the JS verifier in this same `middleware.ts`
+  did not strip those quotes on read → 2-day stuck-login bug.
+  Fix: un-quote prelude in `verifySessionCookie`. Same code path
+  this doc fixed for host-normalization.
+- **Auth-debugging meta-rule born from the same investigation:**
+  [`docs/auth_debugging.md`](./auth_debugging.md) — env-diff
+  before frontend, logger before speculation, self-signed cookie
+  before the long detour.
+- Memory: `feedback_cloudrun_dual_url_oauth_state_mismatch.md`,
+  `feedback_cookie_python_quotes_trap.md`,
+  `feedback_auth_loop_check_env_first.md`
 - Origin session post-mortem: 2026-05-12 (rohittomar@docx.co.in
   "state mismatch" → middleware fix shipped same session)

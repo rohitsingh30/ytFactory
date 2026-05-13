@@ -1,5 +1,15 @@
 # Service worker handler scope — `event` does not survive helper extraction
 
+> **Status (2026-05-13): the studio service worker has been retired.**
+> `web-next/public/sw.js` is now a self-destruct file (skipWaiting +
+> claim + wipe + unregister, no fetch interception). New visits never
+> install a SW; existing browsers fetch the kill SW on next
+> navigation and the SW is gone forever. The handler-scope rule below
+> still applies to ANY future service worker we ship — but as of
+> 2026-05-13, ytFactory ships none. See
+> [`docs/web_next_session_cookie.md`](./web_next_session_cookie.md)
+> §"Hardening" for the retirement context.
+
 > **Cross-channel rule (CLASS-OF-BUG, 2026-05-11).** Any helper
 > extracted from a service-worker `install`/`activate`/`fetch`/`message`
 > event handler MUST take `event` as an explicit parameter if it calls

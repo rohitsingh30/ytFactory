@@ -58,23 +58,28 @@ strictly opt-in for legacy callers (no API breaks).
 
 ### Network-layer SWR
 
-- **`web-next/public/sw.js`** — versioned cache (`ytfactory-api-v2`,
-  bumped from v1 on 2026-05-11 to drop the cache populated by a
-  broken handler — see
+* **`web-next/public/sw.js` — RETIRED 2026-05-13.** Originally a
+  versioned cache with stale-while-revalidate for /api/* GETs.
+  Replaced with a self-destruct service worker (commit `5e3e0d5`)
+  after a 2-day debugging saga where the residual SW from a
+  previous version caused stuck-login symptoms on `/login` for
+  users who had cached the old SW. The replacement: skipWaiting +
+  clients.claim + delete every cache + unregister + force every
+  controlled tab to navigate. The registration site
+  (`web-next/components/app/studio-sw-register.tsx`) was also
+  defanged — it now ONLY unregisters existing SWs and wipes
+  caches; it never re-registers. New visits don't install a SW.
+  Existing browsers fetch the new self-destruct SW on next
+  navigation (Cache-Control: no-store on /sw.js forces re-fetch)
+  and the cleanup runs immediately. Net: no network-layer SWR
+  today. The in-process `useStaleWhileRevalidate` hook
+  (in-memory + sessionStorage, single-tab scope) is now the only
+  caching layer. See
+  [`docs/web_next_session_cookie.md`](./web_next_session_cookie.md)
+  §"Hardening" for the full retirement context. The original SW
+  + handler-scope rule lives at
   [`docs/service_worker_handler_scope.md`](./service_worker_handler_scope.md)
-  for the rule on why every SW change must bump the version).
-  Intercepts only same-origin `/api/*` GETs; skips
-  `/api/auth/*`, `/api/admin/*`, `/api/oauth/*`, `/api/jobs/*`,
-  `/api/critiques/*` (correctness > speed for those). Stale-while-
-  revalidate with 1 hr TTL + 200-entry cap. Stamps a `x-sw-cached-at`
-  header on each cached response so the SW reader can age out.
-- **`web-next/components/app/studio-sw-register.tsx`** — registers
-  the SW after `window.load`. **Kill switch**: any `/app/*` URL with
-  `?nosw=1` unregisters every SW + clears every `ytfactory-api-*`
-  cache. Use this when triaging "stale data" reports before assuming
-  the bug is server-side.
-- Imperative wipe: `bustServiceWorkerCache()` from the same module.
-  Wire into the logout flow if you ever surface multi-account switch.
+  for historical reference.
 
 ### Code-split heavy components
 
