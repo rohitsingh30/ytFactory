@@ -305,7 +305,7 @@ def _regen_audio_caps(
         )
     narration_text = audio.normalize_for_tts(narration_text)
 
-    # 1. TTS (skip if cached)
+    # 1. TTS (skip if cached AND voice fingerprint unchanged)
     # Audit Q2.24 — pre-fix ``cfg["tts_voice"]`` and ``cfg["tts_provider"]``
     # KeyError'd on channels missing these keys. long_form.py has
     # cfg.get(...) fallbacks; footage_only didn't. Now defaults match
@@ -313,8 +313,17 @@ def _regen_audio_caps(
     # fallback for footage-only docs that don't specify TTS).
     tts_voice = cfg.get("tts_voice", "default")
     tts_provider = cfg.get("tts_provider", "kokoro")
-    if not narr_path.exists():
-        print(f"[1/5] TTS via {tts_provider} voice={tts_voice}…")
+    # Audit Q2.22 — fingerprint-gated cache. Pre-fix this only
+    # checked ``narr_path.exists()``; switching tts_provider in YAML
+    # left the OLD voice in the cached wav. Now write a sidecar
+    # (.voice_fp.json) recording (provider, voice, speed, language,
+    # chunk knobs) and re-synth on mismatch.
+    from pipeline.render._voice_fingerprint import (  # noqa: PLC0415
+        compute_fingerprint, needs_resynth, write_sidecar,
+    )
+    resynth, reason = needs_resynth(narr_path, cfg)
+    if resynth:
+        print(f"[1/5] TTS via {tts_provider} voice={tts_voice} ({reason})…")
         t0 = time.time()
         audio.synthesize(
             narration_text,
@@ -325,9 +334,10 @@ def _regen_audio_caps(
             language=cfg.get("tts_language", "en"),
             ref_audio_text=cfg.get("tts_ref_text"),
         )
+        write_sidecar(narr_path, compute_fingerprint(cfg))
         print(f"     wrote {narr_path.name} in {time.time() - t0:.1f}s")
     else:
-        print(f"[1/5] TTS cached: {narr_path.name}")
+        print(f"[1/5] TTS cached: {narr_path.name} ({reason})")
 
     if caption_mode == "none":
         print(f"[2/5] caption_mode=none → skip whisper + beat split")

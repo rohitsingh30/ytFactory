@@ -132,6 +132,10 @@ def _apply_tone(lf: dict, tone: str) -> tuple[float, float]:
 # ---------- whisper anchor alignment --------------------------------------
 
 
+# Audit Q2.23 — wrap heavy stages with @obs.traced so the
+# render envelope opened in main() has children.
+@obs.traced("anchors.sports_doc", category="asr",
+            capture=["asr_provider"])
 def _align_anchors_to_narration(
     narration_wav: Path,
     anchors: list[str],
@@ -541,6 +545,8 @@ def _gather_overlays(
     )
 
 
+@obs.traced("filler.sports_doc", category="render",
+            capture=["target_dur_s"])
 def _build_filler_video(
     b_roll_clips: list[Path],
     target_dur_s: float,
@@ -641,6 +647,7 @@ def _overlay_clip_on_filler(
     return out
 
 
+@obs.traced("splice.sports_doc", category="render")
 def _splice_overlays_batch(
     base: Path,
     overlays: list[tuple[float, Path]],
@@ -869,6 +876,25 @@ def _main_impl(args) -> int:
 
     clips_by_id: dict[str, Path] = {}
     used_overlap = False
+    # Audit Q2.22 — fingerprint-gate the narration cache. Same
+    # rationale as long_form.py — switching tts_provider in the
+    # YAML must bust the cached chunk wavs (filenames are content-
+    # hash but provider isn't in the hash). Wipe stale cache files
+    # BEFORE invoking synth_long_narration so the synth re-binds
+    # them to the new provider/voice.
+    fp_cfg = {
+        "tts_provider": tts_provider,
+        "tts_voice": lf.get("tts_voice"),
+        "tts_speed": speed,
+        "tts_ref_text": lf.get("tts_ref_text"),
+        "tts_chunk_join_silence_s": float(lf.get("tts_chunk_join_silence_s", 0.35)),
+        "tts_chunk_target_chars": int(lf.get("tts_chunk_target_chars", 380)),
+    }
+    candidate_narr_wav = cache_dir / "narration.wav"
+    from pipeline.render._voice_fingerprint import (  # noqa: PLC0415
+        maybe_wipe_stale_chunks as _voice_maybe_wipe,
+    )
+    _voice_maybe_wipe(candidate_narr_wav, fp_cfg)
     tts_t0 = time.time()
     if overlap_safe and not args.tts_only and raw_footage_entries:
         used_overlap = True

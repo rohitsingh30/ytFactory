@@ -304,6 +304,15 @@ def _wav_concat_with_silence(wavs: list[Path], silence_s: float, out_wav: Path) 
     ])
 
 
+# Audit Q2.23 — long_form + sports_doc previously emitted ZERO
+# stage spans, violating the CLAUDE.md "every pipeline stage MUST
+# emit a span" rule. Only shorts.py complied. The dashboard's
+# /app/telemetry per-stage waterfall was empty for every long-form
+# render. Now wrap the four heavy stage functions (TTS synth,
+# video assembly, captions, mux) with @obs.traced so the render
+# envelope opened in main() actually has children.
+@obs.traced("tts.long_form", category="tts",
+            capture=["voice_id", "provider", "speed", "atempo"])
 def synth_long_narration(
     text: str,
     voice_id: str,
@@ -493,6 +502,25 @@ def synth_long_narration(
 
     narration_wav = cache_dir / "narration.wav"
     _wav_concat_with_silence(final_chunks, join_silence_s, narration_wav)
+    # Audit Q2.22 — write a voice-fingerprint sidecar so a future
+    # run with a changed tts_provider/voice/speed in the channel
+    # YAML invalidates this cached narration.wav. Without this,
+    # switching F5→Chatterbox in the YAML didn't bust the cache.
+    # main() reads the sidecar BEFORE invoking synth_long_narration
+    # (see _voice_fingerprint.needs_resynth) and gates the call
+    # accordingly; the write here ensures every fresh synth re-binds
+    # the sidecar to the cfg that produced it.
+    from pipeline.render._voice_fingerprint import (  # noqa: PLC0415
+        compute_fingerprint, write_sidecar,
+    )
+    write_sidecar(narration_wav, compute_fingerprint({
+        "tts_provider": provider,
+        "tts_voice": voice_id,
+        "tts_speed": speed,
+        "tts_ref_text": ref_audio_text,
+        "tts_chunk_join_silence_s": join_silence_s,
+        "tts_chunk_target_chars": chunk_target_chars,
+    }))
     return narration_wav, final_chunks
 
 
@@ -757,6 +785,8 @@ def _assemble_panel_kenburns(
     return video_path
 
 
+@obs.traced("video_panels.long_form", category="render",
+            capture=["out_w", "out_h", "fps"])
 def build_image_panels_video(
     panels: list[dict[str, Any]],
     style_prefix: str,
@@ -899,6 +929,8 @@ def _concat_and_pad(
     return video_path
 
 
+@obs.traced("video_track.long_form", category="render",
+            capture=["target_duration_s", "fps"])
 def build_video_track(
     shotlist: dict[str, Any],
     sources_dir: Path,
@@ -1646,6 +1678,7 @@ def _ffmpeg_has_libass() -> bool:
 # ---------- final mux: video + (narration + music) ------------------------
 
 
+@obs.traced("mux.long_form", category="render")
 def final_mux(
     video_path: Path, narration_wav: Path, music_wav: Path,
     out_path: Path, narration_db: float = -6.0, music_db: float = -28.0,
@@ -2038,6 +2071,29 @@ def _main_impl(args) -> int:
 
     panel_pngs: list[Path] = []
     clip_paths: list[Path] = []
+    # Audit Q2.22 — fingerprint-gate the narration cache. Pre-fix,
+    # switching tts_provider in YAML didn't bust the chunk wavs
+    # (filenames are content-hash but provider isn't in the hash) →
+    # the next render kept the OLD voice. Now read the sidecar
+    # written by synth_long_narration; if cfg differs, wipe stale
+    # narration.wav + chunks under cache_dir BEFORE the synth call.
+    fp_cfg = {
+        "tts_provider": provider,
+        "tts_voice": voice_id,
+        "tts_speed": speed,
+        "tts_ref_text": ref_audio_text,
+        "tts_chunk_join_silence_s": join_silence_s,
+        "tts_chunk_target_chars": chunk_target_chars,
+    }
+    candidate_narr_wav = cache_dir / "narration.wav"
+    # Audit Q2.22 — only wipe when the sidecar is PRESENT and
+    # disagrees with current cfg. A missing sidecar (first encounter
+    # of an existing wav) just gets bound on the next synth — no
+    # wipe needed because nothing has CHANGED yet.
+    from pipeline.render._voice_fingerprint import (  # noqa: PLC0415
+        maybe_wipe_stale_chunks as _voice_maybe_wipe,
+    )
+    _voice_maybe_wipe(candidate_narr_wav, fp_cfg)
     tts_t0 = time.time()
     used_overlap = False
     if overlap_safe and not args.tts_only:

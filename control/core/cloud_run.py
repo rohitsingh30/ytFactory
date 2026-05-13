@@ -195,6 +195,95 @@ def _trigger_via_cli(job_id: str) -> ExecutionRef:
     )
 
 
+# ---------------------------------------------------------------------------
+# Audit Q2.41 — generic JOB-execute helper for jobs OTHER than the
+# render-worker. The slim Cloud Run image does NOT ship the gcloud CLI
+# (per memory/feedback_cloudrun_dispatch_sdk_required.md). Three sites
+# pre-fix called ``asyncio.create_subprocess_exec("gcloud", ...)`` →
+# the binary was missing → 500 with "FileNotFoundError: gcloud".
+#
+# This helper uses google-cloud-run SDK with the same fallback to CLI
+# (handy on dev boxes / tests) but with no implicit binding to the
+# render-worker job_name. Pass job_name + env_overrides explicitly.
+# ---------------------------------------------------------------------------
+
+
+def execute_job_async(
+    job_name: str,
+    *,
+    project: str | None = None,
+    region: str | None = None,
+    env_overrides: dict[str, str] | None = None,
+) -> str:
+    """Trigger a Cloud Run JOB asynchronously. Returns the execution name.
+
+    Tries the SDK first; falls back to gcloud CLI for dev-only paths
+    where SDK isn't installed. Raises RuntimeError if NEITHER is
+    available. Audit Q2.41 — pre-fix three call sites in web/server.py
+    + control/routes/script_jobs_routes.py shelled to gcloud directly,
+    which the slim Cloud Run image doesn't ship.
+    """
+    proj = project or project_id()
+    reg = region or globals().get("region", lambda: "asia-southeast1")()
+    try:
+        # Use the dotted import form so tests can stub via
+        # ``sys.modules["google.cloud.run_v2"] = None`` (matches
+        # the pattern used by _sdk_available).
+        import google.cloud.run_v2 as run_v2  # noqa: PLC0415
+    except ImportError:
+        # Fallback to CLI (dev only — slim Cloud Run image lacks gcloud).
+        if shutil.which("gcloud") is None:
+            raise RuntimeError(
+                "Neither google-cloud-run SDK nor gcloud CLI available. "
+                "Install: pip install google-cloud-run"
+            )
+        return _execute_job_via_cli(job_name, proj, reg, env_overrides or {})
+
+    client = run_v2.JobsClient()
+    job_resource = f"projects/{proj}/locations/{reg}/jobs/{job_name}"
+    overrides = None
+    if env_overrides:
+        overrides = run_v2.RunJobRequest.Overrides(
+            container_overrides=[
+                run_v2.RunJobRequest.Overrides.ContainerOverride(
+                    env=[run_v2.EnvVar(name=k, value=v)
+                         for k, v in env_overrides.items()],
+                )
+            ],
+        )
+    request = run_v2.RunJobRequest(name=job_resource, overrides=overrides)
+    operation = client.run_job(request=request)
+    execution_name = operation.metadata.name if operation.metadata else "(pending)"
+    logger.info(
+        "triggered Cloud Run Job via SDK: name=%s execution=%s",
+        job_name, execution_name,
+    )
+    return execution_name
+
+
+def _execute_job_via_cli(
+    job_name_value: str, proj: str, reg: str, env_overrides: dict[str, str]
+) -> str:
+    cmd = [
+        "gcloud", "run", "jobs", "execute", job_name_value,
+        "--project", proj,
+        "--region", reg,
+        "--async",
+        "--format", "value(metadata.name)",
+    ]
+    if env_overrides:
+        pairs = [f"{k}={v}" for k, v in env_overrides.items()]
+        env_arg = "^|^" + "|".join(pairs) if len(pairs) > 1 else pairs[0]
+        cmd[-2:-2] = ["--update-env-vars", env_arg]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"gcloud run jobs execute failed (rc={proc.returncode}): "
+            f"{(proc.stderr or '').strip()}"
+        )
+    return (proc.stdout or "").strip() or "(unknown)"
+
+
 def _trace_env_overrides() -> dict[str, str]:
     """Return ``{YTFACTORY_TRACEPARENT, YTFACTORY_TRACESTATE}`` from the
     active OTel span, or an empty dict when no span is active / OTel

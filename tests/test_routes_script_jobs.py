@@ -179,32 +179,30 @@ class RunCloudrunnTest(unittest.IsolatedAsyncioTestCase):
     async def test_gcloud_nonzero_exit_fails(self):
         rec = self._seed_job("j4")
         cmd = ["scripts/make_shorts.py", "--channel", "chan/config.yaml", "--script", "chan/scripts/slug.json"]
-        mock_proc = AsyncMock()
-        mock_proc.returncode = 1
-        mock_proc.communicate = AsyncMock(return_value=(b"", b"AUTH_ERROR"))
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("AUTH_ERROR")
+
         with patch.object(jobs_mod, "_b64_file_or_gcs", side_effect=lambda rel: (rel, b"content")), \
              patch.object(jobs_mod, "_gcs_upload_text"), \
-             patch("asyncio.to_thread", new=AsyncMock(return_value=None)), \
-             patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+             patch("control.core.cloud_run.execute_job_async", side_effect=_boom):
             await jobs_mod._run_cloudrun("j4", cmd)
         self.assertEqual(rec["state"], "failed")
-        self.assertIn("gcloud run jobs execute failed", rec["error"])
+        self.assertIn("cloud run jobs execute failed", rec["error"])
 
     async def test_polling_timeout_marks_failed(self):
         rec = self._seed_job("j5")
         cmd = ["scripts/make_shorts.py", "--channel", "chan/config.yaml", "--script", "chan/scripts/slug.json"]
-        mock_proc = AsyncMock()
-        mock_proc.returncode = 0
-        mock_proc.communicate = AsyncMock(return_value=(b"exec-12345\n", b""))
         poll_state = {"state": "running"}
         async def fake_to_thread(fn, *args, **kw):
             if fn == jobs_mod._gcs_upload_text:
                 return None
+            if fn.__name__ == "execute_job_async":
+                return "exec-12345"
             return poll_state
         with patch.object(jobs_mod, "_b64_file_or_gcs", side_effect=lambda rel: (rel, b"content")), \
              patch("asyncio.to_thread", side_effect=fake_to_thread), \
              patch("asyncio.sleep", new=AsyncMock()), \
-             patch("asyncio.create_subprocess_exec", return_value=mock_proc), \
              patch.object(jobs_mod, "CLOUDRUN_ARTIFACTS_BUCKET", "bucket"), \
              patch("builtins.range", return_value=range(2)):
             await jobs_mod._run_cloudrun("j5", cmd)
@@ -214,9 +212,6 @@ class RunCloudrunnTest(unittest.IsolatedAsyncioTestCase):
     async def test_success_flow_with_transient_poll_error(self):
         rec = self._seed_job("j6")
         cmd = ["scripts/make_shorts.py", "--channel", "chan/config.yaml", "--script", "chan/narrations/slug.json"]
-        mock_proc = AsyncMock()
-        mock_proc.returncode = 0
-        mock_proc.communicate = AsyncMock(return_value=(b"exec-xyz\n", b""))
         done_state = {"state": "done", "exit_code": 0, "error": None,
                       "mp4_uri": "gs://bucket/jobs/j6/out.mp4",
                       "completed_at": time.time(), "log_uri": "gs://bucket/jobs/j6/log.txt"}
@@ -224,6 +219,8 @@ class RunCloudrunnTest(unittest.IsolatedAsyncioTestCase):
         async def fake_to_thread(fn, *args, **kw):
             if fn == jobs_mod._gcs_upload_text:
                 return None
+            if fn.__name__ == "execute_job_async":
+                return "exec-xyz"
             call_count[0] += 1
             if call_count[0] == 1:
                 raise Exception("not ready yet")
@@ -231,7 +228,6 @@ class RunCloudrunnTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(jobs_mod, "_b64_file_or_gcs", side_effect=lambda rel: (rel, b"content")), \
              patch("asyncio.to_thread", side_effect=fake_to_thread), \
              patch("asyncio.sleep", new=AsyncMock()), \
-             patch("asyncio.create_subprocess_exec", return_value=mock_proc), \
              patch.object(jobs_mod, "CLOUDRUN_ARTIFACTS_BUCKET", "bucket"):
             await jobs_mod._run_cloudrun("j6", cmd)
         self.assertEqual(rec["state"], "done")
@@ -241,19 +237,17 @@ class RunCloudrunnTest(unittest.IsolatedAsyncioTestCase):
     async def test_success_with_raw_file_found(self):
         rec = self._seed_job("j7")
         cmd = ["scripts/make_shorts.py", "--channel", "chan/config.yaml", "--script", "chan/scripts/slug.json"]
-        mock_proc = AsyncMock()
-        mock_proc.returncode = 0
-        mock_proc.communicate = AsyncMock(return_value=(b"exec-abc\n", b""))
         done_state = {"state": "done", "exit_code": 0, "error": None,
                       "mp4_uri": "gs://b/j7.mp4", "completed_at": time.time(), "log_uri": None}
         async def fake_to_thread(fn, *args, **kw):
             if fn == jobs_mod._gcs_upload_text:
                 return None
+            if fn.__name__ == "execute_job_async":
+                return "exec-abc"
             return done_state
         with patch.object(jobs_mod, "_b64_file_or_gcs", side_effect=lambda rel: (rel, b"content")), \
              patch("asyncio.to_thread", side_effect=fake_to_thread), \
              patch("asyncio.sleep", new=AsyncMock()), \
-             patch("asyncio.create_subprocess_exec", return_value=mock_proc), \
              patch.object(jobs_mod, "CLOUDRUN_ARTIFACTS_BUCKET", "bucket"):
             await jobs_mod._run_cloudrun("j7", cmd)
         self.assertEqual(rec["state"], "done")

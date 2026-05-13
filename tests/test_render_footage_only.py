@@ -332,6 +332,18 @@ class RegenAudioCapsTests(unittest.TestCase):
             paths = _make_channel(tmp / "third", slug=slug, cfg={"tts_provider": "f5_tts", "tts_voice": "v"})
             _write_wav(paths.cache_for(slug) / "narration.wav")
             (paths.cache_for(slug) / "beats.json").write_text("[]")
+            # Audit Q2.22 — also write the sidecar so the cache check
+            # finds a matching voice fingerprint and skips synth. Pre-fix
+            # this test pinned cache-skip behaviour using only
+            # narration.wav presence; post-fix the sidecar is required
+            # to PROVE the cached wav was bound to the current cfg.
+            from pipeline.render._voice_fingerprint import (
+                compute_fingerprint, write_sidecar,
+            )
+            write_sidecar(
+                paths.cache_for(slug) / "narration.wav",
+                compute_fingerprint({"tts_provider": "f5_tts", "tts_voice": "v"}),
+            )
             beat_list = [_FakeBeat("cached", 0, 1, [])]
             with patch("pipeline.paths.RenderPaths.from_channel_dir", return_value=paths), \
                  patch.object(fo.audio, "normalize_for_tts", return_value="text", create=True), \

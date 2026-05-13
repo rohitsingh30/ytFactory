@@ -161,5 +161,178 @@ class StatusTest(unittest.TestCase):
         self.assertIsInstance(result, bool)
 
 
+class ExecuteJobAsyncTest(unittest.TestCase):
+    """Audit Q2.41 — generic SDK-first JOB-execute helper used by
+    web/server.py + control/routes/script_jobs_routes.py."""
+
+    def test_sdk_path_returns_execution_name(self):
+        # Mock the SDK so we don't hit real Cloud Run.
+        fake_run_v2 = MagicMock()
+        fake_client = MagicMock()
+        fake_run_v2.JobsClient.return_value = fake_client
+        fake_op = MagicMock()
+        fake_op.metadata.name = "projects/p/locations/r/jobs/j/executions/abc"
+        fake_client.run_job.return_value = fake_op
+
+        # `import google.cloud.run_v2 as run_v2` resolves the attribute
+        # of `google.cloud` (since the package is already loaded), so
+        # we have to patch BOTH sys.modules AND the attribute to fully
+        # intercept the import.
+        import sys as _sys
+        import google.cloud as _g_cloud
+        with patch.object(_g_cloud, "run_v2", fake_run_v2, create=True), \
+             patch.dict(_sys.modules, {"google.cloud.run_v2": fake_run_v2}):
+            name = cloud_run.execute_job_async(
+                "ytfactory-render-worker-v2",
+                project="p",
+                region="r",
+                env_overrides={"FOO": "bar"},
+            )
+        self.assertEqual(name, "projects/p/locations/r/jobs/j/executions/abc")
+        fake_client.run_job.assert_called_once()
+        # Verify env_overrides reached the SDK as ContainerOverride.env entries.
+        call = fake_client.run_job.call_args
+        request = call.kwargs.get("request") or call.args[0]
+        self.assertIsNotNone(request)
+
+    def test_sdk_path_no_overrides_passes_none(self):
+        fake_run_v2 = MagicMock()
+        fake_client = MagicMock()
+        fake_run_v2.JobsClient.return_value = fake_client
+        fake_op = MagicMock()
+        fake_op.metadata = None
+        fake_client.run_job.return_value = fake_op
+
+        import sys as _sys
+        import google.cloud as _g_cloud
+        with patch.object(_g_cloud, "run_v2", fake_run_v2, create=True), \
+             patch.dict(_sys.modules, {"google.cloud.run_v2": fake_run_v2}):
+            name = cloud_run.execute_job_async(
+                "j",
+                project="p",
+                region="r",
+            )
+        # Falls through to "(pending)" when metadata is None.
+        self.assertEqual(name, "(pending)")
+
+    def test_no_sdk_no_cli_raises(self):
+        # Force ImportError on google.cloud.run_v2 AND no gcloud on PATH.
+        import sys as _sys
+        saved = _sys.modules.pop("google.cloud.run_v2", None)
+        _sys.modules["google.cloud.run_v2"] = None  # forces ImportError
+        try:
+            with patch("control.core.cloud_run.shutil.which", return_value=None):
+                with self.assertRaises(RuntimeError) as ctx:
+                    cloud_run.execute_job_async("j", project="p", region="r")
+            self.assertIn("Neither google-cloud-run SDK nor gcloud", str(ctx.exception))
+        finally:
+            if saved is not None:
+                _sys.modules["google.cloud.run_v2"] = saved
+            else:
+                _sys.modules.pop("google.cloud.run_v2", None)
+
+    def test_cli_fallback_used_when_sdk_missing(self):
+        import sys as _sys
+        saved = _sys.modules.pop("google.cloud.run_v2", None)
+        _sys.modules["google.cloud.run_v2"] = None
+        try:
+            fake_proc = MagicMock(returncode=0, stdout="exec-name\n", stderr="")
+            with patch("control.core.cloud_run.shutil.which", return_value="/usr/bin/gcloud"), \
+                 patch("control.core.cloud_run.subprocess.run", return_value=fake_proc) as run_mock:
+                name = cloud_run.execute_job_async(
+                    "j",
+                    project="p",
+                    region="r",
+                    env_overrides={"K": "V"},
+                )
+            self.assertEqual(name, "exec-name")
+            cmd = run_mock.call_args.args[0]
+            self.assertIn("gcloud", cmd)
+            self.assertIn("--update-env-vars", cmd)
+        finally:
+            if saved is not None:
+                _sys.modules["google.cloud.run_v2"] = saved
+            else:
+                _sys.modules.pop("google.cloud.run_v2", None)
+
+    def test_cli_fallback_no_overrides(self):
+        import sys as _sys
+        saved = _sys.modules.pop("google.cloud.run_v2", None)
+        _sys.modules["google.cloud.run_v2"] = None
+        try:
+            fake_proc = MagicMock(returncode=0, stdout="exec-name\n", stderr="")
+            with patch("control.core.cloud_run.shutil.which", return_value="/usr/bin/gcloud"), \
+                 patch("control.core.cloud_run.subprocess.run", return_value=fake_proc) as run_mock:
+                name = cloud_run.execute_job_async("j", project="p", region="r")
+            self.assertEqual(name, "exec-name")
+            cmd = run_mock.call_args.args[0]
+            # No --update-env-vars when env_overrides is empty.
+            self.assertNotIn("--update-env-vars", cmd)
+        finally:
+            if saved is not None:
+                _sys.modules["google.cloud.run_v2"] = saved
+            else:
+                _sys.modules.pop("google.cloud.run_v2", None)
+
+    def test_cli_fallback_multi_env_uses_caret_pipe(self):
+        import sys as _sys
+        saved = _sys.modules.pop("google.cloud.run_v2", None)
+        _sys.modules["google.cloud.run_v2"] = None
+        try:
+            fake_proc = MagicMock(returncode=0, stdout="exec-name\n", stderr="")
+            with patch("control.core.cloud_run.shutil.which", return_value="/usr/bin/gcloud"), \
+                 patch("control.core.cloud_run.subprocess.run", return_value=fake_proc) as run_mock:
+                cloud_run.execute_job_async(
+                    "j", project="p", region="r",
+                    env_overrides={"A": "1", "B": "2"},
+                )
+            cmd = run_mock.call_args.args[0]
+            i = cmd.index("--update-env-vars")
+            env_arg = cmd[i + 1]
+            self.assertTrue(env_arg.startswith("^|^"), env_arg)
+            self.assertIn("A=1", env_arg)
+            self.assertIn("B=2", env_arg)
+        finally:
+            if saved is not None:
+                _sys.modules["google.cloud.run_v2"] = saved
+            else:
+                _sys.modules.pop("google.cloud.run_v2", None)
+
+    def test_cli_fallback_nonzero_rc_raises(self):
+        import sys as _sys
+        saved = _sys.modules.pop("google.cloud.run_v2", None)
+        _sys.modules["google.cloud.run_v2"] = None
+        try:
+            fake_proc = MagicMock(returncode=1, stdout="", stderr="permission denied")
+            with patch("control.core.cloud_run.shutil.which", return_value="/usr/bin/gcloud"), \
+                 patch("control.core.cloud_run.subprocess.run", return_value=fake_proc):
+                with self.assertRaises(RuntimeError) as ctx:
+                    cloud_run.execute_job_async("j", project="p", region="r")
+            msg = str(ctx.exception)
+            self.assertIn("rc=1", msg)
+            self.assertIn("permission denied", msg)
+        finally:
+            if saved is not None:
+                _sys.modules["google.cloud.run_v2"] = saved
+            else:
+                _sys.modules.pop("google.cloud.run_v2", None)
+
+    def test_cli_fallback_blank_stdout_falls_back_to_unknown(self):
+        import sys as _sys
+        saved = _sys.modules.pop("google.cloud.run_v2", None)
+        _sys.modules["google.cloud.run_v2"] = None
+        try:
+            fake_proc = MagicMock(returncode=0, stdout="   \n", stderr="")
+            with patch("control.core.cloud_run.shutil.which", return_value="/usr/bin/gcloud"), \
+                 patch("control.core.cloud_run.subprocess.run", return_value=fake_proc):
+                name = cloud_run.execute_job_async("j", project="p", region="r")
+            self.assertEqual(name, "(unknown)")
+        finally:
+            if saved is not None:
+                _sys.modules["google.cloud.run_v2"] = saved
+            else:
+                _sys.modules.pop("google.cloud.run_v2", None)
+
+
 if __name__ == "__main__":
     unittest.main()

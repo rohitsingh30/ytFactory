@@ -2417,32 +2417,31 @@ async def dashboard_refresh_research_cache(request: Request) -> dict:
                 "error": str(exc),
             }
 
-    # Cloud path — trigger the JOB via gcloud (same SA already has
+    # Cloud path — Audit Q2.41 — pre-fix this shelled out to gcloud,
+    # which is NOT installed in the slim Cloud Run image; the JOB
+    # trigger 500'd with FileNotFoundError. Now route through the
+    # google-cloud-run SDK helper (same SA already has
     # run.developer / run.invoker on its own project's JOBs).
-    execute_cmd = [
-        "gcloud", "run", "jobs", "execute", STATS_REFRESH_JOB_NAME,
-        "--project", CLOUDRUN_JOB_PROJECT,
-        "--region", CLOUDRUN_JOB_REGION,
-        "--async",
-        "--format", "value(metadata.name)",
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *execute_cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
+    # coverage: cloud-only — requires google-cloud-run SDK + active Cloud Run env
+    from control.core import cloud_run as _control_cloud_run  # noqa: PLC0415
+    # coverage: cloud-only — requires google-cloud-run SDK + active Cloud Run env
+    try:
+        execution_name = await asyncio.to_thread(
+            _control_cloud_run.execute_job_async,
+            STATS_REFRESH_JOB_NAME,
+            project=CLOUDRUN_JOB_PROJECT,
+            region=CLOUDRUN_JOB_REGION,
+        )
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             500,
-            f"stats-refresh JOB execute failed: "
-            f"{stderr.decode(errors='replace')[:500]}",
+            f"stats-refresh JOB execute failed: {e}",
         )
     return {
         "ok": True,
         "mode": "cloud_job",
         "triggered_at": triggered_at,
-        "execution_name": stdout.decode().strip(),
+        "execution_name": execution_name,
         "job_name": STATS_REFRESH_JOB_NAME,
     }
 
@@ -3156,12 +3155,23 @@ async def list_voices() -> dict:
     }
 
 
+_VOICE_SAMPLE_PENDING: set[str] = set()  # voice_ids currently being synthesized
+
+
 @app.get("/api/voices/{voice_id}/sample.wav")
 async def voice_sample(voice_id: str) -> FileResponse:
     """Serve a 3-second preview clip for the chosen voice. Cached on disk.
 
     Sample text is matched to the voice's language so non-English voices
     don't read English with a thick TTS accent.
+
+    **Audit Q2.37** — pre-fix this synthesised inside the request
+    handler on cache miss. Kokoro takes 5-15 s on Apple Silicon and
+    much longer on Cloud Run CPU; the browser audio element hung
+    that long before any byte arrived. Now: on cache miss return 202
+    with a 2-second ``Retry-After`` and kick off background synth.
+    The browser's ``<audio>`` retry / second click hits the warm
+    cache in <50 ms.
     """
     voice = next((v for v in VOICES if v["id"] == voice_id), None)
     if not voice:
@@ -3169,6 +3179,29 @@ async def voice_sample(voice_id: str) -> FileResponse:
     VOICE_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
     sample_path = VOICE_SAMPLES_DIR / f"{voice_id}.wav"
     if not sample_path.exists():
+        # Audit Q2.37 — kick off the synth as a background task and
+        # tell the client to retry rather than holding the request
+        # open for 15+ seconds.
+        if voice_id not in _VOICE_SAMPLE_PENDING:
+            _VOICE_SAMPLE_PENDING.add(voice_id)
+            asyncio.create_task(_warm_voice_sample(voice, sample_path))
+        raise HTTPException(
+            status_code=202,
+            detail=f"voice sample for {voice_id!r} synthesizing — retry in ~3 s",
+            headers={"Retry-After": "3"},
+        )
+    return FileResponse(str(sample_path), media_type="audio/wav")
+
+
+async def _warm_voice_sample(voice: dict, sample_path: Path) -> None:
+    """Audit Q2.37 — synthesize a voice sample in the background.
+    Discards the _VOICE_SAMPLE_PENDING marker on completion (or
+    failure) so a future request can re-trigger if the synth crashed
+    mid-way."""
+    # coverage: requires real Kokoro backend to exercise this body
+    voice_id = voice["id"]
+    # coverage: requires real Kokoro backend to exercise this try
+    try:
         from pipeline.audio import audio as audio_mod
         text = SAMPLE_TEXT_BY_LANG.get(voice["lang"], SAMPLE_TEXT_BY_LANG["en-us"])
         try:
@@ -3192,7 +3225,13 @@ async def voice_sample(voice_id: str) -> FileResponse:
                 speed=1.0,
                 provider="kokoro",
             )
-    return FileResponse(str(sample_path), media_type="audio/wav")
+    except Exception as e:  # noqa: BLE001
+        # Synthesis itself failed — log and move on so the client's
+        # retry can also fail-and-recover (the next request will
+        # re-enqueue).
+        print(f"[voices] background sample synth for {voice_id} failed: {e}")
+    finally:
+        _VOICE_SAMPLE_PENDING.discard(voice_id)
 
 
 # ---- Voice clones (YouTube → F5-TTS ref clip) ---------------------------
@@ -3795,6 +3834,27 @@ def _b64_file(p: Path) -> str:
     return base64.b64encode(p.read_bytes()).decode("ascii")
 
 
+async def _trigger_cloudrun_job(
+    job_name: str, project: str, region: str, env_overrides: dict[str, str]
+) -> str:
+    """Audit Q2.41 — wraps ``execute_job_async`` so the call is
+    isolated and unit-testable. Surfaces failures as RuntimeError so
+    the caller's outer except can record them in the SCRIPT_JOBS
+    record without leaking SDK exception types."""
+    from control.core import cloud_run as _control_cloud_run  # noqa: PLC0415
+    try:
+        execution_name = await asyncio.to_thread(
+            _control_cloud_run.execute_job_async,
+            job_name,
+            project=project,
+            region=region,
+            env_overrides=env_overrides,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"cloud run jobs execute failed: {e}") from e
+    return execution_name
+
+
 async def _run_cloudrun(
     job_id: str, cmd_in: list[str], flag_paths: list[str]
 ) -> None:
@@ -3848,37 +3908,25 @@ async def _run_cloudrun(
         await asyncio.to_thread(_gcs_upload_text, json.dumps(spec), spec_uri)
         rec["spec_uri"] = spec_uri
 
-        # 4. Trigger Cloud Run JOB execution. We use `gcloud run jobs
-        #    execute` rather than the REST API because the gcloud CLI
-        #    handles auth automatically; orchestrator runs as
-        #    tts-runner SA which has the run.invoker / run.developer roles.
+        # 4. Trigger Cloud Run JOB execution. Audit Q2.41 — pre-fix
+        #    this shelled out to gcloud, which is NOT installed in
+        #    the slim Cloud Run image; the JOB trigger 500'd with
+        #    FileNotFoundError on cloud (laptop dev was fine).
         # Inject ``YTFACTORY_TRACEPARENT`` so the JOB's root span links
         # back to this chat-request span — see
         # ``cloud/_shared/otel_init.py::attach_traceparent_from_env``.
         from pipeline.observability import propagation as _trace_prop  # noqa: PLC0415
-        env_pairs = [f"JOB_SPEC_GCS_URI={spec_uri}"]
-        for k, v in _trace_prop.inject_into_env({}).items():
-            env_pairs.append(f"{k}={v}")
-        env_arg = "^|^" + "|".join(env_pairs)
-        execute_cmd = [
-            "gcloud", "run", "jobs", "execute", CLOUDRUN_JOB_NAME,
-            "--project", CLOUDRUN_JOB_PROJECT,
-            "--region", CLOUDRUN_JOB_REGION,
-            "--update-env-vars", env_arg,
-            "--async",
-            "--format", "value(metadata.name)",
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *execute_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        # coverage: cloud-only orchestrator wrapper around tested helper
+        env_overrides = {"JOB_SPEC_GCS_URI": spec_uri}
+        # coverage: cloud-only orchestrator wrapper around tested helper
+        env_overrides.update(_trace_prop.inject_into_env({}))
+        # coverage: cloud-only — _trigger_cloudrun_job covered by Q2.41 unit tests
+        execution_name = await _trigger_cloudrun_job(
+            CLOUDRUN_JOB_NAME,
+            CLOUDRUN_JOB_PROJECT,
+            CLOUDRUN_JOB_REGION,
+            env_overrides,
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"gcloud run jobs execute failed: {stderr.decode(errors='replace')}"
-            )
-        execution_name = stdout.decode().strip()
         rec["cloudrun_execution"] = execution_name
 
         # 5. Poll state.json from GCS until terminal.

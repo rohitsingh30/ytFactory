@@ -125,6 +125,29 @@ def _b64_file_or_gcs(rel_path: str) -> tuple[str, bytes] | None:
 # Cloud Run JOB trigger + state polling
 # ----------------------------------------------------------------------------
 
+async def _trigger_job_or_runtime_error(
+    job_name: str,
+    project: str,
+    region: str,
+    env_overrides: dict[str, str],
+) -> str:
+    """Q2.41 — wrap ``execute_job_async`` so failures surface as
+    RuntimeError rather than leaking SDK exception types into the
+    SCRIPT_JOBS error column. Mirrors web.server._trigger_cloudrun_job.
+    """
+    from control.core import cloud_run as _cr  # noqa: PLC0415
+    try:
+        return await asyncio.to_thread(
+            _cr.execute_job_async,
+            job_name,
+            project=project,
+            region=region,
+            env_overrides=env_overrides,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"cloud run jobs execute failed: {e}") from e
+
+
 async def _run_cloudrun(job_id: str, cmd_in: list[str]) -> None:
     rec = SCRIPT_JOBS[job_id]
     try:
@@ -185,27 +208,17 @@ async def _run_cloudrun(job_id: str, cmd_in: list[str]) -> None:
         await asyncio.to_thread(_gcs_upload_text, json.dumps(spec), spec_uri)
         rec["spec_uri"] = spec_uri
 
-        # 5. Trigger Cloud Run JOB. Use gcloud CLI — control-plane SA
-        #    has run.developer on the JOB.
-        execute_cmd = [
-            "gcloud", "run", "jobs", "execute", CLOUDRUN_JOB_NAME,
-            "--project", CLOUDRUN_JOB_PROJECT,
-            "--region", CLOUDRUN_JOB_REGION,
-            "--update-env-vars", f"^|^JOB_SPEC_GCS_URI={spec_uri}",
-            "--async",
-            "--format", "value(metadata.name)",
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *execute_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        # 5. Trigger Cloud Run JOB. Audit Q2.41 — pre-fix this shelled
+        #    out to gcloud, which is NOT installed in the slim Cloud
+        #    Run image. Now route through the SDK helper. Same SA
+        #    grants apply (run.developer / run.invoker).
+        execution_name = await _trigger_job_or_runtime_error(
+            CLOUDRUN_JOB_NAME,
+            CLOUDRUN_JOB_PROJECT,
+            CLOUDRUN_JOB_REGION,
+            {"JOB_SPEC_GCS_URI": spec_uri},
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"gcloud run jobs execute failed: {stderr.decode(errors='replace')}"
-            )
-        rec["cloudrun_execution"] = stdout.decode().strip()
+        rec["cloudrun_execution"] = execution_name
 
         # 6. Poll state.json from GCS until terminal.
         state_uri = f"gs://{CLOUDRUN_ARTIFACTS_BUCKET}/jobs/{job_id}/state.json"
