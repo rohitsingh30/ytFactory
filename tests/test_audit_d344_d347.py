@@ -54,27 +54,41 @@ class ModelForRewriteLongFormTest(unittest.TestCase):
 
     def test_rewrite_long_form_passes_model_for_to_dispatcher(self):
         # Patch call_claude_cli so we can introspect the model arg.
+        # Post-2026-05-13 (STORM-pattern), the rewriter makes TWO kinds
+        # of calls: an outline call (stage="rewrite_long_form_outline")
+        # and N section-body calls (stage="rewrite_long_form_section").
+        # Both should resolve to the same model tier (whatever
+        # YTFACTORY_MODEL_REWRITE_LONG_FORM resolves to). We assert on
+        # the OUTLINE call (the first one) since that's the bottleneck.
         from pipeline.llm import rewrite_long_form as _rlf
-        from pipeline.llm import cli as llm_cli
+        from pipeline.llm import cli as llm_cli  # noqa: F401
 
-        captured = {}
+        captured = {"first_call": None}
 
         def _capture(prompt, **kw):
-            captured["model"] = kw.get("model")
-            captured["stage"] = kw.get("stage")
-            return {
-                "title_options": ["t1"],
-                "description": "d",
-                "thumbnail_text": "tt",
-                "tags": [],
-                "sections": [
-                    {"id": "s1", "title": "T", "narration": "N",
-                     "target_s": 60.0, "visual_brief": "v",
-                     "panels": [
-                        {"prompt": "p1", "duration_s": 5.0},
-                     ]},
-                ],
-            }
+            if captured["first_call"] is None:
+                captured["first_call"] = {
+                    "model": kw.get("model"),
+                    "stage": kw.get("stage"),
+                }
+            stage = kw.get("stage", "")
+            if stage == "rewrite_long_form_outline":
+                # Outline schema shape
+                return {
+                    "hook": "h" * 200,
+                    "thesis": "t" * 50,
+                    "sections": [
+                        {"id": "s1", "title": "T", "brief": "b" * 50,
+                         "target_words": 100, "visual_brief": "v"},
+                    ],
+                    "panel_briefs": [
+                        {"scene": "s" * 50, "hold_s": 6.0, "after_section_id": "s1"},
+                    ],
+                    "sources": [],
+                    "title_options": ["t1"],
+                }
+            # Section-body schema shape
+            return {"narration": "N" * 200, "sentences": ["A.", "B."]}
 
         raw_story = {
             "slug": "test", "title": "T", "body": "B",
@@ -89,12 +103,15 @@ class ModelForRewriteLongFormTest(unittest.TestCase):
                     channel_cfg={},
                     target_duration_s=120,
                 )
-            except (TypeError, AttributeError, KeyError, ValueError):
-                # Post-call processing might fail on the partial mock
-                # — we only care about the LLM call args.
+            except Exception:
+                # Validator may surface under-delivery on the tiny
+                # mock — we only care about the LLM call args.
                 pass
-        self.assertEqual(captured.get("model"), "haiku")
-        self.assertEqual(captured.get("stage"), "rewrite_long_form")
+        self.assertEqual(captured["first_call"]["model"], "haiku")
+        # Stage is the per-phase name post-STORM (was "rewrite_long_form" pre-STORM).
+        self.assertEqual(
+            captured["first_call"]["stage"], "rewrite_long_form_outline"
+        )
 
 
 if __name__ == "__main__":

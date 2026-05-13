@@ -233,6 +233,35 @@ hard-fails.
 
 Effort: ~250 LOC, ~4 hours, single commit + single deploy.
 
+**STORM-paper mapping (the canonical reference):**
+
+This is literally Stanford STORM's "writing stage" applied to our
+LongFormScript shape. Side-by-side with
+`stanford-oval/storm/knowledge_storm/storm_wiki/modules/article_generation.py`:
+
+| STORM (Stanford) | Our Fix A |
+|---|---|
+| **Pre-writing**: research perspectives + retrieve sources → outline | Outline LLM call (~1k tokens, Pydantic strict) — returns hook + thesis + 10 section stubs + panel briefs |
+| **Writing**: `generate_section(topic, name, retrieved_info, outline)` | `generate_section_body(stub, outline_context)` — ~700 tokens per call |
+| `ThreadPoolExecutor(max_workers=10)` | `ThreadPoolExecutor(max_workers=5)` — parallel section calls |
+| `ConvToSection(engine).forward(...)` returns one section | Returns `SectionBody{narration, sentences[]}` |
+| `article.update_section(...)` then `article.post_processing()` | Aggregator stitches into `LongFormScript`, runs `validate_long_form_envelope`, returns `ScriptEnvelope` |
+
+**STORM elements DEFERRED from Fix A → Phase 1 (RawDoc migration):**
+
+- **Pre-writing perspectives + retrieval** — STORM's RAG over
+  retrieved sources. Lands in Phase 1 (audit P0). For Fix A, we
+  use the existing `raw_story.body` as outline context (same
+  source as today, just sliced differently).
+- **Information table** — STORM's
+  `StormInformationTable.retrieve_information(queries, top_k=5)`.
+  Lands alongside RawDoc.
+
+So: **Fix A = STORM writing stage with existing thin sources**;
+**Phase 1 = STORM pre-writing stage with rich retrieved sources**.
+Together = full STORM. Splitting lets us ship the day-1 deliverable
+in Phase 0 without waiting for the source-data refactor.
+
 ### Fix B — `strict: true` everywhere
 
 Today: `pipeline/llm/cli.py:981` passes `strict: False`. Fix:
