@@ -298,6 +298,51 @@ def render_long_form(
     if progress_cb:
         progress_cb("compose", f"wrote {mp4_path.name}")
 
+    # D10 (2026-05-13) — long-form live narration / beats emission.
+    # Pre-fix this path emitted only envelope/script/video, so the
+    # dashboard's <audio controls> Live Previews block never mounted
+    # for a long-form render — the user couldn't preview the audio
+    # until the entire mp4 finished, and even then the <video> tag
+    # was forced muted (D11 fix lives in the dashboard). Sweep the
+    # cache dir for narration.wav + beats.json + per-panel images,
+    # mirroring the SHORT path in cloud/render-worker-v2/entrypoint.py
+    # post-render artifact sweep.
+    try:
+        from pipeline.render.artifacts import emit_artifact  # noqa: PLC0415
+        from pipeline.probe import probe_duration  # noqa: PLC0415
+        cache_dir = paths.cache_for(env.slug)
+        nar_wav = cache_dir / "narration.wav"
+        if nar_wav.exists():
+            try:
+                nar_dur = float(probe_duration(nar_wav))
+            except Exception:  # noqa: BLE001
+                nar_dur = 0.0
+            emit_artifact(
+                job_id=job_id, kind="narration", local_path=nar_wav,
+                extras={"slug": env.slug, "duration_s": round(nar_dur, 2)},
+            )
+        beats_json = cache_dir / "beats.json"
+        if beats_json.exists():
+            try:
+                n_beats = len(json.loads(beats_json.read_text()))
+            except Exception:  # noqa: BLE001
+                n_beats = None
+            emit_artifact(
+                job_id=job_id, kind="beats", local_path=beats_json,
+                extras=({"n_beats": n_beats} if n_beats is not None else {}),
+            )
+        # Per-panel images (panel_NN.png / img_NN.png — both layouts seen)
+        for img in sorted(cache_dir.glob("panel_*.png")) or sorted(cache_dir.glob("img_*.png")):
+            try:
+                idx = int(img.stem.split("_")[1])
+            except (ValueError, IndexError):
+                continue
+            emit_artifact(
+                job_id=job_id, kind="panels", local_path=img, index=idx,
+            )
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("emit_artifact(long-form narration/beats/panels) failed: %s", exc)
+
     # Live artifact preview (Slice 4): emit the canonical long-form mp4
     # the moment it lands so the dashboard's render-detail page can
     # show the FULL video preview ahead of the worker's final

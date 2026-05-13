@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -1723,10 +1724,139 @@ def _ffmpeg_has_libass() -> bool:
 # ---------- final mux: video + (narration + music) ------------------------
 
 
+def _measure_loudness(wav_path: Path) -> dict[str, float] | None:
+    """Two-pass loudnorm pass 1 — measure input loudness.
+
+    Runs ``loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json`` against
+    ``wav_path`` in measurement mode, parses the JSON object the
+    filter prints to stderr, returns dict with measured_I /
+    measured_LRA / measured_TP / measured_thresh / target_offset.
+
+    Returns ``None`` on any failure (ffmpeg crash, JSON parse error,
+    missing keys). Caller MUST handle None — falls back to single-
+    pass mode in that case so a measurement glitch doesn't break the
+    whole render.
+
+    Why two-pass exists (added 2026-05-13): single-pass loudnorm is
+    documented to be ±3 LU inaccurate. For Cloud Run TTS providers
+    (Chatterbox emits 15-25 dB quieter than F5/Kokoro), single-pass
+    over- or under-corrects by 5-7 LU. The 2026-05-13 silent-mp4
+    bug (final mp4 at -28 LUFS, 14 LU below YouTube target) was
+    caused by exactly this. Two-pass measure-then-apply is the
+    industry standard and lands within ±0.5 LU of target.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-nostats", "-i", str(wav_path),
+                "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=180, check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        # coverage: subprocess failure path — exercised by integration only
+        return None
+    out = (proc.stderr or "") + (proc.stdout or "")
+    # The filter writes a JSON object to stderr. It usually starts with
+    # "[Parsed_loudnorm_..." prefix lines, then the actual {"input_i": "..."} object.
+    start = out.rfind("{")
+    end = out.rfind("}")
+    if start < 0 or end < start:
+        return None
+    try:
+        data = json.loads(out[start:end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    try:
+        return {
+            "measured_I": float(data["input_i"]),
+            "measured_LRA": float(data["input_lra"]),
+            "measured_TP": float(data["input_tp"]),
+            "measured_thresh": float(data["input_thresh"]),
+            "target_offset": float(data.get("target_offset", 0.0)),
+        }
+    except (KeyError, ValueError, TypeError):
+        return None
+    finally:
+        pass
+
+
+def _measurement_is_usable(m: dict[str, float] | None) -> bool:
+    """Defend against pathological ffmpeg outputs that crash pass 2.
+
+    loudnorm's second-pass parameters have a documented range of
+    [-99, 0] for ``measured_I`` / ``measured_thresh`` and [0, 99] for
+    ``measured_LRA``. When pass 1 measures genuine silence, it
+    returns ``measured_I=-inf`` (literally the string "-inf" in the
+    JSON), which is out of range and crashes pass 2 with "Result too
+    large". Same risk on a NaN. Returning False here triggers the
+    single-pass fallback which loudnorm handles gracefully.
+    """
+    if m is None:
+        return False
+    for key, lo, hi in (
+        ("measured_I", -99.0, 0.0),
+        ("measured_LRA", 0.0, 99.0),
+        ("measured_TP", -99.0, 99.0),
+        ("measured_thresh", -99.0, 0.0),
+    ):
+        v = m.get(key)
+        if v is None:
+            return False
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return False
+        if math.isnan(f) or math.isinf(f):
+            return False
+        if not (lo <= f <= hi):
+            return False
+    return True
+
+
+def _verify_audio_loudness(
+    mp4_path: Path, *, target_lufs: float = -16.0, tolerance_lu: float = 4.0,
+) -> tuple[float, bool]:
+    """Run ``volumedetect`` on the post-mux mp4. Return (mean_volume_dB,
+    within_tolerance).
+
+    ``volumedetect`` reports `mean_volume` in dBFS (NOT LUFS — they
+    correlate strongly for spoken-word content but aren't equivalent).
+    For our purposes (catch a 5+ dB miss before it ships) the
+    correlation is tight enough. The post-mortem at
+    docs/audio_loudnorm.md elaborates.
+
+    On any ffmpeg / parse failure returns ``(0.0, True)`` — we don't
+    fail a render because the verification step itself broke.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-nostats", "-i", str(mp4_path),
+                "-af", "volumedetect", "-vn", "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        # coverage: subprocess failure path — exercised by integration only
+        return 0.0, True
+    out = (proc.stderr or "") + (proc.stdout or "")
+    m = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", out)
+    if not m:
+        return 0.0, True
+    mean_db = float(m.group(1))
+    # mean_volume in dBFS approximates LUFS within 1-2 dB for speech.
+    # tolerance_lu defaults to 4 LU (catches 5+ dB misses without
+    # tripping on normal-program-loudness variation).
+    within = abs(mean_db - target_lufs) <= tolerance_lu
+    return mean_db, within
+
+
 @obs.traced("mux.long_form", category="render")
 def final_mux(
     video_path: Path, narration_wav: Path, music_wav: Path,
-    out_path: Path, narration_db: float = -6.0, music_db: float = -28.0,
+    out_path: Path, narration_db: float = 0.0, music_db: float = -28.0,
     caption_cues: list[tuple[Path, float, float]] | None = None,
     margin_v: int = 80,
     watermark_png: Path | None = None,
@@ -1758,23 +1888,75 @@ def final_mux(
             "final_mux: pass either captions_ass OR caption_cues, not both"
         )
 
-    # Pre-amp narration with single-pass loudnorm so the level reaching
-    # the mix is independent of TTS source amplitude. Cloud Run TTS
+    # Pre-amp narration with TWO-PASS loudnorm so the level reaching
+    # the mix is independent of TTS source amplitude AND lands within
+    # ±0.5 LU of -16 LUFS (YouTube spoken-word target). Cloud Run TTS
     # providers (Chatterbox cloned from sarah.wav, Higgs Audio,
     # Indic-Parler) routinely emit audio 15-25 dB quieter than the
-    # F5/Kokoro laptop fallbacks. Pre-fix, a 30-min mystoriesanimated
-    # render landed at mean_volume=-32 dB / max_volume=-12 dB — the
-    # user reported "no audio" because narration was inaudible on
-    # phone speakers. Loudnorm at -16 LUFS (YouTube spoken-word
-    # target) brings every TTS provider to a consistent floor; the
-    # subsequent ``volume={narration_db}dB`` then trims relative to
-    # that floor, so the channel YAML's audio_narration_db setting
-    # keeps its original "trim around the canonical narration level"
-    # meaning. See docs/audio_loudnorm.md for the post-mortem.
+    # F5/Kokoro laptop fallbacks; single-pass loudnorm over- or under-
+    # corrects by 5-7 LU on this input range, which is what shipped
+    # the 2026-05-13 silent mp4 (final landed at -28 LUFS).
+    #
+    # Mux audio chain (post-2026-05-13 fix stack):
+    #
+    #   [1:a] (narration WAV)
+    #     ├ loudnorm two-pass → -16 LUFS ±0.5 LU
+    #     └ volume={narration_db} dB trim — default 0.0 (was -6.0,
+    #       which combined with the amix bug below to land at -28 LUFS)
+    #     → [narr]
+    #
+    #   [2:a] (music WAV)
+    #     └ volume={music_db} dB trim — default -28 dB (-12 dB under
+    #       narration so it sits behind without competing)
+    #     → [bed]
+    #
+    #   [narr][bed] amix=inputs=2:duration=first:dropout_transition=2
+    #     :normalize=0  ← KEY FIX. Default normalize=1 divides every
+    #                     input by N, so mixing narration + bed
+    #                     halves both (-6 dB on narration). With
+    #                     normalize=0 the inputs sum without auto-
+    #                     attenuation, which is what we want when
+    #                     each input is already pre-normalised.
+    #     → [a]
+    #
+    # See docs/audio_loudnorm.md for the post-mortem.
+    measured = _measure_loudness(narration_wav)
+    if not _measurement_is_usable(measured):
+        # Fallback: single-pass loudnorm. Less accurate (±3 LU) but
+        # never blocks the render. Telemetry below records which mode
+        # we used so dashboards can flag the noisy ones. Also the
+        # only safe path when the narration is genuine silence
+        # (measured_I=-inf crashes the second-pass filter).
+        narr_loudnorm = "loudnorm=I=-16:TP=-1.5:LRA=11"
+        loudnorm_mode = "single_pass_fallback"
+        measured_lufs = None
+    else:
+        assert measured is not None  # narrowed by _measurement_is_usable
+        narr_loudnorm = (
+            f"loudnorm=I=-16:TP=-1.5:LRA=11"
+            f":measured_I={measured['measured_I']:.2f}"
+            f":measured_LRA={measured['measured_LRA']:.2f}"
+            f":measured_TP={measured['measured_TP']:.2f}"
+            f":measured_thresh={measured['measured_thresh']:.2f}"
+            f":offset={measured['target_offset']:.2f}"
+            f":linear=true:print_format=summary"
+        )
+        loudnorm_mode = "two_pass"
+        measured_lufs = measured["measured_I"]
+    obs.track(
+        "audio_loudnorm",
+        category="render",
+        metadata={
+            "mode": loudnorm_mode,
+            "measured_input_lufs": measured_lufs,
+            "narration_db_trim": narration_db,
+            "music_db_trim": music_db,
+        },
+    )
     a_flt = (
-        f"[1:a]loudnorm=I=-16:TP=-1.5:LRA=11,volume={narration_db}dB[narr];"
+        f"[1:a]{narr_loudnorm},volume={narration_db}dB[narr];"
         f"[2:a]volume={music_db}dB[bed];"
-        f"[narr][bed]amix=inputs=2:duration=first:dropout_transition=2[a]"
+        f"[narr][bed]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[a]"
     )
 
     needs_filter = bool(caption_cues) or bool(watermark_png) or bool(captions_ass)
@@ -2404,7 +2586,7 @@ def _main_impl(args) -> int:
     out_dir = channel_dir / "long_form"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{args.slug}.mp4"
-    nb = float(lf.get("audio_narration_db", -6.0))
+    nb = float(lf.get("audio_narration_db", 0.0))
     mb = float(lf.get("audio_music_bed_db", -28.0))
 
     # Channel watermark (top-right, faint white) — render once, cache in branding/.
@@ -2438,7 +2620,30 @@ def _main_impl(args) -> int:
               watermark_margin=int(wm_cfg.get("margin", 32)))
     final_dur = _probe_duration(out_path)
     final_size = out_path.stat().st_size // 1024 // 1024
-    print(f"[done] {out_path} — {final_dur:.1f}s ({final_dur/60:.1f} min), {final_size} MB")
+    # D4 (2026-05-13) — verify post-mux loudness lands within ±4 LU of
+    # YouTube's spoken-word target. Catches the 2026-05-13 silent-mp4
+    # bug class so it never ships again. emits OTel event for dashboard
+    # visibility; on hard miss, raises so the worker marks job FAILED
+    # instead of READY (caller handles the exception).
+    mean_db, ok = _verify_audio_loudness(out_path, target_lufs=-16.0, tolerance_lu=4.0)
+    obs.track(
+        "audio_postmux_verify",
+        category="render",
+        metadata={"mean_volume_db": mean_db, "within_tolerance": ok, "target_lufs": -16.0},
+    )
+    if not ok:
+        # mean_db may be 0.0 if the verify subprocess itself failed; in
+        # that case _verify_audio_loudness returns (0.0, True) so we
+        # only land here when ffmpeg DID measure and the result is
+        # genuinely off.
+        raise RuntimeError(
+            f"audio loudness check failed: post-mux mean_volume={mean_db:.1f} dB, "
+            f"target=-16 LUFS, tolerance=±4 LU. Probable cause: "
+            f"silent narration WAV or amix normalize regression. "
+            f"See docs/audio_loudnorm.md."
+        )
+    print(f"[done] {out_path} — {final_dur:.1f}s ({final_dur/60:.1f} min), "
+          f"{final_size} MB, mean_volume={mean_db:.1f} dB")
     return 0
 
 

@@ -214,7 +214,17 @@ function PlayerCard({ job, src }: { job: Job | null; src: string | null }) {
               controls
               autoPlay
               loop
-              muted
+              // muted={!ready} — when the video lands (status flips to
+              // ready), unmute so the user actually hears their render.
+              // Pre-2026-05-13 this was a hard-coded `muted` so autoPlay
+              // would always succeed silently. The trade-off: browsers
+              // may pause autoPlay on a sound-on element and surface
+              // the play button instead, which is the right UX for a
+              // FINISHED video (the user wants to hear it). For an
+              // intermediate `rendering` state we keep it muted so the
+              // pre-roll placeholder doesn't blast silence into a
+              // muted-by-policy autoplay attempt.
+              muted={!ready}
               playsInline
               className="h-full w-full bg-black"
             />
@@ -350,8 +360,20 @@ function StageTimeline({ job }: { job: Job | null }) {
     return STAGE_ORDER.map((s) => ({ stage: s, status: "pending" as const }));
   }, [job]);
 
-  const completed = timeline.filter((t) => t.status === "done").length;
-  const total = timeline.length;
+  // E2/E3 (2026-05-13): exclude pre-marked "skipped" stages from
+  // the progress arithmetic so a long-form render's pill that
+  // legitimately doesn't apply (cast / asr-when-authored) doesn't
+  // inflate "completed". Detected via msg containing the word
+  // "skipped" (the worker writes msgs like "skipped — long-form
+  // has no cast stage" and "skipped — captions aligned from
+  // authored TTS chunk timings"). Pre-fix, "1/4 stages truly done
+  // but 3/7 done · skipped pre-marks" rendered as "3 / 7 stages,
+  // 43%" which way overstated progress.
+  const isSkipped = (t: TimelineEntry) =>
+    t.status === "done" && typeof t.msg === "string" && t.msg.toLowerCase().includes("skipped");
+  const realStages = timeline.filter((t) => !isSkipped(t));
+  const completed = realStages.filter((t) => t.status === "done").length;
+  const total = realStages.length;
   const pct = Math.round((completed / Math.max(total, 1)) * 100);
 
   return (
@@ -604,7 +626,13 @@ function LiveArtifactsCard({ job }: { job: Job | null }) {
       {!anyArtifacts && (
         <div className="mt-4 flex items-center gap-2 rounded-lg border border-dashed border-border/60 bg-background/50 px-3 py-3 text-[12px] text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          Waiting for the first artifact (script lands ~5 s into the render)…
+          {/*
+            E5 fix (2026-05-13): the previous "script lands ~5 s into
+            the render" copy lied for long-form (script lands ~3 min)
+            and for footage_only (no script artifact at all). Generic
+            wording avoids the false promise.
+          */}
+          Waiting for the first artifact (script lands once the rewriter completes)…
         </div>
       )}
 
