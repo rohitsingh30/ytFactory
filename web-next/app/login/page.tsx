@@ -1,22 +1,13 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { api } from "@/lib/api";
 
-interface WhoAmI {
-  signed_in: boolean;
-  email?: string;
-  status?: string;
-  is_admin?: boolean;
-}
-
-// `dynamic` exports must live in a server component. This `"use client"`
-// page can't carry them. The cache control comes from the parent
-// layout's `dynamic = "force-dynamic"` + middleware no-store header.
+// `dynamic` exports must live in a server component. The /login/layout.tsx
+// next to this file carries `export const dynamic = "force-dynamic"`
+// so the HTML shell is rendered fresh on every request.
 
 export default function LoginPage() {
   return (
@@ -27,57 +18,40 @@ export default function LoginPage() {
 }
 
 function LoginInner() {
-  const router = useRouter();
   const sp = useSearchParams();
-  const next = sp.get("next") || "/app";
   const errorParam = sp.get("error");
-  const [checking, setChecking] = useState(true);
 
-  useEffect(() => {
-    // Hard 5s cap — pre-fix the spinner could hang forever when the
-    // proxy stalled, the upstream control plane was offline, OR (the
-    // 2026-05-13 trap) the browser had a stale Next.js HTML shell
-    // referencing chunk hashes that no longer existed on the server,
-    // so the JS that drives this fetch never got loaded. With this
-    // timeout the spinner ALWAYS clears within 5s no matter what,
-    // and the user sees the "Continue with Google" button instead
-    // of staring at a forever-spinning loader.
-    const ctl = new AbortController();
-    const timeoutId = setTimeout(() => ctl.abort(), 5000);
-
-    fetch("/api/auth/whoami", {
-      method: "GET",
-      cache: "no-store",
-      credentials: "include",
-      headers: { Accept: "application/json" },
-      signal: ctl.signal,
-    })
-      .then(async (r) => {
-        if (!r.ok) throw new Error(`whoami ${r.status}`);
-        return (await r.json()) as WhoAmI;
-      })
-      .then((r) => {
-        if (!r.signed_in) {
-          setChecking(false);
-          return;
-        }
-        if (r.status === "approved") router.replace(next);
-        else if (r.status === "pending") router.replace("/access-pending");
-        else setChecking(false);
-      })
-      .catch(() => {
-        // Timeout, network failure, or non-JSON response — surface
-        // the sign-in button so the user can recover. NEVER leave
-        // the spinner up indefinitely.
-        setChecking(false);
-      })
-      .finally(() => clearTimeout(timeoutId));
-
-    return () => {
-      clearTimeout(timeoutId);
-      ctl.abort();
-    };
-  }, [next, router]);
+  // **2026-05-13 simplification.** Pre-fix this page rendered a
+  // "checking session…" spinner that fetched /api/auth/whoami and
+  // either router.replace()'d to /app or revealed the Sign-in button
+  // based on the response. Three failure modes traced over the last
+  // 2h to that flow:
+  //
+  //   1. Browser cached the HTML shell with old chunk hashes; the
+  //      JS that drives the fetch never ran → spinner forever.
+  //   2. Service worker (now retired, public/sw.js is a self-destruct
+  //      kill-switch) intercepted the fetch and served stale.
+  //   3. Auth-loop: middleware lacked YTFACTORY_SESSION_SECRET, so a
+  //      valid cookie failed verification at the edge → redirect to
+  //      /login → /login's whoami succeeded → router.replace("/app")
+  //      → middleware bounced again → infinite loop visible only as
+  //      the spinner re-mounting.
+  //
+  // The right architecture is "let the middleware decide". The
+  // middleware on /app/* already redirects unauthenticated users to
+  // /login. /login itself does NOT need to ping whoami — if the
+  // user is already authenticated, the chrome-side click on
+  // "Continue with Google" is a no-op (OAuth round-trip ends at
+  // /api/auth/google/callback which sets the cookie + redirects to
+  // /app). If the user IS authenticated and lands here by typing
+  // the URL, the "Continue with Google" link still goes to the
+  // OAuth start URL, which the backend's
+  // pipeline.auth.routes.start_login() short-circuits to a redirect
+  // to /app for already-authenticated users (existing behaviour;
+  // see web/server.py).
+  //
+  // Net: no client-side state, no fetch, no spinner. The page
+  // always shows "Continue with Google" instantly.
 
   return (
     <main className="relative flex min-h-screen items-center justify-center px-6">
@@ -106,19 +80,21 @@ function LoginInner() {
           </p>
 
           <div className="mt-6">
-            {checking ? (
-              <div className="flex h-10 items-center justify-center text-[12px] text-muted-foreground">
-                <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                checking session…
-              </div>
-            ) : (
-              <Button asChild className="w-full">
-                <a href="/api/auth/google/login">
-                  <GoogleGlyph className="mr-2 h-4 w-4" />
-                  Sign in with Google
-                </a>
-              </Button>
-            )}
+            <Button asChild className="w-full">
+              <a href="/api/auth/google/login">
+                <GoogleGlyph className="mr-2 h-4 w-4" />
+                Sign in with Google
+              </a>
+            </Button>
+          </div>
+
+          <div className="mt-3 text-center">
+            <a
+              href="/app"
+              className="text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              Already signed in? Open studio →
+            </a>
           </div>
 
           {errorParam && (
