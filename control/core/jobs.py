@@ -251,6 +251,29 @@ def _enqueue_render_job(
         owner_uid=owner_uid,
     )
 
+    # Pre-warm the cloud GPU services this render will need (TTS,
+    # image-gen) AS SOON AS the job is queued. By the time the worker
+    # picks it up + finishes the rewrite stage (~3-5 min), the
+    # services are warm and the first /synth + /generate calls hit
+    # sub-second latency. Pre-fix (2026-05-13 canary 9b96e438), the
+    # chatterbox service had scaled to zero between renders, our
+    # render's first TTS chunk hit a cold-start, GPU quota was
+    # exhausted during the cold-start window, Cloud Run frontend
+    # returned 502, render crashed mid-TTS. Warming up-front
+    # eliminates the cold-start race (and the fallback retry-on-502
+    # added to _post_synth is the belt to this suspenders).
+    try:
+        from pipeline.cloud.warm import warm_async_http  # noqa: PLC0415
+        warm_async_http(proposal.channel)
+    except Exception as exc:  # noqa: BLE001
+        # Warmup is opportunistic — its failure should never block
+        # the render dispatch. Log and proceed.
+        logger.warning(
+            "queue-time warmup failed for channel=%s: %s — render will "
+            "still dispatch, may pay cold-start latency",
+            proposal.channel, exc,
+        )
+
     backend = cloud_run.render_backend()
     if backend == "cloudrun":
         try:

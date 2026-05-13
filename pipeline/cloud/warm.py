@@ -291,6 +291,79 @@ def warm_async(channel: Optional[str] = None, **kwargs: Any) -> threading.Thread
     return t
 
 
+def warm_async_http(channel: Optional[str] = None) -> threading.Thread:
+    """Fire-and-forget pure-HTTP warm for a channel's GPU services.
+
+    Designed for the QUEUE-TIME warm path (POST /api/render →
+    _enqueue_render_job → kick this off in background as soon as the
+    job doc lands in Firestore). By the time the worker picks the
+    job up + finishes the rewrite stage (~3-5 min), the TTS + image
+    services are warm and the first /synth + /generate calls hit
+    sub-second latency instead of the cold-start 30-90s + GPU-quota
+    502 window.
+
+    Differs from :func:`warm_async` in that it does NOT depend on the
+    bundled shell scripts (``cloud/warm_*_services.sh``) — those
+    scripts aren't shipped in the ytfactory-web Cloud Run container
+    image. Instead it calls each provider's existing fire-and-forget
+    HTTP warmup (``pipeline.tts.cloudrun.warmup`` /
+    ``pipeline.images.images_cloudrun.warmup``), which only needs
+    the CLOUDRUN_*_URL env vars + ID-token minting.
+
+    Returns the daemon thread immediately so the caller doesn't block
+    the HTTP response. The caller does NOT need to .join() —
+    individual provider warmups self-log on success / failure and
+    ignored failures are not fatal (the render's own warm-on-stage
+    path remains as a fallback).
+    """
+    def _go() -> None:
+        try:
+            tts_targets, image_targets = _providers_for_channel(channel)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("warm_async_http: provider resolve failed: %s", exc)
+            return
+
+        # TTS warmups
+        try:
+            from pipeline.tts.cloudrun import warmup as _tts_warmup  # noqa: PLC0415
+            for target in tts_targets:
+                # _TTS_PROVIDER_TO_TARGET maps "cloudrun_chatterbox" → "chatterbox";
+                # tts.cloudrun.warmup expects the FULL provider string.
+                provider = f"cloudrun_{target}"
+                _tts_warmup(provider)  # itself returns a daemon thread, fire-and-forget
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("warm_async_http: TTS warm batch failed: %s", exc)
+
+        # Image warmups
+        try:
+            from pipeline.images.images import warmup as _img_warmup  # noqa: PLC0415
+            for target in image_targets:
+                # _IMAGE_PROVIDER_TO_TARGET maps "cloudrun_flux2_klein" → "flux";
+                # images.warmup expects the channel YAML's image_provider STRING
+                # (e.g. "cloudrun_flux2_klein"). Reverse-map.
+                provider = next(
+                    (k for k, v in _IMAGE_PROVIDER_TO_TARGET.items() if v == target),
+                    None,
+                )
+                if provider:
+                    _img_warmup(provider)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("warm_async_http: image warm batch failed: %s", exc)
+
+        logger.info(
+            "warm_async_http: kicked off warmups for channel=%s tts=%s image=%s",
+            channel, sorted(tts_targets), sorted(image_targets),
+        )
+
+    t = threading.Thread(
+        target=_go,
+        name=f"cloud-warm-http-{channel or 'default'}",
+        daemon=True,
+    )
+    t.start()
+    return t
+
+
 def to_dict(report: WarmReport) -> dict[str, Any]:
     return {
         "channel": report.channel,

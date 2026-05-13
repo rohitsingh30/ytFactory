@@ -255,9 +255,15 @@ def _post_synth(payload: dict) -> dict:
 
     Retry semantics (5-attempt cap):
       - 429 Too Many Requests → exponential backoff (1, 2, 4, 8s), retry.
+      - 502 Bad Gateway → exponential backoff, retry. Cloud Run cold-
+        starts return 502 for a 30-90s window while the new instance
+        comes up + grabs a GPU. Added 2026-05-13 after canary
+        9b96e438 hit this exact path (chatterbox scaled to 0 between
+        renders, our parallel section calls woke it up, first
+        request hit 502 during cold-start).
       - 503 Service Unavailable → exponential backoff, retry.
-      - Other 5xx (500/502/504/...) → ``CloudRunUnavailable`` immediately
-        (no retry — cloud is sick, fall back to local).
+      - Other 5xx (500/504/...) → ``CloudRunUnavailable`` immediately
+        (cloud is sick, fall back to local).
       - URLError / OSError / TimeoutError → backoff + retry; if all 5
         attempts fail, ``CloudRunUnavailable``.
       - 4xx that isn't 429 → re-raise ``HTTPError`` (caller's bad input,
@@ -312,7 +318,17 @@ def _post_synth(payload: dict) -> dict:
         except urllib.error.HTTPError as e:
             last_http_error = e
             code = getattr(e, "code", None)
-            if code in (429, 503):
+            # 429/502/503 → retry with exponential backoff. 502 added
+            # 2026-05-13 after canary 9b96e438 hit a chatterbox cold-
+            # start 502: the service had scaled to zero between
+            # renders (last successful synth at 17:21, shutdown at
+            # 17:27, our request at 17:27:53), and Google's frontend
+            # returns 502 for a 30-90s window during cold-start while
+            # the new instance comes up + grabs an L4 GPU. Pre-fix
+            # this 502 was classified "not retryable" → render
+            # crashed mid-TTS even though a 4-second backoff would
+            # have succeeded.
+            if code in (429, 502, 503):
                 if attempt + 1 >= max_attempts:
                     # Audit Q2.20 — 503 already converted to
                     # CloudRunUnavailable so the render-level circuit
@@ -328,7 +344,9 @@ def _post_synth(payload: dict) -> dict:
                 time.sleep(2 ** attempt)
                 continue
             if 500 <= (code or 0) < 600:
-                # Other 5xx → not retryable; cloud needs to fail over.
+                # Other 5xx (500/504) → not retryable; cloud is
+                # genuinely sick (not just cold-starting). Fail over
+                # to local provider.
                 raise CloudRunUnavailable(
                     f"cloud /synth {code}: not retryable"
                 ) from e
