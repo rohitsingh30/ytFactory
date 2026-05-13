@@ -31,6 +31,32 @@ const nextConfig = {
       { source: "/healthz", destination: `${API_BASE}/healthz` },
     ];
   },
+  // Force browsers to re-validate /sw.js on every navigation so the
+  // self-destruct service worker (public/sw.js) ships immediately to
+  // every existing tab. Without this, browsers happily cache the
+  // previous SW for up to 24h (Cache-Control default for SW scripts),
+  // and users stay trapped on the previous SW version that long.
+  //
+  // The 2026-05-13 stuck-spinner trap: a previous studio SW
+  // intercepted /api/* GETs with scope "/" and survived deploys.
+  // Hard-refresh does not bypass an active SW. The replacement
+  // public/sw.js is a kill switch (skipWaiting + claim + wipe + every
+  // tab navigates), but only if the browser fetches the NEW bytes —
+  // hence no-store here.
+  async headers() {
+    return [
+      {
+        source: "/sw.js",
+        headers: [
+          {
+            key: "Cache-Control",
+            value: "no-cache, no-store, must-revalidate, max-age=0",
+          },
+          { key: "Service-Worker-Allowed", value: "/" },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;
