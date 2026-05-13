@@ -34,8 +34,28 @@ function LoginInner() {
   const [checking, setChecking] = useState(true);
 
   useEffect(() => {
-    api
-      .get<WhoAmI>("/api/auth/whoami")
+    // Hard 5s cap — pre-fix the spinner could hang forever when the
+    // proxy stalled, the upstream control plane was offline, OR (the
+    // 2026-05-13 trap) the browser had a stale Next.js HTML shell
+    // referencing chunk hashes that no longer existed on the server,
+    // so the JS that drives this fetch never got loaded. With this
+    // timeout the spinner ALWAYS clears within 5s no matter what,
+    // and the user sees the "Continue with Google" button instead
+    // of staring at a forever-spinning loader.
+    const ctl = new AbortController();
+    const timeoutId = setTimeout(() => ctl.abort(), 5000);
+
+    fetch("/api/auth/whoami", {
+      method: "GET",
+      cache: "no-store",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+      signal: ctl.signal,
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`whoami ${r.status}`);
+        return (await r.json()) as WhoAmI;
+      })
       .then((r) => {
         if (!r.signed_in) {
           setChecking(false);
@@ -45,7 +65,18 @@ function LoginInner() {
         else if (r.status === "pending") router.replace("/access-pending");
         else setChecking(false);
       })
-      .catch(() => setChecking(false));
+      .catch(() => {
+        // Timeout, network failure, or non-JSON response — surface
+        // the sign-in button so the user can recover. NEVER leave
+        // the spinner up indefinitely.
+        setChecking(false);
+      })
+      .finally(() => clearTimeout(timeoutId));
+
+    return () => {
+      clearTimeout(timeoutId);
+      ctl.abort();
+    };
   }, [next, router]);
 
   return (
@@ -94,6 +125,10 @@ function LoginInner() {
             <div className="mt-4 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
               {errorParam === "denied"
                 ? "Your access request was denied."
+                : errorParam === "auth_storage_permission"
+                ? "Sign-in temporarily unavailable: the server can't reach the user store. The on-call has been alerted; please retry in a few minutes."
+                : errorParam === "auth_storage_unavailable"
+                ? "Sign-in temporarily unavailable: the user store is unreachable. Please retry in a few minutes."
                 : `Sign-in failed: ${errorParam}`}
             </div>
           )}

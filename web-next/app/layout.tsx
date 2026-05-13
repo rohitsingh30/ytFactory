@@ -4,6 +4,7 @@ import { GeistMono } from "geist/font/mono";
 import "@/styles/globals.css";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { StaleShellGuard } from "@/components/stale-shell-guard";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://ytfactory.app"),
@@ -38,6 +39,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       suppressHydrationWarning
     >
       <body className="min-h-screen bg-background font-sans antialiased">
+        <StaleShellGuard />
         <TooltipProvider delayDuration={120}>{children}</TooltipProvider>
         <Toaster />
       </body>
