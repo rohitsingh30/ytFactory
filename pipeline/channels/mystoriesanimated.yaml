@@ -139,7 +139,17 @@ long_form:
   # Hard cap of 24 keeps Metal/Cloud-Run cold-load + memory pressure
   # bounded; archival_shotlist would be wrong for this channel (no
   # footage source to draw from).
-  panel_max_count: 24
+  # 2026-05-13 — bumped 24 → 60 for cloudrun_flux2_klein. The 24 cap
+  # was a 2026-05-04 laptop-only protection against Apple Silicon
+  # Metal command-buffer watchdog timeouts (per
+  # docs/long_form_model_inventory.md). On Cloud Run NVIDIA L4 (where
+  # cloudrun_flux2_klein actually runs) that watchdog doesn't exist,
+  # so 60 panels for a 30-min long-form (one per ~30s, well under
+  # the new ~7s panel_seconds prompt density) is fine. The
+  # pipeline.render.long_form code-side default is also 60 for
+  # cloudrun_* providers; this YAML just makes the per-channel
+  # ceiling explicit.
+  panel_max_count: 60
   image_provider: cloudrun_flux2_klein
   image_seed: 4242
   image_steps: 4
