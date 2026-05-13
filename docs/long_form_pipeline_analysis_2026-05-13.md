@@ -552,17 +552,29 @@ Effort: ~50 LOC.
 
 ## Part 6 — Execution sequence
 
-**Today (post-research):**
-- [ ] Write this analysis doc ← (this file)
+### Phase 0 — Fix what's broken AND ship the day-1 deliverable
+
+**The day-1 deliverable** (still unmet on day 11): render ONE
+long-form video end-to-end via the website, critique it, decide
+ship-or-fix, finalize. Phase 0 is the path TO that deliverable;
+the deliverable is the success criterion of Phase 0.
 
 **Tomorrow (~1 day):**
-- [ ] Land Fix A (STORM pattern). Single commit, single deploy. **Verify with one canary.**
-- [ ] If canary works: ship-and-hold. If not: revert, root-cause, retry.
+- [ ] Land Fix A (STORM pattern). Single commit, single deploy.
+- [ ] **Canary render via website**: dispatch a 30-min long-form
+      r/nosleep render, watch it end-to-end through the dashboard,
+      assert the mp4 lands with audio.
+- [ ] If canary succeeds → run `/critique-video` on the mp4 →
+      write critique → decide SHIP / FIX / BLOCK. **THIS IS THE
+      DAY-1 DELIVERABLE.**
+- [ ] If canary fails: revert Fix A, root-cause, retry. Do NOT
+      patch deeper bugs.
 
-**This week (~2 days):**
+**This week (~2 days, after the canary lands):**
 - [ ] Land Fix B (`strict: true` + retire salvager).
 - [ ] Land Fix D (soft validator).
-- [ ] Land Fix E (one real e2e test).
+- [ ] Land Fix E (one real e2e test) — pins the canary as a
+      regression gate so we never regress past the day-1 deliverable.
 - [ ] Land Fix C (per-stage checkpoint).
 
 **Next week:**
