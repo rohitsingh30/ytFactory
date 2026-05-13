@@ -315,6 +315,50 @@ class BuildVideosEdgeCasesTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["video_id"], "VALID1")
 
+    def test_dedupes_repeat_video_ids_across_caches(self):
+        """Audit D3.62 — pre-fix the same video appearing on two
+        accounts (e.g. cross-posted) was rendered twice, double-
+        counting views/likes and confusing the dashboard. Now per-
+        video set guards against repeat emission; first cache wins.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            yt_dir = Path(tmp) / "youtube"
+            yt_dir.mkdir()
+            # Account A's cache (mentions video DUP1 with title A-version).
+            (yt_dir / "acct_a.json").write_text(json.dumps({
+                "account": "acct_a",
+                "fetched_at": "2026-01-01T00:00:00Z",
+                "videos": [
+                    {"video_id": "DUP1", "title": "A-version"},
+                    {"video_id": "ONLY_A", "title": "Only on A"},
+                ],
+            }))
+            # Account B's cache (also mentions DUP1 with B-version).
+            (yt_dir / "acct_b.json").write_text(json.dumps({
+                "account": "acct_b",
+                "fetched_at": "2026-01-01T00:00:00Z",
+                "videos": [
+                    {"video_id": "DUP1", "title": "B-version"},
+                    {"video_id": "ONLY_B", "title": "Only on B"},
+                ],
+            }))
+
+            with patch.object(_agg, "YOUTUBE_DIR", yt_dir):
+                with patch.object(_agg, "_index_local_uploads", return_value={}):
+                    with patch.object(_agg, "_iter_channel_dirs", return_value=[]):
+                        rows = _agg.build_videos()
+
+        ids = [r["video_id"] for r in rows]
+        # DUP1 must appear EXACTLY once (was twice pre-fix).
+        self.assertEqual(ids.count("DUP1"), 1, f"DUP1 not deduped: {ids}")
+        # Both unique ids still present.
+        self.assertIn("ONLY_A", ids)
+        self.assertIn("ONLY_B", ids)
+        # First cache (acct_a, sorted alphabetically) wins.
+        dup_row = next(r for r in rows if r["video_id"] == "DUP1")
+        self.assertEqual(dup_row.get("title"), "A-version")
+        self.assertEqual(dup_row.get("account"), "acct_a")
+
     def test_skips_malformed_cache_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             yt_dir = Path(tmp) / "youtube"

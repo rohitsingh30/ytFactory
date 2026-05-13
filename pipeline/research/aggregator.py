@@ -232,12 +232,27 @@ def build_videos() -> list[dict]:
     if not caches:
         return rows
 
+    # Audit D3.62 — pre-fix this had no per-video deduplication. The
+    # same video can appear on multiple cache accounts (a video that
+    # was originally uploaded to channel A then cross-posted to
+    # channel B's research cache). Rendering the same video_id twice
+    # double-counts views/likes and confuses the dashboard. Now: per-
+    # video set guards against repeat emission. The first cache to
+    # mention a video wins (caches are iterated in stable order:
+    # GCS-canonical preserves insertion order; on-disk fallback uses
+    # `sorted(YOUTUBE_DIR.glob("*.json"))` so the first-by-account-
+    # filename wins).
+    seen_video_ids: set[str] = set()
+
     for cache in caches:
         account = cache.get("account") or "default"
         for yt in cache.get("videos") or []:
             vid = yt.get("video_id")
             if not vid:
                 continue
+            if vid in seen_video_ids:
+                continue
+            seen_video_ids.add(vid)
             local = upload_index.get(vid)
             slug: str | None = None
             channel: str | None = None
