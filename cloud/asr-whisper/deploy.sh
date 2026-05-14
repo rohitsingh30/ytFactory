@@ -18,18 +18,17 @@ TAG="${1:-$(date +%Y%m%d-%H%M%S)}"
 
 PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
 REGION="${GCP_REGION:-asia-southeast1}"
-REPO="ytfactory-asr"
+# Reuse the existing ytfactory-tts artifact registry repo because the
+# operator account doesn't have artifactregistry.repositories.create
+# permission. Cloud Run doesn't care about repo name semantics — the
+# image lives at ytfactory-tts/ytfactory-asr-whisper:tag and works
+# the same as if it lived at ytfactory-asr/ytfactory-asr-whisper.
+# Bigbang PR can move to a dedicated ytfactory-asr repo once the
+# admin grants create perms.
+REPO="ytfactory-tts"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE}:${TAG}"
 
 cd "$(dirname "$0")"
-
-# Make sure the artifact registry repo exists. Idempotent.
-gcloud artifacts repositories create "${REPO}" \
-  --repository-format=docker \
-  --location="${REGION}" \
-  --project="${PROJECT}" \
-  --description="ytFactory ASR (faster-whisper) Cloud Run images" \
-  || true
 
 echo "==> Building + pushing ${IMAGE}"
 gcloud builds submit . \
