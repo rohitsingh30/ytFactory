@@ -318,7 +318,7 @@ def _regen_audio_caps(
     # left the OLD voice in the cached wav. Now write a sidecar
     # (.voice_fp.json) recording (provider, voice, speed, language,
     # chunk knobs) and re-synth on mismatch.
-    from pipeline.render._voice_fingerprint import (  # noqa: PLC0415
+    from pipeline.render.shared.voice_fingerprint import (  # noqa: PLC0415
         compute_fingerprint, needs_resynth, write_sidecar,
     )
     resynth, reason = needs_resynth(narr_path, cfg)
@@ -509,7 +509,7 @@ def _build_silent_video(channel: str, slug: str, shotlist: dict, scratch: Path) 
     # Audit Q2.25 — concat demuxer single-quote escape (filename-only
     # here, but a clip filename containing a literal `'` would still
     # break the parser; -safe 0 + cwd-relative names doesn't change that).
-    from ._concat_safe import concat_file_line  # noqa: PLC0415
+    from .shared.concat_safe import concat_file_line  # noqa: PLC0415
     concat_list.write_text("\n".join(concat_file_line(p.name) for p in clip_paths) + "\n")
 
     silent = scratch / "video.mp4"
@@ -931,7 +931,7 @@ def main() -> None:
     # so HF_TOKEN="hf_..." in .env wrote the LITERAL "hf_..." string
     # (with quotes) to os.environ. Now: shared loader enforces
     # consistent parsing across all three render entry points.
-    from pipeline.render._env_loader import load_dotenv_into_environ
+    from pipeline.render.shared.env_loader import load_dotenv_into_environ
     load_dotenv_into_environ(REPO_ROOT)
 
     render(args.channel, args.slug, do_upload=args.upload, aspect_override=args.aspect)

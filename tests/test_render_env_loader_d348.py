@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pipeline.render._env_loader import (
+from pipeline.render.shared.env_loader import (
     _strip_outer_quotes,
     load_dotenv_into_environ,
 )
@@ -128,7 +128,7 @@ class RenderEntryPointsUseSharedLoaderTest(unittest.TestCase):
         from pipeline.render import long_form
         from unittest.mock import patch as _patch
         with _patch(
-            "pipeline.render._env_loader.load_dotenv_into_environ"
+            "pipeline.render.shared.env_loader.load_dotenv_into_environ"
         ) as m:
             long_form._load_env(Path("/some/repo"))
         m.assert_called_once_with(Path("/some/repo"))
@@ -137,7 +137,7 @@ class RenderEntryPointsUseSharedLoaderTest(unittest.TestCase):
         from pipeline.render import sports_doc
         from unittest.mock import patch as _patch
         with _patch(
-            "pipeline.render._env_loader.load_dotenv_into_environ"
+            "pipeline.render.shared.env_loader.load_dotenv_into_environ"
         ) as m:
             sports_doc._load_env(Path("/some/repo"))
         m.assert_called_once_with(Path("/some/repo"))

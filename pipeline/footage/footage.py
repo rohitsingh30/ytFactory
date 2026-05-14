@@ -424,7 +424,7 @@ def fetch_clip(
 
         concat_list = out_path.parent / f"{out_path.stem}_concat.txt"
         # Audit Q2.25 — concat demuxer single-quote escape.
-        from pipeline.render._concat_safe import concat_file_line  # noqa: PLC0415
+        from pipeline.render.shared.concat_safe import concat_file_line  # noqa: PLC0415
         concat_list.write_text(
             concat_file_line(intro_path.name) + "\n"
             + concat_file_line(broadcast_path.name) + "\n"

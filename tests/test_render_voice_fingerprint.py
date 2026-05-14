@@ -6,7 +6,7 @@ footage_only + sports_doc all checked ``narr_path.exists()``
 and skipped synthesis if true — switching F5 → Chatterbox in
 the YAML didn't cause a re-render.
 
-Tests exercise: pipeline/render/_voice_fingerprint.py
+Tests exercise: pipeline/render/shared/voice_fingerprint.py
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pipeline.render._voice_fingerprint import (
+from pipeline.render.shared.voice_fingerprint import (
     compute_fingerprint,
     fingerprint_hash,
     maybe_wipe_stale_chunks,

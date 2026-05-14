@@ -61,6 +61,22 @@ import yaml
 
 from pipeline import observability as obs
 
+# Phase 1 (2026-05-14) — promotion of helpers into pipeline.render.shared.
+# The local underscore names below are kept as re-exports so existing
+# in-process callers (sports_doc.py, every test that does
+# ``from pipeline.render.long_form import _ffmpeg``) keep working
+# unchanged. The bigbang PR will delete these once long_form.py itself
+# is gone.
+from pipeline.render.shared.ffmpeg_helpers import (
+    apply_atempo as _atempo,
+    probe_duration as _probe_duration,
+    run_ffmpeg as _ffmpeg,
+)
+from pipeline.render.shared.trim_letterbox import (
+    trim_clip_letterbox as _trim_clip_letterbox,
+)
+from pipeline.render.shared.watermark import render_watermark_png  # noqa: F401
+
 
 def _deep_merge_dict(dst: dict, src: dict) -> None:
     """In-place deep-merge of ``src`` into ``dst``.
@@ -117,7 +133,7 @@ def _load_env(repo_root: Path) -> None:
     """Audit D3.48 — delegates to the shared loader so all three
     render entry points (long_form / sports_doc / footage_only) use
     the same parser, including outer-quote stripping."""
-    from pipeline.render._env_loader import load_dotenv_into_environ
+    from pipeline.render.shared.env_loader import load_dotenv_into_environ
     load_dotenv_into_environ(repo_root)
 
 
@@ -221,47 +237,6 @@ def _kokoro_chunk(
         out_path=out_wav,
         speed=speed,
     )
-
-
-def _ffmpeg(args: list[str], *, timeout: float | None = None) -> None:
-    """Run ffmpeg with stderr captured.
-
-    Tier 0 batch E (2026-05-14) hardening:
-    - stderr is captured so failures surface the actual ffmpeg error
-      message in the RuntimeError (pre-fix R-30: stderr went to the
-      worker tail buffer and got overwritten by OTel metric dumps,
-      leaving us with opaque "ffmpeg failed: ..." messages).
-    - Optional timeout (seconds). None = no timeout (default; preserves
-      existing behaviour for the multi-minute panel kenburns / long-form
-      compose calls). Callers that know their command should finish in
-      bounded time SHOULD pass a value.
-
-    On non-zero exit, raises RuntimeError that includes the last 1500
-    chars of stderr so the worker subprocess tail captured by entrypoint.py
-    actually carries the root cause.
-    """
-    try:
-        proc = subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", *args],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(
-            f"ffmpeg timed out after {timeout}s: {' '.join(args[:6])}…"
-        ) from e
-    if proc.returncode != 0:
-        stderr_tail = (proc.stderr or "")[-1500:].strip()
-        raise RuntimeError(
-            f"ffmpeg failed (exit={proc.returncode}): "
-            f"{' '.join(args[:6])}…\nstderr:\n{stderr_tail}"
-        )
-
-
-def _atempo(in_wav: Path, out_wav: Path, factor: float) -> None:
-    _ffmpeg(["-i", str(in_wav), "-filter:a", f"atempo={factor}", str(out_wav)])
 
 
 def _probe_wav_params(wav: Path) -> tuple[int, str]:
@@ -373,7 +348,7 @@ def _wav_concat_with_silence(wavs: list[Path], silence_s: float, out_wav: Path) 
     ])
     list_txt = out_wav.parent / "_concat_list.txt"
     # Audit Q2.25 — concat demuxer single-quote escape.
-    from ._concat_safe import concat_file_line  # noqa: PLC0415
+    from .shared.concat_safe import concat_file_line  # noqa: PLC0415
     lines: list[str] = []
     for i, w in enumerate(wavs):
         if i > 0:
@@ -592,7 +567,7 @@ def synth_long_narration(
     # (see _voice_fingerprint.needs_resynth) and gates the call
     # accordingly; the write here ensures every fresh synth re-binds
     # the sidecar to the cfg that produced it.
-    from pipeline.render._voice_fingerprint import (  # noqa: PLC0415
+    from pipeline.render.shared.voice_fingerprint import (  # noqa: PLC0415
         compute_fingerprint, write_sidecar,
     )
     write_sidecar(narration_wav, compute_fingerprint({
@@ -609,114 +584,6 @@ def synth_long_narration(
 # ---------- video stage: trim + 16:9 letterbox + concat -------------------
 
 
-def _probe_duration(path: Path) -> float:
-    # Backward-compat shim over the canonical helper in
-    # ``pipeline.probe``. New callers should import probe_duration
-    # directly; this module-local alias is kept so the existing
-    # ``from pipeline.render.long_form import _probe_duration`` (used
-    # by sports_doc.py and tests) keeps working unchanged.
-    from pipeline.probe import probe_duration  # noqa: PLC0415
-    return probe_duration(path)
-
-
-def _trim_clip_letterbox(
-    src: Path, in_s: float, out_s: float, out_path: Path,
-    out_w: int = 1920, out_h: int = 1080, fps: int = 30,
-    grade_filter: str | None = None,
-) -> None:
-    """Trim [in_s, out_s] from src, scale to fit 16:9 with blurred letterbox.
-
-    For 4:3 sources (640x480, 320x240) this gives a centered scaled-up
-    image with a blurred copy of the same frame filling the side bars —
-    same aesthetic as the Shorts blurred-letterbox filter, just sideways.
-
-    If grade_filter is set, it's appended after the overlay step — this is
-    where the warm-firelight color grade lives (long_form_visual_signature.md).
-    Single ffmpeg pass: grade applies to the composited 1920x1080 frame so
-    both the foreground subject and the blurred letterbox bars share the
-    same warm tone — keeps the lantern-lit feel consistent across letterboxed
-    4:3 archival sources.
-
-    Three-tier short-circuit (in order, first match wins):
-
-    1. **Exact match + no grade** → ``-c:v copy`` stream-copy. Fastest;
-       no re-encode at all.
-    2. **Aspect match (within 1%) + no grade**, any source resolution
-       → plain ``scale + setsar=1`` re-encode. Skips the
-       ``split→gblur sigma=22→overlay`` chain entirely. The blurred
-       letterbox is a visual no-op when the source already covers the
-       output canvas; running gblur on every frame just to throw the
-       result away wastes 10–40 min on 90-min renders with mixed-
-       resolution 16:9 sources (1280×720 / 1440×1080 / 1920×1080
-       reuploads of the same 16:9 documentary). Promoted to Tier 1
-       in the 2026-05-05 efficiency overhaul.
-    3. **Otherwise** (4:3 source, grade requested, or aspect mismatch)
-       → full split+gblur+overlay chain. Required for letterboxing
-       4:3 archival into 16:9 and for warm-firelight grading.
-    """
-    duration = max(0.1, out_s - in_s)
-    src_w: int | None = None
-    src_h: int | None = None
-    try:
-        # Tier 0 batch E (2026-05-14): cap ffprobe at 30s. A hung ffprobe
-        # (e.g. corrupt source video, network mount stall) would block
-        # the entire trim_clip_letterbox call indefinitely. R-19 in the
-        # catalogue. Typical local probe is <100ms.
-        probe = subprocess.check_output([
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "default=noprint_wrappers=1:nokey=1", str(src),
-        ], timeout=30).decode().strip().splitlines()
-        src_w, src_h = int(probe[0]), int(probe[1])
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-            ValueError, IndexError):
-        pass  # fall through to full chain below
-
-    if grade_filter is None and src_w and src_h:
-        # Tier 1: exact match → stream copy (fastest).
-        if src_w == out_w and src_h == out_h:
-            print(f"[trim] aspect-match {src_w}x{src_h} == {out_w}x{out_h} — stream-copy")
-            _ffmpeg([
-                "-ss", f"{in_s}", "-t", f"{duration}", "-i", str(src),
-                "-an", "-c:v", "copy", str(out_path),
-            ])
-            return
-        # Tier 2: aspect match within 1% but different resolution → plain scale.
-        # Skip the split+gblur+overlay chain entirely — it's a no-op when the
-        # source already covers the output canvas.
-        src_ratio = src_w / src_h
-        out_ratio = out_w / out_h
-        aspect_match = abs(src_ratio - out_ratio) / out_ratio < 0.01
-        if aspect_match:
-            print(f"[trim] aspect-match {src_w}x{src_h} ~ {out_w}x{out_h} — plain scale (no gblur)")
-            vf = f"scale={out_w}:{out_h}:flags=lanczos,setsar=1,fps={fps},format=yuv420p"
-            _ffmpeg([
-                "-ss", f"{in_s}", "-t", f"{duration}", "-i", str(src),
-                "-vf", vf, "-an",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-threads", "3",
-                "-pix_fmt", "yuv420p",
-                str(out_path),
-            ])
-            return
-
-    grade_tail = f",{grade_filter}" if grade_filter else ""
-    vf = (
-        f"[0:v]split=2[bg][fg];"
-        f"[bg]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
-        f"crop={out_w}:{out_h},gblur=sigma=22[bg2];"
-        f"[fg]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[fg2];"
-        f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2,fps={fps}{grade_tail},format=yuv420p"
-    )
-    _ffmpeg([
-        "-ss", f"{in_s}", "-t", f"{duration}", "-i", str(src),
-        "-filter_complex", vf,
-        "-an",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-threads", "3",
-        "-pix_fmt", "yuv420p",
-        str(out_path),
-    ])
 
 
 def _generate_panel_stills(
@@ -977,7 +844,7 @@ def _concat_and_pad(
     Extracted from :func:`build_video_track`. The ``target_duration_s``
     parameter is the only TTS-derived input.
     """
-    from ._concat_safe import concat_file_line  # noqa: PLC0415
+    from .shared.concat_safe import concat_file_line  # noqa: PLC0415
     list_txt = cache_dir / "_concat_clips.txt"
     list_txt.write_text("\n".join(concat_file_line(p.resolve()) for p in clip_paths))
     video_path = cache_dir / "video.mp4"
@@ -1411,57 +1278,6 @@ def build_caption_pngs_from_chunks(
 
     print(f"[cap] {len(cues)} authored sentence PNGs across {len(chunk_wavs)} chunks")
     return cues
-
-
-def render_watermark_png(
-    text: str,
-    out_path: Path,
-    font_size: int = 28,
-    text_color: tuple = (255, 255, 255, 140),  # ~55% opacity white
-    italic: bool = False,
-) -> Path:
-    """Generate a transparent PNG of the channel name for top-right overlay.
-
-    Match the Sleepy Time History watermark spec: faint white sans-serif in
-    the top-right corner of every frame, low opacity so it doesn't dominate.
-    Cached at <branding_dir>/watermark_topright.png — re-render only when the
-    file is missing.
-    """
-    from PIL import Image, ImageDraw, ImageFont
-
-    italic_paths = [
-        "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
-        "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf",
-    ]
-    plain_paths = [
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/System/Library/Fonts/HelveticaNeue.ttc",
-        "/System/Library/Fonts/Avenir.ttc",
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-    ]
-    font_paths = (italic_paths + plain_paths) if italic else plain_paths
-    font: ImageFont.FreeTypeFont | None = None
-    for fp in font_paths:
-        if Path(fp).exists():
-            try:
-                font = ImageFont.truetype(fp, font_size)
-                break
-            except Exception:
-                continue
-    if font is None:
-        font = ImageFont.load_default()
-
-    dummy = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
-    bb = ImageDraw.Draw(dummy).textbbox((0, 0), text, font=font)
-    w = bb[2] - bb[0] + 6
-    h = bb[3] - bb[1] + 6
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.text((-bb[0] + 3, -bb[1] + 3), text, font=font, fill=text_color)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    img.save(str(out_path))
-    return out_path
 
 
 def _render_caption_png(
@@ -2394,7 +2210,7 @@ def _main_impl(args) -> int:
     # disagrees with current cfg. A missing sidecar (first encounter
     # of an existing wav) just gets bound on the next synth — no
     # wipe needed because nothing has CHANGED yet.
-    from pipeline.render._voice_fingerprint import (  # noqa: PLC0415
+    from pipeline.render.shared.voice_fingerprint import (  # noqa: PLC0415
         maybe_wipe_stale_chunks as _voice_maybe_wipe,
     )
     _voice_maybe_wipe(candidate_narr_wav, fp_cfg)

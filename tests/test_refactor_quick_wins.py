@@ -179,16 +179,20 @@ class Libx264ThreadsCapWiringTests(unittest.TestCase):
             return f.read()
 
     def test_long_form_trim_passes_threads_3(self):
-        from pipeline.render import long_form
-        src = self._read(long_form)
-        # _trim_clip_letterbox has two encode paths — both should be capped.
+        # Post-2026-05-14: the trim function moved out of long_form.py
+        # into pipeline/render/shared/trim_letterbox.py as part of the
+        # 4-renderer-to-2-engine consolidation. Source-level grep test
+        # follows the code to its new home.
+        from pipeline.render.shared import trim_letterbox
+        src = self._read(trim_letterbox)
+        # trim_clip_letterbox has two encode paths — both should be capped.
         # Count occurrences of the libx264 + threads 3 pair in the trim function.
         # (Both branches sit inside the function; loose count is fine — the
         # critical thing is that there's no naked libx264 in the trim path.)
         self.assertIn('"-threads", "3"', src)
         self.assertGreaterEqual(
             src.count('"-threads", "3"'), 2,
-            "expected at least 2 trim-encode sites with -threads 3 in long_form.py",
+            "expected at least 2 trim-encode sites with -threads 3 in shared/trim_letterbox.py",
         )
 
     def test_footage_only_silent_video_jobs_pass_threads_3(self):

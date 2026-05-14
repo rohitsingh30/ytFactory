@@ -337,7 +337,7 @@ class RegenAudioCapsTests(unittest.TestCase):
             # this test pinned cache-skip behaviour using only
             # narration.wav presence; post-fix the sidecar is required
             # to PROVE the cached wav was bound to the current cfg.
-            from pipeline.render._voice_fingerprint import (
+            from pipeline.render.shared.voice_fingerprint import (
                 compute_fingerprint, write_sidecar,
             )
             write_sidecar(

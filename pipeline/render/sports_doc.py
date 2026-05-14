@@ -102,7 +102,7 @@ def _load_env(repo_root: Path) -> None:
     """Audit D3.48 — delegates to the shared loader so all three
     render entry points (long_form / sports_doc / footage_only) use
     the same parser, including outer-quote stripping."""
-    from pipeline.render._env_loader import load_dotenv_into_environ
+    from pipeline.render.shared.env_loader import load_dotenv_into_environ
     load_dotenv_into_environ(repo_root)
 
 
@@ -588,7 +588,7 @@ def _build_filler_video(
 
     list_txt = cache_dir / "_filler_concat.txt"
     # Audit Q2.25 — concat demuxer single-quote escape.
-    from ._concat_safe import concat_file_line  # noqa: PLC0415
+    from .shared.concat_safe import concat_file_line  # noqa: PLC0415
     list_txt.write_text("\n".join(concat_file_line(p.resolve()) for p in sequence))
     raw = cache_dir / "_filler_raw.mp4"
     _ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_txt), "-c", "copy", str(raw)])
@@ -635,7 +635,7 @@ def _overlay_clip_on_filler(
 
     list_txt = cache_dir / f"_ov_list_{at_s:.2f}.txt"
     # Audit Q2.25 — concat demuxer single-quote escape.
-    from ._concat_safe import concat_file_line  # noqa: PLC0415
+    from .shared.concat_safe import concat_file_line  # noqa: PLC0415
     list_txt.write_text("\n".join(concat_file_line(p.resolve()) for p in parts))
     _ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_txt), "-c", "copy", str(out)])
     for p in (head, tail):
@@ -716,7 +716,7 @@ def _splice_overlays_batch(
 
     list_txt = cache_dir / "_splice_list.txt"
     # Audit Q2.25 — concat demuxer single-quote escape.
-    from ._concat_safe import concat_file_line  # noqa: PLC0415
+    from .shared.concat_safe import concat_file_line  # noqa: PLC0415
     list_txt.write_text("\n".join(concat_file_line(p.resolve()) for p in parts))
     out = cache_dir / "spliced.mp4"
     _ffmpeg([
@@ -888,7 +888,7 @@ def _main_impl(args) -> int:
         "tts_chunk_target_chars": int(lf.get("tts_chunk_target_chars", 380)),
     }
     candidate_narr_wav = cache_dir / "narration.wav"
-    from pipeline.render._voice_fingerprint import (  # noqa: PLC0415
+    from pipeline.render.shared.voice_fingerprint import (  # noqa: PLC0415
         maybe_wipe_stale_chunks as _voice_maybe_wipe,
     )
     _voice_maybe_wipe(candidate_narr_wav, fp_cfg)

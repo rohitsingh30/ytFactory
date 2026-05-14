@@ -133,7 +133,8 @@ class EnvAndAdapterTests(unittest.TestCase):
         self.assertIn("ffmpeg failed", str(cm.exception))
 
     def test_atempo_calls_ffmpeg(self):
-        with local_tempdir() as tmp, patch.object(render_long_form, "_ffmpeg") as ff:
+        with local_tempdir() as tmp, \
+             patch("pipeline.render.shared.ffmpeg_helpers.run_ffmpeg") as ff:
             render_long_form._atempo(tmp / "in.wav", tmp / "out.wav", 0.85)
             self.assertIn("atempo=0.85", ff.call_args.args[0])
 
@@ -441,14 +442,14 @@ class VideoStageTests(unittest.TestCase):
         with local_tempdir() as tmp, \
              patch("subprocess.check_output",
                    side_effect=subprocess.CalledProcessError(1, "ffprobe")), \
-             patch.object(render_long_form, "_ffmpeg") as ff:
+             patch("pipeline.render.shared.trim_letterbox.run_ffmpeg") as ff:
             render_long_form._trim_clip_letterbox(tmp / "src.mp4", 0, 5, tmp / "out.mp4")
         self.assertIn("split=2", " ".join(map(str, ff.call_args.args[0])))
 
     def test_trim_exact_match_stream_copies(self):
         with local_tempdir() as tmp, \
              patch("subprocess.check_output", return_value=b"1920\n1080\n"), \
-             patch.object(render_long_form, "_ffmpeg") as ff:
+             patch("pipeline.render.shared.trim_letterbox.run_ffmpeg") as ff:
             render_long_form._trim_clip_letterbox(tmp / "src.mp4", 1, 4, tmp / "out.mp4")
         args = ff.call_args.args[0]
         self.assertIn("copy", args)
@@ -457,14 +458,15 @@ class VideoStageTests(unittest.TestCase):
     def test_trim_aspect_match_plain_scale(self):
         with local_tempdir() as tmp, \
              patch("subprocess.check_output", return_value=b"1280\n720\n"), \
-             patch.object(render_long_form, "_ffmpeg") as ff:
+             patch("pipeline.render.shared.trim_letterbox.run_ffmpeg") as ff:
             render_long_form._trim_clip_letterbox(tmp / "src.mp4", 0, 5, tmp / "out.mp4")
         joined = " ".join(map(str, ff.call_args.args[0]))
         self.assertIn("scale=1920:1080", joined)
         self.assertNotIn("gblur", joined)
 
     def test_trim_aspect_mismatch_full_chain_and_grade_bypasses_shortcuts(self):
-        with local_tempdir() as tmp, patch.object(render_long_form, "_ffmpeg") as ff:
+        with local_tempdir() as tmp, \
+             patch("pipeline.render.shared.trim_letterbox.run_ffmpeg") as ff:
             with patch("subprocess.check_output", return_value=b"640\n480\n"):
                 render_long_form._trim_clip_letterbox(tmp / "src.mp4", 0, 5, tmp / "out1.mp4")
             with patch("subprocess.check_output", return_value=b"1920\n1080\n"):

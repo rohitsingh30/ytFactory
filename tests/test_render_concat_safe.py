@@ -5,14 +5,14 @@ which silently corrupted any path containing a `'` character. The
 ffmpeg parser then failed mid-render with a cryptic "Unable to
 parse line N" error pointing at the FOLLOWING line.
 
-Tests exercise: pipeline/render/_concat_safe.py
+Tests exercise: pipeline/render/shared/concat_safe.py
 """
 from __future__ import annotations
 
 import unittest
 from pathlib import Path
 
-from pipeline.render._concat_safe import concat_file_line, escape_concat_path
+from pipeline.render.shared.concat_safe import concat_file_line, escape_concat_path
 
 
 class TestEscapeConcatPath(unittest.TestCase):
