@@ -161,6 +161,33 @@ BANNED_STOCK_ANECDOTES: tuple[tuple[str, str], ...] = (
 )
 
 
+# 2026-05-14 audit add-on: stock essay-style openers that LLMs lean
+# on when the source material is sparse and they have nothing
+# specific to say. Two of the 5 long-forms in the audit window
+# (mystoriesanimated/0c05c335 + 1b5002ec — both r/nosleep "If you
+# can see this..." renders) opened with these meditation-essay
+# patterns instead of the actual horror story. The rewriter learnt
+# to fall back to a TED-Talk meditation when the source post is
+# too short for a 30-min expansion.
+#
+# Soft-warn (not hard-fail) — there are legitimate philosophical
+# topics that legitimately open this way; a soft signal lets the
+# operator notice + retry without blocking content that's actually
+# meditation by design.
+ESSAY_DRIFT_OPENERS: tuple[tuple[str, str], ...] = (
+    ("imagine a completely ordinary", "stock 'imagine an ordinary day' opener"),
+    ("imagine an ordinary", "stock 'imagine an ordinary day' opener"),
+    ("right now, wherever you are", "stock 'right now wherever you are' opener"),
+    ("a person sits somewhere", "stock 'a person sits somewhere' framing"),
+    ("what if i told you", "stock 'what if I told you' lecture opener"),
+    ("scrolling through your phone right now", "stock 'scrolling through your phone' opener"),
+    ("attention is the new currency", "stock 'attention is currency' essay framing"),
+    ("the currency of attention", "stock 'currency of attention' essay framing"),
+    ("we live in a world where", "stock TED-talk 'we live in a world' opener"),
+    ("there's a moment in everyone's life", "stock 'moment in everyone's life' opener"),
+)
+
+
 # ---------- panel hold cap ------------------------------------------------
 
 # A long-form panel held for >12 s without animation reads as dead.
@@ -435,6 +462,145 @@ def check_no_stock_anecdotes(narration: str) -> list[Violation]:
     return []
 
 
+def check_no_essay_drift(narration: str) -> list[Violation]:
+    """C7 — meditation-essay opener drift (added 2026-05-14).
+
+    Soft-warn if the narration's opening contains any phrase from
+    ``ESSAY_DRIFT_OPENERS``. These are stock LLM crutches the
+    rewriter falls back to when the source material is too sparse
+    to fill the requested length — it pads with TED-Talk-style
+    meditation instead of admitting the source can't carry the
+    duration.
+
+    Caught by the 2026-05-13 audit on the r/nosleep 'If you can see
+    this' renders — both shipped 16-23 minute meditation essays
+    completely unrelated to the actual horror post they were
+    nominally based on.
+
+    Soft (not hard) because a topic that GENUINELY warrants a
+    philosophical opener (e.g. 'the philosophy of free will' on a
+    cosmosdecoded long-form) shouldn't be blocked. Operator sees
+    the warning and decides whether to re-prompt with a stricter
+    source-fidelity instruction.
+    """
+    if not narration:
+        return []
+    # Check the FIRST 300 characters — opener-only signal. A later
+    # mention of "imagine an ordinary day" mid-narration is fine
+    # rhetorical scaffolding.
+    opener = narration[:300].lower()
+    hits: list[str] = []
+    for phrase, label in ESSAY_DRIFT_OPENERS:
+        if phrase in opener:
+            hits.append(label)
+    if hits:
+        return [Violation(
+            code="essay_drift_opener",
+            severity="soft",
+            message=(
+                f"narration opens with stock essay-drift phrase(s): "
+                f"{'; '.join(hits)}. The rewriter may have padded a "
+                f"sparse source with TED-Talk meditation. Verify "
+                f"narration is actually grounded in the source."
+            ),
+        )]
+    return []
+
+
+def _extract_anchor_words(text: str, *, min_len: int = 4) -> set[str]:
+    """Pull lowercase content-words from ``text`` that are likely
+    entity/topic anchors.
+
+    Heuristic: split on whitespace + punctuation, lowercase, keep
+    tokens of length ≥ ``min_len`` that are NOT stop-words. Numbers
+    are kept (years, counts, proper-noun-like digits).
+
+    Used by :func:`check_source_fidelity` as a poor-man's NER. Avoids
+    bringing in spaCy / NLTK as a hard dep.
+    """
+    if not text:
+        return set()
+    # Strip basic punctuation + lowercase + split.
+    cleaned = re.sub(r"[^\w\s]", " ", text.lower())
+    tokens = cleaned.split()
+    return {
+        t for t in tokens
+        if len(t) >= min_len and t not in _STOP_WORDS
+    }
+
+
+# Stop-words to exclude from the anchor set — top-frequency English
+# function words that would dominate any overlap calculation. Not
+# exhaustive (no NLP lib) — enough to filter the worst noise.
+_STOP_WORDS: frozenset[str] = frozenset({
+    "about", "after", "again", "against", "around", "because",
+    "before", "being", "between", "could", "doing", "down",
+    "during", "every", "from", "have", "having", "into",
+    "more", "most", "much", "never", "other", "should", "since",
+    "some", "still", "such", "than", "that", "their", "them",
+    "then", "there", "these", "they", "this", "those", "through",
+    "under", "until", "very", "what", "when", "where", "which",
+    "while", "with", "would", "your", "just", "like", "into",
+    "only", "over", "even", "also", "back", "down", "your",
+    "yourself", "ourselves", "themselves",
+})
+
+
+def check_source_fidelity(
+    narration: str, raw_body: str | None,
+    *, min_overlap_frac: float = 0.30,
+    min_source_words: int = 30,
+) -> list[Violation]:
+    """C8 — source-fidelity check (added 2026-05-14).
+
+    Soft-warn when fewer than ``min_overlap_frac`` of the anchor
+    words from ``raw_body`` appear in ``narration``. Indicates the
+    rewriter has wandered off the source material.
+
+    Skipped when:
+      * ``raw_body`` is None or blank (LLM-generated topic, no
+        source to compare against).
+      * Source body is shorter than ``min_source_words`` content
+        words (too sparse to compute meaningful overlap — would
+        produce false positives).
+
+    The 30% threshold is conservative; legitimate creative
+    expansion typically retains ≥ 50% of the source's anchor
+    words even when paraphrased heavily. The audit case
+    (r/nosleep 'If you can see this' rendered as 'attention is
+    currency' essay) had ZERO overlap with the source post's
+    actual entities (the chain message, the recipient, the
+    implied warning).
+
+    Soft severity — operator judgment. A creative-fiction long-form
+    might intentionally diverge from a sparse prompt; we don't want
+    a hard block on every render.
+    """
+    if not narration or not raw_body:
+        return []
+    source_anchors = _extract_anchor_words(raw_body)
+    if len(source_anchors) < min_source_words:
+        # Source too sparse to compute meaningful overlap.
+        return []
+    narration_anchors = _extract_anchor_words(narration)
+    overlap = source_anchors & narration_anchors
+    overlap_frac = len(overlap) / len(source_anchors)
+    if overlap_frac < min_overlap_frac:
+        sample_missing = sorted(source_anchors - narration_anchors)[:8]
+        return [Violation(
+            code="source_fidelity_low",
+            severity="soft",
+            message=(
+                f"narration overlaps only {len(overlap)}/{len(source_anchors)} "
+                f"({overlap_frac:.0%}) of source anchor words; rewriter may "
+                f"have wandered off-source. Min expected: "
+                f"{min_overlap_frac:.0%}. Sample missing terms: "
+                f"{', '.join(sample_missing) if sample_missing else '(none)'}."
+            ),
+        )]
+    return []
+
+
 # ---------- top-level validator ------------------------------------------
 
 
@@ -443,6 +609,7 @@ def validate_long_form_envelope(
     *,
     target_duration_s: int | float,
     niche: str | None = None,
+    raw_body: str | None = None,
 ) -> list[Violation]:
     """Run every check against a long-form ``ScriptEnvelope``.
 
@@ -454,6 +621,12 @@ def validate_long_form_envelope(
     * ``ScriptEnvelope`` with ``.long_form`` populated (new path)
     * dict with ``narration`` + ``sections`` + ``panels`` keys (legacy
       narration JSON shape on disk)
+
+    Args:
+        raw_body: Source post body text (e.g. ``raw_story["body"]``).
+            When provided, enables ``check_source_fidelity``. Pass
+            None for LLM-only sources where there's no body to
+            compare against.
     """
     long_form = _resolve_long_form(envelope)
     if long_form is None:
@@ -470,6 +643,8 @@ def validate_long_form_envelope(
     out.extend(check_word_count(sections, target_duration_s))
     out.extend(check_panel_holds(panels))
     out.extend(check_no_stock_anecdotes(narration))
+    out.extend(check_no_essay_drift(narration))
+    out.extend(check_source_fidelity(narration, raw_body))
     if out:
         _logger.warning(
             "validate_long_form_envelope: %d violations (%d hard, %d soft)",

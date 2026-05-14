@@ -386,3 +386,177 @@ def test_long_form_contract_error_carries_violations():
     err = critic.LongFormContractError(vios)
     assert err.violations == vios
     assert "bad" in str(err)
+
+
+# ---------- C7: essay-drift opener (added 2026-05-14) -------------------
+#
+# Regression for the r/nosleep 'If you can see this' renders that
+# shipped 16-23 minute meditation essays instead of the actual
+# horror story. See pipeline_bug_catalogue_v2_2026-05-14.html.
+
+
+def test_essay_drift_flags_imagine_ordinary_opener():
+    narration = (
+        "Imagine a completely ordinary afternoon. A person sits "
+        "somewhere — maybe on a couch, maybe at a desk. The room is "
+        "quiet. Nothing dramatic is happening. Just a screen glowing."
+    )
+    out = critic.check_no_essay_drift(narration)
+    assert len(out) == 1
+    assert out[0].code == "essay_drift_opener"
+    assert out[0].severity == "soft"
+    assert "imagine" in out[0].message.lower()
+
+
+def test_essay_drift_flags_right_now_wherever_opener():
+    narration = (
+        "Right now, wherever you are, something small is happening. "
+        "Maybe you're sitting on a couch, holding your phone."
+    )
+    out = critic.check_no_essay_drift(narration)
+    assert len(out) == 1
+    assert "right now" in out[0].message.lower()
+
+
+def test_essay_drift_passes_real_narrative_opener():
+    # Actual r/nosleep horror opener — should NOT trigger.
+    narration = (
+        "I moved into the Cedar Street apartment on March 3rd. It "
+        "was a second-floor unit above a closed flower shop, with "
+        "creaky stairs and a mailbox that leaned slightly to the left."
+    )
+    out = critic.check_no_essay_drift(narration)
+    assert out == []
+
+
+def test_essay_drift_only_checks_opener_not_mid_text():
+    # Phrase appearing mid-narration should NOT trigger — opener-only signal.
+    # Pad opener to push the phrase past 300 chars.
+    prefix = "I moved into the Cedar Street apartment on March 3rd. " * 8
+    narration = (
+        prefix
+        + "Then we sat down and I had to imagine a completely ordinary "
+        + "evening, before the noise started. " * 3
+    )
+    # The phrase appears at chars 700+, well past the 300-char opener band.
+    assert narration.lower().find("imagine") > 300, (
+        f"test setup wrong: phrase at {narration.lower().find('imagine')} "
+        f"is within opener band"
+    )
+    out = critic.check_no_essay_drift(narration)
+    assert out == []
+
+
+def test_essay_drift_empty_narration_returns_empty():
+    assert critic.check_no_essay_drift("") == []
+    assert critic.check_no_essay_drift(None) == []
+
+
+# ---------- C8: source-fidelity check (added 2026-05-14) ----------------
+
+
+def test_source_fidelity_flags_low_overlap():
+    raw_body = (
+        "I work as a junior project coordinator at Acme Software in "
+        "Seattle. During the pandemic our team went fully remote and "
+        "Zoom meetings became routine. On Tuesday March 15 my colleague "
+        "Laura Chen vanished from a meeting. The recording shows her "
+        "stand up, walk toward the door, and disappear off-camera. "
+        "Police searched her apartment in Capitol Hill. No trace. "
+        "Her laptop was still logged in showing the meeting feed."
+    )
+    # Generic narration with NO specific entities from the source.
+    narration = (
+        "Imagine a completely ordinary afternoon. The hum of an "
+        "appliance. Light from a window. Words passing by faster than "
+        "they can be remembered. This is the environment most of us "
+        "live in every single day. We notice, then we don't notice. "
+        "Then something feels off. Then nothing feels real anymore."
+    )
+    out = critic.check_source_fidelity(narration, raw_body)
+    assert len(out) == 1
+    assert out[0].code == "source_fidelity_low"
+    assert out[0].severity == "soft"
+    assert "%" in out[0].message  # mentions overlap percentage
+
+
+def test_source_fidelity_passes_high_overlap():
+    raw_body = (
+        "I work as a junior project coordinator at Acme Software in "
+        "Seattle. During the pandemic our team went fully remote and "
+        "Zoom meetings became routine. On Tuesday March 15 my colleague "
+        "Laura Chen vanished from a meeting. The recording shows her "
+        "stand up, walk toward the door, and disappear off-camera. "
+        "Police searched her apartment in Capitol Hill. No trace. "
+        "Her laptop was still logged in showing the meeting feed."
+    )
+    # Faithful expansion that names the entities + scene from the source.
+    narration = (
+        "Laura Chen worked as a junior project coordinator for Acme "
+        "Software, based in Seattle. The pandemic had pushed every "
+        "team fully remote. By that Tuesday in March she was on a "
+        "routine Zoom meeting. Mid-call, she stood up, walked toward "
+        "the door, and disappeared off-camera. The recording captured "
+        "the moment. Police searched her apartment in Capitol Hill "
+        "but found no trace. Her laptop remained logged in to the "
+        "meeting feed long after she vanished."
+    )
+    out = critic.check_source_fidelity(narration, raw_body)
+    assert out == []
+
+
+def test_source_fidelity_skipped_when_body_is_none():
+    # LLM-only source (no reddit URL) — no body to compare against.
+    narration = "Some narration."
+    out = critic.check_source_fidelity(narration, None)
+    assert out == []
+
+
+def test_source_fidelity_skipped_when_body_too_sparse():
+    # Source body too short to compute meaningful overlap.
+    narration = "Some narration."
+    short_body = "If you can see this, keep reading."
+    out = critic.check_source_fidelity(narration, short_body)
+    assert out == []
+
+
+def test_source_fidelity_threshold_configurable():
+    # 50% threshold with a body whose overlap is 45% → fail.
+    raw_body = " ".join(f"entity{i:03d}" for i in range(40))
+    narration = " ".join(f"entity{i:03d}" for i in range(18))  # 18/40 = 45%
+    out = critic.check_source_fidelity(
+        narration, raw_body, min_overlap_frac=0.50,
+    )
+    assert len(out) == 1
+    assert out[0].code == "source_fidelity_low"
+
+    # Same data with a 30% threshold → pass.
+    out2 = critic.check_source_fidelity(
+        narration, raw_body, min_overlap_frac=0.30,
+    )
+    assert out2 == []
+
+
+def test_validate_envelope_includes_source_fidelity_when_body_provided():
+    """End-to-end: validator picks up the new check when raw_body is passed."""
+    # Use the legacy-dict envelope shape to keep the test light.
+    env = {
+        "narration": "Imagine a completely ordinary afternoon.",
+        "sections": [{"narration": "Imagine a completely ordinary afternoon."}],
+        "panels": [],
+    }
+    raw_body = " ".join(f"specifictoken{i}" for i in range(50))
+    # Body has 50 unique anchors; narration has none → 0% overlap.
+    out = critic.validate_long_form_envelope(
+        env, target_duration_s=120, niche=None, raw_body=raw_body,
+    )
+    codes = {v.code for v in out}
+    # Both essay-drift AND source-fidelity should fire.
+    assert "essay_drift_opener" in codes
+    assert "source_fidelity_low" in codes
+
+
+def test_extract_anchor_words_empty_input():
+    # Coverage for the early-return branch.
+    assert critic._extract_anchor_words("") == set()
+    assert critic._extract_anchor_words(None) == set()

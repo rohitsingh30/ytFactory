@@ -939,6 +939,13 @@ def rewrite_long_form(
     # parse failures.
     violations = _critic.validate_long_form_envelope(
         env, target_duration_s=duration_s, niche=niche,
+        # Pipe the source body so the source-fidelity validator
+        # (added 2026-05-14) can flag rewriter drift. Per the audit,
+        # the r/nosleep 'If you can see this' renders had ZERO
+        # overlap with the source post — they shipped 16-23 minute
+        # 'attention is currency' meditations instead of the actual
+        # horror story.
+        raw_body=body,
     )
     hard = [v for v in violations if v.severity == "hard"]
     soft = [v for v in violations if v.severity == "soft"]
