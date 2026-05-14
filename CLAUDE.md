@@ -553,6 +553,84 @@ the mirror behind its own env var.
 
 ---
 
+## Render engines — 4-renderer-to-2-engine consolidation (2026-05-14 — FOUNDATION SHIPPED)
+
+The renderer subsystem is being collapsed from 4 per-kind modules
+(`shorts.py`, `long_form.py`, `sports_doc.py`, `footage_only.py`)
+into 2 pluggable engines (`short` + `long`) backed by 7 plugin slots
+(`audio` / `timeline` / `visualize` / `overlays` / `music` /
+`compose`, plus a registry helper).
+
+Status: **foundation shipped, bigbang merge pending**. Both old
+renderers AND new engines coexist in the tree. The cloud worker
+runs the legacy path by default; flip to engines via
+`YTFACTORY_USE_ENGINES=1`.
+
+### Where things live
+
+- **Single source of truth doc:** [`docs/render_engines_2026.md`](./docs/render_engines_2026.md)
+- **Public entry:** `pipeline.render.video.render_via_engines(spec, script, work_dir, out_path)`
+- **Engines:** `pipeline/render/{short,long}_engine.py` + `engine.py` dispatcher
+- **Plugin slots:** `pipeline/render/{audio,timeline,visualize,overlays,music,compose}/`
+- **Typed Protocols + dataclasses + registry:** `pipeline/render/contracts.py`
+- **Extended spec:** `pipeline/render/spec.py` — 9 nested config dataclasses
+  (`TtsConfig`, `CaptionStyleConfig`, `MusicPolicyConfig`, …) plus 6
+  new top-level fields (`music_policy`, `lower_thirds`,
+  `chapter_cards`, `overlay_timeline`, `critic_loop`, `tone`).
+- **Shared library:** `pipeline/render/shared/` (`ffmpeg_helpers`,
+  `trim_letterbox`, `watermark`, `voice_fingerprint`, `env_loader`,
+  `concat_safe`).
+- **NEW Cloud Run service:** `cloud/asr-whisper/` — faster-whisper on
+  L4 for word-aligned narration. Used by both engines.
+- **YAML migration script:** `scripts/migrate_channel_yamls.py`
+  rewrites every channel + variant + per-channel YAML to the new
+  `defaults: { short: {...}, long: {...} }` shape. Comment
+  preservation is partial — bigbang PR needs per-channel manual
+  review before applying.
+- **Per-plugin tests:** `tests/render/<slot>/test_<plugin>.py`
+- **Engine integration goldens:** `tests/render/test_*_engine_golden.py`
+  with fixture mode (CI default) + cloud mode
+  (`YTFACTORY_GOLDEN_CLOUD=1`).
+- **Tolerance helpers:** `tests/render/golden_assertions.py` (PSNR,
+  LUFS, duration, structural).
+
+### Key design choices (per user direction 2026-05-14)
+
+- **Two engines** (not one, not four). Single-pass vs chunked TTS is
+  the real engine boundary; everything else is a plugin slot.
+- **Big-bang single PR** (not strangler) — golden-corpus-gated.
+- **Force-cutover channel YAMLs** (no transition period; old keys
+  deleted in the same PR).
+- **Hard-cutover legacy CLI** to `python -m pipeline.render
+  --kind=...`.
+- **Critic loop always opt-in** (no defaults-by-kind; user picks
+  every render via `spec.critic_loop`).
+- **2 engine goldens + per-plugin unit tests** (engine is plugin-
+  agnostic; Goldens use REAL canonical plugins).
+- **Cloud whisper for BOTH engines** (short → asr_beats, long →
+  asr_anchors).
+- **Tolerance bands** for goldens (not exact byte hash) — stable
+  across cloud model updates.
+
+### What's left for the bigbang PR
+
+1. Real plugin impls for the remaining visual_modes
+   (`ai_beat_slideshow`, `motion_clips`, `hybrid_beat_footage`,
+   `footage_windows`, `archival_shotlist`, `footage_filler`),
+   overlay impls (`lower_third`, `chapter_card`,
+   `anchored_footage`), and music impls (`section_mood`).
+2. Deploy `cloud/asr-whisper/` to Cloud Run + set
+   `CLOUDRUN_ASR_URL` on the worker.
+3. Per-channel YAML migration with manual comment review.
+4. Wizard UI surfaces the new knobs (`web-next/app/app/create`).
+5. Flip `YTFACTORY_USE_ENGINES=1` on the cloud worker, observe a
+   week of canaries.
+6. Delete `shorts.py`, `long_form.py`, `sports_doc.py`,
+   `footage_only.py`, update remaining callers (script shims, doc
+   references), bigbang merge.
+
+---
+
 ## Layout reference
 
 Per-channel layout is the canonical 2026-05-05 spec. **Use

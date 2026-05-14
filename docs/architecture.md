@@ -329,3 +329,22 @@ job. No tunnels, no localhost, no port forwards.
   buying a second machine. Acceptable for a personal product.
 - **Azure OpenAI is the chat dependency.** If their endpoint is down,
   chat is down. We could add Anthropic API as a fallback later.
+
+## Render engines (2026-05-14 consolidation)
+
+The renderer subsystem has been collapsed from 4 per-kind modules
+(`shorts.py`, `long_form.py`, `sports_doc.py`, `footage_only.py`)
+into 2 pluggable engines (`short` + `long`) backed by 7 plugin slots
+(`audio` / `timeline` / `visualize` / `overlays` / `music` / `compose`).
+
+Full architecture: [`docs/render_engines_2026.md`](./render_engines_2026.md).
+
+Channel YAMLs use the new `defaults: { short: {...}, long: {...} }`
+shape; every spec field is user-overridable per render via the
+wizard (`pipeline/schemas/customization.py`). New Cloud Run service:
+`ytfactory-asr-whisper` (cloud/asr-whisper/) for word-aligned
+narration via faster-whisper.
+
+Cutover is env-gated — `YTFACTORY_USE_ENGINES=1` on the cloud worker
+flips from the legacy subprocess path to the new engine path. Both
+paths coexist until the bigbang PR deletes the legacy renderers.

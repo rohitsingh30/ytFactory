@@ -20,6 +20,11 @@ We have the parallelism. We don't use it. Today's batch render flow:
 
 ```
 for slug in queue:
+    # Post-2026-05-14: parallel-render dispatches via the legacy
+    # renderer subprocess by default. To run via the new pluggable
+    # engines instead, set YTFACTORY_USE_ENGINES=1 in your shell —
+    # the engine path goes through pipeline.render.video.render_via_engines.
+    # Both modes produce the same OUTPUT_MANIFEST line.
     python -m pipeline.render.shorts --channel cosmosdecoded --slug $slug
 ```
 

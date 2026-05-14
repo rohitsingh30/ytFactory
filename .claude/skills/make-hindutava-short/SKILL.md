@@ -30,7 +30,10 @@ The output is one or two JSON files —
 `hindutavaanimated/narrations/<slug>.json` (always) and
 `hindutavaanimated/cast/<slug>.json` (only if the story has named
 characters that need a per-story face lock). Stages 4-7 (TTS, image
-gen, compose) live in `pipeline.render.shorts` via
+gen, compose) live in `pipeline.render.shorts` via the legacy renderer
+(post-2026-05-14: also `pipeline.render.short_engine` via the new
+pluggable engine — flip via `YTFACTORY_USE_ENGINES=1`; see
+[`docs/render_engines_2026.md`](../../../docs/render_engines_2026.md)).
 `scripts/make_shorts.py`, not in this skill.
 
 ## How to run it

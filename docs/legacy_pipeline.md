@@ -1243,3 +1243,23 @@ entry's URL to `pull_backgrounds.py` to actually download + slice.
 | `pipeline/critic.py` | Post-render auto-critique + regen-weak-beats loop. |
 | `pipeline/llm.py` | `claude -p` subprocess wrapper for all autonomous stages. |
 
+
+---
+
+## Post-2026-05-14: render-engine consolidation
+
+This doc covers the LEGACY `scripts/make_shorts.py` →
+`pipeline.render.shorts` chain. As of 2026-05-14 a parallel
+**pluggable engine architecture** ships alongside it:
+
+- 2 engines (`short`, `long`) replace the 4 legacy renderers
+- 7 plugin slots (audio / timeline / visualize / overlays / music /
+  compose / registry) — every choice is a typed `RenderSpec` field
+- New Cloud Run service `cloud/asr-whisper/` (faster-whisper) for
+  word-aligned narration
+- Per-channel YAMLs migrate to `defaults: { short: {...}, long: {...} }`
+
+Full architecture: [`docs/render_engines_2026.md`](./render_engines_2026.md).
+
+The cutover is env-gated (`YTFACTORY_USE_ENGINES=1`); both paths
+coexist until the bigbang PR deletes the legacy renderers.

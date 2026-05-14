@@ -32,6 +32,10 @@ The output is two or three JSON files —
 panel list), and `hindutavaanimated/cast/<slug>.json` (only if the
 story has named characters that need a per-story face lock). Stages
 4-7 (TTS, image gen, compose) live in `pipeline.render.long_form` via
+the existing legacy renderer (and post-2026-05-14 also in
+`pipeline.render.long_engine` via the new pluggable engine — flip
+via `YTFACTORY_USE_ENGINES=1`; see
+[`docs/render_engines_2026.md`](../../../docs/render_engines_2026.md)).
 `historyrecapped/scripts/render_long_form.py`, not in this skill.
 
 ## How to run it
