@@ -1575,6 +1575,43 @@ def _make_short_impl(
             character_description = ""
     opening_directives = cfg.get("opening_image_directives")
 
+    # Era anchor (added 2026-05-14 per Phase 4b — the audit found
+    # 4 of 6 baghdad-mongols-1258 renders showed WW1 trench infantry
+    # because nothing anchored the diffusion model to 13th-century
+    # costume). When the script JSON has metadata.era_anchor set to a
+    # known taxonomy key (pipeline/era_taxonomy.yaml), prepend
+    # "[ERA — <costume tokens>]" to every panel prompt via
+    # build_full_prompt's era_anchor_prefix kwarg. Unknown / missing
+    # era_anchor → no prefix (legacy behaviour preserved). Soft
+    # warning (not hard fail) so existing scripts without era_anchor
+    # keep working until the rewrite prompt teaches the LLM to emit it.
+    era_anchor_prefix: str | None = None
+    script_path_for_meta = _find_script_path(slug)
+    if script_path_for_meta is not None:
+        try:
+            _meta_raw = json.loads(script_path_for_meta.read_text())
+            _meta = (_meta_raw.get("metadata") or {}) if isinstance(_meta_raw, dict) else {}
+            _era_key = _meta.get("era_anchor") or _meta.get("era_lock")
+            if _era_key:
+                from pipeline import era_anchor as _era_mod  # noqa: PLC0415
+                _resolved = _era_mod.era_prefix_for(_era_key)
+                if _resolved:
+                    era_anchor_prefix = _resolved
+                    print(
+                        f"[era] using era anchor {_era_key!r} → "
+                        f"{era_anchor_prefix[:80]!r}..."
+                    )
+                else:
+                    _suggestions = _era_mod.closest_match(str(_era_key))
+                    print(
+                        f"[era] WARNING: metadata.era_anchor={_era_key!r} "
+                        f"not in pipeline/era_taxonomy.yaml; falling back "
+                        f"to no era prefix. Closest matches: "
+                        f"{_suggestions or '(none — see era_taxonomy.yaml for full list)'}"
+                    )
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[era] could not parse script metadata: {e}")
+
     print(f"\n=== make_short: {slug} ===")
     print(f"text:      {text[:80]}{'...' if len(text) > 80 else ''}")
     print(
@@ -2024,6 +2061,7 @@ def _make_short_impl(
                     character_description=routed_desc,
                     key_visual=key_visual,
                     scene=scene,
+                    era_anchor_prefix=era_anchor_prefix,
                 )
                 print(f"     [{i+1}/{len(beat_list)}] {b.duration:.2f}s — {scene[:60]}")
                 animation.generate_clip(
@@ -2386,6 +2424,7 @@ def _make_short_impl(
                     character_description=routed_desc,
                     key_visual=key_visual,
                     scene=scene,
+                    era_anchor_prefix=era_anchor_prefix,
                     weighted=(image_provider != "mflux"),
                 )
 
@@ -2879,6 +2918,7 @@ def _make_short_impl(
                             character_description=routed_desc,
                             key_visual=kv,
                             scene=scene,
+                            era_anchor_prefix=era_anchor_prefix,
                             weighted=(image_provider != "mflux"),
                         )
                         p = cache / f"img_{i:02d}.png"

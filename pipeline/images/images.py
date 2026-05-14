@@ -285,6 +285,7 @@ def build_full_prompt(
     character_description: str | None,
     key_visual: str | None,
     scene: str,
+    era_anchor_prefix: str | None = None,
     key_visual_weight: float = 1.4,
     weighted: bool = True,
 ) -> str:
@@ -292,7 +293,15 @@ def build_full_prompt(
 
     Order matters — earlier tokens get more attention. Layout:
 
-        {character_description}, ({key_visual}:1.4), {scene}. {style_prefix}
+        {era_anchor_prefix} {character_description}, ({key_visual}:1.4), {scene}. {style_prefix}
+
+    `era_anchor_prefix` (when supplied) leads with `[ERA — <costume
+    tokens>]` to anchor the historical period BEFORE any character
+    or scene token can drift modern. Added 2026-05-14 to fix the
+    Mongols-1258 → WW1-trench bug surfaced by the audit
+    (docs/pipeline_bug_catalogue_v2_2026-05-14.html). Caller
+    derives the prefix via
+    ``pipeline/era_anchor.py::era_prefix_for(metadata.era_anchor)``.
 
     `character_description` first establishes identity (Principle #2);
     `key_visual` is weighted up so the punchline survives token dropoff
@@ -305,6 +314,8 @@ def build_full_prompt(
     position alone.
     """
     parts: list[str] = []
+    if era_anchor_prefix and era_anchor_prefix.strip():
+        parts.append(era_anchor_prefix.strip())
     if character_description and character_description.strip():
         parts.append(character_description.strip())
     if key_visual and key_visual.strip():

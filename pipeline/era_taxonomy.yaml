@@ -1,0 +1,225 @@
+# Era taxonomy for historyrecapped image-gen anchors.
+#
+# Each entry maps a stable kebab-case era key to canonical costume +
+# setting tokens that get prepended to every panel prompt as
+# "[ERA — <costume tokens>]" via pipeline/llm/prompts.py +
+# pipeline/images/images.py::build_full_prompt.
+#
+# Why: the 2026-05-13 audit (docs/pipeline_bug_catalogue_v2_2026-05-14.html)
+# found 4 of 6 baghdad-mongols-1258 renders showed WW1 trench infantry
+# in green uniforms with bolt-action rifles. The image gen model sees
+# "soldiers" and defaults to the most common modern depiction. An era
+# anchor with concrete costume + period tokens dominates the diffusion
+# attention away from the modern default.
+#
+# Source-of-truth fields per entry:
+#
+#   tokens   — the prompt fragment prepended to image_gen prompts.
+#              Be specific about clothing, weapons, helmets, mounts.
+#              Avoid abstract era names ("medieval", "ancient") — those
+#              are too broad to anchor.
+#
+#   negatives — anti-prompt fragments appended to the suffix to suppress
+#              common drift modes (e.g. "no rifles" for medieval, "no
+#              automobiles" for pre-1900 eras). These are advisory; the
+#              model only weakly respects negative tokens in distilled
+#              FLUX.2 klein, so the POSITIVE tokens above carry most of
+#              the signal.
+#
+#   description — operator-facing summary (shown in errors, never sent
+#              to the LLM).
+#
+# Add new eras as needed. Validator (pipeline/llm/script_check.py)
+# accepts any key from this file when historyrecapped scripts emit
+# metadata.era_anchor. Scripts emitting an unknown key trigger a soft
+# warning surfacing the closest taxonomy match (so operators see the
+# spelling drift early).
+
+eras:
+
+  13c-mongol-yuan-warband:
+    description: |
+      13th-century Mongol horde, Yuan-dynasty period (1206-1368).
+      Hulagu Khan's siege of Baghdad (1258), Genghis Khan's earlier
+      campaigns, Kublai Khan's China conquest.
+    tokens: |
+      13th-century Mongol cavalry, lamellar leather armor, fur-trimmed
+      conical helmet, composite recurve bow on the back, curved sabre,
+      Yuan-dynasty silk banners, mounted on stocky steppe horses, dust
+      and steppe-grass in the air, no rifles, no firearms.
+    negatives: |
+      no rifles, no firearms, no green uniforms, no WW1 helmets,
+      no modern boots, no automobiles, no European medieval knights,
+      no Crusader iconography.
+
+  12c-norman-knight-mailcoat:
+    description: |
+      12th-century Norman / European knight, mail coat era. Crusades,
+      Henry II, Becket. Pre-plate-armor.
+    tokens: |
+      12th-century European knight, hauberk mail coat to the knee, conical
+      Norman helmet with nasal guard, kite shield, straight sword, surcoat
+      bearing a heraldic charge, mounted destrier with caparison, no plate
+      armor, no firearms.
+    negatives: |
+      no plate armor, no Renaissance fashion, no firearms, no Mongols.
+
+  1c-roman-legion-segmentata:
+    description: |
+      1st-century Roman legion, lorica segmentata era. Imperial Rome,
+      pre-3rd-century crisis. Julio-Claudian + Flavian dynasties.
+    tokens: |
+      1st-century Roman legionary, lorica segmentata plate armor over
+      red tunic, scutum rectangular shield with curved profile, gladius
+      short sword, Imperial Gallic helmet with neck guard, hobnailed
+      caligae sandals, marching in tight formation, SPQR aquila standard,
+      no medieval knights, no firearms.
+    negatives: |
+      no medieval armor, no firearms, no chainmail (legionaries wore
+      segmented plate, not mail), no horned helmets.
+
+  1c-roman-republic-toga:
+    description: |
+      Late Roman Republic / early Empire civilian. Cicero's Senate,
+      Augustus, Cleopatra-era diplomacy. NOT military.
+    tokens: |
+      1st-century BC Roman senator, white wool toga praetexta with
+      purple stripe, leather sandals, marble columns of the Forum,
+      olive-skinned, short hair combed forward, scroll in hand, no armor,
+      no medieval clothing.
+    negatives: |
+      no medieval, no Renaissance, no armor.
+
+  16c-tudor-court:
+    description: |
+      16th-century Tudor English court. Henry VIII, Elizabeth I, the
+      Reformation. Pre-stuart, post-Wars-of-the-Roses.
+    tokens: |
+      16th-century Tudor court attire, doublet and hose, ruff collar,
+      slashed sleeves with gold embroidery, ermine-trimmed cloak,
+      flat velvet cap with feather, oak-paneled great hall background,
+      Holbein-portrait lighting, no Victorian fashion, no firearms
+      (or only ornate matchlock), no Mongols.
+    negatives: |
+      no Victorian, no top hats, no rifles, no automobiles.
+
+  16c-mughal-court:
+    description: |
+      16th-century Mughal India. Akbar's court, Babur's conquest,
+      Humayun. Pre-Aurangzeb.
+    tokens: |
+      16th-century Mughal court, jama and patka silk robes with floral
+      embroidery, jewelled turban with peacock feather, curved talwar
+      sword in jewelled scabbard, sandstone palace with marble inlay,
+      Persian-Indian miniature aesthetic, no European fashion.
+    negatives: |
+      no European armor, no Western suits, no firearms (or only
+      matchlock jezails).
+
+  17c-mughal-shahjahan:
+    description: |
+      17th-century Mughal India. Shah Jahan, Taj Mahal era. Pre-Aurangzeb
+      Sufi influence still strong.
+    tokens: |
+      17th-century Mughal noble, white muslin jama with embroidered
+      borders, slender turban with brooch, pearl necklace, marble Mughal
+      architecture with pietra dura inlay, ornamental gardens, Persian
+      aesthetic, no British colonial fashion.
+    negatives: |
+      no British colonial, no Victorian, no top hats.
+
+  18c-georgian-britain:
+    description: |
+      18th-century Georgian Britain. Reign of George III, American
+      Revolution, French Revolution era. Pre-Victorian.
+    tokens: |
+      18th-century Georgian British attire, tricorn hat, frock coat with
+      brass buttons, knee breeches, white stockings, buckled shoes,
+      powdered wig, oil-lamp candlelight, oak-panelled study, no Victorian
+      fashion, no top hats, no rifles (only flintlock muskets).
+    negatives: |
+      no Victorian top hats, no Western steam locomotives,
+      no modern uniforms.
+
+  ww1-1914-1918-trench:
+    description: |
+      Great War. Western Front trenches. Khaki / field-grey uniforms,
+      bolt-action rifles, gas masks, barbed wire, mud.
+    tokens: |
+      WW1 infantry, khaki / field-grey wool uniform, Brodie steel helmet
+      (British) or Stahlhelm (German), bolt-action Lee-Enfield or Mauser
+      rifle with bayonet, leather webbing, puttees on boots, gas mask
+      satchel, muddy waterlogged trench, sandbag parapet, barbed wire
+      silhouette in no-man's-land, smoke and rain, no medieval armor,
+      no medieval weapons, no Mongol cavalry.
+    negatives: |
+      no swords, no medieval armor, no horseback cavalry charges (cavalry
+      was rare on the Western Front), no Mongols.
+
+  ww2-1939-1945-european-theater:
+    description: |
+      WW2 European theater. D-Day, Stalingrad, Normandy. American /
+      British / German / Soviet uniforms.
+    tokens: |
+      WW2 infantry, M1 helmet (American) or Stahlhelm M1942 (German),
+      Garand or Mauser Kar98k rifle, leather ammo pouches, woollen
+      olive-drab or field-grey uniform, jeep or half-track in background,
+      bombed European city ruins, smoke, gritty newsreel aesthetic.
+    negatives: |
+      no WW1 trenches with sandbags, no automatic rifles before 1944,
+      no medieval armor.
+
+  cold-war-1947-1991-civilian:
+    description: |
+      Cold War civilian. Cuban Missile Crisis, Berlin Wall, space race.
+      Mid-century modern aesthetic.
+    tokens: |
+      mid-20th-century civilian (period varies 1947-1991), period-correct
+      automobile silhouette in background (1950s sedan, 1960s station
+      wagon, etc.), suburban or urban setting, period electronics
+      (rotary phone, vacuum-tube TV, transistor radio), no smartphones,
+      no internet UI.
+    negatives: |
+      no smartphones, no LED screens, no modern cars (post-2000).
+
+  byzantine-1453-fall-of-constantinople:
+    description: |
+      May 1453, Mehmed II's Ottoman siege + fall of Constantinople.
+      Theodosian walls, last Roman emperor Constantine XI.
+    tokens: |
+      15th-century Byzantine + Ottoman siege scene, massive theodosian
+      stone walls, Greek fire flame artillery, Ottoman bombards (large
+      bronze cannons), janissary infantry in white turban kavuks +
+      colored caftans, Byzantine knights in scale armor with Greek
+      crosses on shields, golden Hagia Sophia dome on horizon at dawn,
+      no modern firearms, no WW1 uniforms.
+    negatives:
+      no rifles, no modern uniforms, no automobiles, no Mongols.
+
+  edo-japan-1603-1868-samurai:
+    description: |
+      Edo-period Japan. Tokugawa shogunate, samurai class, sword-fight era.
+      Pre-Meiji-restoration.
+    tokens: |
+      Edo-period samurai, lacquered iron kabuto helmet with crest, do
+      cuirass over shitagi undergown, two-sword daisho (katana + wakizashi)
+      worn at left hip, hakama trousers, woven straw rain cape on overcast
+      days, wooden castle with curved tile roofs, cherry blossoms or
+      bamboo grove backdrop, ukiyo-e composition.
+    negatives: |
+      no firearms (samurai era had matchlock tanegashima but not modern
+      rifles), no Western suits, no Mongol cavalry.
+
+  ancient-egypt-pharaonic-new-kingdom:
+    description: |
+      New Kingdom Egypt (1550-1069 BC). Akhenaten, Tutankhamun, Ramses II.
+      Hieroglyphs, sphinxes, pyramid silhouettes.
+    tokens: |
+      ancient Egyptian pharaonic court, white linen kalasiris kilt,
+      gold pectoral collar with lapis lazuli inlay, kohl-rimmed eyes,
+      striped nemes headdress with cobra uraeus, falcon-headed Horus
+      iconography, sandstone temple columns with painted hieroglyphs,
+      sphinx silhouette, palm trees, Nile reeds, no medieval armor.
+    negatives: |
+      no medieval armor, no firearms, no Greco-Roman columns (Egyptian
+      columns are bulbous papyrus or palm-leaf style, distinct).
