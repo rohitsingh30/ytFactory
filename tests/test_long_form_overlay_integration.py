@@ -117,26 +117,29 @@ def test_overlay_round_trip_voice_via_apply_handler():
     assert spec.voice_id == "pipeline/voice_refs/sarah.wav"
 
 
-def test_overlay_round_trip_captions_density():
+def test_overlay_round_trip_captions_layout():
+    """Pin: the wizard's captions_layout pick lands on both top-level
+    cfg AND the long_form sidecar after overlay merging — replacing
+    the legacy captions_density round-trip (2026-05-14)."""
     spec = build_spec(
         {
             "channel": "mystoriesanimated",
             "format": "aita_animated",
             "length_s": 1800,
-            "channel_overrides": {"captions_density": "dense"},
+            "channel_overrides": {"captions_layout": "bottom_one_line"},
         },
         channel_yaml_path=REPO_ROOT / "pipeline/channels/mystoriesanimated.yaml",
         variant_yaml_path=REPO_ROOT
         / "pipeline/variants/mystoriesanimated/aita_animated.yaml",
     )
     overlay = long_form_overlay_from_spec(spec)
-    assert overlay["long_form"]["captions_density"] == "dense"
-    assert overlay["captions_density"] == "dense"
+    assert overlay["long_form"]["captions_layout"] == "bottom_one_line"
+    assert overlay["captions_layout"] == "bottom_one_line"
 
     cfg = _load_channel_cfg("mystoriesanimated")
     _deep_merge_dict(cfg, overlay)
-    assert cfg["long_form"]["captions_density"] == "dense"
-    assert cfg["captions_density"] == "dense"
+    assert cfg["long_form"]["captions_layout"] == "bottom_one_line"
+    assert cfg["captions_layout"] == "bottom_one_line"
 
 
 def test_overlay_does_not_overwrite_unrelated_keys():

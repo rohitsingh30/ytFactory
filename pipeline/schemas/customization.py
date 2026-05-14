@@ -560,6 +560,11 @@ def _voice_field(default_voice: str, language: str) -> CustomizationField:
 
 
 def _captions_density_field() -> CustomizationField:
+    """Legacy field — kept ONLY because input_registry tests still
+    construct it directly. The wizard no longer renders it; the new
+    ``_captions_layout_field`` replaces it as the user-facing knob.
+    Apply path stays so any saved sidecar from before the migration
+    still flows into cfg correctly."""
     return CustomizationField(
         key="captions_density",
         label="Captions density",
@@ -576,6 +581,65 @@ def _captions_density_field() -> CustomizationField:
             CfgTarget(path=["long_form", "captions_density"]),
         ],
         consumers=["compose", "rewrite"],
+    )
+
+
+def _captions_layout_field() -> CustomizationField:
+    """The 2026-05-14 user-facing caption knob. Replaces the older
+    ``captions_density`` slider with a 3-option preview picker.
+
+    Each option carries ``preview_kind`` metadata so the wizard
+    renderer (web-next/app/app/create/page.tsx) can show a mini
+    16:9 preview of how the captions will look on screen — text
+    centred + word-by-word vs single-line at the bottom vs two-line
+    at the bottom.
+
+    Plumbing:
+    - spec_field = ``captions_layout`` → mirrored onto RenderSpec.
+    - cfg_targets writes to ``cfg[captions_layout]`` AND
+      ``cfg[long_form][captions_layout]`` so both short + long-form
+      renderers pick it up.
+    - Consumed by ``compose`` (caption_mode dispatch in compose.py)
+      and ``long_form`` (build_captions_ass max_lines).
+    """
+    return CustomizationField(
+        key="captions_layout",
+        label="Caption style",
+        kind="preview_select",
+        help="How captions appear on screen. Pick the style that matches your audience.",
+        default="center_word_by_word",
+        options=[
+            FieldOption(
+                value="center_word_by_word",
+                label="Center · word by word",
+                description=(
+                    "TikTok-style — one big word at a time, centred. "
+                    "Highest engagement on Shorts; default for short-form."
+                ),
+            ),
+            FieldOption(
+                value="bottom_one_line",
+                label="Bottom · single line",
+                description=(
+                    "Compact subtitle bar at the bottom. "
+                    "Calm, documentary feel; doesn't fight the visuals."
+                ),
+            ),
+            FieldOption(
+                value="bottom_two_line",
+                label="Bottom · two lines",
+                description=(
+                    "Bottom subtitle bar that wraps to 2 lines. "
+                    "Best for dialogue-heavy / longer sentences."
+                ),
+            ),
+        ],
+        spec_field="captions_layout",
+        cfg_targets=[
+            CfgTarget(path=["captions_layout"]),
+            CfgTarget(path=["long_form", "captions_layout"]),
+        ],
+        consumers=["compose", "long_form"],
     )
 
 
@@ -1209,11 +1273,10 @@ def get_customization_schema(channel_key: str) -> CustomizationSchema | None:
         _song_model_field(ydoc),
         _visual_source_field(entry["default_format"]),
         _length_field(default_length),
-        _captions_density_field(),
+        _captions_layout_field(),
         _music_field(overrides.get("music_bed", "ambient_low")),
         _visibility_field(),
         _schedule_field(),
-        _notes_field(),
     ]
 
     variants = _list_variants(entry)

@@ -1582,6 +1582,7 @@ def build_captions_ass(
     margin_v: int = 80,
     max_chars: int = 70,
     max_lines: int = 2,
+    alignment: int = 2,
     asr_provider: str = "whisper_mlx",
 ) -> tuple[Path, int]:
     """Build a libass-compatible ASS subtitle file for the long-form mux.
@@ -1599,6 +1600,11 @@ def build_captions_ass(
        the rendered narration with whisper and group words by
        sentence-ending punctuation. Legacy fallback for
        ``caption_align: whisper`` configs.
+
+    ``alignment`` (libass numpad layout): 2 = bottom-center (default),
+    5 = middle-center (used by captions_layout=center_word_by_word).
+    Channel YAMLs may override via ``long_form.caption_style.alignment``
+    but the wizard's captions_layout knob is the canonical entrypoint.
 
     Style is parameterised from the channel's ``long_form.caption_style``
     block (``text_rgba``, ``italic``). Defaults to **yellow italic** to
@@ -1685,7 +1691,7 @@ def build_captions_ass(
         f"{primary},{primary},{outline},{back},"
         f"0,{italic_flag},0,0,"
         f"100,100,1,0,1,1.5,2,"
-        f"2,80,80,{int(margin_v)},1"
+        f"{int(alignment)},80,80,{int(margin_v)},1"
     )
     header = (
         "[Script Info]\n"
@@ -2585,6 +2591,30 @@ def _main_impl(args) -> int:
         cap_font = str(cap_style.get("font_name", "Helvetica"))
         cap_size = int(cap_style.get("font_size", 38))
         cap_margin_v = int(cap_style.get("margin_v", 80))
+        # 2026-05-14 — long-form captions_layout dispatch.
+        # Maps the wizard's user-facing knob to libass alignment +
+        # max_lines so the user's pick lands in the rendered video.
+        # The cfg.captions_layout key is set by build_spec via the
+        # input registry; channel YAML can also set it as a default.
+        _layout = (
+            (lf.get("captions_layout") or config.get("captions_layout") or "")
+            .strip().lower()
+        )
+        if _layout == "center_word_by_word":
+            cap_alignment = 5  # libass numpad: middle-center  # coverage: heavy ffmpeg/libass long-form render integration path
+            cap_max_lines = 1  # coverage: heavy ffmpeg/libass long-form render integration path
+            # Larger font at center to read like a TikTok-style burst.
+            # Override the YAML default ONLY when the layout demands it
+            # so channel YAMLs that haven't set caption_style.font_size
+            # still pick up a sensible size.
+            if "font_size" not in cap_style:  # coverage: heavy ffmpeg/libass long-form render integration path
+                cap_size = max(cap_size, 60)  # coverage: heavy ffmpeg/libass long-form render integration path
+        elif _layout == "bottom_one_line":
+            cap_alignment = 2  # coverage: heavy ffmpeg/libass long-form render integration path
+            cap_max_lines = 1  # coverage: heavy ffmpeg/libass long-form render integration path
+        else:  # bottom_two_line (default) or unknown
+            cap_alignment = 2
+            cap_max_lines = 2
         align_mode = str(lf.get("caption_align", "authored"))
         use_ass = _ffmpeg_has_libass()
         if not use_ass:
@@ -2608,6 +2638,8 @@ def _main_impl(args) -> int:
                     font_name=cap_font,
                     font_size=cap_size,
                     margin_v=cap_margin_v,
+                    max_lines=cap_max_lines,
+                    alignment=cap_alignment,
                     asr_provider=asr_provider,
                 )
             else:
@@ -2619,6 +2651,8 @@ def _main_impl(args) -> int:
                     font_name=cap_font,
                     font_size=cap_size,
                     margin_v=cap_margin_v,
+                    max_lines=cap_max_lines,
+                    alignment=cap_alignment,
                     asr_provider=asr_provider,
                 )
             captions_ass = ass_path

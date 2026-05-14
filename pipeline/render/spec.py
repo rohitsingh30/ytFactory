@@ -171,6 +171,32 @@ class CaptionsDensity(str, Enum):
     DENSE = "dense"
 
 
+class CaptionsLayout(str, Enum):
+    """How captions appear on screen.
+
+    Three options the wizard exposes (2026-05-14):
+
+    - ``center_word_by_word`` — TikTok-style. ONE word at a time, large,
+      vertically centred (slight bottom-bias for chin-tap clearance).
+      The default for shorts. Drives ``caption_mode="word"`` in
+      ``pipeline/compose.py`` and selects the word-PNG path in
+      ``pipeline/render/long_form.py``.
+
+    - ``bottom_one_line`` — one short line at the bottom, MarginV=80.
+      Sentence-level cues, hard-truncated to a single line if too long.
+      Drives ``caption_mode="beat"`` (canvas height = 1 line) for shorts
+      and ``build_captions_ass(max_lines=1)`` for long-form.
+
+    - ``bottom_two_line`` — bottom strip, wraps to at most 2 lines.
+      Drives ``caption_mode="beat"`` (canvas height = 2 lines) for
+      shorts and ``build_captions_ass(max_lines=2)`` (the historical
+      long-form default) for long-form.
+    """
+    CENTER_WORD_BY_WORD = "center_word_by_word"
+    BOTTOM_ONE_LINE = "bottom_one_line"
+    BOTTOM_TWO_LINE = "bottom_two_line"
+
+
 # ---------------------------------------------------------------------------
 # Spec dataclass
 # ---------------------------------------------------------------------------
@@ -247,6 +273,13 @@ class RenderSpec:
     # -- Captions / on-screen text ----------------------------------------
     captions_density: CaptionsDensity = CaptionsDensity.STANDARD
     captions_enabled: bool = True
+    captions_layout: CaptionsLayout = CaptionsLayout.CENTER_WORD_BY_WORD
+    """Wizard-selected layout (2026-05-14). Replaces the older
+    captions_density field as the user-facing knob; density stays for
+    back-compat but is now derivable from layout (1-line=minimal,
+    2-line=standard, word=standard). Renderer dispatches on
+    captions_layout — see ``CaptionsLayout`` docstring for the
+    per-mode rendering path."""
 
     # -- Visual presentation ----------------------------------------------
     narrator_visual_mode: str = "on_screen"
@@ -298,6 +331,7 @@ class RenderSpec:
         d["visual_mode"] = self.visual_mode.value
         d["audio_mode"] = self.audio_mode.value
         d["captions_density"] = self.captions_density.value
+        d["captions_layout"] = self.captions_layout.value
         d["output_resolution"] = list(self.output_resolution)
         return d
 
@@ -440,6 +474,19 @@ def _coerce_captions_density(v: Any) -> CaptionsDensity:
     return CaptionsDensity.STANDARD
 
 
+def _coerce_captions_layout(v: Any) -> CaptionsLayout:
+    """Coerce a string to CaptionsLayout. Unknown / missing values fall
+    back to the channel default (center_word_by_word)."""
+    if isinstance(v, CaptionsLayout):
+        return v  # coverage: enum fast-path defensive guard for already-typed input value
+    if isinstance(v, str):
+        try:
+            return CaptionsLayout(v)
+        except ValueError:
+            pass
+    return CaptionsLayout.CENTER_WORD_BY_WORD
+
+
 # Form-override keys that have a typed home on the spec. Anything NOT
 # in this set gets dumped into spec.extra so downstream stages can
 # still find it — no silent drops.
@@ -451,7 +498,7 @@ _TYPED_OVERRIDE_KEYS: set[str] = {
     "voice", "voice_provider",
     "music_bed",
     "song_style", "song_vocal_gender", "song_model",
-    "captions_density", "captions_enabled",
+    "captions_density", "captions_enabled", "captions_layout",
     "visual_mode", "visual_source",
     "narrator_visual_mode",
     "visibility", "schedule_at",
@@ -640,6 +687,14 @@ def build_spec(
 
     # ----- captions -------------------------------------------------------
     captions_density = _coerce_captions_density(overrides.get("captions_density"))
+    # captions_layout is the new (2026-05-14) wizard-driven enum that
+    # replaces captions_density as the user-facing knob. Channel YAML
+    # may set a default; form override wins.
+    captions_layout = _coerce_captions_layout(
+        overrides.get("captions_layout")
+        or cfg.get("captions_layout")
+        or (cfg.get("long_form") or {}).get("captions_layout")
+    )
     captions_enabled = bool(
         cfg.get("captions_enabled", True)
         if "captions_enabled" not in overrides
@@ -678,6 +733,7 @@ def build_spec(
         song_model=overrides.get("song_model"),
         captions_density=captions_density,
         captions_enabled=captions_enabled,
+        captions_layout=captions_layout,
         narrator_visual_mode=narrator_visual_mode,
         visual_source=overrides.get("visual_source"),
         visibility=overrides.get("visibility"),
@@ -730,5 +786,6 @@ __all__ = [
     "VisualMode",
     "AudioMode",
     "CaptionsDensity",
+    "CaptionsLayout",
     "build_spec",
 ]

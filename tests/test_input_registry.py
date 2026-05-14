@@ -250,7 +250,7 @@ def test_apply_overrides_per_channel_lookup_via_get_customization_schema():
         "song_model": "V5",
         "voice": "pipeline/voice_refs/sarah.wav",
         "music_bed": "cinematic",
-        "captions_density": "dense",
+        "captions_layout": "bottom_one_line",
         "visual_source": "both",
         "length_s": 90,
     }
@@ -262,7 +262,7 @@ def test_apply_overrides_per_channel_lookup_via_get_customization_schema():
     assert cfg["sunoapi_model"] == "V5"
     assert cfg["tts_voice"] == "pipeline/voice_refs/sarah.wav"
     assert cfg["music_bed_default"] == "cinematic.mp3"
-    assert cfg["captions_density"] == "dense"
+    assert cfg["captions_layout"] == "bottom_one_line"
     assert cfg["visual_source"] == "both"
     assert cfg["duration_max_s"] == 90
     assert cfg["_suno_prompt_override"] == {"style": "cinematic upbeat pop"}
@@ -271,7 +271,7 @@ def test_apply_overrides_per_channel_lookup_via_get_customization_schema():
     lf = cfg["long_form"]
     assert lf["tts_voice"] == "pipeline/voice_refs/sarah.wav"
     assert lf["music_bed_default"] == "cinematic.mp3"
-    assert lf["captions_density"] == "dense"
+    assert lf["captions_layout"] == "bottom_one_line"
     assert lf["visual_source"] == "both"
     assert lf["duration_max_s"] == 90
 
@@ -309,7 +309,7 @@ def test_long_form_overlay_from_spec_projects_spec_to_overlay():
             "channel_overrides": {
                 "voice": "pipeline/voice_refs/sarah.wav",
                 "music_bed": "ambient_med",
-                "captions_density": "minimal",
+                "captions_layout": "bottom_one_line",
             },
         },
         channel_yaml_path=REPO_ROOT / "pipeline/channels/mystoriesanimated.yaml",
@@ -318,10 +318,10 @@ def test_long_form_overlay_from_spec_projects_spec_to_overlay():
     )
     overlay = long_form_overlay_from_spec(spec)
     assert overlay["music_bed_default"] == "ambient_med.mp3"
-    assert overlay["captions_density"] == "minimal"
+    assert overlay["captions_layout"] == "bottom_one_line"
     assert overlay["duration_max_s"] == 600
     assert overlay["long_form"]["music_bed_default"] == "ambient_med.mp3"
-    assert overlay["long_form"]["captions_density"] == "minimal"
+    assert overlay["long_form"]["captions_layout"] == "bottom_one_line"
     assert overlay["long_form"]["duration_max_s"] == 600
     # 2026-05-13: voice descriptor uses apply_handler, not cfg_targets.
     # Pre-fix the long-form overlay didn't dispatch apply_handlers, so

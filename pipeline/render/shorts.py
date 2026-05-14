@@ -125,6 +125,30 @@ def _resolve_caption_font_size(cfg: dict) -> int | None:
     return _CAPTIONS_DENSITY_FONT_SIZE.get(density)
 
 
+# Map captions_layout (the 2026-05-14 user-facing knob) → compose
+# kwargs. Three-tuple: (caption_mode, caption_max_lines, friendly_label).
+# captions_layout is the canonical key; older captions_density entries
+# in cfg are translated where they survive in pre-migration sidecars.
+_CAPTIONS_LAYOUT_DISPATCH: dict[str, tuple[str, int | None, str]] = {
+    "center_word_by_word": ("word", None,  "center · word by word"),
+    "bottom_one_line":     ("beat", 1,     "bottom · single line"),
+    "bottom_two_line":     ("beat", 2,     "bottom · two lines"),
+}
+
+
+def _resolve_caption_dispatch(cfg: dict) -> tuple[str, int | None, str]:
+    """Pick (caption_mode, caption_max_lines, label) from cfg.
+
+    Precedence: cfg[captions_layout] (new wizard knob) → channel YAML
+    default → fallback to "center_word_by_word". Unknown values fall
+    back to the same default so a stale sidecar never breaks a render.
+    """
+    layout = (cfg.get("captions_layout") or "").strip().lower()
+    return _CAPTIONS_LAYOUT_DISPATCH.get(
+        layout, _CAPTIONS_LAYOUT_DISPATCH["center_word_by_word"],
+    )
+
+
 _CLOSER_KEYWORDS = ("like", "comment", "subscribe", "agree", "swap")
 
 
@@ -2816,7 +2840,12 @@ def _make_short_impl(
         # below covers ONLY the ffmpeg compose call, not the image gen
         # block above (which already emitted "image_gen").
         compose_t0 = time.time()
-        print("[4/4] ffmpeg compose (slideshow)…")
+        # 2026-05-14: dispatch caption_mode + caption_max_lines from
+        # the user-selected captions_layout (wizard) so all 3 styles
+        # (center word-by-word / bottom 1-line / bottom 2-line) actually
+        # land in the rendered video.
+        cap_mode, cap_max_lines, cap_label = _resolve_caption_dispatch(cfg)
+        print(f"[4/4] ffmpeg compose (slideshow · captions={cap_label})…")
         compose.compose(
             image_paths=image_paths,
             beats=beat_list,
@@ -2829,6 +2858,8 @@ def _make_short_impl(
             rank_chips=rank_chips or None,
             word_caption_font_size=_resolve_caption_font_size(cfg),
             resolution=resolution,
+            caption_mode=cap_mode,
+            caption_max_lines=cap_max_lines,
         )
         print(f"     done in {time.time() - compose_t0:.1f}s")
         _record_stage_done(
@@ -2973,6 +3004,10 @@ def _make_short_impl(
                         rank_chips=rank_chips or None,
                         word_caption_font_size=_resolve_caption_font_size(cfg),
                         resolution=resolution,
+                        # Critic recompose must use the SAME caption
+                        # layout the user picked — not the compose default.
+                        caption_mode=_resolve_caption_dispatch(cfg)[0],
+                        caption_max_lines=_resolve_caption_dispatch(cfg)[1],
                     )
                     print(f"✓ re-rendered {out_path}")
             elif score < min_score:

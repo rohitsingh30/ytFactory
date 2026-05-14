@@ -113,8 +113,16 @@ def render_beat_caption(
     stroke_width: int = 6,
     bg_color: tuple[int, int, int, int] = (0, 0, 0, 140),  # translucent black bar
     padding: int = 60,
+    max_lines: int | None = None,
 ) -> Path:
-    """Render this beat's text into a transparent PNG suitable for overlay."""
+    """Render this beat's text into a transparent PNG suitable for overlay.
+
+    ``max_lines`` (2026-05-14): clamp the wrapped output to at most N
+    lines. ``None`` keeps the original behaviour (canvas grows to fit
+    every line). Used by the captions_layout=bottom_one_line /
+    bottom_two_line modes to enforce a consistent visual style across
+    sentences of varying length.
+    """
     # Wrap first so we can size the canvas around the actual line count.
     # Principle #25 (NEW): caption canvas height is a function of line
     # count, never fixed — long captions used to clip ("birth?" cut off
@@ -122,6 +130,20 @@ def render_beat_caption(
     # hardcoded at 320 and 4 lines × 100px overflowed the PNG).
     font = _find_font(font_size, text=beat.text)
     lines = _wrap(beat.text.strip(), font, canvas_w - 2 * padding)
+    if max_lines is not None and max_lines > 0 and len(lines) > max_lines:
+        # Truncate: keep the first ``max_lines`` lines verbatim and
+        # tail-truncate the last one with an ellipsis. Beats wider than
+        # the canvas would otherwise stack vertically and cover the
+        # frame; clamping is the user's explicit choice via
+        # captions_layout=bottom_one_line / bottom_two_line.
+        kept = lines[:max_lines]
+        # Mark truncation only on the LAST kept line — and only if the
+        # source text actually had more content beyond what we kept.
+        rejoined = " ".join(kept)
+        if rejoined != beat.text.strip():
+            tail = kept[-1].rstrip(",.;:! ")
+            kept[-1] = tail + "…"
+        lines = kept
     line_h = font_size + 16
     block_h = line_h * len(lines)
     canvas_h = max(canvas_h, padding * 2 + block_h + 20)

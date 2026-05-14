@@ -2249,7 +2249,7 @@ function AdvancedDrawer({
             More options
           </span>
           <span className="text-[11.5px] text-muted-foreground/70">
-            · captions, visibility, notes
+            · caption style, music, visibility
           </span>
         </div>
         <ChevronDown
@@ -2334,6 +2334,14 @@ function FieldRenderer({
           </Select>
         )}
 
+        {field.kind === "preview_select" && (
+          <CaptionLayoutPreviewPicker
+            options={field.options ?? []}
+            value={value !== undefined && value !== null ? String(value) : String(field.default ?? "")}
+            onChange={(v) => onChange(v)}
+          />
+        )}
+
         {(field.kind === "text" || field.kind === "url") && (
           <Input
             id={field.key}
@@ -2411,5 +2419,180 @@ function FieldRenderer({
         </p>
       )}
     </div>
+  );
+}
+
+
+// ── CaptionLayoutPreviewPicker ──────────────────────────────────────────
+// Three-card picker for captions_layout (2026-05-14). Each card shows a
+// 16:9 mini-preview of how the caption will look in the rendered video,
+// so the user picks by appearance, not by name.
+//
+// The keys in PREVIEW_BY_VALUE map to the FieldOption.value strings the
+// schema returns from pipeline/schemas/customization.py:_captions_layout_field.
+// Adding a 4th option requires wiring a new preview here AND the renderer
+// dispatch in pipeline/render/shorts.py:_resolve_caption_dispatch +
+// pipeline/render/long_form.py captions_layout dispatch block.
+function CaptionLayoutPreviewPicker({
+  options,
+  value,
+  onChange,
+}: {
+  options: Array<{ value: string; label: string; description?: string | null }>;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="grid gap-3 sm:grid-cols-3">
+      {options.map((opt) => {
+        const selected = opt.value === value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => onChange(opt.value)}
+            className={cn(
+              "group flex flex-col gap-2 rounded-lg border p-3 text-left transition-all",
+              selected
+                ? "border-primary bg-primary/5 ring-2 ring-primary/40"
+                : "border-border bg-surface hover:border-border/80 hover:bg-surface-2",
+            )}
+            aria-pressed={selected}
+          >
+            <CaptionLayoutPreview kind={opt.value} />
+            <div>
+              <div className="text-[12px] font-medium tracking-tight">{opt.label}</div>
+              {opt.description && (
+                <div className="mt-0.5 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                  {opt.description}
+                </div>
+              )}
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Mini SVG preview tile — 16:9 frame with a stylised caption rendering
+// for each layout. Pure SVG so it adds zero runtime weight.
+function CaptionLayoutPreview({ kind }: { kind: string }) {
+  // Frame dims chosen to fit two cards per row on a 1366px viewport.
+  const W = 240;
+  const H = 135;
+  // Soft "scene" gradient — mimics a generic video frame so the caption
+  // overlay has something to contrast against.
+  const sceneId = `scene-${kind}`;
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      className="w-full rounded-md border border-border/50"
+      role="img"
+      aria-label={`Preview: ${kind}`}
+    >
+      <defs>
+        <linearGradient id={sceneId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#1e293b" />
+          <stop offset="1" stopColor="#0f172a" />
+        </linearGradient>
+      </defs>
+      <rect width={W} height={H} fill={`url(#${sceneId})`} />
+      {/* faint horizon line so the user reads it as a "scene" */}
+      <rect x="0" y={H * 0.62} width={W} height="1" fill="rgba(255,255,255,0.08)" />
+
+      {kind === "center_word_by_word" && (
+        // ONE big word, vertically centred (slight bottom-bias),
+        // inside a translucent pill — matches captions.render_word_caption.
+        <>
+          <rect
+            x={W / 2 - 36}
+            y={H * 0.50}
+            width="72"
+            height="22"
+            rx="6"
+            fill="rgba(0,0,0,0.55)"
+          />
+          <text
+            x={W / 2}
+            y={H * 0.50 + 16}
+            fill="#FFE56B"
+            fontSize="14"
+            fontWeight="800"
+            fontFamily="Helvetica, Arial, sans-serif"
+            textAnchor="middle"
+            stroke="#000"
+            strokeWidth="0.4"
+          >
+            WORD
+          </text>
+        </>
+      )}
+
+      {kind === "bottom_one_line" && (
+        // Single line at the bottom, narrow strip. Yellow text on
+        // translucent black bar (matches render_beat_caption).
+        <>
+          <rect
+            x="8"
+            y={H - 26}
+            width={W - 16}
+            height="18"
+            rx="2"
+            fill="rgba(0,0,0,0.55)"
+          />
+          <text
+            x={W / 2}
+            y={H - 13}
+            fill="#FFE56B"
+            fontSize="9"
+            fontWeight="700"
+            fontStyle="italic"
+            fontFamily="Helvetica, Arial, sans-serif"
+            textAnchor="middle"
+          >
+            One short subtitle line at the bottom
+          </text>
+        </>
+      )}
+
+      {kind === "bottom_two_line" && (
+        // Two lines at the bottom — taller strip.
+        <>
+          <rect
+            x="8"
+            y={H - 38}
+            width={W - 16}
+            height="30"
+            rx="2"
+            fill="rgba(0,0,0,0.55)"
+          />
+          <text
+            x={W / 2}
+            y={H - 24}
+            fill="#FFE56B"
+            fontSize="9"
+            fontWeight="700"
+            fontStyle="italic"
+            fontFamily="Helvetica, Arial, sans-serif"
+            textAnchor="middle"
+          >
+            A longer caption that wraps
+          </text>
+          <text
+            x={W / 2}
+            y={H - 12}
+            fill="#FFE56B"
+            fontSize="9"
+            fontWeight="700"
+            fontStyle="italic"
+            fontFamily="Helvetica, Arial, sans-serif"
+            textAnchor="middle"
+          >
+            into two readable lines
+          </text>
+        </>
+      )}
+    </svg>
   );
 }

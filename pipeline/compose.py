@@ -663,6 +663,7 @@ def compose(
     rank_chips: list[tuple[int, Path]] | None = None,
     word_caption_font_size: int | None = None,
     resolution: Resolution | None = None,
+    caption_max_lines: int | None = None,
 ) -> Path:
     """Render the final Short.
 
@@ -681,6 +682,12 @@ def compose(
     per OpusClip/Submagic 2026 benchmarks, and makes residual sync
     drift invisible at the word grain). ``"beat"`` falls back to the
     legacy per-beat block at the bottom of the frame.
+
+    ``caption_max_lines`` (2026-05-14): when ``caption_mode="beat"``,
+    clamp each beat caption to at most N lines (over-long captions
+    tail-truncate with ellipsis). Drives the user-facing
+    captions_layout=bottom_one_line / bottom_two_line modes from the
+    wizard. ``None`` = no clamp (canvas grows to fit).
 
     ``resolution`` controls output dimensions + framerate. Defaults to
     Shorts (1080×1920 @ 30 fps) for back-compat. Pass
@@ -748,7 +755,10 @@ def compose(
     caption_paths: list[Path] = []
     for i, beat in enumerate(beats):
         cp = cache_dir / f"caption_{i:02d}.png"
-        captions.render_beat_caption(beat, cp, canvas_w=res.width, canvas_h=320)
+        captions.render_beat_caption(
+            beat, cp, canvas_w=res.width, canvas_h=320,
+            max_lines=caption_max_lines,
+        )
         caption_paths.append(cp)
 
     # 2. Build ffmpeg input list and per-image Ken Burns chain.
