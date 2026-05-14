@@ -331,8 +331,13 @@ def _generate_cloudrun(
     wrapper below. Same signature as the local `_generate_z_image_turbo`
     / `_generate_mflux` so the orchestrator can pass through unchanged."""
     url = _service_url(model)
+    # Append the anti-text suffix to suppress diffusion's natural
+    # tendency to render gibberish text inside panels — see
+    # ``ANTI_TEXT_SUFFIX`` for the full rationale and per-distilled-model
+    # justification (FLUX.2 klein is guidance-distilled, so a true
+    # negative_prompt has no effect; in-prompt negation does).
     payload = {
-        "prompt": prompt,
+        "prompt": _append_anti_text_suffix(prompt, model=model),
         "width": width,
         "height": height,
         "steps": steps,
@@ -351,6 +356,68 @@ def _generate_cloudrun(
         " (cold)" if resp.get("cold_loaded") else "",
     )
     return out_path
+
+
+# ---------------------------------------------------------------- anti-text
+#
+# Diffusion image models LOVE to render text. Even without prompted to,
+# they'll splatter gibberish letters across jerseys, signs, scoreboards,
+# and panel margins. The 2026-05-13 audit of 27 rendered Shorts found:
+#
+#   - Cake-AITA panels: top-text "Flate 2w HOOuR / to Fro TVEIRINE",
+#     "frgoggst i ate it!", "BIG -to Momene", "LUQAR APE", "PIatenn
+#     Predium!" — pure AI-hallucinated nonsense baked into the panel.
+#   - Baghdad-Mongols panels: "VIGEE TI. TWO OIL MONGK BREEAI MILURAK
+#     HISROGLY", "RSOLD MONGCOLAN ENTRH BAGOAI TINVALE HISTORY."
+#   - Ronaldinho jerseys: fake "FCO" Barcelona crest, "CHCASYQUEB"
+#     across the chest.
+#
+# FLUX.2 klein is GUIDANCE-DISTILLED, so the standard
+# ``negative_prompt`` parameter is a no-op (the server explicitly
+# documents this — see cloud/image-flux2-klein/server.py:173-177).
+# But distilled models DO parse in-prompt instructions, so we append
+# an anti-text suffix to every positive prompt. Other cloud providers
+# (z_image_turbo, qwen_image, hidream) accept the same suffix without
+# harm even when their server-side ``negative_prompt`` does work.
+#
+# Per-channel override: a channel YAML can set
+# ``image.anti_text_suffix: ""`` to disable (e.g. for a "screenshot
+# of a tweet" channel where text IS the content).
+
+ANTI_TEXT_SUFFIX = (
+    "(no readable text in image, no signs, no captions, no banners, "
+    "no inscribed words, no jersey lettering, no sponsor logos, "
+    "no street signs, no readable book covers, no name tags, "
+    "plain backgrounds, no watermark)"
+)
+
+
+def _append_anti_text_suffix(prompt: str, *, model: str) -> str:
+    """Append the anti-text suffix to a prompt unless already present.
+
+    Idempotent: if the prompt already contains the suffix substring,
+    returns unchanged (so callers that pre-attach it for testing or
+    customization don't get a double-suffix).
+
+    Per-model carve-outs:
+
+    - ``flux2_klein`` / ``z_image_turbo`` / ``qwen_image`` / ``hidream``:
+      append the suffix in parentheses at the end. Distilled models
+      respect parenthesized in-prompt negation; non-distilled models
+      treat it as a soft hint that aligns with their own negative-prompt
+      behaviour.
+    - Any future model: same suffix unless an opt-out is added here.
+
+    The model parameter is currently unused for branching but kept in
+    the signature so per-model overrides can land without changing
+    callers (e.g. an "image_legible" model variant might want to
+    suppress the suffix entirely).
+    """
+    if not prompt:
+        return prompt
+    if "no readable text in image" in prompt.lower():
+        return prompt
+    return f"{prompt.rstrip(' .,;')}. {ANTI_TEXT_SUFFIX}"
 
 
 # ------------------------------------------------------- per-model wrappers

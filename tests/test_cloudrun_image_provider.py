@@ -142,6 +142,85 @@ class TestCircuitBreaker(unittest.TestCase):
                 )
 
 
+# ----------------------------------------------------- anti-text suffix
+#
+# Verify the ``ANTI_TEXT_SUFFIX`` is appended to outbound payloads so
+# diffusion models stop hallucinating gibberish text inside panels.
+# Per the 2026-05-13 audit (docs/pipeline_bug_catalogue_v2_2026-05-14.html),
+# this was the highest-leverage fix for visible-on-mute Shorts.
+
+
+class TestAntiTextSuffix(unittest.TestCase):
+
+    def test_suffix_appended_to_payload_prompt(self):
+        """``_generate_cloudrun`` must append ``ANTI_TEXT_SUFFIX`` to
+        the prompt before posting to the cloud /generate endpoint."""
+        captured = {}
+
+        def fake_post(url, payload):
+            captured["payload"] = payload
+            return _fake_generate_response()
+
+        out = Path(tempfile.gettempdir()) / "anti_text.png"
+        with patch.object(images_cloudrun, "_post_generate", side_effect=fake_post), \
+             patch.object(images_cloudrun, "_service_url", return_value="http://x"):
+            images_cloudrun._generate_cloudrun(
+                model="flux2_klein",
+                prompt="a person standing in a room",
+                seed=1, out_path=out,
+                width=768, height=1344, steps=4,
+            )
+        self.assertIn("anti_text" in captured.get("payload", {}).get("prompt", "")
+                      or "no readable text" in captured.get("payload", {}).get("prompt", ""),
+                      [True])
+        self.assertIn("a person standing in a room",
+                      captured["payload"]["prompt"])
+        # Original prompt is preserved + suffix appended.
+        self.assertIn("no readable text", captured["payload"]["prompt"])
+        self.assertIn("no signs", captured["payload"]["prompt"])
+
+    def test_idempotent_no_double_suffix(self):
+        """If the prompt already contains the suffix substring, don't
+        double-append. Defends against callers that add it themselves."""
+        already = (
+            "a person standing in a room. (no readable text in image, "
+            "no signs)"
+        )
+        result = images_cloudrun._append_anti_text_suffix(
+            already, model="flux2_klein"
+        )
+        # Suffix substring appears EXACTLY ONCE.
+        self.assertEqual(result.lower().count("no readable text in image"), 1)
+
+    def test_empty_prompt_passes_through(self):
+        """Empty prompt → return empty (validation happens server-side)."""
+        self.assertEqual(
+            images_cloudrun._append_anti_text_suffix("", model="flux2_klein"),
+            "",
+        )
+
+    def test_trailing_punctuation_stripped_before_append(self):
+        """Don't produce ``"...end. . (no readable...)"`` — strip
+        trailing periods/commas/semicolons from the prompt first."""
+        result = images_cloudrun._append_anti_text_suffix(
+            "scene description.", model="flux2_klein",
+        )
+        # No double-period.
+        self.assertNotIn(".. ", result)
+        self.assertIn("scene description.", result)
+
+    def test_suffix_constant_mentions_key_terms(self):
+        """Sanity check on the suffix content — must mention the
+        bug-class terms surfaced in the audit."""
+        s = images_cloudrun.ANTI_TEXT_SUFFIX.lower()
+        self.assertIn("readable text", s)
+        self.assertIn("signs", s)
+        self.assertIn("captions", s)
+        self.assertIn("jersey lettering", s,
+                      "must address Ronaldinho-style jersey gibberish")
+        self.assertIn("plain backgrounds", s)
+
+
 # ----------------------------------------------------- materialise_png
 
 
