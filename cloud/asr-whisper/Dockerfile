@@ -28,6 +28,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN python -m pip install --upgrade pip setuptools wheel
 
+# faster-whisper / CTranslate2 needs cuDNN 8 at runtime. The
+# nvidia/cuda:12.4.0-runtime-ubuntu22.04 base ships CUDA libs but
+# NOT cuDNN — first /align request crashed with
+# "Could not load library libcudnn_ops_infer.so.8".
+#
+# pip install the NVIDIA cuDNN 8 wheel for CUDA 12. Pin to the major
+# version that ctranslate2 4.4 was built against. The wheel ships
+# the .so files at site-packages/nvidia/cudnn/lib which need to be
+# on LD_LIBRARY_PATH — set that explicitly below.
+RUN python -m pip install nvidia-cudnn-cu12==8.9.7.29 nvidia-cublas-cu12
+
+# Add NVIDIA pip wheels' .so dirs to LD_LIBRARY_PATH so the dynamic
+# linker finds libcudnn_ops_infer.so.8 + libcublas.so at faster-whisper
+# import + first-inference time.
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib:/usr/local/lib/python3.10/dist-packages/nvidia/cublas/lib:${LD_LIBRARY_PATH}
+
 COPY requirements.txt /app/requirements.txt
 RUN python -m pip install -r /app/requirements.txt
 
