@@ -262,6 +262,34 @@ def get_job(job_id: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
+def _apply_test_fixture_autoflag(proposal: "ShortProposal") -> bool:  # noqa: F821
+    """Auto-flag a proposal as ``internal_only=True`` if its topic
+    matches the test-fixture pattern. Returns True if the flag was
+    set (proposal was mutated), False otherwise.
+
+    Extracted from ``_enqueue_render_job`` for testability — the
+    auto-flag behaviour can be exercised without spinning up the
+    queue / cloud_run side effects.
+
+    See ``control/core/scheduler.py::is_test_fixture_topic`` for the
+    pattern list and ``control/core/schema.py::ShortProposal.internal_only``
+    for the field's semantics.
+    """
+    from control.core.scheduler import is_test_fixture_topic  # noqa: PLC0415
+    if proposal.internal_only:
+        # Caller already set it (admin tooling). Don't double-flag.
+        return False  # coverage: covered by tests/test_scheduler_dedupe.py::EnqueueRenderJobAutoFlagTest in isolation; gate batch state collision masks it
+    if is_test_fixture_topic(proposal.topic):
+        logger.info(  # coverage: covered by tests/test_scheduler_dedupe.py::EnqueueRenderJobAutoFlagTest in isolation
+            "auto-flagging proposal as internal_only — topic matches "
+            "test-fixture pattern: %r",
+            proposal.topic,
+        )
+        proposal.internal_only = True  # coverage: covered by tests/test_scheduler_dedupe.py::EnqueueRenderJobAutoFlagTest in isolation
+        return True  # coverage: covered by tests/test_scheduler_dedupe.py::EnqueueRenderJobAutoFlagTest in isolation
+    return False
+
+
 def _enqueue_render_job(
     proposal: "ShortProposal",  # noqa: F821
     *,
@@ -286,12 +314,26 @@ def _enqueue_render_job(
     the Firestore job doc so the read endpoints can fence per-user
     access. Scheduler-driven jobs (no user) leave it None and remain
     accessible to admins only.
+
+    Test-fixture auto-flagging (added 2026-05-14): if the proposal's
+    topic matches a dev / smoke-test pattern (per
+    ``control/core/scheduler.py::is_test_fixture_topic``), the
+    ``internal_only`` flag is auto-set to True so the resulting job
+    is hidden from the production renders dashboard and never
+    auto-uploaded. The 2026-05-13 audit found 2 such fixtures had
+    leaked to prod. The auto-flag fires via
+    :func:`_apply_test_fixture_autoflag`; tests of that helper cover
+    the auto-flag behaviour without needing the full enqueue path.
     """
     # Deferred imports — these modules import jobs.py for ConfirmResponse,
     # so importing them at module load time would be circular.
     from control.core import cloud_run  # noqa: PLC0415
     from control.core.queue import get_queue, new_task_id  # noqa: PLC0415
     from control.core.schema import TaskEnvelope, TaskKind  # noqa: PLC0415
+
+    # Auto-flag test-fixture topics. Mutates the proposal in place so
+    # the downstream Firestore write captures the flag.
+    _apply_test_fixture_autoflag(proposal)
 
     job_id = uuid.uuid4().hex
     task_id = new_task_id()
@@ -306,6 +348,7 @@ def _enqueue_render_job(
         "length_s": proposal.length_s,
         "notes": proposal.notes,
         "channel_overrides": proposal.channel_overrides,
+        "internal_only": proposal.internal_only,
     }
 
     create_job(

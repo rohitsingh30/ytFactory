@@ -94,6 +94,26 @@ class ShortProposal(BaseModel):
     # these via `proposal.channel_overrides.get(...)` so adding a knob
     # never requires touching the renderer code.
     channel_overrides: dict[str, Any] = Field(default_factory=dict)
+    # Internal-only flag (added 2026-05-14 — see
+    # docs/pipeline_bug_catalogue_v2_2026-05-14.html).
+    #
+    # When True, the proposal is a dev / smoke-test fixture that should
+    # NEVER be auto-uploaded to YouTube and should be hidden from the
+    # production renders dashboard. The 27-render audit found two such
+    # fixtures had leaked to prod (topics 'AITA descriptor-registry
+    # smoke test all knobs' + 'AITA slice 4 + 5 verify') because no
+    # gate distinguished them from real proposals.
+    #
+    # Set automatically by control/core/jobs.py::_enqueue_render_job
+    # when the topic matches a test-fixture pattern (see
+    # control/core/scheduler.py::is_test_fixture_topic for the regex
+    # list). Can also be set explicitly by admin tooling for any
+    # deliberately-internal render.
+    #
+    # Downstream consumers (pipeline/render/shorts.py upload gate,
+    # web-next dashboard renders list) MUST honour this — never
+    # auto-publish, hide from default views.
+    internal_only: bool = False
 
 
 class ChatTurn(BaseModel):

@@ -9,7 +9,10 @@ Every tick:
   2. Round-robin across the 5 channels: pick the next channel after the
      last one we enqueued for. If that channel has no pending work, try
      the next, until we either find work or run out of channels.
-  3. "Pending work" = a narration JSON with no matching upload record.
+  3. "Pending work" = a narration JSON with no matching upload record
+     AND no recent successful RENDER for the same slug (the "topic
+     uniqueness window" added 2026-05-14 to fix the 9-cake-AITA / 6-baghdad /
+     5-ronaldinho duplicate-render bug from the 2026-05-13 audit).
      Looks at both top-level (`<channel>/narrations/<slug>.json`) AND
      niche-nested (`<channel>/<niche>/narrations/<slug>.json`) layouts.
   4. On match, enqueue a RENDER_SHORT task via control.core.jobs._enqueue_render_job.
@@ -25,7 +28,8 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -57,7 +61,126 @@ CHANNEL_ROTATION: list[str] = _channel_rotation()
 # you ever add a second laptop/agent.
 MAX_HEAVY_IN_FLIGHT = int(os.environ.get("YTFACTORY_MAX_HEAVY_IN_FLIGHT", "2"))
 
+# Topic-uniqueness window for the dedupe guard added 2026-05-14.
+# A topic that has been successfully rendered (status=done) within
+# this many days is excluded from re-rendering. Set to 0 to disable
+# (re-renders allowed without limit). Per the 2026-05-13 audit found
+# 9 cake-AITA / 6 baghdad / 5 ronaldinho re-renders within 6 days
+# because the only check was "is upload missing?" — never satisfied
+# while uploads are paused. The window-based check is independent of
+# upload status.
+DEDUPE_WINDOW_DAYS = int(os.environ.get("YTFACTORY_TOPIC_DEDUPE_DAYS", "30"))
+
 logger = logging.getLogger(__name__)
+
+
+# ---------- Test-fixture topic detector --------------------------------
+#
+# Added 2026-05-14 after the 27-render audit found 2 jobs leaked to
+# prod with obviously-internal topic names ('AITA descriptor-registry
+# smoke test all knobs', 'AITA slice 4 + 5 verify'). These are dev
+# fixtures that the agent runs to validate pipeline branches; they
+# should never appear on the dashboard or get auto-uploaded.
+#
+# The detector below is regex-based and intentionally aggressive on
+# false positives. Better to mark a real topic as internal_only
+# (operator can flip the flag manually) than to ship a smoke-test to
+# YouTube. False negatives (real test fixtures slipping through) are
+# the actually-bad case the 2026-05-14 audit caught us on.
+
+_TEST_FIXTURE_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"\bsmoke[- ]?test\b", re.IGNORECASE),
+    re.compile(r"\bdescriptor[- ]?registry\b", re.IGNORECASE),
+    re.compile(r"\b(slice|verify|verification)\s+\d", re.IGNORECASE),
+    re.compile(r"\bregress(ion)?\s+(test|fixture)\b", re.IGNORECASE),
+    re.compile(r"\bdebug[- ](render|test|build)\b", re.IGNORECASE),
+    re.compile(r"\b(internal|dev|debug|qa)[- ](only|fixture|test)\b", re.IGNORECASE),
+    re.compile(r"\b(test|fixture)\s+all\s+knobs\b", re.IGNORECASE),
+    # Slug forms — kebab-case with the same hints.
+    re.compile(r"\b(smoke-test|debug-render|dev-fixture|qa-test)\b", re.IGNORECASE),
+)
+
+
+def is_test_fixture_topic(topic: str | None) -> bool:
+    """True if ``topic`` looks like a dev / smoke-test fixture.
+
+    Used by ``control/core/jobs.py::_enqueue_render_job`` to auto-flag
+    proposals as ``internal_only=True`` so they don't reach the
+    production renders dashboard or get auto-uploaded.
+
+    Returns False for falsy inputs (None / "") — defensive default,
+    a missing topic is a different bug class.
+    """
+    if not topic:
+        return False
+    return any(p.search(topic) for p in _TEST_FIXTURE_PATTERNS)
+
+
+# ---------- Recently-rendered topic dedupe -----------------------------
+
+
+def _firestore_client_safe():
+    """Best-effort Firestore client; returns None if not configured.
+
+    The scheduler's dedupe guard degrades gracefully when Firestore is
+    unavailable (laptop dev without GOOGLE_CLOUD_PROJECT, unit tests
+    without a real client) — we log + skip the dedupe rather than
+    blocking renders entirely.
+    """
+    try:
+        from google.cloud import firestore  # noqa: PLC0415
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+        if not project:
+            return None
+        return firestore.Client(project=project)
+    except Exception:  # noqa: BLE001
+        logger.debug("scheduler dedupe: firestore client unavailable", exc_info=True)
+        return None
+
+
+def _recently_rendered_slugs(channel: str, *, since_days: int = DEDUPE_WINDOW_DAYS) -> set[str]:
+    """Slugs (= proposal.topic) that have been rendered (status=done) for
+    ``channel`` in the last ``since_days`` days.
+
+    Returns an empty set if Firestore is unavailable OR ``since_days``
+    is 0 (dedupe disabled). Errors are logged + swallowed — degrading
+    to "no dedupe" is preferable to halting the scheduler tick when
+    Firestore has a hiccup.
+
+    Used by ``_next_unrendered`` to filter out narrations whose slug
+    has already been successfully rendered recently. Critical fix for
+    the 9-cake-AITA / 6-baghdad / 5-ronaldinho re-render bug surfaced
+    by the 2026-05-13 audit.
+    """
+    if since_days <= 0:
+        return set()
+    cli = _firestore_client_safe()
+    if cli is None:
+        return set()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+    out: set[str] = set()
+    try:
+        # Query: all jobs for this channel, status=done, created within
+        # the window. Project-wide collection group not needed; jobs
+        # live in a flat collection.
+        q = (
+            cli.collection("jobs")
+            .where("channel", "==", channel)
+            .where("status", "==", "done")
+            .where("created_at", ">=", cutoff)
+        )
+        for doc in q.stream():
+            d = doc.to_dict() or {}
+            topic = d.get("topic")
+            if topic:
+                out.add(topic)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "scheduler dedupe: firestore query failed for channel=%s; "
+            "proceeding without dedupe (may re-render recent topics)",
+            channel, exc_info=True,
+        )
+    return out
 
 _MEM_STATE: dict = {}
 
@@ -168,17 +291,25 @@ def _next_unrendered(channel: str) -> Optional[Tuple[str, Path]]:
         return None
 
     uploaded = _uploaded_slugs(chan_dir)
+    # Topic-uniqueness window — also exclude slugs that have a recent
+    # successful render (regardless of upload status). Fixes the
+    # 9-cake-AITA / 6-baghdad / 5-ronaldinho re-render bug from the
+    # 2026-05-13 audit (uploads were paused so the upload-only check
+    # never fired). See ``DEDUPE_WINDOW_DAYS``.
+    recently_rendered = _recently_rendered_slugs(channel)
 
     # Top-level + niche-nested narration buckets.
     candidates: list[tuple[str, Path]] = []
     top_narr = chan_dir / "narrations"
     if top_narr.exists():
         for f in top_narr.glob("*.json"):
-            if f.stem not in uploaded:
-                candidates.append((f.stem, f))
+            if f.stem in uploaded or f.stem in recently_rendered:
+                continue
+            candidates.append((f.stem, f))
     for niche_narr in chan_dir.glob("*/narrations/*.json"):
-        if niche_narr.stem not in uploaded:
-            candidates.append((niche_narr.stem, niche_narr))
+        if niche_narr.stem in uploaded or niche_narr.stem in recently_rendered:
+            continue
+        candidates.append((niche_narr.stem, niche_narr))
 
     if not candidates:
         return None
@@ -192,6 +323,8 @@ def _next_unrendered_gcs(bucket: str, channel: str) -> Optional[Tuple[str, Path]
     try:
         cli = _gcs_client()
         uploaded = _uploaded_slugs_gcs(bucket, channel)
+        # Topic-uniqueness window — see _next_unrendered for rationale.
+        recently_rendered = _recently_rendered_slugs(channel)
         candidates: list[tuple[str, str, float]] = []  # (slug, gs_uri, mtime)
         for blob in cli.list_blobs(bucket, prefix=f"{channel}/"):
             parts = blob.name.split("/")
@@ -199,7 +332,7 @@ def _next_unrendered_gcs(bucket: str, channel: str) -> Optional[Tuple[str, Path]
             # <channel>/<niche>/narrations/<slug>.json.
             if len(parts) >= 3 and parts[-2] == "narrations" and blob.name.endswith(".json"):
                 slug = Path(parts[-1]).stem
-                if slug in uploaded:
+                if slug in uploaded or slug in recently_rendered:
                     continue
                 ts = blob.updated.timestamp() if blob.updated else 0.0
                 candidates.append((slug, f"gs://{bucket}/{blob.name}", ts))
