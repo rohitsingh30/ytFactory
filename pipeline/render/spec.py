@@ -171,6 +171,47 @@ class CaptionsDensity(str, Enum):
     DENSE = "dense"
 
 
+class MusicPolicy(str, Enum):
+    """Selects the music plugin (``pipeline/render/music/<policy>.py``).
+
+    Added 2026-05-14 as part of the 4-renderer-to-2-engine
+    consolidation. Pre-fix, music behaviour was implicit per renderer:
+    ``shorts.py`` always ducked a single bed, ``long_form.py`` always
+    looped a single ambient track, ``sports_doc.py`` always cycled
+    section moods, ``footage_only.py`` had no music at all. Now a
+    typed enum with one plugin per value.
+
+    - ``ducked_loop``  — short-style: loop ``music_bed.mp3`` under
+      the narration with sidechain ducking. Default for shorts.
+    - ``single_bed``   — long-form: loop one ambient track for the
+      full duration. Default for long-form.
+    - ``section_mood`` — per-``Section`` mood crossfade. Picks a
+      different bed per ``sections[]`` entry from
+      ``<channel>/music/<mood>/``. Default for overlay_timeline.
+    - ``none``         — explicitly silent. Picks the no-op plugin
+      that emits a silent wav of narration_duration_s.
+    """
+    DUCKED_LOOP = "ducked_loop"
+    SINGLE_BED = "single_bed"
+    SECTION_MOOD = "section_mood"
+    NONE = "none"
+
+
+class WatermarkPosition(str, Enum):
+    """Where the channel watermark sits on each frame.
+
+    Added 2026-05-14. Pre-fix ``render_watermark_png`` produced a PNG
+    but each renderer's compose stage hardcoded the ffmpeg overlay
+    position (``W-w-32:32`` for top-right in long_form,
+    ``W-w-32:H-h-32`` for bottom-right in shorts, etc).
+    """
+    TOP_RIGHT = "tr"
+    TOP_LEFT = "tl"
+    BOTTOM_RIGHT = "br"
+    BOTTOM_LEFT = "bl"
+    NONE = "none"
+
+
 class CaptionsLayout(str, Enum):
     """How captions appear on screen.
 
@@ -215,6 +256,131 @@ def _default_resolution_for(aspect: str) -> tuple[int, int]:
         "1:1":  (1080, 1080),
         "4:5":  (1080, 1350),
     }.get(aspect, (1080, 1920))
+
+
+# ---------------------------------------------------------------------------
+# Nested style/config dataclasses (added 2026-05-14)
+#
+# Each one bundles a family of related knobs that USED to be hardcoded
+# inside one of the four renderers (see knob_inventory.txt in the
+# session workspace for the full audit). RenderSpec now carries one of
+# each; engines + plugins read from them; the form-input registry
+# exposes every leaf as a CustomizationField for wizard / API surfacing.
+#
+# Defaults are conservative — they reproduce the historical behavior of
+# ``long_form.py`` (the most-tested renderer) so a channel that doesn't
+# override anything still renders the same way it did pre-2026-05-14.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TtsConfig:
+    """TTS-driven audio knobs.
+
+    Replaces the per-renderer ``_TONE_OVERRIDES`` table + scattered
+    ``tts_speed`` / ``tts_post_atempo`` literals. ``tone_overrides`` is
+    the same shape ``sports_doc._TONE_OVERRIDES`` had:
+    ``{tone_name: {"speed": float, "atempo": float}}``.
+    """
+    speed_default: float = 0.98
+    post_atempo_default: float = 1.0
+    chunk_target_chars: int = 380
+    chunk_join_silence_s: float = 0.4
+    tone_overrides: dict[str, dict[str, float]] = field(default_factory=lambda: {
+        "tifo-academic":   {"speed": 0.98, "atempo": 1.00},
+        "intense-podcast": {"speed": 1.02, "atempo": 0.97},
+        "playful-spicy":   {"speed": 1.00, "atempo": 1.00},
+        "serious-doc":     {"speed": 0.95, "atempo": 0.92},
+    })
+
+
+@dataclass
+class CaptionStyleConfig:
+    """Caption rendering knobs — colors, fonts, ASS canvas size, etc.
+
+    Defaults match ``long_form.py``'s yellow-italic Sleepy Time History
+    style. Channels that want bold-white captions (sports_doc) override
+    ``text_rgba`` + ``italic`` in their ``defaults: { long: { ... } }``
+    block.
+    """
+    font_size: int = 38
+    font_size_minimal: int = 130
+    font_size_standard: int = 110
+    font_size_dense: int = 90
+    text_rgba: tuple[int, int, int, int] = (255, 217, 61, 255)  # warm yellow
+    italic: bool = True
+    play_res_x: int = 1920
+    play_res_y: int = 1080
+    black_intro_buffer_s: float = 0.30
+
+
+@dataclass
+class MusicPolicyConfig:
+    """Music bed knobs — default file, mix levels, duck level."""
+    default_bed: str = "ambient_low"
+    """The bed file (without ``.mp3`` extension) under
+    ``<channel>/music/``. Empty string = no bed."""
+    music_bed_db: float = -28.0
+    """LUFS / dB of the bed under narration."""
+    filler_level_db: float = -22.0
+    """LUFS / dB of the bed under FILLER (no-narration) windows."""
+    mix_default: float = 0.35
+    """Linear mix factor for the bed when ducked (0.0 = silent, 1.0 = full)."""
+
+
+@dataclass
+class VideoGradeConfig:
+    """Color-grade knobs — sigma for blurred letterbox, brightness shift."""
+    blur_sigma: float = 22.0
+    brightness: float = 0.0
+
+
+@dataclass
+class WatermarkConfig:
+    """Watermark PNG knobs — font size, text color/alpha, margin from edge."""
+    font_size: int = 28
+    text_rgba: tuple[int, int, int, int] = (255, 255, 255, 140)
+    margin: int = 32
+    position: WatermarkPosition = WatermarkPosition.TOP_RIGHT
+
+
+@dataclass
+class ChapterCardConfig:
+    """Chapter card knobs — colors, font sizes, hold duration.
+
+    Defaults match ``sports_doc.py``'s deep-teal slab + orange chapter
+    number aesthetic. Channels that want a different palette set
+    ``bg_rgba`` / ``number_color`` in their long block.
+    """
+    bg_rgba: tuple[int, int, int, int] = (10, 22, 38, 240)
+    bg_color: str = "0x0a1626"
+    number_color: tuple[int, int, int, int] = (255, 168, 0, 255)
+    number_font_size: int = 48
+    title_font_size: int = 72
+    duration_s: float = 3.0
+
+
+@dataclass
+class LowerThirdConfig:
+    """Lower-third (speaker name + handle) knobs."""
+    bg_rgba: tuple[int, int, int, int] = (10, 22, 38, 215)
+    text_rgba: tuple[int, int, int, int] = (255, 255, 255, 255)
+    accent_rgba: tuple[int, int, int, int] = (255, 168, 0, 255)
+    font_size: int = 36
+    handle_font_size: int = 24
+    hold_min_s: float = 2.5
+
+
+@dataclass
+class FillerConfig:
+    """No-narration filler video knobs (used by overlay_timeline mode)."""
+    bg_color: str = "0x0a1626"
+
+
+@dataclass
+class NetworkConfig:
+    """Network-bound knobs (e.g. ffprobe timeout)."""
+    timeout_s: int = 30
 
 
 @dataclass
@@ -281,6 +447,49 @@ class RenderSpec:
     captions_layout — see ``CaptionsLayout`` docstring for the
     per-mode rendering path."""
 
+    # -- Music / overlays / chapter cards / lower-thirds (added 2026-05-14)
+    # These are the user-selectable knobs that USED to be hardcoded per
+    # renderer. ``music_policy`` picks the music plugin; the three
+    # bools toggle individual overlay producers. Same shape as every
+    # other typed enum/bool on the spec — form descriptors expose them
+    # all in the wizard.
+    music_policy: MusicPolicy = MusicPolicy.DUCKED_LOOP
+    lower_thirds: bool = False
+    chapter_cards: bool = False
+    overlay_timeline: bool = False
+    """When True, engine activates the ``anchored_footage`` overlay
+    producer (foreground match-clips + b-roll filler — the
+    sports_doc shape). The visual_mode for this case is
+    ``footage_filler`` so the background is b-roll cycle and the
+    overlays carry the anchored cuts."""
+
+    # -- Critic loop ------------------------------------------------------
+    critic_loop: bool | None = None
+    """Per user direction (2026-05-14): NO defaults-by-kind. ``None``
+    means "respect whatever the channel's ``defaults:`` block says";
+    explicit ``True`` / ``False`` from the form overrides everything.
+    The engine treats ``None`` as ``False`` if no channel default
+    applies, so renders never silently spend critic budget."""
+
+    # -- Tone (sports_doc-style narration cadence override) --------------
+    tone: str | None = None
+    """When set, the AudioSynthesizer applies the ``tone_overrides[tone]``
+    speed/atempo values from ``TtsConfig``. ``None`` = use
+    ``speed_default`` / ``post_atempo_default``. Values today:
+    ``tifo-academic`` / ``intense-podcast`` / ``playful-spicy`` /
+    ``serious-doc`` — channel YAMLs can register additional tones."""
+
+    # -- Nested typed config (defaults reproduce historical behavior) ----
+    tts: TtsConfig = field(default_factory=TtsConfig)
+    caption_style: CaptionStyleConfig = field(default_factory=CaptionStyleConfig)
+    music: MusicPolicyConfig = field(default_factory=MusicPolicyConfig)
+    video_grade: VideoGradeConfig = field(default_factory=VideoGradeConfig)
+    watermark: WatermarkConfig = field(default_factory=WatermarkConfig)
+    chapter_card: ChapterCardConfig = field(default_factory=ChapterCardConfig)
+    lower_third: LowerThirdConfig = field(default_factory=LowerThirdConfig)
+    filler: FillerConfig = field(default_factory=FillerConfig)
+    network: NetworkConfig = field(default_factory=NetworkConfig)
+
     # -- Visual presentation ----------------------------------------------
     narrator_visual_mode: str = "on_screen"
     """``on_screen`` (default) puts the narrator character in image
@@ -320,10 +529,16 @@ class RenderSpec:
         """Firestore-friendly representation. Enums → str values, tuple
         → list. The cloud worker writes this into ``job.render_spec`` so
         the dashboard can show "the system interpreted your inputs as
-        kind=short, visual_mode=ai_beat_slideshow, aspect=9:16"."""
+        kind=short, visual_mode=ai_beat_slideshow, aspect=9:16".
+
+        Post-2026-05-14 also flattens the nested config dataclasses
+        (TtsConfig, CaptionStyleConfig, MusicPolicyConfig, …) into their
+        primitive shapes so Firestore + dashboard JSON deserialize them
+        without a custom decoder. Tuples become lists; enums become
+        bare str values.
+        """
         d = asdict(self)
-        # Enums become bare str values via the Enum's str inheritance,
-        # but asdict() preserves them as Enum — coerce explicitly.
+        # Top-level Enums → bare str values (asdict doesn't unwrap Enum).
         for k, v in list(d.items()):
             if isinstance(v, Enum):
                 d[k] = v.value
@@ -332,7 +547,30 @@ class RenderSpec:
         d["audio_mode"] = self.audio_mode.value
         d["captions_density"] = self.captions_density.value
         d["captions_layout"] = self.captions_layout.value
+        d["music_policy"] = self.music_policy.value
         d["output_resolution"] = list(self.output_resolution)
+        # Nested config Enums + tuples — recurse one level (none of the
+        # nested configs themselves contain further nested configs).
+        d["watermark"] = {
+            **d["watermark"],
+            "position": self.watermark.position.value,
+            "text_rgba": list(self.watermark.text_rgba),
+        }
+        d["caption_style"] = {
+            **d["caption_style"],
+            "text_rgba": list(self.caption_style.text_rgba),
+        }
+        d["chapter_card"] = {
+            **d["chapter_card"],
+            "bg_rgba": list(self.chapter_card.bg_rgba),
+            "number_color": list(self.chapter_card.number_color),
+        }
+        d["lower_third"] = {
+            **d["lower_third"],
+            "bg_rgba": list(self.lower_third.bg_rgba),
+            "text_rgba": list(self.lower_third.text_rgba),
+            "accent_rgba": list(self.lower_third.accent_rgba),
+        }
         return d
 
 
@@ -487,6 +725,42 @@ def _coerce_captions_layout(v: Any) -> CaptionsLayout:
     return CaptionsLayout.CENTER_WORD_BY_WORD
 
 
+def _coerce_music_policy(v: Any) -> MusicPolicy:
+    """Coerce to MusicPolicy. Unknown / missing → DUCKED_LOOP (the
+    historical short default; long engine overrides via channel YAML).
+    """
+    if isinstance(v, MusicPolicy):
+        return v
+    if isinstance(v, str):
+        try:
+            return MusicPolicy(v)
+        except ValueError:
+            pass
+    return MusicPolicy.DUCKED_LOOP
+
+
+def _coerce_optional_bool(v: Any) -> bool | None:
+    """Tri-state coerce for ``critic_loop``-style fields. Empty string
+    or None → None (let channel default apply); ``"true"``/``True``/1
+    → True; everything else → False.
+    """
+    if v is None or v == "":
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(v)
+
+
+def _coerce_bool(v: Any, default: bool = False) -> bool:
+    """Two-state coerce. Same parsing as
+    :func:`_coerce_optional_bool` but returns ``default`` for missing
+    values."""
+    out = _coerce_optional_bool(v)
+    return default if out is None else out
+
+
 # Form-override keys that have a typed home on the spec. Anything NOT
 # in this set gets dumped into spec.extra so downstream stages can
 # still find it — no silent drops.
@@ -503,6 +777,11 @@ _TYPED_OVERRIDE_KEYS: set[str] = {
     "narrator_visual_mode",
     "visibility", "schedule_at",
     "duration_target_s", "duration_max_s",
+    # Added 2026-05-14 — new top-level user-selectable knobs.
+    "music_policy",
+    "lower_thirds", "chapter_cards", "overlay_timeline",
+    "critic_loop",
+    "tone",
 }
 
 
@@ -708,6 +987,35 @@ def build_spec(
         or "on_screen"
     )
 
+    # ----- new typed overrides (added 2026-05-14) ------------------------
+    music_policy = _coerce_music_policy(
+        overrides.get("music_policy") or cfg.get("music_policy")
+    )
+    lower_thirds = _coerce_bool(
+        overrides.get("lower_thirds")
+        if "lower_thirds" in overrides
+        else cfg.get("lower_thirds"),
+        default=False,
+    )
+    chapter_cards = _coerce_bool(
+        overrides.get("chapter_cards")
+        if "chapter_cards" in overrides
+        else cfg.get("chapter_cards"),
+        default=False,
+    )
+    overlay_timeline = _coerce_bool(
+        overrides.get("overlay_timeline")
+        if "overlay_timeline" in overrides
+        else cfg.get("overlay_timeline"),
+        default=False,
+    )
+    critic_loop = _coerce_optional_bool(
+        overrides.get("critic_loop")
+        if "critic_loop" in overrides
+        else cfg.get("critic_loop")
+    )
+    tone = (overrides.get("tone") or cfg.get("tone") or "").strip() or None
+
     # ----- extra (non-typed pass-through) --------------------------------
     extra = {
         k: v for k, v in overrides.items()
@@ -734,6 +1042,12 @@ def build_spec(
         captions_density=captions_density,
         captions_enabled=captions_enabled,
         captions_layout=captions_layout,
+        music_policy=music_policy,
+        lower_thirds=lower_thirds,
+        chapter_cards=chapter_cards,
+        overlay_timeline=overlay_timeline,
+        critic_loop=critic_loop,
+        tone=tone,
         narrator_visual_mode=narrator_visual_mode,
         visual_source=overrides.get("visual_source"),
         visibility=overrides.get("visibility"),
@@ -781,11 +1095,25 @@ def _aspect_from_resolution(res: Any) -> str | None:
 
 
 __all__ = [
+    # Top-level types
     "RenderSpec",
     "RenderKind",
     "VisualMode",
     "AudioMode",
     "CaptionsDensity",
     "CaptionsLayout",
+    "MusicPolicy",
+    "WatermarkPosition",
+    # Nested config dataclasses (added 2026-05-14)
+    "TtsConfig",
+    "CaptionStyleConfig",
+    "MusicPolicyConfig",
+    "VideoGradeConfig",
+    "WatermarkConfig",
+    "ChapterCardConfig",
+    "LowerThirdConfig",
+    "FillerConfig",
+    "NetworkConfig",
+    # Builder
     "build_spec",
 ]
