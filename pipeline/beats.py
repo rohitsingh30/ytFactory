@@ -502,6 +502,92 @@ _CONJUNCTION_WORDS = frozenset({
 })
 
 
+# 2026-05-14 — added after the 27-render audit found beat-0 of the
+# cake-AITA hook segmented as "I refused to cut my" (1.5s) followed
+# by "sister's wedding cake at her reception" (1.8s). The pipeline's
+# tier-3 middle-word splitter cut on word index, with no awareness
+# that the left side ended on the possessive pronoun "my" — a
+# linguistic stop-word that telegraphs an unfinished phrase. Viewers
+# read this as "the video froze mid-sentence" and flick.
+#
+# Same root-cause across the audit:
+#   - "I refused to cut my" / "sister's wedding cake at her reception"
+#   - "drove two hours to" / "the venue" (would-be split if not for
+#     a clause break landing earlier)
+#   - "Soldiers began throwing thousands of priceless books from" /
+#     "the House of Wisdom into the Tigris River"
+#
+# Fix: forbid splits that would END the left side on any of these
+# stop words. Apply in both tier-2 (conjunction) and tier-3
+# (middle-word) splitters via :func:`_is_acceptable_split_idx`.
+#
+# Lowercased + stripped-of-trailing-punct before lookup. NOTE: this
+# DOES include "for", "as", "if", "but", "so" — which are also in
+# _CONJUNCTION_WORDS. That's intentional: a conjunction at the
+# clause-end of a sentence reads as a stop too ("…I went, so") even
+# though splitting BEFORE one is fine.
+_FORBIDDEN_END_TOKENS = frozenset({
+    # Articles
+    "a", "an", "the",
+    # Possessives
+    "my", "your", "his", "her", "its", "our", "their", "whose",
+    # Prepositions (most common)
+    "of", "for", "to", "with", "in", "on", "at", "by", "from",
+    "into", "onto", "upon", "about", "over", "under", "through",
+    "between", "among", "against", "around", "before", "after",
+    "during", "without", "within", "across", "behind", "beneath",
+    # Conjunctions / connectives
+    "and", "or", "but", "so", "as", "if", "yet", "nor",
+    "than", "because", "while", "though", "although", "until",
+    "unless", "since", "when", "where", "whether",
+    # Common pronouns mid-flow
+    "this", "that", "these", "those",
+})
+
+
+def _is_acceptable_split_idx(group: list, best: int) -> bool:
+    """True iff splitting ``group`` so the LEFT side ends at
+    ``group[best - 1]`` does NOT land on a stop-word.
+
+    ``best`` is the index of the FIRST word of the right side
+    (matches the slicing convention used by :func:`_split_long_group`).
+    Returns ``True`` for boundary cases where the index is at the
+    edges (the caller has already validated 0 < best < len(group)).
+    """
+    if best <= 0 or best >= len(group):
+        return True
+    last_left = group[best - 1].text or ""
+    bare = last_left.strip(",.;:!?\"'-").lower()
+    return bare not in _FORBIDDEN_END_TOKENS
+
+
+def _shift_to_acceptable(
+    group: list, candidate: int, *, max_walk: int = 3
+) -> int | None:
+    """Walk ``candidate`` ±N positions to find an acceptable split.
+
+    Returns the shifted index, or ``None`` if no acceptable position
+    exists within ±``max_walk`` words. The caller decides what to do
+    on None — usually fall back to the next splitter tier.
+
+    Walk order: prefer SHIFTING RIGHT first (consume one more word
+    into the left side) since that adds context to the left phrase
+    rather than truncating it. If right-shift fails, try left-shift.
+    """
+    if _is_acceptable_split_idx(group, candidate):
+        return candidate
+    n = len(group)
+    for delta in range(1, max_walk + 1):
+        # Right shift first.
+        right = candidate + delta
+        if right < n and _is_acceptable_split_idx(group, right):
+            return right
+        left = candidate - delta
+        if left > 0 and _is_acceptable_split_idx(group, left):
+            return left
+    return None
+
+
 def _split_long_group(group: list[Word], max_s: float) -> list[list[Word]]:
     """Split a single-sentence word group so no fragment exceeds ``max_s``.
 
@@ -525,6 +611,17 @@ def _split_long_group(group: list[Word], max_s: float) -> list[list[Word]]:
     unchanged when no clause break was found, silently letting a 4.4s
     beat through against a 3.2s ceiling. Now we always split until each
     sub-group fits.
+
+    Class-of-bug fix 2026-05-14 (post-27-render audit, see
+    docs/pipeline_bug_catalogue_v2_2026-05-14.html): tier 2 + tier 3
+    splits also pass through :func:`_is_acceptable_split_idx` /
+    :func:`_shift_to_acceptable` so the left side never ends on a
+    stop-word. Pre-fix the cake-AITA hook split as "I refused to cut
+    my" / "sister's wedding cake at her reception" — viewers read the
+    "my" cut as a freeze. Post-fix the splitter walks ±3 words to
+    find a non-stop-word boundary; if none exists, falls back to the
+    original index (better than failing — the ``max_s`` contract takes
+    precedence over the stop-word heuristic).
     """
     if not group:
         return []
@@ -559,11 +656,18 @@ def _split_long_group(group: list[Word], max_s: float) -> list[list[Word]]:
         if conj_indices:
             mid_t = (group[0].start + group[-1].end) / 2
             best = min(conj_indices, key=lambda i: abs(group[i].start - mid_t))
+            # Walk to acceptable boundary; if none, accept original.
+            shifted = _shift_to_acceptable(group, best)
+            if shifted is not None:
+                best = shifted
             left, right = group[:best], group[best:]
         else:
             # Tier 3 — middle-word split. Last resort, never desirable
             # but always available so the max_s contract holds.
             best = max(1, len(group) // 2)
+            shifted = _shift_to_acceptable(group, best)
+            if shifted is not None:
+                best = shifted
             left, right = group[:best], group[best:]
 
     # Recurse: a single split may not suffice if the sentence is very
