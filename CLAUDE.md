@@ -580,8 +580,10 @@ runs the legacy path by default; flip to engines via
 - **Shared library:** `pipeline/render/shared/` (`ffmpeg_helpers`,
   `trim_letterbox`, `watermark`, `voice_fingerprint`, `env_loader`,
   `concat_safe`).
-- **NEW Cloud Run service:** `cloud/asr-whisper/` — faster-whisper on
-  L4 for word-aligned narration. Used by both engines.
+- **NEW Cloud Run service (DEPLOYED):** `cloud/asr-whisper/` — faster-whisper on
+  L4 for word-aligned narration. Live at `https://ytfactory-asr-whisper-7hwnzw7lya-as.a.run.app`.
+  Set `CLOUDRUN_ASR_URL=<URL>` on laptop / cloud worker to route both
+  short + long engine timelines through it.
 - **YAML migration script:** `scripts/migrate_channel_yamls.py`
   rewrites every channel + variant + per-channel YAML to the new
   `defaults: { short: {...}, long: {...} }` shape. Comment
