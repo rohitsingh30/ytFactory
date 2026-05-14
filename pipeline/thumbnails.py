@@ -253,13 +253,87 @@ def list_scene_frames(cache_dir: Path) -> list[Path]:
     return sorted(cache_dir.glob("img_*.png"))
 
 
+def score_frame(path: Path) -> float:
+    """Compute a thumbnail-worthiness score for ``path``.
+
+    Combines three signals that are cheap to compute with Pillow alone
+    (no OpenCV dep):
+
+      * **Edge density** — proxy for "busy / detailed" frames. Flat
+        backgrounds + character T-poses score low; complex scenes
+        with multiple characters or props score high.
+      * **Mean luminance** — punishes too-dark + too-bright frames
+        (both kill thumbnail readability on a phone screen).
+      * **Channel stddev** — proxy for "colorful / varied" frames.
+        Monochromatic / single-tone frames score low.
+
+    Score is a non-negative float. Higher is better. A frame that
+    fails ``pipeline/llm/quality_gate.py::check_image`` (broken /
+    all-black / all-flat) gets ``-1.0`` so the picker knows to
+    skip it.
+
+    Added 2026-05-14 per Phase 8b. Used by :func:`pick_scene` to
+    fall through from a broken ``img_00`` to the next viable frame.
+    Pure Pillow — no OpenCV / mediapipe dep added.
+    """
+    try:
+        from pipeline.llm.quality_gate import check_image  # noqa: PLC0415
+    except Exception:  # pragma: no cover  # coverage: defensive — quality_gate import failure path is structurally untriggerable in tests
+        check_image = None  # noqa: N806
+    if check_image is not None:
+        ok, _reason = check_image(path)
+        if not ok:
+            return -1.0
+    try:
+        with Image.open(path) as img:
+            if img.mode != "RGB":
+                img = img.convert("RGB")  # coverage: tested via test_score_frame_handles_rgba via the alpha path
+            from PIL import ImageFilter, ImageStat  # noqa: PLC0415
+            stat = ImageStat.Stat(img)
+            avg_stddev = sum(stat.stddev) / max(1, len(stat.stddev))
+            luma = img.convert("L")
+            luma_pixels = list(luma.getdata())
+            mean_lum = sum(luma_pixels) / max(1, len(luma_pixels))
+            edges = luma.filter(ImageFilter.FIND_EDGES)
+            edge_pixels = sum(1 for p in edges.getdata() if p > 30)
+            edge_density = edge_pixels / max(1, img.width * img.height)
+    except Exception:  # coverage: tested via test_score_frame_handles_corrupt_file
+        return -1.0
+    # Luminance scoring: peak at ~120 (mid-bright), penalty at extremes.
+    # 0 (pitch black) and 255 (blown-out white) both unwatchable.
+    # Triangular weighting centred at 120; max value = 1.0 at lum=120,
+    # 0.0 at lum=0 or lum=240.
+    lum_score = max(0.0, 1.0 - abs(mean_lum - 120.0) / 120.0)
+    # Edge density: scale 0 → 0, 0.05 → 0.5, 0.15+ → 1.0.
+    edge_score = min(1.0, edge_density / 0.15)
+    # Stddev: scale 0 → 0, 30 → 0.5, 60+ → 1.0.
+    sd_score = min(1.0, avg_stddev / 60.0)
+    # Weighted sum — edge density is the strongest signal for "is
+    # this frame visually interesting" so it gets the highest weight.
+    return 0.5 * edge_score + 0.3 * sd_score + 0.2 * lum_score
+
+
 def pick_scene(cache_dir: Path, *, prefer_index: int | None = None) -> Path | None:
     """Pick the scene frame to use as the thumbnail base.
 
     The hook moment (img_00) is usually the most expressive — beat 0
     is authored under the strictest concrete-tokens rule (Principle #7)
-    and the character is closest to camera. Bias toward img_01 if the
-    operator explicitly overrides via ``prefer_index``.
+    and the character is closest to camera. So img_00 is the default.
+
+    If ``prefer_index`` is set, return THAT frame (no scoring).
+
+    Otherwise (default behaviour), use a tiered approach:
+      1. If img_00 passes :func:`score_frame` (score >= 0), use it.
+      2. Else fall through to the highest-scoring frame in the
+         remaining set, breaking ties by index (lower wins — earlier
+         beats are still better-curated).
+      3. If every frame scores negative (everything failed quality
+         gate), return img_00 anyway — better to ship a degraded
+         thumbnail than no thumbnail at all (the cloud worker
+         falls back to ffmpeg first-frame on None).
+
+    Added 2026-05-14 per Phase 8b — promotes broken-frame skipping
+    without adding OpenCV as a dep. Pure Pillow.
     """
     frames = list_scene_frames(cache_dir)
     if not frames:
@@ -271,7 +345,22 @@ def pick_scene(cache_dir: Path, *, prefer_index: int | None = None) -> Path | No
                     return f
             except (ValueError, IndexError):
                 continue
-    return frames[0]
+        # prefer_index not found → fall through to default logic.
+    # Default: try img_00 first; if it scores fine, use it.
+    head = frames[0]
+    head_score = score_frame(head)
+    if head_score >= 0:
+        return head
+    # Fall through to highest-scoring frame.
+    scored = [(score_frame(f), i, f) for i, f in enumerate(frames)]
+    # Filter out negative-score (broken) frames; if all broken, use img_00.
+    viable = [(s, i, f) for (s, i, f) in scored if s >= 0]
+    if not viable:
+        return head
+    # Sort by (-score, index) so highest score wins; ties broken by
+    # earliest index (lowest = earliest = better-curated).
+    viable.sort(key=lambda t: (-t[0], t[1]))
+    return viable[0][2]
 
 
 # ---------- compositor ---------------------------------------------------

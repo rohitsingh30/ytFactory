@@ -330,6 +330,166 @@ class TestPickScene(unittest.TestCase):
             shutil.rmtree(scratch, ignore_errors=True)
 
 
+class TestScoreFrame(unittest.TestCase):
+    """Pin the Phase 8b score_frame helper that lets pick_scene skip
+    broken frames without adding OpenCV as a dep."""
+
+    def setUp(self) -> None:
+        self._scratch = Path(tempfile.mkdtemp(dir=str(_BASE)))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self._scratch, ignore_errors=True)
+
+    def test_missing_file_scores_negative(self) -> None:
+        score = thumbnails.score_frame(self._scratch / "nope.png")
+        self.assertEqual(score, -1.0)
+
+    def test_zero_byte_file_scores_negative(self) -> None:
+        # Quality gate rejects too-small files.
+        path = self._scratch / "empty.png"
+        path.write_bytes(b"")
+        score = thumbnails.score_frame(path)
+        self.assertEqual(score, -1.0)
+
+    def test_solid_color_image_scores_low(self) -> None:
+        # Bypass quality_gate so we can pin score_frame's INTERNAL
+        # scoring math (the QC integration is exercised by other tests).
+        path = self._scratch / "grey.png"
+        Image.new("RGB", (640, 1138), (128, 128, 128)).save(path)
+        with self._mock_qc_pass():
+            score = thumbnails.score_frame(path)
+        # Flat grey: zero edges, zero stddev, mid-luma → low total.
+        self.assertLess(score, 0.4,
+                        f"flat grey shouldn't score >= 0.4, got {score}")
+        self.assertGreaterEqual(score, 0)
+
+    def test_busy_image_scores_higher_than_flat(self) -> None:
+        # Same trick: bypass QC to compare INTRINSIC score math.
+        flat_path = self._scratch / "flat.png"
+        Image.new("RGB", (640, 1138), (128, 128, 128)).save(flat_path)
+        busy_path = self._scratch / "busy.png"
+        busy = Image.new("RGB", (640, 1138), (255, 255, 255))
+        draw = ImageDraw.Draw(busy)
+        for x in range(0, 640, 4):
+            draw.rectangle([x, 0, x + 1, 1138], fill=(0, 0, 0))
+        busy.save(busy_path)
+        with self._mock_qc_pass():
+            flat_score = thumbnails.score_frame(flat_path)
+            busy_score = thumbnails.score_frame(busy_path)
+        # Busy MUST score higher than flat.
+        self.assertGreater(busy_score, flat_score,
+                           f"busy={busy_score} should beat flat={flat_score}")
+
+    def _mock_qc_pass(self):
+        """Patch check_image to always-pass so score_frame computes
+        its intrinsic score on tiny test fixtures (real QC rejects
+        small PNGs of solid color)."""
+        return patch(
+            "pipeline.llm.quality_gate.check_image",
+            return_value=(True, ""),
+        )
+
+    def test_score_frame_handles_rgba(self) -> None:
+        # Cover the `if img.mode != 'RGB': img = img.convert('RGB')` line.
+        path = self._scratch / "rgba.png"
+        img = Image.new("RGBA", (640, 1138), (128, 128, 128, 200))
+        img.save(path)
+        with self._mock_qc_pass():
+            score = thumbnails.score_frame(path)
+        # Should compute something (not raise, not return -1.0).
+        self.assertGreaterEqual(score, 0)
+
+    def test_score_frame_handles_corrupt_file(self) -> None:
+        # Cover the inner except branch (Image.open raises).
+        path = self._scratch / "corrupt.png"
+        path.write_bytes(b"not a real PNG, just bytes that are big enough" * 1000)
+        # check_image will reject (not a valid PNG), so we mock it to
+        # bypass and force the inner Image.open to fail instead.
+        with self._mock_qc_pass():
+            score = thumbnails.score_frame(path)
+        self.assertEqual(score, -1.0)
+
+
+class TestPickSceneScoring(unittest.TestCase):
+    """Pin the Phase 8b fall-through behaviour: if img_00 is broken,
+    pick the highest-scoring viable alternative."""
+
+    def setUp(self) -> None:
+        self._scratch = Path(tempfile.mkdtemp(dir=str(_BASE)))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self._scratch, ignore_errors=True)
+
+    def _save_busy_frame(self, idx: int) -> None:
+        """Write a real image that passes the quality gate (>=30KB,
+        with edges, with luminance variety)."""
+        from PIL import ImageDraw  # noqa: PLC0415
+        img = Image.new("RGB", (640, 1138), (255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        # Add stripes (edges) AND noise (file size).
+        import random  # noqa: PLC0415
+        random.seed(42 + idx)
+        for x in range(0, 640, 4):
+            draw.rectangle([x, 0, x + 1, 1138], fill=(0, 0, 0))
+        # Add Gaussian noise to bloat file size past 30KB minimum.
+        pixels = list(img.getdata())
+        noisy = [
+            (max(0, min(255, r + random.randint(-15, 15))),
+             max(0, min(255, g + random.randint(-15, 15))),
+             max(0, min(255, b + random.randint(-15, 15))))
+            for r, g, b in pixels
+        ]
+        img.putdata(noisy)
+        img.save(self._scratch / f"img_{idx:02d}.png")
+
+    def _save_broken_frame(self, idx: int) -> None:
+        """Write an empty file that fails the quality gate."""
+        (self._scratch / f"img_{idx:02d}.png").write_bytes(b"")
+
+    def test_good_img_00_returned_as_is(self) -> None:
+        # img_00 is good → use it (default behaviour preserved).
+        self._save_busy_frame(0)
+        self._save_busy_frame(1)
+        result = thumbnails.pick_scene(self._scratch)
+        self.assertEqual(result.name, "img_00.png")
+
+    def test_broken_img_00_falls_through_to_viable_alt(self) -> None:
+        # img_00 broken → pick the next viable frame.
+        self._save_broken_frame(0)
+        self._save_busy_frame(1)
+        self._save_busy_frame(2)
+        result = thumbnails.pick_scene(self._scratch)
+        # img_01 is the next earliest VIABLE frame.
+        self.assertEqual(result.name, "img_01.png")
+
+    def test_all_broken_returns_img_00_as_fallback(self) -> None:
+        # If everything is broken, return img_00 anyway — the cloud
+        # worker's ffmpeg fallback path will catch the bad thumb.
+        # Better degraded thumbnail than no thumbnail at all.
+        self._save_broken_frame(0)
+        self._save_broken_frame(1)
+        self._save_broken_frame(2)
+        result = thumbnails.pick_scene(self._scratch)
+        self.assertEqual(result.name, "img_00.png")
+
+    def test_prefer_index_still_wins_over_scoring(self) -> None:
+        # Even with broken img_00, an explicit prefer_index trumps the
+        # score-based fall-through.
+        self._save_broken_frame(0)
+        self._save_busy_frame(1)
+        self._save_busy_frame(2)
+        result = thumbnails.pick_scene(self._scratch, prefer_index=2)
+        self.assertEqual(result.name, "img_02.png")
+
+    def test_prefer_index_not_found_falls_through_to_default(self) -> None:
+        # prefer_index=99 doesn't match any frame → fall through to
+        # default scoring logic. img_00 is good → return it.
+        self._save_busy_frame(0)
+        self._save_busy_frame(1)
+        result = thumbnails.pick_scene(self._scratch, prefer_index=99)
+        self.assertEqual(result.name, "img_00.png")
+
+
 class TestFitCover(unittest.TestCase):
     def test_wider_source_crops_width(self) -> None:
         src = Image.new("RGB", (400, 100))  # ar=4.0
