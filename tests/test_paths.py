@@ -169,17 +169,22 @@ class FromChannelYamlTest(unittest.TestCase):
 
     def test_variant_yaml_in_niche_channel_resolves_via_NICHE_CHANNEL(self):
         # aita_animated.yaml maps to niche "aita" → reddit_amitheasshole dir.
+        # NICHE_CHANNEL stores the canonical pipeline/variants path; the
+        # test must use the same path for the endswith() match to fire.
         p = RenderPaths.from_channel_yaml(
-            Path("mystoriesanimated/variants/aita_animated.yaml")
+            Path("pipeline/variants/mystoriesanimated/aita_animated.yaml")
         )
         self.assertEqual(p.channel, "mystoriesanimated")
         self.assertEqual(p.niche, "reddit_amitheasshole")
 
     def test_sports_ranked_variant_resolves_to_ranked_niche(self):
+        # Audit YAML-14 fix: the channel slug is `sportsrecapped`, not
+        # `sportstoriesanimated` (the latter has never existed). The
+        # canonical NICHE_CHANNEL path is pipeline/variants/<slug>/<variant>.yaml.
         p = RenderPaths.from_channel_yaml(
-            Path("sportstoriesanimated/variants/ranked.yaml")
+            Path("pipeline/variants/sportsrecapped/ranked.yaml")
         )
-        self.assertEqual(p.channel, "sportstoriesanimated")
+        self.assertEqual(p.channel, "sportsrecapped")
         self.assertEqual(p.niche, "ranked")
 
     def test_unregistered_variant_warns_and_falls_back_flat(self):

@@ -35,6 +35,38 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+# CRITICAL: snapshot google.* sys.modules + package attrs at conftest
+# LOAD time, BEFORE any test module is imported. A dozen test files
+# (test_web_*, test_routes_oauth, test_critique_runner, etc.) install
+# ``sys.modules["google.cloud"] = MagicMock()`` at MODULE-IMPORT time
+# without restoring it. Capturing inside a fixture would catch the
+# already-polluted state.
+def _snapshot_google_modules() -> dict[str, object]:
+    import sys
+    snap: dict[str, object] = {}
+    for key in list(sys.modules.keys()):
+        if key == "google" or key.startswith("google."):
+            snap[key] = sys.modules[key]
+    return snap
+
+
+def _snapshot_google_pkg_attrs() -> dict[str, dict[str, object]]:
+    import sys
+    out: dict[str, dict[str, object]] = {}
+    for pkg_name in ("google", "google.cloud"):
+        pkg = sys.modules.get(pkg_name)
+        if pkg is not None:
+            try:
+                out[pkg_name] = dict(vars(pkg))
+            except TypeError:
+                out[pkg_name] = {}
+    return out
+
+
+_GOOGLE_MODULES_BASELINE = _snapshot_google_modules()
+_GOOGLE_PKG_ATTRS_BASELINE = _snapshot_google_pkg_attrs()
+
+
 @pytest.fixture(autouse=True)
 def isolate_research_dirs(request, tmp_path, monkeypatch):
     """Repoint every research write-surface to a per-test tmp dir.
@@ -102,6 +134,111 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "no_research_isolation: opt out of the research-dirs autouse fixture",
+    )
+
+
+@pytest.fixture(autouse=True)
+def isolate_google_cloud_modules(request):
+    """Per-test cleanup of MagicMock LEAKS in ``sys.modules`` under
+    ``google.*`` keys, plus MagicMock attribute leaks on the
+    ``google`` / ``google.cloud`` packages.
+
+    Born from the 2026-05-14 test-pollution post-mortem. A dozen test
+    files (``test_web_*``, ``test_routes_oauth``, ``test_critique_runner``,
+    ``test_cloud_snapshot``, ``test_yt_dlp_cloudrun``, …) shared this
+    pattern at module-import time:
+
+        for name in ("google.cloud", "google.cloud.storage", "google.cloud.firestore"):
+            if name not in sys.modules:
+                sys.modules[name] = MagicMock()
+
+    The stubs are NEVER restored after the module's tests finish. Any
+    subsequent test that does ``from google.cloud import secretmanager``
+    or ``import google.cloud.storage`` finds the MagicMock parent
+    package and gets garbage instead of the real / patch-replaced
+    submodule. ~66 tests in the suite fail downstream because their
+    own ``patch.dict(sys.modules, {...})`` is shadowed by the leaked
+    MagicMock attribute on the parent package.
+
+    SCOPE: this fixture ONLY removes MagicMock-typed leaks. Real
+    google packages (google.cloud.run_v2, google.cloud.storage, etc.)
+    that legitimate tests import are left alone — they share global
+    proto descriptor registries (``google._upb._message``) that
+    segfault on naive re-import (verified 2026-05-14 — restoring
+    real google.cloud.run_v2 after a test SIGSEGV'd the suite).
+
+    Two phases on test teardown:
+      1. Remove any ``sys.modules[google.*]`` entry that's a
+         ``MagicMock`` instance AND wasn't in the conftest-load-time
+         baseline.
+      2. Remove MagicMock-typed attributes from the ``google`` /
+         ``google.cloud`` package objects that weren't in the
+         baseline (the from-import-step-1 path that lets the leak
+         bypass sys.modules).
+
+    Opt out via ``@pytest.mark.no_google_cloud_isolation`` (rare).
+    """
+    if request.node.get_closest_marker("no_google_cloud_isolation"):
+        yield
+        return
+
+    import sys  # noqa: PLC0415
+    from unittest.mock import MagicMock as _MagicMock  # noqa: PLC0415
+
+    yield
+
+    # Phase 1: prune MagicMock sys.modules leaks.
+    for key in list(sys.modules.keys()):
+        if not (key == "google" or key.startswith("google.")):
+            continue
+        if key in _GOOGLE_MODULES_BASELINE:
+            # Baseline entry — restore the original ref in case the
+            # test mutated sys.modules[key] to a different value (e.g.
+            # patch.dict overrode it but for some reason didn't restore).
+            if sys.modules[key] is not _GOOGLE_MODULES_BASELINE[key]:
+                sys.modules[key] = _GOOGLE_MODULES_BASELINE[key]
+            continue
+        # Not in baseline = the test added it. If it's a MagicMock or
+        # any obvious test stub, drop it. Real modules added at test
+        # time stay (e.g. lazy import of google.cloud.run_v2 during a
+        # test that legitimately needs it).
+        if isinstance(sys.modules[key], _MagicMock):
+            sys.modules.pop(key, None)
+
+    # Phase 2: prune MagicMock attribute leaks on the package objects.
+    baseline_attrs = _GOOGLE_PKG_ATTRS_BASELINE
+    for pkg_name, saved_attrs in baseline_attrs.items():
+        pkg = sys.modules.get(pkg_name)
+        if pkg is None:
+            continue
+        try:
+            current_attrs = vars(pkg)
+        except TypeError:
+            # pkg is MagicMock-stubbed — nothing to clean up at this layer.
+            continue
+        for key in list(current_attrs.keys()):
+            if key in saved_attrs:
+                continue
+            # Attribute added by some test. Only delete if it's a
+            # MagicMock — real submodules added by legitimate imports
+            # stay (the proto descriptor cache depends on stable
+            # bindings).
+            try:
+                val = current_attrs[key]
+            except KeyError:
+                continue
+            if isinstance(val, _MagicMock):
+                try:
+                    delattr(pkg, key)
+                except AttributeError:
+                    pass
+
+
+def pytest_collection_modifyitems(config, items):
+    # Register the marker so @pytest.mark.no_google_cloud_isolation works.
+    config.addinivalue_line(
+        "markers",
+        "no_google_cloud_isolation: opt out of the google.cloud sys.modules isolation fixture",
     )
 
 
