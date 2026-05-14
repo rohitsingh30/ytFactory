@@ -90,5 +90,62 @@ class RewriteTest(unittest.TestCase):
         self.assertEqual(loaded.source, "")
 
 
+class PromptNumbersRuleTest(unittest.TestCase):
+    """Pin the 2026-05-14 update to the numbers-formatting rule.
+
+    Pre-fix the rewriter prompt told the LLM to spell ALL numbers as
+    words ('two thousand five', 'twelve fifty-eight', 'sixty guests').
+    Modern Cloud Run TTS handles digits naturally, so the rule was
+    relaxed: years/dates/ages/counts use digits; only currency-with-
+    symbol and decimals/fractions still need spelling out.
+
+    Pin the new rule by asserting the prompt mentions the carve-out so
+    a casual edit doesn't slip back to the old 'always spell out' rule.
+    """
+
+    def test_prompt_mentions_digits_for_years_and_counts(self):
+        # The prompt tells the LLM that years/dates/ages/counts use
+        # DIGITS. Search for the keyword + the example pattern.
+        # _SHARED_CRAFT_RULES is the relevant string constant.
+        from pipeline.llm import rewrite as rw
+        prosody = rw._SHARED_CRAFT_RULES
+        # We embed a comment about Chatterbox + IndicF5 and an example
+        # showing 1258 / 2005 in digit form. Pin one of the markers.
+        self.assertIn(
+            "DIGITS", prosody,
+            "rewrite prompt must instruct LLM to use DIGITS for "
+            "years/dates/ages/counts (per 2026-05-14 audit)",
+        )
+        self.assertIn(
+            "1258", prosody,
+            "rewrite prompt must show '1258' as a digit-form example "
+            "(historyrecapped/baghdad-mongols-1258 was the regression case)",
+        )
+
+    def test_prompt_keeps_currency_symbol_warning(self):
+        # Currency with $ / € symbol still needs spelling out — TTS
+        # mishandles the symbol regardless of model.
+        from pipeline.llm import rewrite as rw
+        prosody = rw._SHARED_CRAFT_RULES
+        self.assertIn(
+            "$2000", prosody,
+            "rewrite prompt must keep the $2000 currency-symbol "
+            "warning (TTS reads the symbol as 'two zero zero zero')",
+        )
+
+    def test_prompt_no_longer_says_always_spell_out(self):
+        # The old rule said 'ALWAYS spell out as words ... applies to
+        # ages, counts, amounts, dates — every number.' That clause
+        # was the regression source. Make sure it's gone.
+        from pipeline.llm import rewrite as rw
+        prosody = rw._SHARED_CRAFT_RULES
+        self.assertNotIn(
+            "applies to ages, counts, amounts, dates", prosody,
+            "the legacy 'spell every number as words' rule must not "
+            "be reintroduced — it caused the 'twelve fifty-eight' "
+            "TTS regression on baghdad-mongols-1258",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

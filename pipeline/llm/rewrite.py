@@ -233,11 +233,31 @@ of pauses, emphasis, and breath):
   "Want to know the worst part?" — invites the viewer to think
   before you answer.
 
-- Numbers and currency: ALWAYS spell out as words ("two thousand
-  dollars", "three kids", "sixty guests", "she was forty-two"). The
-  TTS reads "$2000" as "two zero zero zero" — gibberish. Even
-  numerals ≤3 digits ("$400") read as digit-by-digit. SPELL THEM OUT.
-  This applies to ages, counts, amounts, dates — every number.
+- Numbers and currency:
+
+  * **YEARS, DATES, AGES, SIMPLE COUNTS** — use DIGITS. Modern Cloud
+    Run TTS (Chatterbox v2 + IndicF5) reads "1258", "2005", "the
+    1990s", "she was 42", "60 guests", "3 kids" naturally — pre-fix
+    we asked the LLM to spell these as words ("twelve fifty-eight",
+    "two thousand five") which slowed pace AND risked
+    mispronunciation drift across TTS providers. The 2026-05-13
+    audit (docs/pipeline_bug_catalogue_v2_2026-05-14.html) flagged
+    'twelve fifty-eight' as audible regression on the
+    historyrecapped/baghdad-mongols-1258 renders. Use digits.
+
+  * **CURRENCY WITH SYMBOL** — STILL spell out, because the dollar/
+    euro symbol is the actual failure mode. TTS reads "$2000" as
+    "two zero zero zero" or "$ two thousand" depending on the
+    model. Write "two thousand dollars" / "four hundred euros"
+    instead. (If you're authoring the digit form for emphasis,
+    write "2000 dollars" — drop the symbol.)
+
+  * **DECIMALS, FRACTIONS, RATIOS** — spell out ("one and a half",
+    "two-thirds", "three to one"). TTS handles "1.5" inconsistently
+    (sometimes "one point five", sometimes "one decimal five").
+
+  * **PHONE NUMBERS, ZIP CODES** — never narrated; if the source
+    contains one, redact or paraphrase ("a New York area code").
 
 - QUOTED DIALOGUE: TTS does not voice-act. A quoted line ("Don't
   feel good. Gotta bail.") sounds identical to the narrator —
@@ -279,9 +299,12 @@ OPENING:
   the AITA acronym in the spoken hook (rule above) — phrase the
   question in natural English. NEVER "Hi guys" or "today's story is".
 - Inciting wedge in the first ~30 words: a number, a name, a
-  specific prop ("four thousand two hundred dollars", "my SIL
-  Megan", "the second wedding cake", "the group chat"). Always
-  spell numbers as words (see Prosody rules below — TTS gibberish).
+  specific prop ("$4200" → "4,200 dollars" or "four thousand
+  dollars" depending on TTS comfort, "my SIL Megan", "the second
+  wedding cake", "the group chat"). For YEARS / AGES / COUNTS use
+  digits ("1258", "she was 42", "60 guests") — modern TTS handles
+  these naturally; only currency-with-symbol and decimals need
+  spelling out (see Prosody rules).
 
 SPICY (this is what separates retentive AITA from algorithmic mush —
 mine the source story for these and put them in):
@@ -290,10 +313,15 @@ mine the source story for these and put them in):
   reads as fake; named relationships read as a Reddit post you
   actually saw. (If the source uses initials/abbreviations, keep
   them — DIL, MIL, SIL, BIL, OOP, NC, are all standard.)
-- SPECIFIC numbers and dates, spelled as words: "four thousand two
-  hundred dollars", "she was forty-two", "two days before the
-  wedding", "in front of sixty guests". Vague "a lot of money" or
-  "a while ago" loses viewers.
+- SPECIFIC numbers and dates — preferred form depends on type:
+  * Years / dates / ages / simple counts → DIGITS ("1258", "2005",
+    "she was 42", "60 guests", "two days before the wedding").
+    Modern TTS reads these naturally.
+  * Currency with $/€ symbol → SPELL OUT ("four thousand two
+    hundred dollars" or write "$4,200" without symbol risk).
+  * Decimals / fractions → SPELL OUT ("one and a half", "two-thirds").
+  Vague "a lot of money" or "a while ago" loses viewers — pick a
+  number even if you have to estimate from context.
 - ESCALATION CURVE: hook → first wrong → antagonist doubles down →
   the moment it broke → the kicker. The story should get WORSE as
   it goes, not just describe one event.
