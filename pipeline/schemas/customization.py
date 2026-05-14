@@ -1251,6 +1251,175 @@ def get_channel(channel_key: str) -> ChannelSummary | None:
     )
 
 
+def _music_policy_field() -> CustomizationField:
+    """Selects the music plugin (added 2026-05-14, post-consolidation).
+
+    Maps directly to ``RenderSpec.music_policy`` and the
+    :class:`pipeline.render.contracts.MusicComposer` plugin family
+    under ``pipeline/render/music/``.
+
+    Adding a new MusicPolicy = add a module under
+    ``pipeline/render/music/`` + add an option here.
+    """
+    return CustomizationField(
+        key="music_policy",
+        label="Music style",
+        kind="select",
+        default="ducked_loop",
+        options=[
+            FieldOption(value="ducked_loop",
+                        label="Ducked loop · short style",
+                        description="Loop a bed under the narration with sidechain ducking."),
+            FieldOption(value="single_bed",
+                        label="Single bed · long-form ambient",
+                        description="One ambient track for the full duration, no ducking."),
+            FieldOption(value="section_mood",
+                        label="Section mood · per-section crossfade",
+                        description="Different mood bed per section, crossfade between."),
+            FieldOption(value="none",
+                        label="No music",
+                        description="Silent — narration only."),
+        ],
+        help="Music behavior for this render.",
+        spec_field="music_policy",
+        cfg_targets=[
+            CfgTarget(path=["music_policy"]),
+            CfgTarget(path=["long_form", "music_policy"]),
+        ],
+        consumers=["compose"],
+    )
+
+
+def _lower_thirds_field() -> CustomizationField:
+    """Toggle the lower-third overlay producer (speaker name + handle)."""
+    return CustomizationField(
+        key="lower_thirds",
+        label="Lower-thirds",
+        kind="switch",
+        default=False,
+        help="Show speaker name + handle as a lower-third on talking-head clips.",
+        spec_field="lower_thirds",
+        cfg_targets=[CfgTarget(path=["lower_thirds"])],
+        consumers=["compose"],
+    )
+
+
+def _chapter_cards_field() -> CustomizationField:
+    """Toggle the chapter-card overlay producer (full-frame slates)."""
+    return CustomizationField(
+        key="chapter_cards",
+        label="Chapter cards",
+        kind="switch",
+        default=False,
+        help="Show full-frame chapter title slates between sections.",
+        spec_field="chapter_cards",
+        cfg_targets=[CfgTarget(path=["chapter_cards"])],
+        consumers=["compose"],
+    )
+
+
+def _overlay_timeline_field() -> CustomizationField:
+    """Toggle the anchored-foreground-footage overlay (sports_doc shape).
+
+    When ON, the engine uses ``visual_mode=footage_filler`` for the
+    background + the ``anchored_footage`` overlay producer to splice
+    foreground match-clips at authored anchors. The legacy
+    ``sports_doc`` kind collapses into long with this flag set.
+    """
+    return CustomizationField(
+        key="overlay_timeline",
+        label="Overlay timeline (sports doc shape)",
+        kind="switch",
+        default=False,
+        help=(
+            "Background = b-roll cycled. Foreground = match-footage cuts "
+            "at authored anchors. Use for sports docs / similar long-form "
+            "with reactive overlays."
+        ),
+        spec_field="overlay_timeline",
+        cfg_targets=[CfgTarget(path=["overlay_timeline"])],
+        consumers=["compose"],
+    )
+
+
+def _critic_loop_field() -> CustomizationField:
+    """Tri-state critic-loop opt-in (per 2026-05-14 user direction:
+    NO defaults-by-kind — user picks every time).
+
+    UI shows ``Default · Off · On``:
+    - ``""`` (default) → spec.critic_loop = None (channel default if
+      set, else off — never silently spends critic budget)
+    - ``"on"``         → spec.critic_loop = True
+    - ``"off"``        → spec.critic_loop = False
+    """
+    return CustomizationField(
+        key="critic_loop",
+        label="Run critic loop",
+        kind="select",
+        default="",
+        options=[
+            FieldOption(value="", label="Default",
+                        description="Use channel default; off if not set."),
+            FieldOption(value="off", label="Off",
+                        description="Skip post-render critique."),
+            FieldOption(value="on", label="On",
+                        description="Run the critic + retry once on FIX/BLOCK."),
+        ],
+        help="Per-render override for the post-render critique loop.",
+        spec_field="critic_loop",
+        cfg_targets=[CfgTarget(path=["critic_loop"])],
+        consumers=["render"],
+    )
+
+
+def _tone_field(ydoc: dict[str, Any]) -> CustomizationField:
+    """Narration cadence override (sports_doc-style tone table).
+
+    Options come from ``spec.tts.tone_overrides`` keys. Channel YAMLs
+    can extend the table; the field always offers ``Default`` as the
+    no-override choice.
+    """
+    # Hardcoded defaults match TtsConfig.tone_overrides defaults; the
+    # bigbang PR sources them dynamically from the spec.
+    tone_options = [
+        FieldOption(value="", label="Default",
+                    description="Use channel speed/atempo defaults."),
+        FieldOption(value="tifo-academic", label="Tifo · academic",
+                    description="Measured analytical (default for sports explainer)."),
+        FieldOption(value="intense-podcast", label="Intense · podcast",
+                    description="Faster, more energetic."),
+        FieldOption(value="playful-spicy", label="Playful · spicy",
+                    description="Lighter cadence with sass."),
+        FieldOption(value="serious-doc", label="Serious · documentary",
+                    description="Slower, more deliberate."),
+    ]
+    # If channel YAML defines additional tones (under defaults.long.tts.tone_overrides),
+    # append them. Defensive: ydoc shape may not have the new layout yet.
+    extra_tones: list[str] = []
+    try:
+        cfg_tones = (ydoc.get("defaults", {}).get("long", {}) or {}) \
+            .get("tts", {}).get("tone_overrides", {})
+        if isinstance(cfg_tones, dict):
+            for tone_name in cfg_tones:
+                if not any(o.value == tone_name for o in tone_options):
+                    extra_tones.append(tone_name)
+    except Exception:  # noqa: BLE001
+        pass
+    for t in extra_tones:
+        tone_options.append(FieldOption(value=t, label=t.replace("-", " ")))
+    return CustomizationField(
+        key="tone",
+        label="Narration tone",
+        kind="select",
+        default="",
+        options=tone_options,
+        help="Override speed + atempo for the narrator. Default = channel preset.",
+        spec_field="tone",
+        cfg_targets=[CfgTarget(path=["tone"])],
+        consumers=["tts"],
+    )
+
+
 def get_customization_schema(channel_key: str) -> CustomizationSchema | None:
     entry = _registry_entry(channel_key)
     if not entry:
@@ -1275,6 +1444,15 @@ def get_customization_schema(channel_key: str) -> CustomizationSchema | None:
         _length_field(default_length),
         _captions_layout_field(),
         _music_field(overrides.get("music_bed", "ambient_low")),
+        # Added 2026-05-14 — post 4-renderer-to-2-engine consolidation.
+        # Each maps to a typed RenderSpec field exposed by the new
+        # engines + plugin slots.
+        _music_policy_field(),
+        _lower_thirds_field(),
+        _chapter_cards_field(),
+        _overlay_timeline_field(),
+        _critic_loop_field(),
+        _tone_field(ydoc),
         _visibility_field(),
         _schedule_field(),
     ]
