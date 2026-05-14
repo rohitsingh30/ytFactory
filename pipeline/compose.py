@@ -393,9 +393,26 @@ def _beat_overlaps_closer(beat_text: str, closer_format: str | None) -> bool:
     return len(overlap) / len(beat_words) >= 0.5
 
 
-# Word-level karaoke captions: position relative to frame.
-# Slightly above vertical centre, away from the closer-panel safe zone.
-_WORD_CAPTION_Y_FRAC = 0.45
+# Word-level karaoke captions: vertical position as a FRACTION of
+# frame height (0.0 = top, 1.0 = bottom).
+#
+# Default = 0.78 (lower-third — the modern Shorts/TikTok standard).
+# Per the 2026-05-13 audit (docs/pipeline_bug_catalogue_v2_2026-05-14.html),
+# the previous default of 0.45 (vertical centre) landed captions on
+# the character's mid-section / belt buckle, making them effectively
+# invisible — frame inspection of the 22 cake-AITA / Ronaldinho /
+# Baghdad-Mongols Shorts showed the single-word ASR overlay pill
+# obscured by the character body. The original rationale for 0.45
+# was "away from the closer-panel safe zone", but the closer panel
+# was removed on 2026-05-02 per user direction (last-beat icon
+# embedding into the diffusion image replaced it), so the safe
+# zone constraint no longer applies.
+#
+# Per-channel override knob: not wired today. If a channel needs
+# the legacy 0.45 (vertical-centre) behaviour, add a ``captions.y_frac``
+# field to its YAML and thread it through compose() — see git history
+# of this constant for the abandoned resolver branch.
+_WORD_CAPTION_Y_FRAC = 0.78
 
 
 def _compose_with_word_captions(

@@ -140,3 +140,41 @@ def test_legacy_module_constants_match_shorts_default():
     assert compose.WIDTH == _DEFAULT_RES.width == 1080
     assert compose.HEIGHT == _DEFAULT_RES.height == 1920
     assert compose.FPS == _DEFAULT_RES.fps == 30
+
+
+def test_word_caption_y_frac_is_lower_third():
+    """Per the 2026-05-13 audit, the previous default of 0.45
+    (vertical-centre) put captions on the character's belt buckle
+    — invisible on the cake-AITA / Ronaldinho / Baghdad-Mongols
+    Shorts. Pin the new lower-third standard so the same regression
+    doesn't get reintroduced. See
+    docs/pipeline_bug_catalogue_v2_2026-05-14.html.
+    """
+    from pipeline import compose
+    # Lower-third = roughly y ∈ [0.66, 0.85]. Strict bounds so a
+    # casual edit doesn't slip the value back to the broken centre.
+    assert 0.66 <= compose._WORD_CAPTION_Y_FRAC <= 0.85, (
+        f"_WORD_CAPTION_Y_FRAC={compose._WORD_CAPTION_Y_FRAC} "
+        f"is not in the lower-third band [0.66, 0.85]; if you intend "
+        f"to revert to the legacy 0.45 vertical-centre, justify in "
+        f"the commit message + update this test"
+    )
+    # And specifically NOT the legacy value.
+    assert compose._WORD_CAPTION_Y_FRAC != 0.45, (
+        "0.45 was the broken default that put captions on the "
+        "character's mid-section / belt buckle"
+    )
+
+
+def test_word_caption_y_pixel_position_matches_lower_third():
+    """End-to-end pin: at the standard 1920-tall 9:16 frame, the
+    caption overlay y-coordinate must land in the lower-third pixel
+    band [1267, 1632]. Catches off-by-one math errors when the
+    constant is read at compose time."""
+    from pipeline import compose
+    res = Resolution()
+    word_y = int(res.height * compose._WORD_CAPTION_Y_FRAC)
+    assert 1267 <= word_y <= 1632, (
+        f"caption y={word_y}px on a 1920-tall frame is not "
+        f"lower-third (expected [1267, 1632])"
+    )
