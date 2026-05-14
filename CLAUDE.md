@@ -79,6 +79,48 @@ for incremental work — full-repo 100% is a multi-week project.
 
 ---
 
+## Post-2026-05-14 audit conventions (READ FIRST when editing critic / era / cast / beats / scheduler / thumbnails)
+
+A 27-render audit on 2026-05-13 surfaced 6 root-cause bug classes
+that produced systematic shipping defects (all 27 jobs verdict=SHIP
+despite gibberish AI text in panels, WW1 trench infantry rendered
+for a 1258 historical event, 5 different anonymous footballers as
+"Ronaldinho" across one Short, etc.). The 2026-05-13 → 2026-05-14
+fix sweep landed 13 commits + ~170 new test cases pinning the
+conventions.
+
+**If you are about to modify any of these files, read
+[`docs/post-audit-2026-05-14.md`](./docs/post-audit-2026-05-14.md) FIRST**:
+
+- `pipeline/llm/critic.py` + `pipeline/llm/critic_axes.py` (per-axis
+  scoring; verdict derived deterministically — don't add a 7th axis
+  without re-running calibration)
+- `pipeline/llm/contracts/critic_contract.py` (contract path uses
+  the same axes)
+- `pipeline/era_anchor.py` + `pipeline/era_taxonomy.yaml` (history
+  channels' costume/period prefix)
+- `pipeline/critic_long_form.py` (essay-drift + source-fidelity
+  validators; rewriter LLM emits `metadata.era_anchor`)
+- `pipeline/beats.py` (`_FORBIDDEN_END_TOKENS` stop-word boundary guard)
+- `pipeline/render/shorts.py` (`_derive_protagonist_anchor` for
+  voice_only channels; era_anchor_prefix wiring)
+- `pipeline/images/images.py` (`build_full_prompt` era_anchor_prefix
+  kwarg; ANTI_TEXT_SUFFIX in `pipeline/images/images_cloudrun.py`)
+- `pipeline/compose.py` (`_WORD_CAPTION_Y_FRAC = 0.78` lower-third)
+- `pipeline/thumbnails.py` (`score_frame` + `pick_scene` fallthrough)
+- `pipeline/upload/upload.py` (`fiction_disclosure` footer for LLM-only)
+- `control/core/scheduler.py` (topic dedupe + `is_test_fixture_topic`
+  autoflag)
+- `control/core/schema.py` (`ShortProposal.internal_only`)
+- `cloud/render-worker-v2/entrypoint.py` (writes `verdict: UNGATED`
+  not hardcoded SHIP; uses `auto_thumbnail` instead of ffmpeg
+  first-frame)
+
+`docs/post-audit-2026-05-14.md` is the agent-facing reference (5min
+read). Full audit data: `docs/pipeline_bug_catalogue_v2_2026-05-14.html`.
+
+---
+
 ## Cloud-first TTS migration (2026-05-06 — COMPLETE)
 
 GPU-bound TTS runs on **Cloud Run + NVIDIA L4** in `asia-southeast1`.
