@@ -210,6 +210,26 @@ def init(
             except Exception as e:  # noqa: BLE001
                 _logger.warning("Cloud Monitoring exporter unavailable: %s", e)
 
+        # Silence the OTel cloud_monitoring exporter's noisy ERROR-level
+        # tracebacks. Tier 0 batch H canary post-mortem (2026-05-14):
+        # the exporter raises grpc._InactiveRpcError ("Points must be
+        # written more frequently than the maximum sampling period")
+        # for the SDK's own internal metrics (otel.sdk.span.started)
+        # because span starts increment more than once per 60s window.
+        # This is a recoverable error (next 60s window succeeds), but
+        # the SDK logs it at ERROR which then poisons stderr and the
+        # subprocess-tail capture in pipeline.render.video, masking
+        # every real ffmpeg failure. The exporter still writes good
+        # metrics; we just stop logging the rejection. WARNING level
+        # remains visible. OBS-01 / OBS-02 / TEL-LOG-01 / TEL-LOG-07
+        # / TEL-LOG-34 / TEL-FS-13.
+        for noisy in (
+            "opentelemetry.exporter.cloud_monitoring",
+            "opentelemetry.sdk.metrics._internal.export",
+            "opentelemetry.sdk.trace.export",
+        ):
+            logging.getLogger(noisy).setLevel(logging.CRITICAL)
+
         meter_provider = MeterProvider(resource=resource, metric_readers=readers)
         set_meter_provider(meter_provider)
 
