@@ -119,6 +119,19 @@ class ClaudeCLIError(RuntimeError):
     """The `claude` CLI exited non-zero or returned an error envelope."""
 
 
+class ContentFilterError(ClaudeCLIError):
+    """Azure / OpenAI returned ``finish_reason=content_filter``.
+
+    The model's response was suppressed by the safety filter, so the
+    body is empty/partial JSON and `_parse_inner_json` would fail with
+    a misleading "could not parse JSON" error. Callers (especially
+    ``rewrite_long_form._generate_all_section_bodies``) catch this to
+    fall back to the section's brief instead of aborting the whole
+    render. See TEL-FS-26 / TEL-EXEC-05 (3 r/nosleep section bodies
+    tripped the filter on 2026-05-13 and crashed the rewrite stage).
+    """
+
+
 # Per-stage model defaults — single source of truth so tuning the
 # cost/quality balance is one edit.
 #
@@ -1294,6 +1307,31 @@ def _call_azure_openai(
                              "completion_tokens": completion,
                              "reasoning_tokens": reasoning})
         raise ClaudeCLIError(msg)
+
+    # finish_reason=content_filter: Azure's safety filter suppressed
+    # the response. Body is empty/partial JSON; surface a typed error
+    # so callers (rewrite_long_form per-section fan-out) can fall back
+    # to the section's brief instead of crashing the whole render.
+    # TEL-FS-26 / TEL-EXEC-05: 3 r/nosleep section bodies tripped this
+    # on 2026-05-13 and the renders aborted because we emitted the
+    # generic "could not parse JSON" error instead of a typed signal.
+    if finish_reason == "content_filter":
+        completion = getattr(usage, "completion_tokens", None)
+        msg = (
+            f"azure_openai stage={stage} deployment={deployment} "
+            f"response suppressed by Azure content filter "
+            f"(finish_reason=content_filter, "
+            f"completion_tokens={completion}). Caller should fall "
+            f"back to a non-LLM source for this slot — see "
+            f"pipeline/llm/rewrite_long_form.py::_generate_all_section_bodies."
+        )
+        _tlm.track("llm_call", category="llm", success=False,
+                   duration_ms=int((time.time() - t0) * 1000),
+                   job_id=job_id,
+                   metadata={**tlm_meta, "error": msg[:200],
+                             "finish_reason": "content_filter",
+                             "completion_tokens": completion})
+        raise ContentFilterError(msg)
 
     _tlm.track(
         "llm_call",

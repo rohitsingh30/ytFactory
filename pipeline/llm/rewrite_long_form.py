@@ -643,6 +643,19 @@ def _generate_all_section_bodies(
                     extra_context=extra_context,
                 )
                 return section, body, None
+            except _llm.ContentFilterError as exc:
+                # Azure content filter suppressed the response —
+                # retrying with the same prompt won't help. Skip
+                # remaining retries and fall back to brief immediately.
+                # TEL-FS-26 / TEL-EXEC-05: 3 r/nosleep section bodies
+                # tripped this on 2026-05-13.
+                last_err = f"ContentFilterError: {exc}"
+                _logger.warning(
+                    "section-body LLM call hit content filter for %s "
+                    "(no retry; falling back to brief): %s",
+                    section.get("id"), str(exc)[:200],
+                )
+                break
             except Exception as exc:  # noqa: BLE001
                 last_err = f"{type(exc).__name__}: {exc}"
                 _logger.warning(

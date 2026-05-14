@@ -254,6 +254,58 @@ def test_section_body_failure_falls_back_to_brief():
     assert call_state["sec-2_count"] == 2
 
 
+def test_section_body_content_filter_does_not_retry():
+    """When a section body trips Azure content_filter, retrying with
+    the same prompt won't help — content_filter is deterministic per
+    prompt. The fan-out must skip retry and fall back to brief immediately.
+
+    Telemetry: TEL-FS-26 / TEL-EXEC-05 — 3 r/nosleep section bodies
+    tripped this on 2026-05-13 and the renders aborted because each
+    section burned 2 LLM calls (initial + retry, both rejected) instead
+    of 1.
+    """
+    raw_story = {"slug": "x", "title": "T", "body": "Source"}
+    outline = _make_outline(n_sections=4)
+
+    call_state = {"sec-1_count": 0}
+    def _mock(prompt, **kwargs):
+        if kwargs.get("stage") == "rewrite_long_form_outline":
+            return outline
+        section_id = "?"
+        for line in prompt.split("\n"):
+            if "← THIS SECTION" in line:
+                start = line.find("[")
+                end = line.find("]")
+                if start >= 0 and end > start:
+                    section_id = line[start + 1:end]
+                break
+        if section_id == "sec-1":
+            call_state["sec-1_count"] += 1
+            raise _rlf._llm.ContentFilterError(
+                "azure_openai stage=rewrite_long_form_section "
+                "response suppressed by Azure content filter"
+            )
+        return _make_section_body(words=450)
+
+    with patch.object(_rlf._llm, "call_claude_cli", side_effect=_mock):
+        try:
+            env = _rlf.rewrite_long_form(
+                raw_story, channel_cfg={},
+                target_duration_s=600,
+            )
+            # If env returned, sec-1 fell back to brief.
+            sec1 = next((s for s in env.long_form.sections if s.id == "sec-1"), None)
+            assert sec1 is not None
+            assert "establishes 1" in sec1.narration
+        except LongFormContractError:
+            pass  # acceptable when too few sections delivered
+
+    # CRITICAL: only ONE call to sec-1 (no retry on content_filter).
+    assert call_state["sec-1_count"] == 1, (
+        f"content_filter must NOT trigger retry; got {call_state['sec-1_count']} calls"
+    )
+
+
 def test_outline_call_runs_before_any_section_body_call():
     """Phase 1 (outline) must complete before Phase 2 (sections) starts."""
     raw_story = {"slug": "x", "title": "T", "body": "Source"}

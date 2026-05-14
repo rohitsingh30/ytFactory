@@ -402,6 +402,29 @@ class AzureBackendTest(unittest.TestCase):
             )
         self.assertIn("rate limit", str(ctx.exception))
 
+    def test_content_filter_raises_typed_error_no_retry(self) -> None:
+        # Telemetry hit: TEL-FS-26 / TEL-EXEC-05. Azure suppresses
+        # the response (e.g. r/nosleep section body trips the filter)
+        # and returns finish_reason=content_filter with empty/partial
+        # body. Pre-fix behaviour: _parse_inner_json crashed with
+        # "could not parse JSON", taking down the whole render. Post-
+        # fix: raises ContentFilterError so the per-section fan-out in
+        # rewrite_long_form can fall back to brief-as-narration for
+        # just that slot.
+        self._fake_client.chat.completions.create.return_value = \
+            self._make_resp("", finish_reason="content_filter")
+        with self.assertRaises(llm_cli.ContentFilterError) as ctx:
+            llm_cli._call_azure_openai(
+                "tell me a scary story", output_json=True, json_schema=None,
+                model="opus", timeout_s=30, stage="rewrite_long_form_section",
+            )
+        # Single call only — no retry (retrying with same prompt won't pass).
+        self.assertEqual(self._fake_client.chat.completions.create.call_count, 1)
+        self.assertIn("content_filter", str(ctx.exception))
+        # ContentFilterError must subclass ClaudeCLIError so existing
+        # `except ClaudeCLIError` blocks continue to catch it.
+        self.assertIsInstance(ctx.exception, llm_cli.ClaudeCLIError)
+
     def test_missing_credentials_raises(self) -> None:
         os.environ.pop("AZURE_OPENAI_API_KEY", None)
         with self.assertRaises(llm_cli.ClaudeCLIError) as ctx:
