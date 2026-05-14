@@ -123,3 +123,8 @@ docs/screenshots/
 .coverage
 .coverage.*
 .coverage_gate.*
+
+# Agent / session ephemera (per-machine, not source)
+.copilot/
+.copilot-session/
+.work/
