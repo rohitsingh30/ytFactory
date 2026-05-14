@@ -162,6 +162,32 @@ def test_check_word_count_passes_above_soft_floor():
     assert soft == []
 
 
+def test_floor_env_defaults_are_50pct_hard_and_85pct_soft():
+    """Tier 0 batch G — pin the env defaults so a future tweak can't
+    silently raise the floor back to the pre-2026-05-13 85% hard floor
+    that crashed every long_form render where Azure under-delivered.
+
+    Telemetry refs: TEL-EXEC-07 (1) + TEL-FS-28 (1) + TEL-LOG-18 (1) —
+    rewrite delivered 2631 words vs 3825 expected (69%) and the render
+    aborted because HARD_FLOOR_FRAC was 0.85. The 50%/85% calibration
+    keeps catastrophic short-deliveries hard-failing while letting
+    realistic Azure output through with a soft warning.
+    """
+    # Read fresh from os.environ — tests/conftest may have set a different
+    # value; we want the SHIPPED defaults.
+    import os
+    hard = float(os.environ.get("YTFACTORY_LONG_FORM_HARD_FLOOR_FRAC", "0.50"))
+    soft = float(os.environ.get("YTFACTORY_LONG_FORM_SOFT_FLOOR_FRAC", "0.85"))
+    assert hard == 0.50, (
+        f"YTFACTORY_LONG_FORM_HARD_FLOOR_FRAC default must be 0.50; got {hard}. "
+        "Raising it back to 0.85 will crash long_form renders when Azure "
+        "GPT-5.3 under-delivers (which it does at 55-69% on 30-min requests)."
+    )
+    assert soft == 0.85, (
+        f"YTFACTORY_LONG_FORM_SOFT_FLOOR_FRAC default must be 0.85; got {soft}."
+    )
+
+
 def test_check_word_count_no_sections_hard_fails():
     out = critic.check_word_count([], target_duration_s=1800)
     assert len(out) == 1
