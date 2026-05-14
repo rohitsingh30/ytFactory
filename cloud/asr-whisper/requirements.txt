@@ -1,0 +1,33 @@
+# cloud/asr-whisper/ — faster-whisper Cloud Run GPU service.
+#
+# Used by both render engines (short → timeline.asr_beats; long →
+# timeline.asr_anchors) for word-timestamped narration alignment.
+# Pinned to faster-whisper large-v3 for determinism.
+
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.9.2
+
+# faster-whisper bundles ctranslate2 (CUDA wheels) — much faster than
+# openai-whisper at the same WER. Pinned to a tested release.
+faster-whisper==1.0.3
+ctranslate2==4.4.0
+huggingface_hub>=0.20
+
+# Audio I/O
+soundfile==0.12.1
+numpy>=1.26,<2
+
+# GCS — used to fetch narration_wav_url when the request points at GCS.
+google-cloud-storage==2.18.2
+
+# ---- OTEL_DEPS (managed by cloud/_shared/append_otel_deps.sh)
+opentelemetry-api>=1.27
+opentelemetry-sdk>=1.27
+opentelemetry-exporter-gcp-trace>=1.7.0
+opentelemetry-exporter-gcp-monitoring>=1.7.0a0
+opentelemetry-instrumentation-fastapi>=0.48b0
+opentelemetry-instrumentation-requests>=0.48b0
+opentelemetry-instrumentation-httpx>=0.48b0
+opentelemetry-resourcedetector-gcp>=1.7.0a0
+opentelemetry-propagator-gcp>=1.7.0
