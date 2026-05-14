@@ -331,8 +331,16 @@ class PipelineRunnerCriticCascadeTest(unittest.TestCase):
     def test_fix_verdict_cascade_invalidates_named_stage(self):
         # Critic verdict: FIX targeting rewrite.narration. The runner
         # should add rewrite back to pending and re-run it.
+        # Note: axes drive the derived verdict per pipeline/llm/critic_axes.py
+        # (added 2026-05-14 to fix rubber-stamp bug). FIX verdict requires
+        # at least one axis < 7 (and none ≤ 3).
         critic_outputs = [
             {
+                "axes": {
+                    "hook_strength": 8, "caption_legibility": 8,
+                    "cast_continuity": 8, "mute_mode_score": 4,
+                    "source_fidelity": 8, "closer_strength": 8,
+                },
                 "verdict": "FIX",
                 "weakest_param": "missing_cta_polish",
                 "fixes": [{
@@ -343,8 +351,15 @@ class PipelineRunnerCriticCascadeTest(unittest.TestCase):
                     "reason": "the WAIT-WHAT pivot is too soft",
                 }],
             },
-            # Second pass critic — SHIP this time.
-            {"verdict": "SHIP", "weakest_param": "", "fixes": []},
+            # Second pass critic — SHIP this time. All axes ≥ 7.
+            {
+                "axes": {
+                    "hook_strength": 8, "caption_legibility": 8,
+                    "cast_continuity": 8, "mute_mode_score": 8,
+                    "source_fidelity": 8, "closer_strength": 8,
+                },
+                "verdict": "SHIP", "weakest_param": "", "fixes": [],
+            },
         ]
         rewrite_outputs = [GOOD_REWRITE_OUT, GOOD_REWRITE_OUT]   # initial + cascade
 
@@ -373,7 +388,13 @@ class PipelineRunnerCriticCascadeTest(unittest.TestCase):
 
     def test_critic_pass_cap_limits_cascade(self):
         # Critic keeps returning FIX; runner should cap at max_passes=1.
+        # axes contain a 4 → derived verdict = FIX (per critic_axes.py).
         always_fix = {
+            "axes": {
+                "hook_strength": 4, "caption_legibility": 8,
+                "cast_continuity": 8, "mute_mode_score": 8,
+                "source_fidelity": 8, "closer_strength": 8,
+            },
             "verdict": "FIX",
             "weakest_param": "stuck",
             "fixes": [{

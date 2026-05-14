@@ -2876,6 +2876,21 @@ def _make_short_impl(
         do_upload = upload_override
     if do_upload:
         min_upload_score = int(upload_cfg.get("min_score", 0))
+        # Verdict gate (added 2026-05-14 with the per-axis critic).
+        # Today: only verdict=="SHIP" auto-uploads. Verdicts FIX/BLOCK
+        # mean the critic flagged at least one axis < 7 (FIX) or ≤ 3
+        # (BLOCK) — neither should auto-publish. UNGATED means the
+        # critic stage didn't run at all (e.g. cloud worker stub
+        # path) — also skip auto-upload until a real critic verdict
+        # exists. Per pipeline/llm/critic_axes.py.
+        critique_verdict: str | None = None
+        if run_critic:
+            # ``critique`` was set above when run_critic; safe to read.
+            # ``.get`` on a None falls through to ``or {}`` then ``.get``
+            # again — both can never raise on a dict-or-None binding,
+            # so no try/except needed (verified — locals() returns the
+            # frame's namespace dict; .get/.get is unconditionally safe).
+            critique_verdict = (locals().get("critique") or {}).get("verdict")
         if require_critic and score is None:
             # Cron / agent path: critique must succeed before any upload.
             # Refuse to ship a video that hasn't been graded by /critique-video,
@@ -2885,6 +2900,18 @@ def _make_short_impl(
                 f"[upload] skipped — --require-critic was set but the "
                 f"critic produced no score (run_critic={run_critic}, "
                 f"critique={'authored' if score is not None else 'missing'})"
+            )
+            do_upload = False
+        elif require_critic and critique_verdict and critique_verdict != "SHIP":
+            # Verdict ≠ SHIP means at least one quality axis failed
+            # the per-axis gate (per critic_axes.derive_verdict). Don't
+            # auto-publish on a FIX/BLOCK verdict — operator must
+            # rerender or hand-approve.
+            print(
+                f"[upload] skipped — critic verdict {critique_verdict!r} "
+                f"!= 'SHIP' (per-axis gate, see pipeline/llm/critic_axes.py). "
+                f"Re-render after addressing critic.fixes, or override "
+                f"manually."
             )
             do_upload = False
         elif score is not None and score < min_upload_score:

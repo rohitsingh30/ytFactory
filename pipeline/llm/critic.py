@@ -27,6 +27,7 @@ from pathlib import Path
 from pipeline import observability as _obs
 
 from . import cli as llm
+from . import critic_axes
 
 
 # Patterns the critic occasionally emits that are NOT visual scene
@@ -91,10 +92,28 @@ SAMPLE_FPS = 1  # one frame per second is enough density for critique.
 _CRITIC_SCHEMA = {
     "type": "object",
     "required": [
+        # axes is the new required field — see pipeline/llm/critic_axes.py
+        # for the rationale (rubber-stamp bug 2026-05-13). The legacy
+        # ``score`` is kept for back-compat but is now derived from
+        # axes when present (mean of the 6 axis scores).
+        "axes", "verdict",
         "score", "one_line_take", "top_issues",
         "beat_corrections", "system_corrections", "highest_leverage_change",
     ],
     "properties": {
+        # Per-axis 1-10 scoring. ``additionalProperties: false`` and
+        # every axis ``required`` are enforced by the schema fragment
+        # so the LLM can't game the gate by omitting an axis.
+        "axes": critic_axes.axes_json_schema(),
+        # Verdict is REQUIRED but the post-LLM hook in
+        # ``critique_short`` overwrites it from the axes — the LLM
+        # decides axes; the pipeline decides verdict. We still ask
+        # for it so the LLM has a forcing-function to think about
+        # the gate while it's scoring axes.
+        "verdict": {
+            "type": "string",
+            "enum": list(critic_axes.VERDICTS),
+        },
         "score": {"type": "integer", "minimum": 1, "maximum": 10},
         "one_line_take": {"type": "string", "maxLength": 400},
         "top_issues": {
@@ -174,6 +193,22 @@ stayed, react to what happens next, beat by beat, the way a real
 viewer would — attention drifting, getting hooked, rolling your eyes,
 etc. THEN switch hats and engineer the fixes.
 
+GATING RULE — non-negotiable. The pipeline's ship/reject decision is
+DERIVED from your per-axis scores below — not from your verdict
+field. Score honestly; do not sandbag a 4 to a 7 because you "want
+the video to ship". The pipeline will overwrite your verdict from
+your axes (any axis ≤ 3 → BLOCK, any axis < 7 → FIX, all ≥ 7 →
+SHIP), so under-scoring just breaks downstream regen.
+
+PER-AXIS SCORING — score EACH axis 1-10 (10 = best):
+
+{axes_block}
+
+Score on what's ACTUALLY in the rendered video, not on the
+narration / script alone. A great script with broken visuals is
+NOT a 10 on cast_continuity or hook_strength — it's a 4 if the
+hook frame is a static T-pose with no on-screen text.
+
 Read every PNG frame under {frames_dir} in order (they are named
 t_00.png, t_01.png, ..., one per second). The audio timeline is in
 {beats_path} as word-level timestamps — read it once and use that
@@ -251,6 +286,15 @@ specific files when you can: `pipeline/cast.py`, `pipeline/prompts.py`,
 After watching, return ONLY a JSON object with this exact shape:
 
 {{
+  "axes": {{
+    "hook_strength": <int 1-10>,
+    "caption_legibility": <int 1-10>,
+    "cast_continuity": <int 1-10>,
+    "mute_mode_score": <int 1-10>,
+    "source_fidelity": <int 1-10>,
+    "closer_strength": <int 1-10>
+  }},
+  "verdict": "<SHIP|FIX|BLOCK — but pipeline derives the real verdict from axes above>",
   "score": <integer 1-10, where 10 is "I would share this Short">,
   "one_line_take": "<single sentence, would-I-keep-watching>",
   "top_issues": [
@@ -324,6 +368,7 @@ def critique_short(
     prompt = _CRITIC_PROMPT.format(
         frames_dir=frames_dir.resolve(),
         beats_path=beats_path.resolve(),
+        axes_block=critic_axes.render_axes_block(indent="  "),
     )
 
     critic_model = llm.model_for("critic")
@@ -352,11 +397,55 @@ def critique_short(
     if not isinstance(raw, dict):
         raise ValueError(f"critic expected JSON object, got {type(raw).__name__}")
 
+    # === Verdict derivation ===
+    # Per pipeline/llm/critic_axes.py, the SHIP/FIX/BLOCK gate is
+    # derived from per-axis scores — NOT from the LLM's free-form
+    # verdict choice. This is the fix for the rubber-stamp bug
+    # (27/27 jobs in Firestore on 2026-05-13 had verdict=SHIP
+    # despite obvious failures). The LLM's emitted ``verdict`` is
+    # kept in ``raw["verdict_llm"]`` for audit/debug; the canonical
+    # ``raw["verdict"]`` is overwritten from the axes.
+    axes = raw.get("axes")
+    derived_verdict = critic_axes.derive_verdict(axes)
+    llm_verdict = raw.get("verdict")
+    raw["verdict_llm"] = llm_verdict
+    raw["verdict"] = derived_verdict
+    if llm_verdict and llm_verdict != derived_verdict:
+        print(
+            f"[critic] verdict overridden: LLM said {llm_verdict!r} "
+            f"but axes ({critic_axes.axes_summary(axes)}) → {derived_verdict!r}"
+        )
+
+    # If axes are missing/malformed and the LLM also failed to emit a
+    # parseable score, surface this loudly so the operator knows the
+    # critic call is degraded (don't silently let the FIX verdict
+    # masquerade as a good evaluation).
+    if not isinstance(axes, dict) or not all(
+        isinstance(axes.get(name), int) and not isinstance(axes.get(name), bool)
+        for name in critic_axes.AXIS_NAMES
+    ):
+        print(
+            f"[critic] WARNING — axes missing or malformed; verdict forced "
+            f"to {derived_verdict!r}. axes={axes!r}"
+        )
+
+    # Backfill ``score`` as the mean of the axes when present (rounded
+    # to nearest int). Legacy callers that only read ``score`` keep
+    # working; new callers should read ``axes`` for granularity.
+    if isinstance(axes, dict):
+        intvals = [
+            v for v in (axes.get(n) for n in critic_axes.AXIS_NAMES)
+            if isinstance(v, int) and not isinstance(v, bool)
+        ]
+        if intvals:
+            raw["score"] = round(sum(intvals) / len(intvals))
+
     out_dir.mkdir(parents=True, exist_ok=True)
     score_path = out_dir / f"{slug}.score.json"
     score_path.write_text(json.dumps(raw, indent=2))
     print(
-        f"[critic] score={raw.get('score')!r} — "
+        f"[critic] verdict={derived_verdict} score={raw.get('score')!r} "
+        f"axes=({critic_axes.axes_summary(axes)}) — "
         f"{raw.get('one_line_take', '(no take)')[:120]}"
     )
 

@@ -223,6 +223,110 @@ class CritiqueShortTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cr.critique_short(slug="slug", mp4_path=self.mp4, cache_dir=self.cache, out_dir=self.out)
 
+    # ----- verdict-override-from-axes behaviour (added 2026-05-14) -----
+
+    @staticmethod
+    def _good_axes(**overrides):
+        a = {
+            "hook_strength": 8, "caption_legibility": 8,
+            "cast_continuity": 8, "mute_mode_score": 8,
+            "source_fidelity": 8, "closer_strength": 8,
+        }
+        a.update(overrides)
+        return a
+
+    def _critique(self, raw_output):
+        frame = SCRATCH_CRITIC / "frame.png"
+        frame.write_text("png")
+        with patch.object(cr, "_sample_frames", return_value=[frame]), \
+             patch.object(cr.llm, "model_for", return_value="opus"), \
+             patch.object(cr.llm, "call_claude_cli", return_value=raw_output):
+            return cr.critique_short(
+                slug="slug", mp4_path=self.mp4,
+                cache_dir=self.cache, out_dir=self.out,
+            )
+
+    def test_verdict_overridden_when_llm_disagrees_with_axes(self):
+        # LLM tries to ship despite a 3 in caption_legibility — pipeline
+        # MUST overwrite to BLOCK (axis ≤ 3 is irrecoverable).
+        raw = {
+            "axes": self._good_axes(caption_legibility=3),
+            "verdict": "SHIP",
+            "score": 7,
+            "one_line_take": "ok",
+            "top_issues": [],
+            "beat_corrections": {},
+            "system_corrections": [],
+            "highest_leverage_change": "x",
+        }
+        result = self._critique(raw)
+        self.assertEqual(result["verdict"], "BLOCK",
+                         "axis ≤ 3 must force BLOCK regardless of LLM verdict")
+        self.assertEqual(result["verdict_llm"], "SHIP",
+                         "LLM's original verdict preserved for audit")
+
+    def test_verdict_ship_when_all_axes_pass(self):
+        raw = {
+            "axes": self._good_axes(),
+            "verdict": "SHIP",
+            "score": 8,
+            "one_line_take": "good",
+            "top_issues": [],
+            "beat_corrections": {},
+            "system_corrections": [],
+            "highest_leverage_change": "x",
+        }
+        result = self._critique(raw)
+        self.assertEqual(result["verdict"], "SHIP")
+
+    def test_missing_axes_forces_fix(self):
+        # LLM forgot to emit axes — verdict can't be SHIP.
+        raw = {
+            "verdict": "SHIP",
+            "score": 9,
+            "one_line_take": "ok",
+            "top_issues": [],
+            "beat_corrections": {},
+            "system_corrections": [],
+            "highest_leverage_change": "x",
+        }
+        result = self._critique(raw)
+        self.assertEqual(result["verdict"], "FIX",
+                         "missing axes → cannot SHIP, force FIX for re-prompt")
+
+    def test_axes_score_backfills_from_axes_mean(self):
+        raw = {
+            "axes": self._good_axes(hook_strength=6, caption_legibility=6),
+            "verdict": "FIX",
+            # LLM emitted score=4 but axes mean is round((6+6+8+8+8+8)/6)=7.
+            "score": 4,
+            "one_line_take": "x",
+            "top_issues": [],
+            "beat_corrections": {},
+            "system_corrections": [],
+            "highest_leverage_change": "x",
+        }
+        result = self._critique(raw)
+        self.assertEqual(result["score"], 7,
+                         "score should be backfilled as round(mean(axes))")
+
+    def test_axes_persisted_in_score_json(self):
+        raw = {
+            "axes": self._good_axes(),
+            "verdict": "SHIP",
+            "score": 8,
+            "one_line_take": "good",
+            "top_issues": [],
+            "beat_corrections": {},
+            "system_corrections": [],
+            "highest_leverage_change": "x",
+        }
+        self._critique(raw)
+        on_disk = json.loads((self.out / "slug.score.json").read_text())
+        self.assertIn("axes", on_disk)
+        self.assertEqual(on_disk["axes"], self._good_axes())
+        self.assertEqual(on_disk["verdict"], "SHIP")
+
 
 class RegenerateSanitiserBranchesTest(unittest.TestCase):
     def setUp(self):

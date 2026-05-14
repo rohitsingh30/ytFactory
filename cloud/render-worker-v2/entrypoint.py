@@ -2005,6 +2005,35 @@ def _main_from_firestore(job_id: str) -> int:
             else None
         )
 
+        # Critic verdict — honest sentinel, NOT a hardcoded SHIP.
+        #
+        # Pre-2026-05-14 this stage wrote `{"verdict": "SHIP"}`
+        # unconditionally, which lied to every downstream consumer
+        # (dashboard, scheduler, upload gate). The real
+        # vision-bearing critic at ``pipeline/llm/critic.py`` is
+        # currently Claude-CLI-only (``add_dirs +
+        # allowed_tools=["Read"]`` are CLI-specific) and the cloud
+        # worker uses Azure OpenAI, so we cannot run it here yet.
+        #
+        # Until the cloud-vision wire-up lands (see plan.md Phase 1
+        # follow-up), surface the truth: the render is UNGATED.
+        # Downstream upload gates that require ``verdict == "SHIP"``
+        # will skip these renders rather than auto-publish unreviewed
+        # videos. The dashboard can show a clear "needs review" badge.
+        critique_field = {
+            "verdict": "UNGATED",
+            "reason": (
+                "stub mode — cloud worker has no critic stage; "
+                "real vision-bearing critic is laptop-only until "
+                "cloud-vision SDK wire-up lands"
+                if mode == "stub" else
+                "real-render mode — cloud worker has no critic stage; "
+                "vision-bearing critic at pipeline/llm/critic.py "
+                "requires Claude-CLI add_dirs/Read tooling that is "
+                "not available on Azure OpenAI yet"
+            ),
+            "axes": None,
+        }
         _update_job(
             job_id,
             status="done",
@@ -2012,16 +2041,7 @@ def _main_from_firestore(job_id: str) -> int:
             short_uri=mp4_uri,
             thumb_uri=thumb_uri,
             timeline=timeline,
-            critique={
-                "verdict": "SHIP",
-                "weakest_param": (
-                    "(stub mode — real critic runs after pipeline port lands)"
-                    if mode == "stub" else None
-                ),
-                "notes": (
-                    f"Cloud Run Job render complete (mode={mode})."
-                ),
-            },
+            critique=critique_field,
         )
         logger.info("render complete: job=%s mp4=%s mode=%s", job_id, mp4_uri, mode)
         return 0

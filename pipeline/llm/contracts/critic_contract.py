@@ -34,10 +34,11 @@ from dataclasses import dataclass
 
 from ..fix import Fix
 from ..orchestrator import Constraint, StageContext
+from .. import critic_axes
 from .base import render_constraints_block, render_fixes_block
 
 
-_VALID_VERDICTS = ("SHIP", "FIX", "BLOCK")
+_VALID_VERDICTS = critic_axes.VERDICTS
 
 
 @dataclass
@@ -55,23 +56,51 @@ class CriticContract:
     def gather_constraints(self, ctx: StageContext) -> list[Constraint]:
         return [
             Constraint(
+                name="axes_field",
+                severity="error",
+                description=(
+                    "Output MUST include an 'axes' object with all 6 "
+                    "required axes scored 1-10: "
+                    + ", ".join(critic_axes.AXIS_NAMES) + ". "
+                    "The pipeline DERIVES the SHIP/FIX/BLOCK verdict "
+                    "from these axes — score honestly. Any axis ≤ 3 "
+                    "auto-BLOCKs; any axis < 7 auto-FIXes; all ≥ 7 "
+                    "ships. Sandbagging a 4 to a 7 will silently break "
+                    "downstream regen."
+                ),
+                examples_good=(
+                    '{"axes": {"hook_strength": 8, "caption_legibility": 9, '
+                    '"cast_continuity": 8, "mute_mode_score": 7, '
+                    '"source_fidelity": 8, "closer_strength": 7}, '
+                    '"verdict": "SHIP", "fixes": []}',
+                    '{"axes": {"hook_strength": 4, "caption_legibility": 9, '
+                    '"cast_continuity": 8, "mute_mode_score": 6, '
+                    '"source_fidelity": 8, "closer_strength": 7}, '
+                    '"verdict": "FIX", "fixes": [{"target_stage": "prompts", '
+                    '"target_path": "beats[0].prompt", '
+                    '"constraint": "static_t_pose_hook", "severity": "error", '
+                    '"reason": "beat 0 is a static T-pose with no on-screen text"}]}',
+                ),
+                examples_bad=(
+                    '{"verdict": "SHIP"}  # axes missing — pipeline will FIX',
+                    '{"axes": {"hook_strength": "high"}}  # non-int axis',
+                    '{"axes": {"hook_strength": 9}}  # only 1 of 6 axes scored',
+                ),
+            ),
+            Constraint(
                 name="verdict_field",
                 severity="error",
                 description=(
                     "Output MUST include a 'verdict' field set to exactly "
-                    "one of: 'SHIP', 'FIX', 'BLOCK'. SHIP = render is good "
-                    "as-is; FIX = list of targeted Fixes for downstream "
-                    "stages; BLOCK = the source can't be salvaged."
+                    "one of: 'SHIP', 'FIX', 'BLOCK'. NOTE: the pipeline "
+                    "OVERWRITES this from the axes-derived verdict — your "
+                    "self-reported verdict is for your own internal "
+                    "consistency only."
                 ),
                 examples_good=(
-                    '{"verdict": "SHIP", "weakest_param": "pacing", "fixes": []}',
-                    '{"verdict": "FIX", "fixes": [{"target_stage": "prompts", '
-                    '"target_path": "beats[7].prompt", '
-                    '"constraint": "cast_drift", "severity": "error", '
-                    '"reason": "protagonist hair colour changed at beat 7"}]}',
+                    '{"axes": {...}, "verdict": "SHIP", "fixes": []}',
                 ),
                 examples_bad=(
-                    '{"score": 7}',
                     '{"verdict": "MAYBE"}',
                 ),
             ),
@@ -79,9 +108,10 @@ class CriticContract:
                 name="fixes_shape",
                 severity="error",
                 description=(
-                    "When verdict is 'FIX', the 'fixes' field MUST be a "
-                    "non-empty list of objects with at minimum: "
-                    "target_stage, target_path, constraint, severity, reason."
+                    "When the DERIVED verdict is 'FIX' (any axis < 7), "
+                    "the 'fixes' field MUST be a non-empty list of "
+                    "objects with at minimum: target_stage, target_path, "
+                    "constraint, severity, reason."
                 ),
             ),
         ]
@@ -107,20 +137,21 @@ class CriticContract:
         return (
             f"You are the ytFactory post-render critic. You watch one short "
             f"as a YouTube viewer would AND as a pipeline engineer; you "
-            f"emit a structured verdict.\n\n"
+            f"emit a per-axis structured score. The pipeline derives the "
+            f"SHIP/FIX/BLOCK verdict from your axes — see the gating rule "
+            f"below.\n\n"
             f"{rules}"
             f"\nMP4: {mp4_uri}\n"
             f"\nNarration:\n\"\"\"\n{(script.get('narration') or '')[:2000]}\n\"\"\"\n"
             f"\nCast lock:\n{_format_cast_summary(cast)}\n"
             f"\n{frames_block}\n"
-            f"\nReview these for:\n"
-            f"  - Hook strength (first 1.5s — does it stop the scroll?).\n"
-            f"  - Audio/visual sync (do the captions match the spoken word?).\n"
-            f"  - Cast lock drift (does the protagonist look the same in every beat?).\n"
-            f"  - Pacing (any beat that lingers? any cut that's too fast?).\n"
-            f"  - Closing CTA (natural verdict question, no AITA acronyms).\n"
-            f"  - Mute-mode legibility (a viewer with sound off — do they get it?).\n\n"
-            f"Return ONLY a JSON object matching the verdict_field examples above. "
+            f"\nSCORE EACH AXIS 1-10 (10 = best):\n"
+            f"{critic_axes.render_axes_block(indent='  ')}\n"
+            f"\nGATING RULE: any axis ≤ 3 → BLOCK; any axis < 7 → FIX; "
+            f"all ≥ 7 → SHIP. The pipeline overwrites your verdict from "
+            f"this rule. Score honestly — sandbagging a 4 to a 7 just "
+            f"breaks downstream regen.\n\n"
+            f"Return ONLY a JSON object matching the axes_field examples above. "
             f"For FIX verdicts, every Fix MUST name a target_stage from "
             f"{{rewrite, cast, prompts, images, tts, asr, compose}}, a "
             f"target_path that points at the broken artifact (e.g. "
@@ -131,12 +162,14 @@ class CriticContract:
     def regen_prompt(self, ctx: StageContext, prev_output: dict, fixes: list[Fix]) -> str:
         diag = render_fixes_block(fixes)
         return (
-            f"Your previous critic verdict was malformed. Fix it.\n\n"
+            f"Your previous critic output was malformed. Fix it.\n\n"
             f"Previous output:\n{prev_output!r}\n\n"
             f"{diag}\n"
-            f"Return ONLY a JSON object with the correct shape: "
-            f'{{"verdict": "SHIP|FIX|BLOCK", "weakest_param": "...", '
-            f'"fixes": [...]}}.'
+            f"Return ONLY a JSON object with the correct shape:\n"
+            f'  {{"axes": {{ {", ".join(f"{n!r}: <int 1-10>" for n in critic_axes.AXIS_NAMES)} }}, '
+            f'"verdict": "SHIP|FIX|BLOCK", "fixes": [...]}}\n'
+            f"All 6 axes are required; missing or non-int axes will trigger "
+            f"another regen. The pipeline derives the verdict from axes."
         )
 
     # ------------------------------------------------------------------
@@ -145,24 +178,79 @@ class CriticContract:
     # ------------------------------------------------------------------
 
     def validate(self, ctx: StageContext, output: dict) -> list[Fix]:
+        """Validate the critic's output AND derive the canonical verdict.
+
+        Side effect: mutates ``output`` in place to set
+        ``output["verdict"]`` from ``output["axes"]`` per
+        :func:`critic_axes.derive_verdict` — the LLM's self-reported
+        verdict is preserved as ``output["verdict_llm"]`` for audit
+        but no longer the source of truth. This is the fix for the
+        rubber-stamp bug surfaced by the 2026-05-13 27-render audit
+        (every job verdict was SHIP because the LLM was free to choose).
+        """
         fixes: list[Fix] = []
-        verdict = output.get("verdict")
-        if verdict not in _VALID_VERDICTS:
+
+        axes = output.get("axes")
+        # Axes presence is the precondition for a meaningful verdict.
+        if not isinstance(axes, dict):
+            fixes.append(Fix(
+                constraint="axes_field",
+                reason=(
+                    "axes field missing or not a dict; pipeline cannot "
+                    "derive verdict without per-axis scores"
+                ),
+                target_stage=self.name,
+                target_path="critic.axes",
+                source_judge="critic_contract",
+            ))
+            # Also stamp verdict for downstream readers who skip the
+            # fixes path.
+            output["verdict_llm"] = output.get("verdict")
+            output["verdict"] = "FIX"
+            return fixes
+
+        # Check every required axis is an int.
+        for name in critic_axes.AXIS_NAMES:
+            v = axes.get(name)
+            if isinstance(v, bool) or not isinstance(v, int):
+                fixes.append(Fix(
+                    constraint="axes_field",
+                    reason=(
+                        f"axis {name!r} missing or not an int (got {v!r}); "
+                        f"pipeline cannot derive verdict"
+                    ),
+                    target_stage=self.name,
+                    target_path=f"critic.axes.{name}",
+                    source_judge="critic_contract",
+                ))
+
+        # Derive the canonical verdict regardless of LLM's emission.
+        derived = critic_axes.derive_verdict(axes)
+        output["verdict_llm"] = output.get("verdict")
+        output["verdict"] = derived
+
+        # Validate verdict shape (now that we've forced it).
+        if derived not in _VALID_VERDICTS:
+            # Should be unreachable; defence-in-depth.
             fixes.append(Fix(
                 constraint="verdict_field",
-                reason=f"verdict must be one of {_VALID_VERDICTS!r}, got {verdict!r}",
+                reason=f"derived verdict {derived!r} not in {_VALID_VERDICTS!r}",
                 target_stage=self.name,
                 target_path="critic.verdict",
                 source_judge="critic_contract",
             ))
             return fixes
 
-        if verdict == "FIX":
+        if derived == "FIX":
             raw_fixes = output.get("fixes")
             if not isinstance(raw_fixes, list) or not raw_fixes:
                 fixes.append(Fix(
                     constraint="fixes_shape",
-                    reason="FIX verdict requires a non-empty 'fixes' list",
+                    reason=(
+                        "FIX verdict (derived from axes < 7) requires a "
+                        "non-empty 'fixes' list — name the broken "
+                        "stage(s)/beats so the runner can cascade"
+                    ),
                     target_stage=self.name,
                     target_path="critic.fixes",
                     source_judge="critic_contract",
