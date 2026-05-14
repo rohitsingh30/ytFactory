@@ -34,6 +34,14 @@ class Script:
     title_options: list[str]
     source_url: str = ""
     source: str = ""
+    # Free-form metadata blob (added 2026-05-14 per Phase 4b for
+    # era_anchor; future renders may carry other directives here too).
+    # Schema is intentionally loose — consumers read individual keys
+    # they recognise (e.g. ``metadata.era_anchor``,
+    # ``metadata.era_lock``) and ignore the rest. Keeps the dataclass
+    # extensible without per-field migrations as new visual anchors
+    # land.
+    metadata: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +369,10 @@ Return ONLY a JSON object (no prose, no markdown fences):
 {{
   "hook": "<first ~5–10 words of the narration>",
   "narration": "<full {words_lo}–{words_hi} word narration, {sentences_lo}–{sentences_hi} short sentences, including the hook AND the closer>",
-  "title_options": ["<click-bait title A>", "<title B>", "<title C>"]
+  "title_options": ["<click-bait title A>", "<title B>", "<title C>"],
+  "metadata": {{
+    "era_anchor": "<OPTIONAL — only when the topic is set in a specific historical period (e.g. baghdad-mongols-1258, ww1-trench, roman-pompeii). Pick a kebab-case key from the curated taxonomy at pipeline/era_taxonomy.yaml: 13c-mongol-yuan-warband, 12c-norman-knight-mailcoat, 1c-roman-legion-segmentata, 1c-roman-republic-toga, 16c-tudor-court, 16c-mughal-court, 17c-mughal-shahjahan, 18c-georgian-britain, ww1-1914-1918-trench, ww2-1939-1945-european-theater, cold-war-1947-1991-civilian, byzantine-1453-fall-of-constantinople, edo-japan-1603-1868-samurai, ancient-egypt-pharaonic-new-kingdom. Anchors the image-gen costume + period — without it, 'soldiers' renders as WW1 trench infantry by default. OMIT for non-historical topics (AITA, sports, contemporary mystery)>"
+  }}
 }}
 """
 

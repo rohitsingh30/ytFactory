@@ -147,5 +147,67 @@ class PromptNumbersRuleTest(unittest.TestCase):
         )
 
 
+class PromptEraAnchorInstructionTest(unittest.TestCase):
+    """Pin the 2026-05-14 Phase 4b prompt update that teaches the LLM
+    to emit metadata.era_anchor for historical topics."""
+
+    def test_prompt_mentions_era_anchor_field(self):
+        from pipeline.llm import rewrite as rw
+        self.assertIn("era_anchor", rw._BASE_PROMPT,
+                      "_BASE_PROMPT must mention era_anchor in the "
+                      "JSON output schema (Phase 4b wiring)")
+
+    def test_prompt_lists_known_taxonomy_keys(self):
+        # The prompt should enumerate at least a few taxonomy keys so
+        # the LLM picks valid kebab-case IDs (not invented ones).
+        from pipeline.llm import rewrite as rw
+        for key in (
+            "13c-mongol-yuan-warband",
+            "ww1-1914-1918-trench",
+            "ww2-1939-1945-european-theater",
+            "1c-roman-legion-segmentata",
+        ):
+            self.assertIn(key, rw._BASE_PROMPT,
+                          f"_BASE_PROMPT must list era key {key!r}")
+
+    def test_prompt_says_omit_for_non_historical(self):
+        # Critical — without this guard the LLM would emit garbage
+        # era_anchor values for AITA / sports / contemporary topics.
+        from pipeline.llm import rewrite as rw
+        self.assertIn("OMIT for non-historical", rw._BASE_PROMPT,
+                      "_BASE_PROMPT must instruct OMIT for non-historical")
+
+    def test_script_dataclass_has_metadata_field(self):
+        # The Script.metadata field accepts the LLM's emitted era_anchor
+        # blob and round-trips through save_script / asdict.
+        from pipeline.llm.rewrite import Script, save_script, load_script
+        import tempfile
+        import shutil
+        s = Script(
+            slug="test", hook="h", narration="n",
+            title_options=["t"],
+            metadata={"era_anchor": "13c-mongol-yuan-warband"},
+        )
+        tmp_dir = Path(tempfile.mkdtemp())
+        try:
+            path = tmp_dir / "test.json"
+            save_script(s, path)
+            loaded = load_script(path)
+            self.assertEqual(
+                loaded.metadata.get("era_anchor"),
+                "13c-mongol-yuan-warband",
+            )
+        finally:
+            shutil.rmtree(tmp_dir)
+
+    def test_script_dataclass_metadata_defaults_to_none(self):
+        # Backward compat — existing Script(...) calls without metadata
+        # default to None, not a dict (avoids dict-mutation bugs across
+        # instances).
+        from pipeline.llm.rewrite import Script
+        s = Script(slug="s", hook="h", narration="n", title_options=["t"])
+        self.assertIsNone(s.metadata)
+
+
 if __name__ == "__main__":
     unittest.main()
