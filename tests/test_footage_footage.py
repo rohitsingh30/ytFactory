@@ -420,18 +420,26 @@ class TestDownloadSource(unittest.TestCase):
         results: list[Path] = []
 
         def worker():
-            with patch("subprocess.run", side_effect=fake_run), \
-                 patch.dict(os.environ, env, clear=False):
-                results.append(_download_source(
-                    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-                    self.cache,
-                ))
+            results.append(_download_source(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                self.cache,
+            ))
 
-        # Two threads racing for the same video.
-        t1 = threading.Thread(target=worker)
-        t2 = threading.Thread(target=worker)
-        t1.start(); t2.start()
-        t1.join(); t2.join()
+        # Two threads racing for the same video. Patch on the MAIN
+        # thread (not inside the worker) — unittest.mock.patch is NOT
+        # thread-safe; entering+exiting the same patcher concurrently
+        # can leave the global subprocess.run as a MagicMock after
+        # both threads exit, polluting every subsequent test in the
+        # process. (Verified 2026-05-15 — pre-fix this test left
+        # subprocess.run as MagicMock for the rest of the suite, which
+        # made test_render_long_form_probe_wav and 7 other tests fail
+        # downstream.)
+        with patch("subprocess.run", side_effect=fake_run), \
+             patch.dict(os.environ, env, clear=False):
+            t1 = threading.Thread(target=worker)
+            t2 = threading.Thread(target=worker)
+            t1.start(); t2.start()
+            t1.join(); t2.join()
 
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0], dest)
