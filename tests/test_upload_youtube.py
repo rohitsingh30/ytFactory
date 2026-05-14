@@ -1169,6 +1169,147 @@ class TestDeriveMetadata(unittest.TestCase):
         self.assertEqual(meta["category_id"], "24")
 
 
+class TestFictionDisclosure(unittest.TestCase):
+    """Phase 4c — DRAMATIZED FICTION transparency footer for LLM-only
+    sources. Off by default; opt-in per channel via
+    upload.fiction_disclosure: true."""
+
+    def test_disabled_by_default(self):
+        meta = derive_metadata(
+            script={"hook": "h"}, raw=None,
+            upload_cfg={"description_template": "base text"},
+        )
+        # raw is None → would be LLM-only, but disclosure off by default.
+        self.assertNotIn("DRAMATIZED FICTION", meta["description"])
+
+    def test_enabled_appends_when_raw_is_none(self):
+        meta = derive_metadata(
+            script={"hook": "h"}, raw=None,
+            upload_cfg={
+                "description_template": "base text",
+                "fiction_disclosure": True,
+            },
+        )
+        self.assertTrue(meta["description"].startswith("base text"))
+        self.assertIn("DRAMATIZED FICTION", meta["description"])
+
+    def test_enabled_appends_when_source_kind_is_llm(self):
+        meta = derive_metadata(
+            script={"hook": "h"},
+            raw={"source_kind": "llm", "url": "https://something",
+                 "body": "LLM-fabricated body"},
+            upload_cfg={
+                "description_template": "base text",
+                "fiction_disclosure": True,
+            },
+        )
+        # source_kind=llm wins regardless of url/body presence.
+        self.assertIn("DRAMATIZED FICTION", meta["description"])
+
+    def test_enabled_skips_when_real_reddit_url_present(self):
+        # Real reddit_url source → no disclosure (it's a real story).
+        meta = derive_metadata(
+            script={"hook": "h"},
+            raw={
+                "source_kind": "reddit_url",
+                "url": "https://reddit.com/r/aita/comments/abc",
+                "body": "real reddit post body",
+            },
+            upload_cfg={
+                "description_template": "base text",
+                "fiction_disclosure": True,
+            },
+        )
+        self.assertNotIn("DRAMATIZED FICTION", meta["description"])
+
+    def test_enabled_appends_when_url_and_body_both_empty(self):
+        # Defensive — legacy raw dict without source_kind set, but
+        # missing both url + body. Treat as LLM-only.
+        meta = derive_metadata(
+            script={"hook": "h"},
+            raw={"some_other_field": "value"},
+            upload_cfg={
+                "description_template": "base text",
+                "fiction_disclosure": True,
+            },
+        )
+        self.assertIn("DRAMATIZED FICTION", meta["description"])
+
+    def test_custom_disclosure_text_used(self):
+        custom = "\n\n--- Custom transparency text ---"
+        meta = derive_metadata(
+            script={"hook": "h"}, raw=None,
+            upload_cfg={
+                "description_template": "base text",
+                "fiction_disclosure": True,
+                "fiction_disclosure_text": custom,
+            },
+        )
+        self.assertIn("Custom transparency text", meta["description"])
+        self.assertNotIn("DRAMATIZED FICTION", meta["description"])
+
+    def test_empty_disclosure_text_disables(self):
+        # Empty string → no append even when fiction_disclosure=True.
+        meta = derive_metadata(
+            script={"hook": "h"}, raw=None,
+            upload_cfg={
+                "description_template": "base text",
+                "fiction_disclosure": True,
+                "fiction_disclosure_text": "",
+            },
+        )
+        self.assertEqual(meta["description"], "base text")
+
+    def test_disclosure_does_not_exceed_5000_char_cap(self):
+        # If base description + disclosure would exceed 5000 chars,
+        # the truncation still happens (description[:5000]).
+        meta = derive_metadata(
+            script={"hook": "h"}, raw=None,
+            upload_cfg={"fiction_disclosure": True},
+            description_override="X" * 4990,
+        )
+        # Cap holds; disclosure truncated as needed.
+        self.assertLessEqual(len(meta["description"]), 5000)
+
+
+class TestIsLlmOnlySource(unittest.TestCase):
+
+    def test_none_raw_is_llm_only(self):
+        from pipeline.upload.upload import _is_llm_only_source
+        self.assertTrue(_is_llm_only_source(None))
+
+    def test_empty_raw_is_llm_only(self):
+        from pipeline.upload.upload import _is_llm_only_source
+        self.assertTrue(_is_llm_only_source({}))
+
+    def test_explicit_llm_source_kind(self):
+        from pipeline.upload.upload import _is_llm_only_source
+        self.assertTrue(_is_llm_only_source({"source_kind": "llm"}))
+        self.assertTrue(_is_llm_only_source({"source_kind": "LLM"}))
+
+    def test_real_reddit_url_is_not_llm_only(self):
+        from pipeline.upload.upload import _is_llm_only_source
+        self.assertFalse(_is_llm_only_source({
+            "source_kind": "reddit_url",
+            "url": "https://reddit.com/r/aita/comments/abc",
+            "body": "post body",
+        }))
+
+    def test_url_present_with_no_source_kind_is_not_llm_only(self):
+        from pipeline.upload.upload import _is_llm_only_source
+        self.assertFalse(_is_llm_only_source({
+            "url": "https://example.com",
+        }))
+
+    def test_body_present_with_no_url_is_not_llm_only(self):
+        from pipeline.upload.upload import _is_llm_only_source
+        self.assertFalse(_is_llm_only_source({"body": "real story body"}))
+
+    def test_neither_url_nor_body_is_llm_only(self):
+        from pipeline.upload.upload import _is_llm_only_source
+        self.assertTrue(_is_llm_only_source({"some_field": "value"}))
+
+
 # ===========================================================================
 # 8.  set_thumbnail
 # ===========================================================================

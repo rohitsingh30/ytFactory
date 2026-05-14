@@ -935,6 +935,15 @@ def render_description(template: str, *, script: dict, raw: dict | None) -> str:
 # ---- metadata derivation ------------------------------------------------
 
 
+_FICTION_DISCLOSURE_DEFAULT = (
+    "\n\n"
+    "—\n"
+    "DRAMATIZED FICTION — Inspired by the unresolved-mysteries / nosleep "
+    "genre. The events, names, and locations in this video are fabricated "
+    "for storytelling. No real persons are depicted."
+)
+
+
 def derive_metadata(
     *,
     script: dict,
@@ -956,6 +965,12 @@ def derive_metadata(
           description_template: |
             From r/{raw.metadata.subreddit}.
             Source: {raw.url}
+          fiction_disclosure: true      # NEW 2026-05-14 — appends a
+                                         # transparency line for LLM-only
+                                         # source_kinds (no real reddit
+                                         # URL). Off by default; opt-in
+                                         # for mystoriesanimated nosleep /
+                                         # unresolved_mysteries niches.
     """
     title = title_override
     if not title:
@@ -974,6 +989,33 @@ def derive_metadata(
             "From {raw.metadata.subreddit}.\nSource: {raw.url}"
         )
         description = render_description(tmpl, script=script, raw=raw)
+
+    # Fiction-transparency footer (added 2026-05-14 per Phase 4c).
+    #
+    # When a channel opts in via ``upload.fiction_disclosure: true``
+    # AND the source is LLM-only (no real reddit URL), append a
+    # short transparency line to the description so viewers can tell
+    # the story is fabricated. The 27-render audit (docs/
+    # pipeline_bug_catalogue_v2_2026-05-14.html) found 3 of 5
+    # mystoriesanimated long-forms had source_kind=llm with
+    # plausibly-real character names (Laura Chen, Cedar Street
+    # apartment, etc.) — viewers Googling those would find nothing
+    # and feel deceived. The disclosure is metadata-only — does not
+    # change the video itself, preserves the explicit prior UX
+    # decision against on-video watermarks.
+    #
+    # Channel YAML can override the default text via
+    # ``upload.fiction_disclosure_text``. Set to an empty string to
+    # disable for a specific channel even if the global default
+    # changes.
+    if upload_cfg.get("fiction_disclosure"):
+        if _is_llm_only_source(raw):
+            disclosure = upload_cfg.get(
+                "fiction_disclosure_text", _FICTION_DISCLOSURE_DEFAULT,
+            )
+            if disclosure:
+                description = description + disclosure
+
     description = description[:5000]
 
     tags = list(upload_cfg.get("tags") or [])
@@ -991,6 +1033,29 @@ def derive_metadata(
         "category_id": category_id,
         "made_for_kids": made_for_kids,
     }
+
+
+def _is_llm_only_source(raw: dict | None) -> bool:
+    """True when the source is LLM-fabricated (no real URL).
+
+    Triggers the fiction disclosure footer in :func:`derive_metadata`.
+    Two conditions either of which counts as LLM-only:
+      * ``raw`` is None / empty (no source file at all).
+      * ``raw.source_kind == "llm"`` (explicit LLM-source flag from
+        the proposal).
+      * ``raw.url`` is empty/missing AND ``raw.body`` is empty/missing
+        (defensive — some legacy source files don't set source_kind
+        but have neither URL nor body).
+    """
+    if not raw:
+        return True
+    if (raw.get("source_kind") or "").lower() == "llm":
+        return True
+    has_url = bool((raw.get("url") or "").strip())
+    has_body = bool((raw.get("body") or "").strip())
+    if not has_url and not has_body:
+        return True
+    return False
 
 
 # ---- upload core --------------------------------------------------------
