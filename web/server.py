@@ -1218,9 +1218,11 @@ async def run_job(job: Job) -> None:
     # ---- Step 2: render ----
     script_path = PROJECT_ROOT / niche_cfg["channel_dir"] / "narrations" / f"{slug}.json"
     render_args = [
-        str(PYTHON_BIN), "scripts/make_shorts.py",
-        "--script", str(script_path),
+        str(PYTHON_BIN), "-m", "pipeline.render",
+        "--kind", "short",
         "--channel", niche_cfg["channel"],
+        "--slug", slug,
+        "--script", str(script_path),
         # Stage 8 — every website-initiated render auto-uploads to YouTube.
         # The channel YAML's upload: block (account, privacy, tags, etc.)
         # decides where it goes. CLI-only renders are unaffected (the
@@ -1360,18 +1362,21 @@ async def _riff_render_one_seed(
     _emit_simple(job, "cast", "done", "Narrator cast",
                  seed_idx=seed_idx, slug=seed.slug)
 
-    # 3. Render via make_shorts.py — same flow as the regular niches.
+    # 3. Render via the new engine CLI — same flow as the regular niches.
     # Auto-critique fires inline (principle #23 — never opt out).
     # Stage 8 auto-upload — every website render ships to YouTube.
+    # Slug is the script filename stem.
+    _slug = Path(script_path).stem
     render_args = [
-        str(PYTHON_BIN), "scripts/make_shorts.py",
-        "--script", str(script_path),
+        str(PYTHON_BIN), "-m", "pipeline.render",
+        "--kind", "short",
         "--channel", channel_yaml,
-        "--upload",
+        "--slug", _slug,
+        "--script", str(script_path),
     ]
     voice = (job.options or {}).get("voice") or profile.get("suggested_voice")
     if voice and voice in {v["id"] for v in VOICES}:
-        render_args += ["--tts-voice", voice]
+        render_args += ["--override", f"voice={voice}"]
     rc, tail = await run_subprocess(job, render_args, seed_idx=seed_idx)
     if job.state == "cancelled":
         return None
@@ -3457,14 +3462,22 @@ async def create_job(payload: dict) -> dict:
 # This replaces the older "skills bash-exec scripts/make_shorts.py
 # directly" pattern (`feedback_skills_kick_render_directly.md`),
 # which was env-fragile (PYTHONPATH, cwd, gcloud account).
-# Allowed entry-points the skill is permitted to invoke. Whitelist
-# rather than free-form to prevent the endpoint from becoming a
-# remote-shell. Add a new path here to expose a new renderer.
+#
+# Post-2026-05-14: the 4 legacy per-kind CLI shims (scripts/make_shorts.py,
+# historyrecapped/scripts/render_long_form.py, etc) have been DELETED
+# in favor of the single engine-driven CLI:
+#
+#     python -m pipeline.render --kind=short|long --channel=... --slug=... --script=...
+#
+# The whitelist accepts the new module form. Per-channel
+# legacy paths (which were dead code by 2026-05-14 — they all just
+# re-exported pipeline.render.<kind>.cli_main from a few-line shim)
+# are NOT in the whitelist anymore. Any external skill still wired
+# at the old paths needs to update its render call to use the new
+# `-m pipeline.render` form.
 _ALLOWED_RENDER_CMDS: set[str] = {
-    "scripts/make_shorts.py",
-    "historyrecapped/scripts/render_long_form.py",
-    "historyrecapped/scripts/render_footage_only.py",
-    "sportsrecapped/scripts/render_long_form_doc.py",
+    "-m",  # python -m pipeline.render — the new engine CLI
+    "scripts/historyrecapped/render_split_screen.py",  # placeholder for future per-channel shims
     "sportsrecapped/scripts/render_tweet_reaction.py",
     "sportsrecapped/scripts/render_rivalry_compilation.py",
     "scrollpulse/scripts/render_split_screen.py",
@@ -3692,15 +3705,20 @@ async def create_script_job(payload: dict) -> dict:
 
     Payload (legacy convenience for shorts):
         channel_yaml + script_path  →  rewrites to cmd=
-            [scripts/make_shorts.py, --channel, ..., --script, ...]
+            [-m, pipeline.render, --kind, short,
+             --channel, ..., --slug, ..., --script, ...]
     """
     cmd_in: list[str] = list(payload.get("cmd") or [])
 
     # Convenience-form rewrite (keeps the shorts-only callers simple).
     if not cmd_in and (payload.get("channel_yaml") and payload.get("script_path")):
+        from pathlib import Path as _Path
+        _slug = _Path(str(payload["script_path"])).stem
         cmd_in = [
-            "scripts/make_shorts.py",
+            "-m", "pipeline.render",
+            "--kind", "short",
             "--channel", str(payload["channel_yaml"]),
+            "--slug", _slug,
             "--script", str(payload["script_path"]),
         ]
         cmd_in.extend(list(payload.get("extra_args") or []))

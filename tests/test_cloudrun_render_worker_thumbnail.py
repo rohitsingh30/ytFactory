@@ -73,7 +73,7 @@ class StageRenderThumbnailTests(unittest.TestCase):
 
     def test_auto_thumbnail_happy_path_skips_ffmpeg_fallback(self):
         job = self._make_job()
-        with mock.patch.object(self.ep, "_run_renderer_subprocess",
+        with mock.patch.object(self.ep, "_run_renderer_via_engines",
                                return_value=self.mp4) as mock_render, \
              mock.patch.object(self.ep, "subprocess") as mock_subp, \
              mock.patch("pipeline.paths.RenderPaths.from_channel_yaml") as mock_rp:
@@ -100,7 +100,7 @@ class StageRenderThumbnailTests(unittest.TestCase):
 
     def test_auto_thumbnail_returns_none_falls_back_to_ffmpeg(self):
         job = self._make_job()
-        with mock.patch.object(self.ep, "_run_renderer_subprocess",
+        with mock.patch.object(self.ep, "_run_renderer_via_engines",
                                return_value=self.mp4), \
              mock.patch.object(self.ep, "subprocess") as mock_subp, \
              mock.patch("pipeline.paths.RenderPaths.from_channel_yaml") as mock_rp, \
@@ -118,7 +118,7 @@ class StageRenderThumbnailTests(unittest.TestCase):
 
     def test_auto_thumbnail_raises_falls_back_to_ffmpeg(self):
         job = self._make_job()
-        with mock.patch.object(self.ep, "_run_renderer_subprocess",
+        with mock.patch.object(self.ep, "_run_renderer_via_engines",
                                return_value=self.mp4), \
              mock.patch.object(self.ep, "subprocess") as mock_subp, \
              mock.patch("pipeline.paths.RenderPaths.from_channel_yaml") as mock_rp, \
@@ -136,7 +136,7 @@ class StageRenderThumbnailTests(unittest.TestCase):
         """Sanity: the existing _real_mp4 binding still happens after
         the new thumbnail logic."""
         job = self._make_job()
-        with mock.patch.object(self.ep, "_run_renderer_subprocess",
+        with mock.patch.object(self.ep, "_run_renderer_via_engines",
                                return_value=self.mp4), \
              mock.patch.object(self.ep, "subprocess"), \
              mock.patch("pipeline.paths.RenderPaths.from_channel_yaml") as mock_rp, \
@@ -150,7 +150,7 @@ class StageRenderThumbnailTests(unittest.TestCase):
     def test_missing_context_skips_auto_uses_ffmpeg(self):
         # No slug / script / channel — auto_thumbnail can't run.
         job = self._make_job(with_context=False)
-        with mock.patch.object(self.ep, "_run_renderer_subprocess",
+        with mock.patch.object(self.ep, "_run_renderer_via_engines",
                                return_value=self.mp4), \
              mock.patch.object(self.ep, "subprocess") as mock_subp, \
              mock.patch("pipeline.thumbnails.auto_thumbnail") as mock_auto:

@@ -71,7 +71,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("render-worker-v2")
 
-
 REPO_ROOT = Path("/workspace")
 TMP_ROOT = Path("/tmp/render")
 
@@ -93,7 +92,6 @@ STAGES: list[tuple[str, str]] = [
     ("upload", "Uploading to GCS"),
 ]
 
-
 # Map proposal.channel → channel YAML path on disk (baked into the image).
 #
 # Single source of truth for channel YAML locations is
@@ -105,7 +103,6 @@ def _channel_yaml_for(channel_key: str) -> Path:
     from pipeline.channels import _channel_yaml_path  # noqa: PLC0415
     rel = _channel_yaml_path(channel_key)
     return REPO_ROOT / rel
-
 
 def _variant_yaml_for(channel_key: str, variant: str | None) -> Path | None:
     """Return the variant overlay YAML path if it exists, else None.
@@ -131,33 +128,26 @@ def _variant_yaml_for(channel_key: str, variant: str | None) -> Path | None:
             return p
     return None
 
-
 # ---------------------------------------------------------------------------
 # Firestore + GCS helpers
 # ---------------------------------------------------------------------------
 
-
 def _project_id() -> str:
     return os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
 
-
 def _bucket_name() -> str:
     return os.environ.get("YTFACTORY_BUCKET", "ytfactory-prod-v2-artifacts")
-
 
 def _firestore_client():
     from google.cloud import firestore  # noqa: PLC0415
     return firestore.Client(project=_project_id())
 
-
 def _storage_client():
     from google.cloud import storage  # noqa: PLC0415
     return storage.Client(project=_project_id())
 
-
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 # ---------------------------------------------------------------------------
 # Preflight — validate env BEFORE we touch Firestore.
@@ -171,9 +161,7 @@ def _utcnow_iso() -> str:
 # Firestore write, surfaces a one-line cause, exits clean.
 # ---------------------------------------------------------------------------
 
-
 _PreflightError = tuple[str, str]  # (env_key, friendly_message)
-
 
 def _preflight() -> list[_PreflightError]:
     """Return a list of missing/invalid env entries — empty list = OK.
@@ -293,7 +281,6 @@ def _preflight() -> list[_PreflightError]:
 
     return problems
 
-
 def _format_preflight_error(problems: list[_PreflightError]) -> str:
     lines = [
         "Cloud Run render worker preflight failed — refusing to consume work.",
@@ -314,7 +301,6 @@ def _format_preflight_error(problems: list[_PreflightError]) -> str:
         "    --update-env-vars=YTFACTORY_PREFLIGHT_ONLY=1",
     ]
     return "\n".join(lines)
-
 
 def _run_preflight_or_die(job_id: str | None) -> None:
     """Validate env. On failure: log + (optionally) mark the Firestore
@@ -358,10 +344,8 @@ def _run_preflight_or_die(job_id: str | None) -> None:
 
     sys.exit(2)
 
-
 def _job_ref(job_id: str):
     return _firestore_client().collection("jobs").document(job_id)
-
 
 def _empty_timeline(stages: list[tuple[str, str]] | None = None) -> list[dict]:
     """Build the initial timeline from a stage list.
@@ -373,7 +357,6 @@ def _empty_timeline(stages: list[tuple[str, str]] | None = None) -> list[dict]:
     src = stages if stages is not None else STAGES
     return [{"stage": k, "label": label, "status": "pending"} for k, label in src]
 
-
 def _set_stage(timeline: list[dict], key: str, status: str, msg: str | None = None) -> list[dict]:
     out = [dict(s) for s in timeline]
     for s in out:
@@ -384,11 +367,9 @@ def _set_stage(timeline: list[dict], key: str, status: str, msg: str | None = No
                 s["msg"] = msg
     return out
 
-
 def _update_job(job_id: str, **fields: Any) -> None:
     fields["updated_at"] = datetime.now(timezone.utc)
     _job_ref(job_id).set(fields, merge=True)
-
 
 def _upload_mp4_to_gcs(local_mp4: Path, job_id: str) -> str:
     blob_path = f"jobs/{job_id}/short.mp4"
@@ -398,7 +379,6 @@ def _upload_mp4_to_gcs(local_mp4: Path, job_id: str) -> str:
     blob.upload_from_filename(str(local_mp4))
     return f"gs://{_bucket_name()}/{blob_path}"
 
-
 def _upload_thumb_to_gcs(local_thumb: Path, job_id: str) -> str:
     blob_path = f"jobs/{job_id}/thumb.jpg"
     bucket = _storage_client().bucket(_bucket_name())
@@ -407,15 +387,12 @@ def _upload_thumb_to_gcs(local_thumb: Path, job_id: str) -> str:
     blob.upload_from_filename(str(local_thumb))
     return f"gs://{_bucket_name()}/{blob_path}"
 
-
 # ---------------------------------------------------------------------------
 # Mode + slug helpers
 # ---------------------------------------------------------------------------
 
-
 def _is_stub_mode() -> bool:
     return os.environ.get("YTFACTORY_RENDER_MODE", "stub").lower() == "stub"
-
 
 def _slug_from_topic(topic: str, job_id: str) -> str:
     """Filesystem-safe slug for the script.json + per-render dir."""
@@ -424,11 +401,9 @@ def _slug_from_topic(topic: str, job_id: str) -> str:
     suffix = job_id[:8]
     return f"{base}-{suffix}" if base else suffix
 
-
 # ---------------------------------------------------------------------------
 # STUB stage handlers — used when YTFACTORY_RENDER_MODE=stub
 # ---------------------------------------------------------------------------
-
 
 def _run_stage_stub(stage: str, job: dict, work_dir: Path) -> None:
     if stage == "upload":
@@ -451,11 +426,9 @@ def _run_stage_stub(stage: str, job: dict, work_dir: Path) -> None:
         job["_stub_thumb"] = str(thumb)
     time.sleep(2)
 
-
 # ---------------------------------------------------------------------------
 # REAL stage handlers — used when YTFACTORY_RENDER_MODE=real
 # ---------------------------------------------------------------------------
-
 
 def _stage_rewrite_real(job: dict, work_dir: Path) -> None:
     """Synthesize a Script via pipeline.llm.rewrite — Anthropic SDK
@@ -574,7 +547,6 @@ def _stage_rewrite_real(job: dict, work_dir: Path) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("emit_artifact(script) failed: %s", exc)
 
-
 def _fetch_source(kind: str, ref: str) -> dict | None:
     """Adapter dispatcher for source_kind → fetched story dict.
 
@@ -627,7 +599,6 @@ def _fetch_source(kind: str, ref: str) -> dict | None:
         }
     return None
 
-
 def _stage_cast_real(job: dict, work_dir: Path) -> None:
     """No-op for the v2 worker: the renderer subprocess invokes
     pipeline.llm.cast.author_cast as part of its first stage; we
@@ -638,7 +609,6 @@ def _stage_cast_real(job: dict, work_dir: Path) -> None:
     that pipeline.render.shorts already does in its bootstrap. Keep
     the worker thin and let the renderer own it.)"""
     time.sleep(0.05)
-
 
 # ---------------------------------------------------------------------------
 # Renderer-log → user-visible substep
@@ -728,7 +698,6 @@ _LF_SUBSTAGE_ALIASES: dict[str, str] = {"narrate": "tts"}
 #      don't emit ``[1/5] tts done`` still get the TTS pill flipped
 #      to done when the images pill starts running.
 _LF_OVERLAPPING_SUBSTAGES: frozenset[str] = frozenset({"tts", "images"})
-
 
 def _lf_advance_timeline(
     timeline: list[dict],
@@ -875,7 +844,6 @@ _REGEX_LF_CAP_PNG = re.compile(r"^\[cap\] (\d+) (?:authored )?sentence PNGs")
 _REGEX_LF_MUX_START = re.compile(r"^\[4/4\] muxing video")
 _REGEX_LF_MUX_DONE = re.compile(r"^\[done\] (\S+\.mp4) — ([\d.]+)s")
 
-
 def _classify_renderer_line(line: str) -> tuple[str, str] | None:
     """Translate a single renderer-stdout line into ``(stage_key,
     substep_msg)``, or ``None`` if the line carries no user-visible
@@ -985,7 +953,6 @@ def _classify_renderer_line(line: str) -> tuple[str, str] | None:
 
     return None
 
-
 def _tail_renderer_log(
     log_path: Path,
     progress_cb: Callable[[str, str], None],
@@ -1048,7 +1015,6 @@ def _tail_renderer_log(
                     )
         # Sleep in small slices so stop_event is honoured promptly.
         stop_event.wait(timeout=poll_interval)
-
 
 def _run_renderer_via_engines(
     job: dict,
@@ -1120,187 +1086,6 @@ def _run_renderer_via_engines(
         out_path=out_path,
     )
 
-
-def _run_renderer_subprocess(
-    job: dict,
-    work_dir: Path,
-    *,
-    progress_cb: Callable[[str, str], None] | None = None,
-) -> Path:
-    """Shell out to ``pipeline.render.shorts`` and return the produced mp4 path.
-
-    The renderer handles stages images → tts → asr → compose using the
-    cloud providers declared in the channel YAML. ASR is forced to
-    faster-whisper via env (whisper-mlx is Apple-only).
-
-    Engine cutover (2026-05-14)
-    ---------------------------
-
-    When ``YTFACTORY_USE_ENGINES=1`` is set on the worker, this function
-    delegates to :func:`_run_renderer_via_engines` which calls
-    :func:`pipeline.render.video.render_via_engines` directly (no
-    subprocess) — the new pluggable engine architecture. Default
-    OFF until the bigbang cutover lands; flipping this on in cloud
-    is a single ``--update-env-vars`` redeploy.
-    """
-    if os.environ.get("YTFACTORY_USE_ENGINES") == "1":
-        return _run_renderer_via_engines(job, work_dir, progress_cb=progress_cb)
-
-    script_path = job.get("_script_path")
-    channel_yaml = job.get("_channel_yaml")
-    if not script_path or not channel_yaml:
-        raise RuntimeError("renderer: rewrite stage didn't set _script_path / _channel_yaml")
-
-    log_path = work_dir / "renderer.log"
-    cmd = [
-        sys.executable, "-m", "pipeline.render.shorts",
-        "--script", script_path,
-        "--channel", channel_yaml,
-        "--no-upload",     # YouTube upload happens via /api/jobs/{id}/publish
-        "--no-critic",     # critic runs on the cloud worker as a separate stage later
-    ]
-
-    # Forward the user's Customize-step picks from the proposal's
-    # `channel_overrides` dict into pipeline.render.shorts via repeated
-    # --override KEY=VALUE flags. This is the cloud-side counterpart of
-    # the create page's submit() forwarder; without it, song_style /
-    # audio_mode / visual_source / voice etc. would silently land in
-    # Firestore but never reach make_short.
-    #
-    # Stringify defensively — the renderer's --override parser splits on
-    # the first `=` and stores the raw RHS, so non-string values would
-    # arrive as their repr. Skip empty values so a YAML default keeps
-    # winning when the form left a knob untouched.
-    proposal = job.get("proposal") or {}
-    overrides = proposal.get("channel_overrides") or {}
-    # Long-form rendering would normally dispatch to
-    # ``pipeline.render.long_form`` (chunked TTS, archival footage matching,
-    # 60-min sleep narrator). The cloud worker doesn't have that
-    # dispatch yet — it always invokes ``pipeline.render.shorts``. When
-    # the user picks "Long form" we still respect the duration cap
-    # (forwarded as duration_max_s via _apply_form_overrides) but the
-    # output remains an extended Shorts-style render. Surface this
-    # clearly so an operator scanning the worker log doesn't expect a
-    # 60-min sleep video.
-    if isinstance(overrides, dict) and overrides.get("length_kind") == "long":
-        ls = overrides.get("length_s")
-        logger.warning(
-            "length_kind=long requested (length_s=%s) — cloud worker dispatches "
-            "to pipeline.render.shorts regardless; the output will be an "
-            "EXTENDED Shorts render, not a true long-form sleep video. "
-            "True long-form dispatch in cloud is tracked separately.",
-            ls,
-        )
-    if isinstance(overrides, dict):
-        for k, v in overrides.items():
-            if v is None:
-                continue
-            sv = str(v)
-            if not sv.strip():
-                continue
-            cmd += ["--override", f"{k}={sv}"]
-        if overrides:
-            logger.info("renderer overrides: %s", sorted(overrides.keys()))
-    env = os.environ.copy()
-    env.setdefault("PYTHONPATH", str(REPO_ROOT))
-    env.setdefault("YTFACTORY_ASR_PROVIDER", "faster_whisper")
-    env.setdefault("YTFACTORY_LLM_BACKEND", "azure_openai")
-    # Disable any local-fallback paths (they require Apple-only mlx /
-    # mflux which aren't installed in the cloud image).
-    env.setdefault("CLOUDRUN_TTS_DISABLE_FALLBACK", "1")
-    env.setdefault("CLOUDRUN_IMAGE_DISABLE_FALLBACK", "1")
-    # Force the child Python to flush prints immediately. Without this
-    # the renderer's [1/4] / [3/4] / [4/4] phase markers stay in the
-    # interpreter's block buffer and only land in renderer.log when
-    # the subprocess exits — defeating the substep tailer below.
-    env.setdefault("PYTHONUNBUFFERED", "1")
-
-    logger.info("renderer: %s", " ".join(cmd))
-    t0 = time.time()
-    # Pre-create the log so the tailer doesn't race the subprocess
-    # creating it; FileNotFoundError on the first poll cycle would
-    # otherwise drop the first batch of substep markers.
-    log_path.touch()
-    stop_event = threading.Event()
-    tailer: threading.Thread | None = None
-    if progress_cb is not None:
-        tailer = threading.Thread(
-            target=_tail_renderer_log,
-            args=(log_path, progress_cb, stop_event),
-            name="renderer-log-tailer",
-            daemon=True,
-        )
-        tailer.start()
-    try:
-        with log_path.open("wb") as logfh:
-            proc = subprocess.run(
-                cmd, cwd=str(REPO_ROOT), env=env,
-                stdout=logfh, stderr=subprocess.STDOUT, check=False,
-            )
-    finally:
-        if tailer is not None:
-            stop_event.set()
-            tailer.join(timeout=5)
-    elapsed = time.time() - t0
-    logger.info("renderer exit=%s in %.0fs", proc.returncode, elapsed)
-    if proc.returncode != 0:
-        tail = log_path.read_text(errors="replace")[-4000:]
-        raise RuntimeError(f"renderer subprocess exit={proc.returncode}\n{tail}")
-
-    # Locate the produced mp4. The renderer writes via
-    # RenderPaths.from_channel_yaml — use the SAME resolver so worker
-    # and renderer can never disagree on the output location. Pre-fix
-    # the worker hard-coded chan_dir = Path(channel_yaml).parent which
-    # resolved to ``pipeline/channels/`` (the central-config dir) when
-    # the channel YAML lived there, and then looked for
-    # ``pipeline/channels/shorts/<slug>.mp4`` — the renderer had
-    # written to the channel root. v7 cake-orch surfaced this:
-    # renderer exited 0 in 941s, all 22 images + mp4 on disk, the
-    # worker raised "renderer ran but no mp4 found".
-    slug = job.get("_slug") or ""
-    candidates: list[Path] = []
-    try:
-        from pipeline.paths import RenderPaths  # noqa: PLC0415
-        rp = RenderPaths.from_channel_yaml(
-            Path(channel_yaml), project_root=REPO_ROOT,
-        )
-        # Per-niche layout writes to <channel>/<niche>/shorts/<slug>.mp4;
-        # flat layout to <channel>/shorts/<slug>.mp4. ``rp.root`` is
-        # the right answer for both.
-        candidates += [
-            rp.root / "shorts" / f"{slug}.mp4",
-            rp.root / "shorts" / slug / f"{slug}.mp4",
-            rp.channel_root / "shorts" / f"{slug}.mp4",
-        ]
-    except Exception as e:  # noqa: BLE001 — fall back to legacy lookup
-        logger.warning(
-            "[worker] RenderPaths lookup failed (%s); using legacy "
-            "chan_dir glob", e,
-        )
-
-    chan_dir = Path(channel_yaml).parent
-    candidates += [
-        chan_dir / "shorts" / f"{slug}.mp4",
-        chan_dir / "shorts" / slug / f"{slug}.mp4",
-        # Renderer's data/ legacy fallback when path resolution can't
-        # find a channel root (e.g. for mystoriesanimated when the
-        # channel-named dir was removed in the 2026-05-10 cleanup).
-        REPO_ROOT / "data" / "shorts" / f"{slug}.mp4",
-    ]
-    for cand in candidates:
-        if cand.exists():
-            logger.info("[worker] mp4 found at %s", cand)
-            return cand
-    # Last-ditch: glob the entire repo root for the slug.
-    for mp4 in REPO_ROOT.rglob(f"{slug}.mp4"):
-        logger.info("[worker] mp4 found via repo-wide glob at %s", mp4)
-        return mp4
-    raise RuntimeError(
-        f"renderer ran but no mp4 found for slug={slug}; "
-        f"searched: {candidates!r}"
-    )
-
-
 def _stage_render_real(
     job: dict,
     work_dir: Path,
@@ -1317,7 +1102,7 @@ def _stage_render_real(
     the **correct** timeline pill (tts / asr / images / compose)
     instead of pinning every substep to the umbrella compose stage.
     """
-    mp4 = _run_renderer_subprocess(job, work_dir, progress_cb=progress_cb)
+    mp4 = _run_renderer_via_engines(job, work_dir, progress_cb=progress_cb)
     # Generate a thumb. Prefer the CTR-optimized composition from
     # pipeline.thumbnails.auto_thumbnail (scene frame + curiosity-
     # headline overlay) — added 2026-05-14 per the audit
@@ -1461,13 +1246,11 @@ def _stage_render_real(
         logger.warning("post-render artifact emission failed: %s", exc)
     job["_real_thumb"] = str(thumb) if thumb.exists() else None
 
-
 def _stage_upload_real(job: dict, work_dir: Path) -> None:
     """No-op: actual GCS upload happens after the stage loop in main()
     so we can update Firestore with the URI in one shot. This keeps
     the timeline label honest."""
     time.sleep(0.05)
-
 
 def _stage_editing_agent_real(job: dict, work_dir: Path) -> None:
     """Optional 8th stage: post-compose cinematic polish.
@@ -1558,7 +1341,6 @@ def _stage_editing_agent_real(job: dict, work_dir: Path) -> None:
     job["_real_mp4_pre_edit"] = str(src_mp4)
     job["_real_mp4"] = str(out_mp4)
 
-
 # Registry: stage key → real handler. The renderer subprocess
 # (``_stage_render_real``) covers tts / asr / images / compose as one
 # umbrella step — that's why those three keys aren't in here. The main
@@ -1576,13 +1358,11 @@ _REAL_HANDLERS: dict[str, Callable[[dict, Path], None]] = {
     "upload":  _stage_upload_real,
 }
 
-
 # Stub handler for the optional 8th stage — sleeps a bit so the
 # timeline pill isn't suspiciously instant in stub mode.
 def _stub_editing_agent_handler(key: str, job: dict, work_dir: Path) -> None:
     time.sleep(2)
     logger.info("editing_agent (stub) — would polish %s", job.get("_stub_mp4"))
-
 
 def _stages_for_job(job: dict) -> list[tuple[str, str]]:
     """Return the stage list for THIS job. Inserts ``editing_agent``
@@ -1604,11 +1384,9 @@ def _stages_for_job(job: dict) -> list[tuple[str, str]]:
             out.append(("editing_agent", "Cinematic polish pass"))
     return out
 
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-
 
 def main() -> int:
     """Two entry modes:
@@ -1654,7 +1432,6 @@ def main() -> int:
         return _main_from_firestore(job_id)
     logger.error("either YTFACTORY_JOB_ID (Firestore) or JOB_SPEC_GCS_URI (GCS) must be set")
     return 2
-
 
 def _main_from_firestore(job_id: str) -> int:
     mode = "stub" if _is_stub_mode() else "real"
@@ -2199,11 +1976,9 @@ def _main_from_firestore(job_id: str) -> int:
         )
         return 1
 
-
 # ---------------------------------------------------------------------------
 # GCS spec.json entry point — for the website's /api/jobs/from_script flow
 # ---------------------------------------------------------------------------
-
 
 def _gcs_read_text(uri: str) -> str:
     from urllib.parse import urlparse  # noqa: PLC0415
@@ -2211,13 +1986,11 @@ def _gcs_read_text(uri: str) -> str:
     blob = _storage_client().bucket(bucket_name).blob(blob_path)
     return blob.download_as_text()
 
-
 def _gcs_upload_text(text: str, uri: str, *, content_type: str = "application/json") -> None:
     from urllib.parse import urlparse  # noqa: PLC0415
     p = urlparse(uri)
     blob = _storage_client().bucket(p.netloc).blob(p.path.lstrip("/"))
     blob.upload_from_string(text, content_type=content_type)
-
 
 def _gcs_upload_file(local_path: Path, uri: str, *, content_type: str | None = None) -> None:
     from urllib.parse import urlparse  # noqa: PLC0415
@@ -2226,7 +1999,6 @@ def _gcs_upload_file(local_path: Path, uri: str, *, content_type: str | None = N
     if content_type:
         blob.content_type = content_type
     blob.upload_from_filename(str(local_path))
-
 
 def _main_from_gcs_spec(spec_uri: str) -> int:
     """The website-driven path: spec.json on GCS + state.json on GCS.
@@ -2370,7 +2142,6 @@ def _main_from_gcs_spec(spec_uri: str) -> int:
         logger.error("GCS-spec render failed: %s\n%s", e, tb)
         _write_state("failed", error=f"{e}\n{tb}"[:8000])
         return 1
-
 
 if __name__ == "__main__":
     sys.exit(main())

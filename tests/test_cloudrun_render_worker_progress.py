@@ -34,10 +34,8 @@ import time
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINT_PATH = REPO_ROOT / "cloud" / "render-worker-v2" / "entrypoint.py"
-
 
 def _load_entrypoint():
     """Import cloud/render-worker-v2/entrypoint.py without polluting sys.path.
@@ -55,7 +53,6 @@ def _load_entrypoint():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
-
 
 class ClassifyRendererLineTests(unittest.TestCase):
     """Each line family the renderer prints must produce a non-empty,
@@ -164,7 +161,6 @@ class ClassifyRendererLineTests(unittest.TestCase):
         self.assertEqual(a, b)
         self.assertEqual(a, ("images", "Image 3 of 22"))
 
-
 class ClassifyLongFormRendererLineTests(unittest.TestCase):
     """Long-form (`pipeline.render.long_form`) prints with different
     prefixes than the SHORT renderer. Regexes added 2026-05-13 so the
@@ -271,7 +267,6 @@ class ClassifyLongFormRendererLineTests(unittest.TestCase):
             "[done] /tmp/render/abc/mystoriesanimated/long_form/my-video.mp4 — 1322.4s (22.0 min), 87 MB, mean_volume=-16.0 dB"
         )
         self.assertEqual(ev, ("compose", "Wrote my-video.mp4 (1322.4s)"))
-
 
 class TailRendererLogTests(unittest.TestCase):
     """The tailer must:
@@ -471,104 +466,6 @@ class TailRendererLogTests(unittest.TestCase):
     def _tmp_log(self, *, create: bool = True):
         return self._TmpLogCtx(create=create)
 
-
-class RunRendererSubprocessProgressTests(unittest.TestCase):
-    """End-to-end check: drive a tiny child python process whose
-    stdout mimics the renderer's substep markers, verify that the
-    callback receives them in order. This pins the contract that
-    PYTHONUNBUFFERED is set + the tailer is wired up.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.ep = _load_entrypoint()
-
-    def test_subprocess_substeps_reach_callback(self):
-        import sys
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as td:
-            work_dir = Path(td)
-
-            # Stand in for pipeline.render.shorts: print three known
-            # substep markers with explicit flushes + tiny sleeps so
-            # the tailer (poll_interval=1.5s by default) actually sees
-            # them as separate events.
-            child = (
-                "import sys, time\n"
-                "for line in ("
-                "'[1/4] TTS', "
-                "'    [3/22] beat=01', "
-                "'[4/4] ffmpeg compose'"
-                "):\n"
-                "    print(line); sys.stdout.flush(); time.sleep(0.4)\n"
-            )
-
-            # Inject a fake rewrite-stage output so
-            # _run_renderer_subprocess doesn't reject the job.
-            job = {
-                "_script_path": str(work_dir / "script.json"),
-                "_channel_yaml": str(work_dir / "channel.yaml"),
-                "proposal": {},
-            }
-            (work_dir / "script.json").write_text("{}")
-            (work_dir / "channel.yaml").write_text("name: test\n")
-
-            # Patch the subprocess command so we don't actually run
-            # pipeline.render.shorts (no Cloud Run TTS, no L4 GPU …).
-            import unittest.mock as _mock
-            seen: list[str] = []
-            seen_lock = threading.Lock()
-
-            def cb(stage: str, msg: str) -> None:
-                with seen_lock:
-                    seen.append(msg)
-
-            real_run = self.ep.subprocess.run
-
-            def fake_run(cmd, *args, **kwargs):
-                # Replace pipeline.render.shorts invocation with our
-                # tiny child script. Keep cwd/env/stdout/stderr piping
-                # so the test exercises the same plumbing as prod.
-                kwargs = dict(kwargs)
-                kwargs["check"] = False
-                return real_run(
-                    [sys.executable, "-u", "-c", child],
-                    *args,
-                    **kwargs,
-                )
-
-            # Speed up the tailer so the test isn't slow.
-            real_tail = self.ep._tail_renderer_log
-
-            def fast_tail(log_path, progress_cb, stop_event, **kw):
-                kw.setdefault("poll_interval", 0.05)
-                return real_tail(log_path, progress_cb, stop_event, **kw)
-
-            with _mock.patch.object(self.ep.subprocess, "run", side_effect=fake_run), \
-                 _mock.patch.object(self.ep, "_tail_renderer_log", side_effect=fast_tail), \
-                 _mock.patch.object(self.ep, "REPO_ROOT", work_dir):
-                # We don't care about the mp4-resolution branch here
-                # (the fake child doesn't write one) — call the
-                # subprocess wrapper directly and inspect callbacks.
-                # Skip the post-run mp4 lookup by stubbing rglob path
-                # resolution — easier: catch the RuntimeError that
-                # comes from "no mp4 found".
-                try:
-                    self.ep._run_renderer_subprocess(job, work_dir, progress_cb=cb)
-                except RuntimeError as exc:
-                    # Expected — fake child writes no mp4. We only
-                    # care that the tailer ran first.
-                    self.assertIn("no mp4 found", str(exc))
-
-            # Three substep markers → three distinct callbacks.
-            self.assertEqual(seen, [
-                "Synthesizing narration",
-                "Image 3 of 22",
-                "Stitching video with ffmpeg",
-            ])
-
-
 # ---------------------------------------------------------------------------
 # Long-form progress walker — regression tests for the cascade-coercion
 # bug fixed 2026-05-12.
@@ -590,7 +487,6 @@ class RunRendererSubprocessProgressTests(unittest.TestCase):
 #   - only marks a prior pill "done" if we actually saw it START (its
 #     key is recorded in ``substage_t0``).
 # ---------------------------------------------------------------------------
-
 
 class LfAdvanceTimelineTests(unittest.TestCase):
     """Pin the long-form progression contract.
@@ -790,7 +686,6 @@ class LfAdvanceTimelineTests(unittest.TestCase):
             timeline, substage_t0, "compose", "caption burn", now=1400.0,
         )
         self.assertEqual(substage_t0["compose"], first_t0)
-
 
 class LfAdvanceTimelineParallelTests(unittest.TestCase):
     """Pin the stage-overlap-aware behaviour of
@@ -994,7 +889,6 @@ class LfAdvanceTimelineParallelTests(unittest.TestCase):
         self.assertEqual(images["status"], "done")
         self.assertEqual(images["msg"], "399.0s")  # 1500.0 - 1101.0
         self.assertEqual(compose["status"], "running")
-
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
