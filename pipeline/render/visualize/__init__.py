@@ -18,3 +18,7 @@ from __future__ import annotations
 
 from . import visuals_from_fixture  # noqa: F401
 from . import longform_panels  # noqa: F401
+from . import ai_beat_slideshow  # noqa: F401
+from . import footage_windows  # noqa: F401
+from . import footage_filler  # noqa: F401
+from . import archival_shotlist  # noqa: F401

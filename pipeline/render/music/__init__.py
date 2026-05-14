@@ -15,3 +15,4 @@ from __future__ import annotations
 from . import silent  # noqa: F401
 from . import single_bed  # noqa: F401
 from . import ducked_loop  # noqa: F401
+from . import section_mood  # noqa: F401

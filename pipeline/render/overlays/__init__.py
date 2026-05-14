@@ -26,3 +26,6 @@ from __future__ import annotations
 from . import noop  # noqa: F401
 from . import sentence_caption_ass  # noqa: F401
 from . import word_caption_pngs  # noqa: F401
+from . import lower_third  # noqa: F401
+from . import chapter_card  # noqa: F401
+from . import anchored_footage  # noqa: F401
