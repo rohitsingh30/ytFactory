@@ -125,6 +125,58 @@ def render(
     )
 
 
+def render_via_engines(
+    spec: RenderSpec,
+    *,
+    script: dict[str, Any],
+    work_dir: Path,
+    out_path: Path,
+) -> Path:
+    """Render the spec to an mp4 via the new pluggable engines.
+
+    Added 2026-05-14 as part of the 4-renderer-to-2-engine
+    consolidation. This is the NEW dispatch path — it routes through
+    :func:`pipeline.render.engine.pick_engine` to pick
+    ``short_engine.render_short`` or ``long_engine.render_long``,
+    which in turn dispatch to plugin slots (audio / timeline /
+    visualize / overlays / music / compose) by spec field.
+
+    Coexists with :func:`render` (the legacy dispatch that shells out
+    to the old per-kind renderers) until the bigbang PR removes the
+    legacy path. New callers should use this; the cloud worker will
+    flip during bigbang.
+
+    Differs from :func:`render` in three ways:
+
+    * Takes ``script`` directly instead of a ``proposal``. The
+      legacy path also rewrites the script as part of the dispatch;
+      the new path expects the rewriter to have run upstream so the
+      engine only does the deterministic stages.
+    * Takes ``out_path`` directly instead of inferring it from
+      channel layout. Caller is responsible for ``RenderPaths``
+      lookup. Keeps the engine fully channel-agnostic.
+    * Drops ``progress_cb`` / ``job_id``. Telemetry is emitted via
+      the OTel render envelope from inside each engine; artifact
+      emission via :mod:`pipeline.render.artifacts` is done at
+      the same call sites as before.
+
+    Returns the path to the produced mp4.
+    """
+    from pipeline.render.engine import pick_engine  # noqa: PLC0415
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _logger.info(
+        "video.render_via_engines: kind=%s channel=%s aspect=%s res=%s out=%s",
+        spec.kind.value, spec.channel, spec.aspect_ratio,
+        spec.output_resolution, out_path,
+    )
+
+    engine_fn = pick_engine(spec)
+    return engine_fn(spec, script, work_dir, out_path)
+
+
 # ---------------------------------------------------------------------------
 # Long-form
 # ---------------------------------------------------------------------------
@@ -747,5 +799,6 @@ _LF_DONE_TOKEN_RE = re.compile(r"\bdone\b")
 __all__ = [
     "render",
     "render_long_form",
+    "render_via_engines",
     "ProgressCallback",
 ]
