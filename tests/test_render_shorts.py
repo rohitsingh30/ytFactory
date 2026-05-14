@@ -328,6 +328,94 @@ class TestPureHelpers(TempWorkspaceMixin, unittest.TestCase):
         self.assertNotIn("music_bed", cfg)
 
 
+class TestDeriveProtagonistAnchor(unittest.TestCase):
+    """The voice_only protagonist-fallback heuristic added 2026-05-14
+    to fix Ronaldinho cast-drift (5 different anonymous footballers
+    across 5 beats of one Short)."""
+
+    def test_single_supporting_named_in_slug_returns_description(self):
+        cast = [{
+            "name": "Ronaldinho",
+            "description": (
+                "Brazilian footballer, long curly hair, gap-tooth smile, "
+                "Barcelona blaugrana stripes"
+            ),
+            "aliases": ["Ronnie"],
+        }]
+        result = shorts._derive_protagonist_anchor(
+            cast, "ronaldinho-trophies-after-you-stopped-watching"
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("Brazilian footballer", result)
+
+    def test_alias_match_works(self):
+        cast = [{
+            "name": "Ronaldo de Assis Moreira",
+            "aliases": ["Ronaldinho"],
+            "description": "Brazilian footballer, long curly hair",
+        }]
+        # Slug uses the alias, not the formal name.
+        result = shorts._derive_protagonist_anchor(
+            cast, "ronaldinho-trophies"
+        )
+        self.assertIsNotNone(result)
+
+    def test_multiple_supporting_returns_none(self):
+        # Multi-character story → no single protagonist fallback.
+        cast = [
+            {"name": "Messi", "description": "Argentine, short, dark hair"},
+            {"name": "Ronaldo", "description": "Portuguese, tall, jawline"},
+        ]
+        result = shorts._derive_protagonist_anchor(
+            cast, "messi-vs-ronaldo-greatest-debate"
+        )
+        self.assertIsNone(result)
+
+    def test_empty_cast_returns_none(self):
+        self.assertIsNone(shorts._derive_protagonist_anchor([], "any-slug"))
+        self.assertIsNone(shorts._derive_protagonist_anchor(None, "any-slug"))
+
+    def test_supporting_without_description_excluded(self):
+        # Entry with name but no description shouldn't qualify.
+        cast = [{"name": "Ronaldinho", "description": ""}]
+        result = shorts._derive_protagonist_anchor(
+            cast, "ronaldinho-trophies"
+        )
+        self.assertIsNone(result)
+
+    def test_supporting_without_name_excluded(self):
+        cast = [{"description": "someone", "name": ""}]
+        result = shorts._derive_protagonist_anchor(
+            cast, "any-slug"
+        )
+        self.assertIsNone(result)
+
+    def test_name_not_in_slug_returns_none(self):
+        # Single character but topic doesn't name them → no fallback
+        # (no evidence this character is the protagonist).
+        cast = [{"name": "Ronaldinho", "description": "Brazilian player"}]
+        result = shorts._derive_protagonist_anchor(
+            cast, "barcelona-vs-real-madrid-classic"
+        )
+        self.assertIsNone(result)
+
+    def test_short_name_under_3_chars_excluded(self):
+        # Defensive — single-letter or 2-char names would over-match.
+        cast = [{"name": "Pe", "description": "test"}]
+        result = shorts._derive_protagonist_anchor(
+            cast, "pe-rules-something"
+        )
+        self.assertIsNone(result)
+
+    def test_underscore_in_slug_normalised(self):
+        # Slug normalisation: underscores → spaces → match.
+        cast = [{"name": "Hulagu", "description": "Mongol leader"}]
+        result = shorts._derive_protagonist_anchor(
+            cast, "hulagu_khan_destroys_baghdad"
+        )
+        self.assertIsNotNone(result)
+
+
 class TestFileHelpers(TempWorkspaceMixin, unittest.TestCase):
     def test_channel_scan_helpers(self):
         ch = self.tmp / "chan"
@@ -579,6 +667,46 @@ class TestMakeShortBranches(TempWorkspaceMixin, unittest.TestCase):
         kwargs = m.images.build_full_prompt.call_args_list[0].kwargs
         self.assertEqual(kwargs["style_prefix"], "flat 2D cartoon style")
         self.assertEqual(kwargs["character_description"], "")
+
+    def test_voice_only_with_protagonist_anchor_uses_supporting_description(self):
+        # Voice-only channel + cast with single supporting character whose
+        # name appears in the slug → fallback to that character's description
+        # instead of clearing to "". Per the 2026-05-14 fix.
+        channel_path, out_dir = self.write_channel(
+            {"narrator_visual_mode": "voice_only"}
+        )
+        (out_dir / "narrations").mkdir()
+        (out_dir / "narrations" / "ronaldinho-trophies.json").write_text("{}")
+        cast_path = self.tmp / "ronaldinho-cast.json"
+        cast_path.write_text("{}")
+        cast_obj = {
+            # narrator description present but voice_only WOULD clear it
+            "narrator": {"description": "sports analyst persona"},
+            # Single supporting character whose name appears in the slug.
+            "supporting": [{
+                "name": "Ronaldinho",
+                "description": (
+                    "Brazilian footballer, long curly hair, gap-tooth smile, "
+                    "Barcelona blaugrana stripes"
+                ),
+                "aliases": ["Ronnie"],
+                "seed": 42,
+            }],
+        }
+        with patched_make_short_environment([_fake_beat("opening", 0, 1)]) as m:
+            m.find_cast.return_value = cast_path
+            m.load_cast.return_value = cast_obj
+            shorts.make_short(
+                "hello", channel_path, out_dir, "ronaldinho-trophies",
+                run_critic=False,
+            )
+        # Cast routing should have received the protagonist description
+        # (NOT empty string, NOT the analyst persona).
+        char_desc = m.route.call_args.kwargs["narrator_desc"]
+        self.assertIn("Brazilian footballer", char_desc,
+                      f"expected protagonist anchor, got {char_desc!r}")
+        self.assertNotIn("analyst persona", char_desc,
+                         "must not leak the cleared narrator description")
 
     def test_cast_auto_author_success_failure_and_loaded_cast(self):
         channel_path, out_dir = self.write_channel()

@@ -266,6 +266,61 @@ def _find_cast_path(slug: str) -> Path | None:
     return _scan_intermediate(slug, "cast")
 
 
+def _derive_protagonist_anchor(
+    cast_supporting: list[dict] | None,
+    slug: str,
+) -> str | None:
+    """For voice-only channels (no narrator persona on screen), pick a
+    single 'protagonist' character description to use as the
+    channel-wide fallback when a per-beat doesn't name anyone.
+
+    Heuristic: when ``cast_supporting`` contains a SINGLE entry whose
+    name (or any alias) appears as a word in the topic ``slug``,
+    return that entry's ``description``. Otherwise return None
+    (caller falls back to "" — the legacy voice_only behaviour).
+
+    Why a SINGLE-entry guard: multi-character topics like
+    'messi-vs-ronaldo' MUST be named per-beat. A wrong protagonist
+    fallback would lock every unnamed beat to the wrong player.
+
+    Added 2026-05-14 to fix the cast-drift bug surfaced by the
+    27-render audit: the sportsrecapped/ronaldinho-trophies Short
+    rendered 5 different anonymous footballers across 5 beats
+    because the voice_only mode HARD-CLEARED the channel-wide
+    character_description. The fix promotes the only-supporting-
+    character to fill that slot when the topic clearly names them.
+
+    Returns the description string, or None if no single-protagonist
+    fallback is appropriate.
+    """
+    if not cast_supporting:
+        return None
+    # Filter to entries with both a name and a non-empty description.
+    candidates = [
+        e for e in cast_supporting
+        if isinstance(e, dict)
+        and (e.get("name") or "").strip()
+        and (e.get("description") or "").strip()
+    ]
+    if len(candidates) != 1:
+        # Multi-character or empty — no single protagonist.
+        return None
+    entry = candidates[0]
+    slug_norm = slug.lower().replace("-", " ").replace("_", " ")
+    names: list[str] = [(entry.get("name") or "").lower()]
+    for a in entry.get("aliases") or []:
+        if isinstance(a, str) and a.strip():
+            names.append(a.lower())
+    # Match if the name appears as a whole word in the slug. Reuse
+    # the same word-bounded logic as the cast router so behaviour
+    # matches per-beat routing.
+    from pipeline.llm.cast_router import _word_bounded  # noqa: PLC0415
+    for n in names:
+        if len(n) >= 3 and _word_bounded(n, slug_norm):
+            return (entry.get("description") or "").strip()
+    return None
+
+
 def _load_forced_narration_lines(slug: str) -> list[str] | None:
     """Locate ``data/intermediate/<channel>/shotlist/<slug>.json`` and
     extract the per-shot narration_lines (plus closer.narration_line) in
@@ -1484,19 +1539,40 @@ def _make_short_impl(
                     f"lock to those seeds for cross-beat consistency"
                 )
 
-    # Sports-style channels: narrator is voice-over only. Suppress the
-    # narrator description from per-beat image prompts so the renderer
-    # doesn't paint an "analyst persona" alongside (or instead of) the
-    # actual people in the story. The prompt-author still receives the
-    # mode flag and the supporting[] list so it can name real people.
+    # Sports-style channels: narrator is voice-over only. Pre-fix this
+    # cleared character_description entirely, which left every unnamed
+    # beat with NO character anchor → diffusion freelanced and produced
+    # 5 different anonymous footballers across 5 beats of one
+    # 'Ronaldinho' Short (per the 27-render audit, see
+    # docs/pipeline_bug_catalogue_v2_2026-05-14.html).
+    #
+    # Fix 2026-05-14: when voice_only AND there's a clear single
+    # protagonist (one supporting character named in the topic slug),
+    # use THAT character's description as the channel-wide fallback
+    # instead of "". This way unnamed beats lock to the protagonist
+    # appearance instead of redrawing a stranger every beat. Multi-
+    # character stories (e.g. 'Messi vs Ronaldo') still need explicit
+    # per-beat naming and remain unaffected — multiple supporting
+    # entries → no single protagonist → fallback stays "".
     if cfg.get("narrator_visual_mode") == "voice_only":
-        if character_description:
+        protagonist_anchor = _derive_protagonist_anchor(
+            cast_supporting_full, slug,
+        )
+        if protagonist_anchor:
             print(
-                f"[cast] narrator_visual_mode=voice_only — clearing "
-                f"channel-wide character_description so no analyst "
-                f"persona is painted into per-beat image prompts"
+                f"[cast] narrator_visual_mode=voice_only — using single "
+                f"protagonist {protagonist_anchor[:60]!r} from cast.supporting[] "
+                f"as channel-wide fallback (topic slug names this character)"
             )
-        character_description = ""
+            character_description = protagonist_anchor
+        else:
+            if character_description:
+                print(
+                    f"[cast] narrator_visual_mode=voice_only — clearing "
+                    f"channel-wide character_description so no analyst "
+                    f"persona is painted into per-beat image prompts"
+                )
+            character_description = ""
     opening_directives = cfg.get("opening_image_directives")
 
     print(f"\n=== make_short: {slug} ===")
