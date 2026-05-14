@@ -30,9 +30,11 @@ from pipeline.render.contracts import (
     get_plugin,
 )
 from pipeline.render.short_engine import (
+    ProgressCallback,
     _captions_plugin_for_layout,
     _collect_overlays,
     _compose_plugin_name,
+    _emit,
     _music_plugin_name,
     _timeline_plugin_name,
     _visualize_plugin_name,
@@ -59,8 +61,19 @@ def render_long(
     script: dict[str, Any],
     work_dir: Path,
     out_path: Path,
+    *,
+    progress_cb: ProgressCallback | None = None,
 ) -> Path:
-    """Render one long-form to ``out_path``. Returns the final mp4 path."""
+    """Render one long-form to ``out_path``. Returns the final mp4 path.
+
+    ``progress_cb(stage, msg)`` is fired at each substage boundary
+    (``tts`` / ``asr`` / ``images`` / ``compose``) so the cloud
+    worker's dashboard timeline can show live transitions. Per-substep
+    granularity (TTS chunk N/M, panel N/M) flows through the worker's
+    stdout-classifier path which catches the legacy ``print()``
+    statements still emitted by the delegating plugin shims (e.g.,
+    ``tts_chunked`` → ``synth_long_narration``).
+    """
     work_dir.mkdir(parents=True, exist_ok=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -70,32 +83,49 @@ def render_long(
         spec.duration_target_s,
     )
 
+    audio_name = _long_audio_plugin_name(spec)
+    timeline_name = _timeline_plugin_name(spec, default="asr_anchors")
+    visualize_name = _visualize_plugin_name(spec)
+    music_name = _music_plugin_name(spec)
+    compose_name = _compose_plugin_name(spec, default="section_video")
+
     # 1. Audio (chunked by default)
-    audio_plugin: AudioSynthesizer = get_plugin("audio", _long_audio_plugin_name(spec))
+    audio_plugin: AudioSynthesizer = get_plugin("audio", audio_name)
+    _emit(progress_cb, "tts",
+          f"Synthesizing chunked narration ({audio_name})")
     audio: AudioResult = audio_plugin.synth(spec, script, work_dir)
     _drop_f5_after_audio(spec, label="long stage-1 TTS")
     _logger.info("render_long: audio=%s duration=%.2fs chunks=%s",
                  audio.narration_path.name, audio.duration_s,
                  len(audio.chunk_timings) if audio.chunk_timings else 0)
+    n_chunks = len(audio.chunk_timings) if audio.chunk_timings else 0
+    _emit(progress_cb, "tts",
+          f"Narration ready: {audio.duration_s:.1f}s "
+          f"({n_chunks} chunks)" if n_chunks
+          else f"Narration ready: {audio.duration_s:.1f}s")
 
     # 2. Timeline (asr_anchors by default — anchors authored sections)
-    timeline_plugin: TimelineBuilder = get_plugin(
-        "timeline", _timeline_plugin_name(spec, default="asr_anchors"),
-    )
+    timeline_plugin: TimelineBuilder = get_plugin("timeline", timeline_name)
+    _emit(progress_cb, "asr", f"Aligning sections ({timeline_name})")
     timeline: Timeline = timeline_plugin.build(spec, script, audio)
     _logger.info("render_long: timeline=%d segments", len(timeline))
+    _emit(progress_cb, "asr", f"Aligned {len(timeline)} segments")
 
     # 3. Visuals
-    visualize_plugin: VisualProducer = get_plugin(
-        "visualize", _visualize_plugin_name(spec),
-    )
+    visualize_plugin: VisualProducer = get_plugin("visualize", visualize_name)
+    _emit(progress_cb, "images",
+          f"Generating {len(timeline)} visuals via {visualize_name}")
     visuals: VisualTrack = visualize_plugin.produce(spec, timeline, work_dir)
     _logger.info("render_long: visuals=%s duration=%.2fs",
                  visuals.video_path.name, visuals.duration_s)
+    _emit(progress_cb, "images",
+          f"Visuals ready: {visuals.video_path.name} ({visuals.duration_s:.1f}s)")
 
     # 4. Music — section_mood needs sections; build from script
-    music_plugin: MusicComposer = get_plugin("music", _music_plugin_name(spec))
+    music_plugin: MusicComposer = get_plugin("music", music_name)
     sections = _extract_sections(script, timeline)
+    _emit(progress_cb, "compose",
+          f"Composing music ({music_name}, {len(sections)} sections)")
     music_path = music_plugin.compose(
         spec, audio.duration_s, sections=sections,
     )
@@ -107,11 +137,11 @@ def render_long(
     _logger.info("render_long: overlays=%d elements", len(overlays))
 
     # 6. Compose (section_video by default)
-    compose_plugin: FinalMux = get_plugin(
-        "compose", _compose_plugin_name(spec, default="section_video"),
-    )
+    compose_plugin: FinalMux = get_plugin("compose", compose_name)
+    _emit(progress_cb, "compose", "Stitching video with ffmpeg")
     mp4_path = compose_plugin.mux(visuals, audio, overlays, music_path, spec, out_path)
     _logger.info("render_long: mux done → %s", mp4_path)
+    _emit(progress_cb, "compose", f"Wrote {mp4_path.name}")
 
     if spec.critic_loop is True:
         _logger.info("render_long: critic_loop opt-in (stub)")

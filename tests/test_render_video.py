@@ -505,5 +505,81 @@ class RenderLongFormErrorSurfaceTest(unittest.TestCase):
         self.assertIn("Subprocess error:", msg)
 
 
+class RenderViaEnginesDispatchTest(unittest.TestCase):
+    """Pin ``render_via_engines`` dispatch + ``progress_cb`` forwarding.
+
+    The cloud worker calls this in-process and depends on:
+    - ``pick_engine(spec)`` returning the right engine fn for the kind
+    - the engine fn being called with ``progress_cb=...`` so live
+      dashboard timeline updates flow through (added 2026-05-14 to
+      restore live logs after the engine bigbang regressed them).
+    """
+
+    def test_dispatches_short_kind_to_short_engine_with_progress_cb(self):
+        from unittest.mock import MagicMock, patch
+        # Build a minimal real RenderSpec (not a mock) so engine.pick_engine
+        # can read .kind via its enum-equality check.
+        from pipeline.render.spec import RenderKind, RenderSpec
+        # We don't have a public spec factory that takes raw kwargs, so
+        # just construct one with the documented dataclass fields. The
+        # engine is mocked so the spec is only inspected for `.kind`.
+        spec = MagicMock(spec=RenderSpec)
+        spec.kind = RenderKind.SHORT
+        spec.channel = "test_channel"
+        spec.aspect_ratio = "9:16"
+        spec.output_resolution = (1080, 1920)
+
+        captured: dict = {}
+
+        def fake_engine(s, script, work_dir, out_path, *, progress_cb=None):
+            captured["called"] = True
+            captured["progress_cb"] = progress_cb
+            return out_path
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cb = lambda stage, msg: None
+            with patch("pipeline.render.engine.pick_engine", return_value=fake_engine):
+                result = _video.render_via_engines(
+                    spec,
+                    script={"narration": "x"},
+                    work_dir=tmp_path / "work",
+                    out_path=tmp_path / "out.mp4",
+                    progress_cb=cb,
+                )
+        self.assertEqual(result, tmp_path / "out.mp4")
+        self.assertTrue(captured["called"])
+        self.assertIs(
+            captured["progress_cb"], cb,
+            "progress_cb MUST be forwarded into the engine — without "
+            "it the dashboard timeline freezes during in-process renders",
+        )
+
+    def test_progress_cb_optional(self):
+        from unittest.mock import MagicMock, patch
+        from pipeline.render.spec import RenderKind, RenderSpec
+        spec = MagicMock(spec=RenderSpec)
+        spec.kind = RenderKind.SHORT
+        spec.channel = "test_channel"
+        spec.aspect_ratio = "9:16"
+        spec.output_resolution = (1080, 1920)
+
+        seen = {}
+
+        def fake_engine(s, script, work_dir, out_path, *, progress_cb=None):
+            seen["progress_cb"] = progress_cb
+            return out_path
+
+        with TemporaryDirectory() as tmp:
+            with patch("pipeline.render.engine.pick_engine", return_value=fake_engine):
+                _video.render_via_engines(
+                    spec,
+                    script={},
+                    work_dir=Path(tmp) / "w",
+                    out_path=Path(tmp) / "o.mp4",
+                )
+        self.assertIsNone(seen.get("progress_cb"))
+
+
 if __name__ == "__main__":
     unittest.main()

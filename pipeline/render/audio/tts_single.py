@@ -1,13 +1,9 @@
 """Single-pass cloud-TTS AudioSynthesizer for the short engine.
 
-Wraps the existing single-pass TTS path baked into ``shorts.py`` so
-the new engine can call a Protocol method instead of import-and-
-orchestrate the renderer-internal helpers.
-
-This is a DELEGATING shim — the body still lives in shorts.py and
-the plugin just calls into it. The bigbang PR moves the body fully
-into this module (along with the rest of the per-beat orchestration)
-so shorts.py can be deleted.
+Wraps ``pipeline.audio.synthesize`` (the channel-agnostic TTS dispatcher
+that every legacy renderer already uses) so the new short engine can
+call a Protocol method instead of import-and-orchestrate the
+provider-specific helpers itself.
 
 Provider routing
 ----------------
@@ -22,9 +18,25 @@ The short engine sets ``spec.voice_provider``. Today's values:
 - ``kokoro``               (laptop fallback for Hindi)
 
 This module's :class:`TtsSingle` doesn't reach into the providers
-itself — it delegates to ``pipeline.tts`` which already routes by
-provider name with cloud→laptop fallback wired through
-``pipeline/tts/cloudrun.py`` (per ``docs/cloudrun_tts.md``).
+itself — it delegates to :func:`pipeline.audio.synthesize` which
+already routes by provider name with cloud→laptop fallback wired
+through ``pipeline/tts/cloudrun.py`` (per ``docs/cloudrun_tts.md``).
+
+History
+-------
+
+Pre-2026-05-14 this file imported ``from pipeline.tts import synth``
+— a symbol that has NEVER existed. The bug went unnoticed because
+every engine test uses ``audio_plugin: audio_from_fixture`` instead
+of ``tts_single``, so the broken import (deferred inside the
+``synth()`` method body) was never executed in CI. The
+``isinstance(TtsSingle(), AudioSynthesizer)`` assertion at module
+load was misleading — Protocol checks are structural (just
+``hasattr``), so a syntactically-correct method satisfies the
+contract even if it raises on first call. Fix: use the actual
+dispatcher + add a smoke-test gate that calls every plugin's main
+method against a stub. See
+``tests/render/test_plugin_callable_smoke.py``.
 """
 from __future__ import annotations
 
@@ -58,7 +70,11 @@ class TtsSingle:
         script: dict[str, Any],
         work_dir: Path,
     ) -> AudioResult:
-        from pipeline.tts import synth as _provider_synth  # noqa: PLC0415
+        # Deferred import to avoid loading the heavy TTS provider
+        # graph at engine-import time. ``pipeline.audio`` pulls in
+        # kokoro / f5_tts / chatterbox model loaders transitively and
+        # those allocate Metal contexts on import.
+        from pipeline.audio import synthesize  # noqa: PLC0415
 
         narration_text = self._narration_text(script)
         out_path = work_dir / "narration.wav"
@@ -67,24 +83,28 @@ class TtsSingle:
         provider = spec.voice_provider or "cloudrun_chatterbox"
         voice_id = spec.voice_id or ""
         speed = self._effective_speed(spec)
-        atempo = self._effective_atempo(spec)
 
-        # _provider_synth is the channel-agnostic TTS dispatcher in
-        # pipeline.tts.__init__. It accepts provider name + voice ref +
-        # text and writes the wav to out_path. Cloud→laptop fallback
-        # is wired inside (CloudRunUnavailable → local F5/kokoro).
-        _provider_synth(
+        # synthesize is the channel-agnostic TTS dispatcher in
+        # pipeline.audio.__init__. It accepts (text, voice, out_path,
+        # speed, provider, …) and writes the wav to out_path. Cloud→
+        # laptop fallback is wired inside pipeline.tts.cloudrun
+        # (CloudRunUnavailable → local F5/kokoro). Returns the wav path.
+        synthesize(
             text=narration_text,
-            provider=provider,
             voice=voice_id,
-            speed=speed,
-            atempo=atempo,
             out_path=out_path,
+            speed=speed,
+            provider=provider,
         )
 
         # Bind the wav to the cfg that produced it via the voice
         # fingerprint sidecar, so cache-invalidation downstream works
-        # the same way it does for shorts.py + long_form.py today.
+        # the same way it does for the legacy renderers today. We
+        # include post_atempo in the fingerprint even though
+        # synthesize() doesn't apply it directly — the engine layer
+        # may apply atempo as a post-pass; the fingerprint must
+        # match the cfg the user picked.
+        atempo = self._effective_atempo(spec)
         fp = compute_fingerprint({
             "tts_provider": provider,
             "tts_voice": voice_id,
@@ -129,7 +149,10 @@ register_plugin("audio", "tts_single", TtsSingle())
 # Protocol conformance is structural — but we assert it here for
 # documentation + a fail-fast safety net if a future edit breaks the
 # signature. ``isinstance`` works because AudioSynthesizer is
-# @runtime_checkable.
+# @runtime_checkable. NOTE: Protocol assertions only check attribute
+# existence — they cannot detect that a method calls a non-existent
+# import. The real "is this plugin actually callable?" gate lives in
+# tests/render/test_plugin_callable_smoke.py.
 assert isinstance(TtsSingle(), AudioSynthesizer)
 
 

@@ -1,9 +1,9 @@
 """Engine dispatcher — picks short_engine vs long_engine by spec.kind.
 
 Single function: :func:`pick_engine` returns the engine's
-``render(spec, script, work_dir, out_path) → Path`` callable for the
-given spec. Used by :mod:`pipeline.render.video` (the public entry)
-to route every render through the right engine.
+``render(spec, script, work_dir, out_path, *, progress_cb=None) → Path``
+callable for the given spec. Used by :mod:`pipeline.render.video` (the
+public entry) to route every render through the right engine.
 
 Today's mapping:
 
@@ -26,7 +26,7 @@ plugin layer until the bigbang PR collapses ``RenderKind`` to
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from pipeline.render.spec import RenderKind, RenderSpec
 
@@ -34,15 +34,19 @@ from pipeline.render.spec import RenderKind, RenderSpec
 # cheap (``video.py`` imports this at module top).
 
 
-# Type alias for the engine signature.
-EngineFn = Callable[[RenderSpec, dict[str, Any], Path, Path], Path]
+# Type alias for the engine signature. ``progress_cb`` is keyword-only;
+# every engine accepts it but may ignore it (None disables boundary
+# events). See pipeline/render/short_engine.py::render_short for the
+# semantics.
+ProgressCallback = Callable[[str, str], None]
+EngineFn = Callable[..., Path]
 
 
 def pick_engine(spec: RenderSpec) -> EngineFn:
     """Return the engine's render function for ``spec.kind``.
 
     Engine functions all share the signature
-    ``(spec, script, work_dir, out_path) → Path``.
+    ``(spec, script, work_dir, out_path, *, progress_cb=None) → Path``.
 
     Raises :class:`ValueError` for unknown kinds — should be unreachable
     given :class:`RenderKind` is an Enum, but defensive against future
@@ -63,4 +67,4 @@ def pick_engine(spec: RenderSpec) -> EngineFn:
     raise ValueError(f"engine.pick_engine: unknown kind={spec.kind!r}")
 
 
-__all__ = ["pick_engine", "EngineFn"]
+__all__ = ["pick_engine", "EngineFn", "ProgressCallback"]

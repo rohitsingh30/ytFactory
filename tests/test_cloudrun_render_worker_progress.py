@@ -890,5 +890,543 @@ class LfAdvanceTimelineParallelTests(unittest.TestCase):
         self.assertEqual(images["msg"], "399.0s")  # 1500.0 - 1101.0
         self.assertEqual(compose["status"], "running")
 
+
+# ---------------------------------------------------------------------------
+# In-process engine-path stdout-classifier proxy (post-2026-05-14)
+# ---------------------------------------------------------------------------
+#
+# After the 2026-05-14 bigbang the cloud worker calls render_via_engines()
+# IN-PROCESS instead of shelling out, so the legacy `[1/4] TTS …` lines
+# went to the worker's own stdout where nothing read them — substage pills
+# in the dashboard froze at "pending" for the entire 5-15 min render. Fix:
+# wrap sys.stdout with _StdoutProgressProxy for the duration of the engine
+# call so the existing _classify_renderer_line regex set still bridges
+# legacy plugin print()s into progress_cb.
+#
+# These tests pin the proxy contract (faithful pass-through, per-thread
+# buffering, dedup, reentrancy bypass, deactivate-after-restore safety) PLUS
+# the wiring inside _run_renderer_via_engines (initial event attaches to
+# tts not compose; render_via_engines is called inside the wrap context;
+# progress_cb is forwarded into the engine).
+
+class StdoutProgressProxyTests(unittest.TestCase):
+    """Pin the proxy's contract: every write reaches the wrapped stream
+    in order; complete lines are classified through the supplied
+    classifier and fired to the callback; partial lines stay buffered
+    per-thread; consecutive duplicate events dedupe; the proxy survives
+    deactivation without blowing up."""
+
+    def setUp(self):
+        self.ep = _load_entrypoint()
+
+    def _make_pair(self, classifier=None):
+        import io  # noqa: PLC0415
+        wrapped = io.StringIO()
+        events: list[tuple[str, str]] = []
+        cls = classifier or self.ep._classify_renderer_line
+        proxy = self.ep._StdoutProgressProxy(
+            wrapped=wrapped,
+            progress_cb=lambda s, m: events.append((s, m)),
+            classifier=cls,
+        )
+        return proxy, wrapped, events
+
+    def test_emits_classified_events_in_order(self):
+        proxy, _, events = self._make_pair()
+        proxy.write("[1/4] TTS (cloudrun_chatterbox)\n")
+        proxy.write("[2/4] faster_whisper aligning timestamps\n")
+        proxy.write("[3/4] cloudrun_flux2_klein: generating 22 images\n")
+        proxy.write("[4/4] ffmpeg compose 9:16\n")
+        stages = [s for s, _ in events]
+        self.assertEqual(stages, ["tts", "asr", "images", "compose"])
+
+    def test_passes_through_to_wrapped_stream_verbatim(self):
+        """Cloud Logging consumes one structured-JSON-per-line from
+        stdout; the proxy must forward every byte unchanged so the
+        JSON exporter still works."""
+        proxy, wrapped, _ = self._make_pair()
+        proxy.write("hello\nworld\n[1/4] TTS\n")
+        self.assertEqual(wrapped.getvalue(), "hello\nworld\n[1/4] TTS\n")
+
+    def test_holds_back_partial_trailing_line(self):
+        """Half-written lines (no '\\n' yet) MUST NOT be classified —
+        otherwise '[1/4] T' in one write + 'TS\\n' in the next would
+        miss the match."""
+        proxy, _, events = self._make_pair()
+        proxy.write("[1/4] T")
+        self.assertEqual(events, [], "partial line shouldn't classify yet")
+        proxy.write("TS (cloudrun_chatterbox)\n")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "tts")
+
+    def test_dedupes_consecutive_identical_events(self):
+        """Same line classified to the same (stage, msg) twice in a
+        row should fire ONCE — pre-fix would have flooded Firestore."""
+        proxy, _, events = self._make_pair()
+        proxy.write("[1/4] TTS (cloudrun_chatterbox)\n")
+        proxy.write("[1/4] TTS (cloudrun_chatterbox)\n")
+        self.assertEqual(len(events), 1)
+
+    def test_passes_unclassified_lines_through_silently(self):
+        proxy, wrapped, events = self._make_pair()
+        proxy.write("a totally unknown line\n")
+        proxy.write("another one\n")
+        self.assertEqual(events, [])
+        self.assertEqual(
+            wrapped.getvalue(), "a totally unknown line\nanother one\n",
+        )
+
+    def test_per_thread_buffering_no_interleave(self):
+        """Two threads writing partial lines simultaneously must not
+        interleave half-bytes into the wrong buffer. Pre-critique
+        design used a single shared buffer + lock, which would let
+        '[1/4]' from thread-A combine with '[3/4]' from thread-B."""
+        proxy, _, events = self._make_pair()
+        # Thread A writes its [1/4] line one chunk at a time. Thread B
+        # interleaves its [3/4] line writes between A's writes. Per-
+        # thread buffering must keep them separate.
+        a_chunks = ["[1/4] T", "TS (provA)", "\n"]
+        b_chunks = ["[3/4] provB: generating 5 images", "\n"]
+        barrier = threading.Barrier(2)
+
+        def write_chunks(chunks):
+            barrier.wait()
+            for c in chunks:
+                proxy.write(c)
+                time.sleep(0.001)  # encourage interleave
+
+        ta = threading.Thread(target=write_chunks, args=(a_chunks,))
+        tb = threading.Thread(target=write_chunks, args=(b_chunks,))
+        ta.start(); tb.start()
+        ta.join(); tb.join()
+
+        # Both events must be present and well-formed (not garbled).
+        stages = sorted(s for s, _ in events)
+        self.assertEqual(
+            stages, ["images", "tts"],
+            f"expected both events to fire cleanly, got {events!r}",
+        )
+        for stage, msg in events:
+            self.assertNotIn(
+                "TS", msg.replace("TTS", ""),
+                f"garbled msg from cross-thread interleave: {msg!r}",
+            )
+
+    def test_reentrancy_callback_writes_pass_through(self):
+        """If progress_cb writes to stdout (e.g., a logger handler
+        configured to emit there), the recursive write MUST pass
+        through unclassified — otherwise we'd recurse on every line
+        and likely deadlock on the cb_lock."""
+        import io  # noqa: PLC0415
+        wrapped = io.StringIO()
+        events: list[tuple[str, str]] = []
+
+        def chatty_cb(stage, msg):
+            events.append((stage, msg))
+            # Recurse: the callback writes a line that WOULD classify.
+            sys_stdout = wrapped  # we hand the proxy this stream
+            # write through the proxy itself to simulate logger->stdout
+            proxy.write("[1/4] TTS (recursive)\n")
+
+        proxy = self.ep._StdoutProgressProxy(
+            wrapped=wrapped,
+            progress_cb=chatty_cb,
+            classifier=self.ep._classify_renderer_line,
+        )
+        proxy.write("[1/4] TTS (cloudrun_chatterbox)\n")
+        # Only the OUTER event fires; the recursive one is bypassed.
+        self.assertEqual(len(events), 1)
+        # But the recursive write IS still echoed to wrapped.
+        self.assertIn("[1/4] TTS (recursive)", wrapped.getvalue())
+
+    def test_callback_exception_does_not_kill_writer(self):
+        proxy, _, events = self._make_pair()
+
+        def boom(stage, msg):
+            raise RuntimeError("simulated cb failure")
+
+        proxy._cb = boom
+        # Must not raise, and must keep accepting writes after the failure.
+        proxy.write("[1/4] TTS\n")
+        proxy.write("[4/4] ffmpeg compose\n")
+        self.assertEqual(events, [], "events list isn't used in this test")
+
+    def test_deactivate_drains_trailing_partial_line(self):
+        """If the renderer exits without emitting a trailing newline
+        (e.g. mid-write crash) the buffered remainder MUST still be
+        classified on deactivate so we don't lose the last event."""
+        proxy, _, events = self._make_pair()
+        proxy.write("[1/4] TTS (cloudrun_chatterbox)")  # NO newline
+        self.assertEqual(events, [])  # held back so far
+        proxy.deactivate()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "tts")
+
+    def test_writes_after_deactivate_pass_through_silently(self):
+        """A logging handler that captured the proxy reference BEFORE
+        the context manager exited must still be able to write. The
+        proxy stays in memory; subsequent writes pass through."""
+        proxy, wrapped, events = self._make_pair()
+        proxy.deactivate()
+        proxy.write("[1/4] TTS (post-deactivate)\n")
+        self.assertEqual(events, [], "post-deactivate must not classify")
+        self.assertIn("[1/4] TTS (post-deactivate)", wrapped.getvalue())
+
+    def test_attribute_delegation(self):
+        """Stream attributes the proxy doesn't override (encoding,
+        isatty, etc.) must delegate to the wrapped stream."""
+        import io  # noqa: PLC0415
+        wrapped = io.StringIO()
+        wrapped.custom_attr = "hello"
+        proxy = self.ep._StdoutProgressProxy(
+            wrapped=wrapped,
+            progress_cb=lambda s, m: None,
+            classifier=self.ep._classify_renderer_line,
+        )
+        self.assertEqual(proxy.custom_attr, "hello")
+        # isatty / writable should delegate too (StringIO supports them).
+        self.assertEqual(proxy.writable(), wrapped.writable())
+
+    def test_empty_string_write_short_circuits(self):
+        """Empty / non-string writes return immediately without
+        touching the buffer or firing the classifier."""
+        proxy, _, events = self._make_pair()
+        proxy.write("")
+        self.assertEqual(events, [])
+        # Bytes (technically misuse of a str-mode stream) should also
+        # be forwarded without classification — the proxy doesn't
+        # promise to handle non-str writes, just must not crash.
+        proxy.write(b"")  # type: ignore[arg-type]
+        self.assertEqual(events, [])
+
+    def test_wrapped_write_failure_does_not_propagate(self):
+        """If sys.stdout itself raises mid-render (e.g. broken pipe
+        when the parent closed the FD), the proxy MUST swallow it —
+        the render is otherwise fine, and a raise here would be a
+        very confusing crash."""
+
+        class BoomStream:
+            def write(self, _s):
+                raise OSError("EPIPE simulated")
+
+            def flush(self):
+                raise OSError("EPIPE simulated")
+
+        events: list[tuple[str, str]] = []
+        proxy = self.ep._StdoutProgressProxy(
+            wrapped=BoomStream(),
+            progress_cb=lambda s, m: events.append((s, m)),
+            classifier=self.ep._classify_renderer_line,
+        )
+        # Must not raise.
+        proxy.write("[1/4] TTS (cloudrun_chatterbox)\n")
+        # Even though write to wrapped failed, the line was still
+        # buffered + classified → callback fired.
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "tts")
+
+    def test_flush_exception_does_not_propagate(self):
+        """``proxy.flush()`` is called by Python at interpreter
+        shutdown for any stdout-shaped object. Must not raise — would
+        spam stderr at process exit."""
+
+        class BoomStream:
+            def write(self, _s):
+                return len(_s)
+
+            def flush(self):
+                raise OSError("EPIPE simulated")
+
+        proxy = self.ep._StdoutProgressProxy(
+            wrapped=BoomStream(),
+            progress_cb=lambda s, m: None,
+            classifier=self.ep._classify_renderer_line,
+        )
+        # Must not raise.
+        proxy.flush()
+
+    def test_deactivate_dedupes_against_last_event(self):
+        """If the buffered partial line matches the SAME event that
+        already fired (last full-line write was the same string), we
+        must NOT re-fire it on deactivate — same dedup policy as
+        normal write()."""
+        proxy, _, events = self._make_pair()
+        proxy.write("[1/4] TTS (cloudrun_chatterbox)\n")
+        self.assertEqual(len(events), 1)
+        # Now buffer an IDENTICAL partial line (no newline). On
+        # deactivate the trailing-line drain MUST see it matches
+        # _last_event and skip.
+        proxy.write("[1/4] TTS (cloudrun_chatterbox)")
+        proxy.deactivate()
+        self.assertEqual(
+            len(events), 1,
+            "deactivate drain must dedupe against _last_event "
+            "to avoid double-firing the same event",
+        )
+
+    def test_deactivate_is_idempotent(self):
+        """Calling deactivate twice must be safe — the worker may
+        defensive-double-call from both finally branches."""
+        proxy, _, _ = self._make_pair()
+        proxy.deactivate()
+        proxy.deactivate()  # must not raise
+
+
+class CaptureRendererStdoutTests(unittest.TestCase):
+    """Pin the context-manager wrapper: swap sys.stdout for the
+    duration; restore on normal AND exceptional exit; no-op when
+    progress_cb is None (laptop CLI / tests must pay zero cost)."""
+
+    def setUp(self):
+        self.ep = _load_entrypoint()
+        self._orig_stdout = sys.stdout
+
+    def tearDown(self):
+        sys.stdout = self._orig_stdout
+
+    def test_no_op_when_progress_cb_is_none(self):
+        before = sys.stdout
+        with self.ep._capture_renderer_stdout(None):
+            self.assertIs(sys.stdout, before, "must not swap stdout")
+        self.assertIs(sys.stdout, before)
+
+    def test_swaps_and_restores_on_normal_exit(self):
+        before = sys.stdout
+        events: list[tuple[str, str]] = []
+        with self.ep._capture_renderer_stdout(lambda s, m: events.append((s, m))):
+            self.assertIsNot(sys.stdout, before, "stdout must be swapped")
+            print("[1/4] TTS (cloudrun_chatterbox)")
+        self.assertIs(sys.stdout, before, "stdout must be restored")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "tts")
+
+    def test_swaps_and_restores_on_exception(self):
+        before = sys.stdout
+        events: list[tuple[str, str]] = []
+        with self.assertRaises(RuntimeError):
+            with self.ep._capture_renderer_stdout(lambda s, m: events.append((s, m))):
+                print("[1/4] TTS (cloudrun_chatterbox)")
+                raise RuntimeError("simulated renderer crash")
+        self.assertIs(sys.stdout, before, "stdout must be restored even on raise")
+        # Trailing event still fired before the raise.
+        self.assertEqual(len(events), 1)
+
+
+class EngineDispatchProgressTests(unittest.TestCase):
+    """Pin the wiring inside ``_run_renderer_via_engines``:
+
+    - the placeholder event the worker fires BEFORE engine starts
+      uses the FIRST substage (``tts``), not ``compose``. Pre-fix
+      this was ``("compose", "engine path: short")`` which made
+      _compose_progress cascade-mark tts/asr/images "done" at t≈0.
+    - the engine call is wrapped in ``_capture_renderer_stdout`` so
+      legacy plugin print()s reach progress_cb.
+    - ``progress_cb`` is forwarded into ``render_via_engines`` so
+      explicit boundary events fire from inside the engine.
+    """
+
+    def setUp(self):
+        self.ep = _load_entrypoint()
+
+    def _build_job(self, tmp: Path, kind: str = "short") -> dict:
+        """Minimal job dict: a script JSON file + a synthetic channel YAML
+        the spec builder can consume. Both are read by
+        ``_run_renderer_via_engines`` upfront."""
+        script = tmp / "script.json"
+        script.write_text(
+            '{"slug": "test_slug", "narration": "hello", '
+            '"shots": [{"narration_line": "first beat"}]}'
+        )
+        channel_yaml = tmp / "channel.yaml"
+        channel_yaml.write_text(
+            "channel_dir: " + str(tmp) + "\n"
+            "name: testchannel\n"
+            "aspect: 9:16\n"
+            "kind: " + kind + "\n"
+        )
+        return {
+            "_script_path": str(script),
+            "_channel_yaml": str(channel_yaml),
+            "_slug": "test_slug",
+            "proposal": {"topic": "test", "kind": kind},
+            "job_id": "test-job",
+        }
+
+    def test_initial_placeholder_event_uses_tts_not_compose(self):
+        """Critical: pre-fix the worker emitted ``("compose", "engine
+        path: short")`` BEFORE the engine actually started. The
+        ``_compose_progress`` closure cascades EVERY earlier pill to
+        ``done`` when it sees a later pill go ``running``, so this
+        falsely marked tts/asr/images "done" at t≈0. Must attach to
+        the FIRST substage."""
+        captured: list[tuple[str, str]] = []
+        # Stub the spec builder + render_via_engines so the test
+        # doesn't try to actually render anything. The point is just
+        # to observe the first event fired before render starts.
+        from unittest import mock  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            job = self._build_job(tmp)
+
+            # Stub spec build + render so we never touch the real engine.
+            class _FakeSpec:
+                class _Kind:
+                    value = "short"
+                kind = _Kind()
+                channel = "testchannel"
+
+            with mock.patch.object(
+                self.ep, "_run_renderer_via_engines",
+                wraps=self.ep._run_renderer_via_engines,
+            ):
+                # We need to mock the imports inside the function. The
+                # cleanest way is to patch sys.modules entries the
+                # function imports lazily.
+                fake_video = mock.MagicMock()
+                fake_video.render_via_engines = mock.MagicMock(
+                    return_value=tmp / "out.mp4",
+                )
+                fake_spec_mod = mock.MagicMock()
+                fake_spec_mod.build_spec = mock.MagicMock(return_value=_FakeSpec())
+                fake_paths = mock.MagicMock()
+                fake_rp = mock.MagicMock()
+                fake_rp.short_for = mock.MagicMock(return_value=tmp / "out.mp4")
+                fake_rp.long_form_for = mock.MagicMock(return_value=tmp / "out.mp4")
+                fake_paths.RenderPaths.from_channel_yaml = mock.MagicMock(
+                    return_value=fake_rp,
+                )
+                with mock.patch.dict(sys.modules, {
+                    "pipeline.render.video": fake_video,
+                    "pipeline.render.spec": fake_spec_mod,
+                    "pipeline.paths": fake_paths,
+                }):
+                    self.ep._run_renderer_via_engines(
+                        job, tmp,
+                        progress_cb=lambda s, m: captured.append((s, m)),
+                    )
+
+        # First event must be ("tts", …) — NOT ("compose", …).
+        self.assertGreaterEqual(len(captured), 1, f"no events fired: {captured!r}")
+        self.assertEqual(
+            captured[0][0], "tts",
+            f"first event must attach to the first substage; got {captured[0]!r}",
+        )
+        self.assertNotEqual(
+            captured[0][0], "compose",
+            "compose-as-first cascades earlier pills to false 'done' "
+            "(_compose_progress cascade behaviour, see _RENDERER_SUBSTAGES "
+            "ordering)",
+        )
+
+    def test_render_via_engines_called_inside_capture_context(self):
+        """The engine call MUST happen INSIDE the
+        ``_capture_renderer_stdout`` context so legacy plugin print()s
+        flow through the classifier. We verify by checking that
+        sys.stdout is the proxy at the moment render_via_engines
+        is called."""
+        from unittest import mock  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+        observed: dict[str, Any] = {}
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            job = self._build_job(tmp)
+
+            class _FakeSpec:
+                class _Kind:
+                    value = "short"
+                kind = _Kind()
+                channel = "testchannel"
+
+            def _stub_render(**kw):
+                # Snapshot sys.stdout at the moment the engine is invoked.
+                observed["stdout_during_call"] = sys.stdout
+                observed["progress_cb_kwarg"] = kw.get("progress_cb")
+                return tmp / "out.mp4"
+
+            fake_video = mock.MagicMock()
+            fake_video.render_via_engines = _stub_render
+            fake_spec_mod = mock.MagicMock()
+            fake_spec_mod.build_spec = mock.MagicMock(return_value=_FakeSpec())
+            fake_paths = mock.MagicMock()
+            fake_rp = mock.MagicMock()
+            fake_rp.short_for = mock.MagicMock(return_value=tmp / "out.mp4")
+            fake_paths.RenderPaths.from_channel_yaml = mock.MagicMock(
+                return_value=fake_rp,
+            )
+
+            user_cb = lambda s, m: None
+            with mock.patch.dict(sys.modules, {
+                "pipeline.render.video": fake_video,
+                "pipeline.render.spec": fake_spec_mod,
+                "pipeline.paths": fake_paths,
+            }):
+                self.ep._run_renderer_via_engines(
+                    job, tmp, progress_cb=user_cb,
+                )
+
+        self.assertIsInstance(
+            observed.get("stdout_during_call"), self.ep._StdoutProgressProxy,
+            "render_via_engines was called OUTSIDE the capture context "
+            "→ legacy plugin print()s won't reach progress_cb",
+        )
+        self.assertIs(
+            observed.get("progress_cb_kwarg"), user_cb,
+            "progress_cb must be forwarded into render_via_engines so "
+            "engine boundary events fire too",
+        )
+
+    def test_no_capture_context_when_progress_cb_is_none(self):
+        """Laptop CLI / tests pass progress_cb=None → no proxy swap,
+        no overhead, no classifier wired up."""
+        from unittest import mock  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+        observed: dict[str, Any] = {}
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            job = self._build_job(tmp)
+
+            class _FakeSpec:
+                class _Kind:
+                    value = "short"
+                kind = _Kind()
+                channel = "testchannel"
+
+            def _stub_render(**kw):
+                observed["stdout_during_call"] = sys.stdout
+                return tmp / "out.mp4"
+
+            fake_video = mock.MagicMock()
+            fake_video.render_via_engines = _stub_render
+            fake_spec_mod = mock.MagicMock()
+            fake_spec_mod.build_spec = mock.MagicMock(return_value=_FakeSpec())
+            fake_paths = mock.MagicMock()
+            fake_rp = mock.MagicMock()
+            fake_rp.short_for = mock.MagicMock(return_value=tmp / "out.mp4")
+            fake_paths.RenderPaths.from_channel_yaml = mock.MagicMock(
+                return_value=fake_rp,
+            )
+
+            with mock.patch.dict(sys.modules, {
+                "pipeline.render.video": fake_video,
+                "pipeline.render.spec": fake_spec_mod,
+                "pipeline.paths": fake_paths,
+            }):
+                self.ep._run_renderer_via_engines(
+                    job, tmp, progress_cb=None,
+                )
+
+        self.assertNotIsInstance(
+            observed.get("stdout_during_call"), self.ep._StdoutProgressProxy,
+            "must NOT swap stdout when progress_cb is None",
+        )
+
+
+# Module-level imports for the new tests above.
+import sys  # noqa: E402  (placed here so older test classes don't pull it)
+from typing import Any  # noqa: E402
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

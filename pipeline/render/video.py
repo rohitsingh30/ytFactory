@@ -131,6 +131,7 @@ def render_via_engines(
     script: dict[str, Any],
     work_dir: Path,
     out_path: Path,
+    progress_cb: ProgressCallback | None = None,
 ) -> Path:
     """Render the spec to an mp4 via the new pluggable engines.
 
@@ -155,10 +156,14 @@ def render_via_engines(
     * Takes ``out_path`` directly instead of inferring it from
       channel layout. Caller is responsible for ``RenderPaths``
       lookup. Keeps the engine fully channel-agnostic.
-    * Drops ``progress_cb`` / ``job_id``. Telemetry is emitted via
-      the OTel render envelope from inside each engine; artifact
-      emission via :mod:`pipeline.render.artifacts` is done at
-      the same call sites as before.
+    * Drops ``job_id``. Telemetry is emitted via the OTel render
+      envelope from inside each engine; artifact emission via
+      :mod:`pipeline.render.artifacts` is done at the same call
+      sites as before. ``progress_cb`` is forwarded into the engine
+      so the cloud worker's dashboard timeline keeps receiving live
+      stage-boundary events (without it the substage pills freeze
+      while the in-process render runs — fixed 2026-05-14 after the
+      bigbang regressed live logs).
 
     Returns the path to the produced mp4.
     """
@@ -174,7 +179,7 @@ def render_via_engines(
     )
 
     engine_fn = pick_engine(spec)
-    return engine_fn(spec, script, work_dir, out_path)
+    return engine_fn(spec, script, work_dir, out_path, progress_cb=progress_cb)
 
 
 # ---------------------------------------------------------------------------

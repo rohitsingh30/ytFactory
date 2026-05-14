@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pipeline.render.contracts import (
     AudioResult,
@@ -91,11 +91,44 @@ import pipeline.render.compose  # noqa: F401
 _logger = logging.getLogger(__name__)
 
 
+# Type alias mirroring pipeline.render.video.ProgressCallback. We
+# inline it here (rather than import to avoid a circular dep with
+# video.py, which imports this module's render_short transitively
+# via engine.pick_engine).
+ProgressCallback = Callable[[str, str], None]
+
+
+def _emit(progress_cb: ProgressCallback | None, stage: str, msg: str) -> None:
+    """Fire a stage-boundary progress event, swallowing exceptions.
+
+    Boundary events are how the cloud worker's dashboard timeline
+    learns that a substage started or finished — without them the
+    pills freeze at "pending" while the in-process engine churns.
+    Per-substep granularity (TTS chunk N/M, image N/M) flows through
+    the worker's separate stdout-classifier path; this callback is
+    just the start/done bookends.
+
+    A bug in progress_cb MUST NOT kill the render — same policy the
+    legacy stdout tailer used (see _tail_renderer_log in
+    cloud/render-worker-v2/entrypoint.py).
+    """
+    if progress_cb is None:
+        return
+    try:
+        progress_cb(stage, msg)
+    except Exception:  # noqa: BLE001
+        _logger.warning(
+            "progress_cb failed for %r/%r", stage, msg, exc_info=True,
+        )
+
+
 def render_short(
     spec: RenderSpec,
     script: dict[str, Any],
     work_dir: Path,
     out_path: Path,
+    *,
+    progress_cb: ProgressCallback | None = None,
 ) -> Path:
     """Render one short to ``out_path``. Returns the final mp4 path.
 
@@ -155,6 +188,16 @@ def render_short(
             "in parallel with TTS + ASR (%d preliminary beats)",
             overlap_reason, len(preliminary_timeline),
         )
+        # Visualize boundary events fire on the MAIN thread (before
+        # .submit and after .result()) so progress_cb invocations
+        # don't race with the audio/timeline events. Per-substep
+        # image progress (e.g., "Image 5 of 12") still flows in
+        # real-time via the worker's stdout-classifier path even
+        # though it originates from the visualize worker thread.
+        _emit(progress_cb, "images",
+              f"Generating {len(preliminary_timeline)} visuals via {visualize_name}")
+        _emit(progress_cb, "tts",
+              f"Synthesizing narration ({audio_name})")
         audio, timeline, visuals = _run_overlapped(
             spec=spec,
             script=script,
@@ -163,7 +206,10 @@ def render_short(
             timeline_plugin=timeline_plugin,
             visualize_plugin=visualize_plugin,
             preliminary_timeline=preliminary_timeline,
+            progress_cb=progress_cb,
         )
+        _emit(progress_cb, "images",
+              f"Visuals ready: {visuals.video_path.name}")
     else:
         if not preliminary_timeline:
             reason = "no preliminary beats authored (script has no text)"
@@ -177,6 +223,7 @@ def render_short(
             audio_plugin=audio_plugin,
             timeline_plugin=timeline_plugin,
             visualize_plugin=visualize_plugin,
+            progress_cb=progress_cb,
         )
 
     _logger.info(
@@ -186,16 +233,19 @@ def render_short(
     )
 
     # 4. Music
+    _emit(progress_cb, "compose", f"Composing music ({music_name})")
     music_path = music_plugin.compose(spec, audio.duration_s, sections=None)
     _logger.info("render_short: music=%s", music_path.name)
 
-    # 5. Overlays — collect from every active producer.
+    # 5. Overlays — collect from every active overlay producer.
     overlays = _collect_overlays(spec, timeline, audio)
     _logger.info("render_short: overlays=%d elements", len(overlays))
 
     # 6. Compose
+    _emit(progress_cb, "compose", "Stitching video with ffmpeg")
     mp4_path = compose_plugin.mux(visuals, audio, overlays, music_path, spec, out_path)
     _logger.info("render_short: mux done → %s", mp4_path)
+    _emit(progress_cb, "compose", f"Wrote {mp4_path.name}")
 
     # 7. Critic loop — opt-in only (per user direction 2026-05-14).
     if spec.critic_loop is True:
@@ -278,6 +328,7 @@ def _run_overlapped(
     timeline_plugin: TimelineBuilder,
     visualize_plugin: VisualProducer,
     preliminary_timeline: Timeline,
+    progress_cb: ProgressCallback | None = None,
 ) -> tuple[AudioResult, Timeline, VisualTrack]:
     """Parallel path: visualize runs on a worker thread while
     audio + timeline run on the main thread. Re-joins before
@@ -288,6 +339,11 @@ def _run_overlapped(
     ``timeline_plugin.build(spec, script, audio)`` are computed on
     the main thread post-TTS. Compose re-times visuals against the
     real timeline at mux time.
+
+    ``progress_cb`` only fires the AUDIO + TIMELINE boundary events
+    here — visualize boundaries fire in the engine before .submit()
+    and after .result() so we don't mix main-thread and
+    worker-thread callback invocations through the same queue.
     """
     with StageOverlap(label=f"short-engine-{spec.channel[:16]}",
                       max_workers=1, log=True) as overlap:
@@ -302,7 +358,13 @@ def _run_overlapped(
         # Main thread: audio + timeline (sequential — timeline needs audio).
         audio = audio_plugin.synth(spec, script, work_dir)
         _drop_f5_after_audio(spec, label="short stage-1 TTS (post-overlap)")
+        _emit(progress_cb, "tts",
+              f"Narration ready: {audio.duration_s:.1f}s")
+
+        _emit(progress_cb, "asr", "Aligning captions")
         timeline = timeline_plugin.build(spec, script, audio)
+        _emit(progress_cb, "asr",
+              f"Aligned {len(timeline)} beats — {audio.duration_s:.1f}s of audio")
 
         # Re-join.
         visuals = visuals_fut.result()
@@ -333,14 +395,29 @@ def _run_sequential(
     audio_plugin: AudioSynthesizer,
     timeline_plugin: TimelineBuilder,
     visualize_plugin: VisualProducer,
+    progress_cb: ProgressCallback | None = None,
 ) -> tuple[AudioResult, Timeline, VisualTrack]:
     """Strict-sequential path: audio → timeline → visualize. Picked
     when the overlap gate refuses (local TTS, local image-gen, or
     YTFACTORY_DISABLE_STAGE_OVERLAP=1)."""
+    audio_name = (spec.voice_provider or "tts")
+    visualize_name = (spec.extra or {}).get("visualize_plugin") or spec.visual_mode.value
+    _emit(progress_cb, "tts", f"Synthesizing narration ({audio_name})")
     audio = audio_plugin.synth(spec, script, work_dir)
     _drop_f5_after_audio(spec, label="short stage-1 TTS")
+    _emit(progress_cb, "tts",
+          f"Narration ready: {audio.duration_s:.1f}s")
+
+    _emit(progress_cb, "asr", "Aligning captions")
     timeline = timeline_plugin.build(spec, script, audio)
+    _emit(progress_cb, "asr",
+          f"Aligned {len(timeline)} beats — {audio.duration_s:.1f}s of audio")
+
+    _emit(progress_cb, "images",
+          f"Generating {len(timeline)} visuals via {visualize_name}")
     visuals = visualize_plugin.produce(spec, timeline, work_dir)
+    _emit(progress_cb, "images",
+          f"Visuals ready: {visuals.video_path.name}")
     return audio, timeline, visuals
 
 

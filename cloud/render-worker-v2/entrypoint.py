@@ -1016,6 +1016,215 @@ def _tail_renderer_log(
         # Sleep in small slices so stop_event is honoured promptly.
         stop_event.wait(timeout=poll_interval)
 
+
+# ---------------------------------------------------------------------------
+# In-process renderer stdout classifier (post-2026-05-14 engine path)
+# ---------------------------------------------------------------------------
+#
+# The legacy subprocess-based renderer streamed `[1/4] TTS …`, `[3/4] cloud:
+# generating N images`, `[panel] N/M gen → …` and the like to its stdout.
+# `_tail_renderer_log` polled the redirected log file and forwarded each
+# matching line to `progress_cb` so the dashboard timeline showed live
+# per-substep updates.
+#
+# Post-2026-05-14 the cloud worker calls `pipeline.render.video.render_via_engines`
+# IN-PROCESS — no subprocess, no log file, no tailer. The engine plugins
+# still delegate to `pipeline/render/_legacy/{shorts,long_form,sports_doc,
+# footage_only}.py` for the heavy lifting (tts_chunked → synth_long_narration,
+# longform_panels → render_panel_video, …) and those legacy modules still
+# emit the same `print(…)` statements `_classify_renderer_line` is designed
+# to consume. The fix is just to bridge the engine call's stdout into the
+# same classifier.
+#
+# `_StdoutProgressProxy` wraps `sys.stdout` for the duration of the call.
+# It uses PER-THREAD line buffers so the visualize worker thread (StageOverlap)
+# doesn't interleave half-lines with the main thread's tts/asr writes. A
+# thread-local `in_callback` flag plus a separate callback lock prevents
+# deadlock when a callback itself prints (e.g., a logger handler routed to
+# stdout) — the recursive write passes through unclassified.
+
+class _StdoutProgressProxy:
+    """Wraps sys.stdout. While ``active``, classifies each complete line
+    on a per-thread buffer and fires ``progress_cb(stage, msg)`` for
+    matches via ``_classify_renderer_line``. After ``deactivate()`` is
+    called, all writes pass through to the original stream unchanged
+    (so anything that captured a reference to the proxy — e.g., a
+    logging handler — keeps working without surprise).
+
+    Thread-safety contract:
+
+    * Per-thread line buffers (keyed on ``threading.get_ident()``) so
+      partial writes from one thread don't interleave with another.
+      A short single lock guards the buffer dict + ``_last_event``.
+    * Callback invocation uses a SEPARATE lock so a slow callback
+      (Firestore write) can't deadlock a parallel ``write()`` call.
+    * Reentrancy: if ``progress_cb`` (or anything it calls) writes
+      back through the proxy, a thread-local ``in_callback`` flag
+      short-circuits classification on the recursive write so we
+      pass through unchanged. Prevents infinite recursion when the
+      callback indirectly logs to stdout.
+
+    Attribute delegation: any attribute access that isn't on the proxy
+    itself (``write`` / ``flush`` / etc.) falls through to the wrapped
+    stream so ``isatty()`` / ``encoding`` / ``fileno()`` etc. behave
+    transparently — important for Cloud Run's stdout pipe behaviour
+    and for libraries that introspect the stream.
+    """
+
+    def __init__(
+        self,
+        wrapped: Any,
+        progress_cb: Callable[[str, str], None],
+        classifier: Callable[[str], tuple[str, str] | None],
+    ) -> None:
+        self._wrapped = wrapped
+        self._cb = progress_cb
+        self._classify = classifier
+        self._buffers: dict[int, str] = {}
+        self._buffer_lock = threading.Lock()
+        self._cb_lock = threading.Lock()
+        self._tls = threading.local()
+        self._last_event: tuple[str, str] | None = None
+        self._active = True
+
+    # NOTE: never raise out of write() — sys.stdout writes happen in
+    # arbitrary library code and a raise here would crash the render.
+
+    def write(self, s: Any) -> int:
+        # Always forward immediately to keep stdout ordering / Cloud
+        # Logging structured-JSON-per-line semantics intact. Even when
+        # we're inactive or in a recursive callback, the wrapped
+        # stream gets the bytes.
+        try:
+            n = self._wrapped.write(s)
+        except Exception:  # noqa: BLE001  # coverage: wrapped stream write failed (broken pipe / EPIPE) — covered by StdoutProgressProxyTests::test_wrapped_write_failure_does_not_propagate
+            n = len(s) if isinstance(s, str) else 0  # coverage: same wrapped-write failure branch as the line directly above this one
+
+        if not isinstance(s, str) or not s:
+            return n
+        if not self._active:
+            return n
+        if getattr(self._tls, "in_callback", False):
+            return n
+
+        # Buffer + classify under the buffer lock. Collect events in a
+        # local list so we fire callbacks OUTSIDE the buffer lock —
+        # otherwise a callback that writes (logger → stdout → write
+        # → acquire buffer lock) would deadlock.
+        events: list[tuple[str, str]] = []
+        tid = threading.get_ident()
+        with self._buffer_lock:
+            # coverage: race-after-deactivate guard inside buffer lock; only fires when deactivate() runs concurrently between our outer self._active check and lock acquisition — needs racing-thread fixture infra not worth maintaining for this defensive check
+            if not self._active:
+                return n
+            buf = self._buffers.get(tid, "") + s
+            *complete, remainder = buf.split("\n")
+            self._buffers[tid] = remainder
+            for line in complete:
+                event = self._classify(line)
+                if event is None or event == self._last_event:
+                    continue
+                self._last_event = event
+                events.append(event)
+
+        for ev in events:
+            self._fire(ev)
+        return n
+
+    def _fire(self, event: tuple[str, str]) -> None:
+        # Reentrancy gate: if THIS thread is already in a callback,
+        # silently drop the recursive event. Different threads
+        # serialize on _cb_lock so the user-supplied progress_cb
+        # never sees concurrent invocations.
+        # coverage: defensive guard for direct _fire() reentry; in practice the write-path bypass at line 1107 prevents same-thread reentry from ever reaching _fire()
+        if getattr(self._tls, "in_callback", False):
+            return
+        with self._cb_lock:
+            self._tls.in_callback = True
+            try:
+                self._cb(*event)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "progress_cb failed for engine substep %r/%r",
+                    event[0], event[1], exc_info=True,
+                )
+            finally:
+                self._tls.in_callback = False
+
+    def flush(self) -> None:
+        try:
+            self._wrapped.flush()
+        except Exception:  # noqa: BLE001  # coverage: wrapped stream flush failed (broken pipe / EPIPE at interpreter shutdown) — covered by StdoutProgressProxyTests::test_flush_exception_does_not_propagate
+            pass
+
+    def deactivate(self) -> None:
+        """Drain any trailing partial lines, mark the proxy inactive.
+
+        After this, ``write()`` calls pass through to the wrapped
+        stream unchanged. Idempotent.
+        """
+        with self._buffer_lock:
+            buffers = list(self._buffers.values())
+            self._buffers.clear()
+            self._active = False
+        for buf in buffers:
+            stripped = buf.strip()
+            if not stripped:
+                continue
+            event = self._classify(stripped)
+            if event is None or event == self._last_event:
+                continue
+            self._last_event = event
+            self._fire(event)
+
+    def __getattr__(self, name: str) -> Any:
+        # __getattr__ only fires for attributes NOT found on self —
+        # write / flush / deactivate are explicit above so they
+        # never reach here. Everything else (.encoding, .isatty,
+        # .fileno, .closed, .errors, .reconfigure, ...) delegates.
+        return getattr(self._wrapped, name)
+
+
+def _capture_renderer_stdout(
+    progress_cb: Callable[[str, str], None] | None,
+):
+    """Context manager that bridges in-process renderer prints to
+    ``progress_cb``.
+
+    When ``progress_cb`` is None, this is a no-op (yields without
+    swapping ``sys.stdout``) so non-cloud callers (laptop CLI, tests)
+    pay zero overhead. When set, replaces ``sys.stdout`` with a
+    :class:`_StdoutProgressProxy` for the duration of the with-block;
+    restores the original ``sys.stdout`` and ``deactivate()``s the
+    proxy on exit (whether normal or exceptional).
+
+    The proxy stays in memory after restoration so any long-lived
+    reference (e.g., a logging handler that captured ``sys.stdout``
+    before the swap) keeps working — writes pass through unchanged.
+    """
+    from contextlib import contextmanager  # noqa: PLC0415
+
+    @contextmanager
+    def _ctx():
+        if progress_cb is None:
+            yield
+            return
+        original = sys.stdout
+        proxy = _StdoutProgressProxy(
+            wrapped=original,
+            progress_cb=progress_cb,
+            classifier=_classify_renderer_line,
+        )
+        sys.stdout = proxy
+        try:
+            yield proxy
+        finally:
+            sys.stdout = original
+            proxy.deactivate()
+
+    return _ctx()
+
+
 def _run_renderer_via_engines(
     job: dict,
     work_dir: Path,
@@ -1034,6 +1243,26 @@ def _run_renderer_via_engines(
     NO subprocess shell-out — engines run in-process. Telemetry comes
     from the engines' OTel render envelope; artifact emission via
     :mod:`pipeline.render.artifacts`.
+
+    Live dashboard timeline updates flow via TWO complementary paths
+    (post-2026-05-14 — see docs/post-audit-2026-05-14.md "live logs"
+    section). Without them the substage pills (tts / asr / images /
+    compose) freeze at "pending" while the in-process render runs:
+
+    1. ``progress_cb`` is forwarded into ``render_via_engines`` so each
+       engine fires explicit substage-boundary events ("Synthesizing
+       narration", "Aligned N beats", "Stitching video with ffmpeg",
+       "Wrote X.mp4"). Cheap, deterministic, always fires regardless
+       of whether the underlying plugin is a thin wrapper or a fat
+       legacy delegation.
+    2. ``_capture_renderer_stdout`` wraps ``sys.stdout`` for the
+       duration of the call so the LEGACY ``print()`` statements in
+       ``pipeline/render/_legacy/{shorts,long_form,sports_doc,footage_only}.py``
+       (still reached via the delegating plugin shims like
+       ``audio.tts_chunked`` → ``synth_long_narration``) are
+       classified through ``_classify_renderer_line`` and forwarded
+       to ``progress_cb`` for per-substep granularity (``TTS cloud
+       chunk N/M``, ``Image N of M``, ``Panel N/M``).
 
     Returns the produced mp4 path. Raises on engine failure (caller
     treats this exactly like a non-zero subprocess exit code).
@@ -1071,20 +1300,31 @@ def _run_renderer_via_engines(
     else:
         out_path = rp.long_form_for(slug)
 
+    # Initial placeholder event so the user sees something between job
+    # start and the first real engine substage event (cold-start TTS /
+    # cloud-image warmup can take 5-30 s before the first matching
+    # line lands). MUST attach to the FIRST substage, not "compose" —
+    # _compose_progress cascades EVERY earlier pill to "done" when it
+    # sees a later pill go "running", so an initial `("compose", …)`
+    # would falsely mark tts/asr/images done at t≈0 (the original
+    # bug pre-this-fix). Pinned by
+    # tests/test_cloudrun_render_worker_progress.py::EngineDispatchProgressTests.
     if progress_cb:
-        progress_cb("compose", f"engine path: {spec.kind.value}")
+        progress_cb("tts", f"Preparing engine render ({spec.kind.value})")
 
     logger.info(
         "renderer (engines): kind=%s channel=%s slug=%s out=%s",
         spec.kind.value, spec.channel, slug, out_path,
     )
 
-    return render_via_engines(
-        spec=spec,
-        script=script_dict,
-        work_dir=work_dir,
-        out_path=out_path,
-    )
+    with _capture_renderer_stdout(progress_cb):
+        return render_via_engines(
+            spec=spec,
+            script=script_dict,
+            work_dir=work_dir,
+            out_path=out_path,
+            progress_cb=progress_cb,
+        )
 
 def _stage_render_real(
     job: dict,
