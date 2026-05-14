@@ -1050,6 +1050,77 @@ def _tail_renderer_log(
         stop_event.wait(timeout=poll_interval)
 
 
+def _run_renderer_via_engines(
+    job: dict,
+    work_dir: Path,
+    *,
+    progress_cb: Callable[[str, str], None] | None = None,
+) -> Path:
+    """Render via the new pluggable engines (post-2026-05-14 architecture).
+
+    Picked when ``YTFACTORY_USE_ENGINES=1`` is set. Goes through
+    :func:`pipeline.render.video.render_via_engines` which dispatches
+    to ``short_engine`` / ``long_engine`` based on ``spec.kind`` and
+    in turn calls plugin slots (audio / timeline / visualize / overlays
+    / music / compose) by spec field name lookup — zero
+    ``if visual_mode == ...`` branches.
+
+    NO subprocess shell-out — engines run in-process. Telemetry comes
+    from the engines' OTel render envelope; artifact emission via
+    :mod:`pipeline.render.artifacts`.
+
+    Returns the produced mp4 path. Raises on engine failure (caller
+    treats this exactly like a non-zero subprocess exit code).
+    """
+    from pipeline.render.spec import build_spec  # noqa: PLC0415
+    from pipeline.render.video import render_via_engines  # noqa: PLC0415
+
+    script_path = job.get("_script_path")
+    channel_yaml = job.get("_channel_yaml")
+    if not script_path or not channel_yaml:
+        raise RuntimeError(
+            "renderer: rewrite stage didn't set _script_path / _channel_yaml"
+        )
+
+    proposal = job.get("proposal") or {}
+
+    # Build spec via the central builder so the engine sees the same
+    # field-resolution behavior the wizard / form uses.
+    spec = build_spec(
+        proposal=proposal,
+        channel_yaml_path=Path(channel_yaml) if channel_yaml else None,
+        variant_yaml_path=None,
+    )
+
+    # Read the script JSON the rewrite stage already wrote.
+    script_dict = json.loads(Path(script_path).read_text())
+
+    # Resolve where the engine should write the mp4. Mirror the legacy
+    # path so the worker's downstream upload + thumb steps find it.
+    from pipeline.paths import RenderPaths  # noqa: PLC0415
+    rp = RenderPaths.from_channel_yaml(Path(channel_yaml))
+    slug = script_dict.get("slug") or job.get("_slug") or "unknown"
+    if spec.kind.value == "short":
+        out_path = rp.short_for(slug)
+    else:
+        out_path = rp.long_form_for(slug)
+
+    if progress_cb:
+        progress_cb("compose", f"engine path: {spec.kind.value}")
+
+    logger.info(
+        "renderer (engines): kind=%s channel=%s slug=%s out=%s",
+        spec.kind.value, spec.channel, slug, out_path,
+    )
+
+    return render_via_engines(
+        spec=spec,
+        script=script_dict,
+        work_dir=work_dir,
+        out_path=out_path,
+    )
+
+
 def _run_renderer_subprocess(
     job: dict,
     work_dir: Path,
@@ -1061,7 +1132,20 @@ def _run_renderer_subprocess(
     The renderer handles stages images → tts → asr → compose using the
     cloud providers declared in the channel YAML. ASR is forced to
     faster-whisper via env (whisper-mlx is Apple-only).
+
+    Engine cutover (2026-05-14)
+    ---------------------------
+
+    When ``YTFACTORY_USE_ENGINES=1`` is set on the worker, this function
+    delegates to :func:`_run_renderer_via_engines` which calls
+    :func:`pipeline.render.video.render_via_engines` directly (no
+    subprocess) — the new pluggable engine architecture. Default
+    OFF until the bigbang cutover lands; flipping this on in cloud
+    is a single ``--update-env-vars`` redeploy.
     """
+    if os.environ.get("YTFACTORY_USE_ENGINES") == "1":
+        return _run_renderer_via_engines(job, work_dir, progress_cb=progress_cb)
+
     script_path = job.get("_script_path")
     channel_yaml = job.get("_channel_yaml")
     if not script_path or not channel_yaml:
