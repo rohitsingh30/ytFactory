@@ -2298,8 +2298,15 @@ def _make_short_impl(
 
                 # Flux doesn't parse compel-style (text:weight) syntax,
                 # so emit unweighted prompts on the mflux path.
+                # Defensive .get on image_style_prefix: TEL-FS-14 (8) +
+                # TEL-EXEC-10 (4) + TEL-LOG-11 (16) — Cosmos channel
+                # YAML lacks this key and pre-fix this crashed every
+                # cosmosdecoded short. Empty string is fine here; the
+                # prompt builder renders the scene without a style
+                # prepend, which is no worse than what other channels
+                # without explicit style get.
                 full_prompt = images.build_full_prompt(
-                    style_prefix=cfg["image_style_prefix"],
+                    style_prefix=cfg.get("image_style_prefix") or "",
                     character_description=routed_desc,
                     key_visual=key_visual,
                     scene=scene,

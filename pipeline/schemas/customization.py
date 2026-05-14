@@ -55,13 +55,36 @@ def _build_channel_registry() -> list[dict[str, Any]]:
     """Compose CHANNEL_REGISTRY from presentation metadata + the
     channel-locations SoT in ``pipeline.channels``. Paths are derived,
     never hardcoded — renaming ``pipeline/channels`` is one edit there.
+
+    Filters by ``in_rotation`` so out-of-rotation channels (scrollpulse,
+    rhymetimejunction with broken audio, etc.) don't appear in the
+    wizard. Telemetry: TEL-LOG-14 = 4 scrollpulse renders crashed in
+    14d because the wizard exposed it but the worker can't find
+    pipeline/channels/scrollpulse.yaml. NCH-03 + NCH-08 + YAML-01.
     """
     from pipeline.channels import (  # noqa: PLC0415 — avoid circular at import
-        _channel_yaml_path, _channel_variants_dir,
+        _channel_yaml_path, _channel_variants_dir, get_channel,
     )
     out: list[dict[str, Any]] = []
     for p in _CHANNEL_PRESENTATION:
         slug = p["key"]
+        ch = get_channel(slug)
+        # Filter: only channels that are BOTH registered AND in_rotation
+        # appear in the wizard. Unregistered = wasn't added to channels.yaml
+        # → presentation entry is stale. Out-of-rotation = explicitly
+        # disabled by the operator → must not be picker-selectable.
+        if ch is None:
+            # Presentation entry has no matching registry row; skip.
+            # Loud log so the drift surfaces during boot.
+            import logging  # noqa: PLC0415
+            logging.getLogger(__name__).warning(
+                "wizard registry: dropping presentation %r — "
+                "not registered in pipeline/channels.yaml", slug,
+            )
+            continue
+        if not ch.in_rotation:
+            # Operator disabled this channel — don't expose in wizard.
+            continue
         out.append({
             "key": slug,
             "label": p["label"],
