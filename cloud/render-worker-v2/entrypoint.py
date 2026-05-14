@@ -1518,11 +1518,43 @@ def _main_from_firestore(job_id: str) -> int:
     mode = "stub" if _is_stub_mode() else "real"
     logger.info("starting render-worker-v2 for job=%s mode=%s (Firestore)", job_id, mode)
 
-    snap = _job_ref(job_id).get()
-    if not snap.exists:
-        logger.error("job %s not found in Firestore", job_id)
+    # Bounded retry on the initial lookup (TEL-FS-04 / TEL-EXEC-01).
+    # When the dispatcher fires `gcloud run jobs execute` IMMEDIATELY
+    # after `create_job` (control/core/jobs.py:_enqueue_render_job),
+    # the worker container can boot AND query Firestore before the
+    # cross-region write fully propagates. Pre-fix: 130/266 = ~50%
+    # of failed jobs in the last 30 days had error="job doc not found"
+    # at this exact point. With 3 attempts × 1s backoff, the typical
+    # 200-500ms propagation window is covered without burning wall
+    # clock on the happy path (first attempt almost always succeeds).
+    snap = None
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            snap = _job_ref(job_id).get()
+            if snap.exists:
+                break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            logger.warning(
+                "Firestore lookup attempt %d/3 errored for job=%s: %s",
+                attempt + 1, job_id, e,
+            )
+        if attempt < 2:
+            logger.info(
+                "job %s not visible yet (attempt %d/3) — retrying in 1s",
+                job_id, attempt + 1,
+            )
+            time.sleep(1.0)
+
+    if snap is None or not snap.exists:
+        err_msg = (
+            f"job doc not found after 3 attempts (last_err={last_err})"
+            if last_err else "job doc not found after 3 attempts"
+        )
+        logger.error("job %s not found in Firestore: %s", job_id, err_msg)
         _update_job(job_id, status="failed", stage="bootstrap",
-                    error="job doc not found")
+                    error=err_msg)
         return 1
     job = snap.to_dict() or {}
     job["job_id"] = job_id

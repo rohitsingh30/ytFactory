@@ -158,7 +158,34 @@ STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 
 
-def create_job(job_id: str, *, channel: str, topic: str, proposal: dict[str, Any], owner_uid: str | None = None) -> None:
+def create_job(
+    job_id: str,
+    *,
+    channel: str,
+    topic: str,
+    proposal: dict[str, Any],
+    owner_uid: str | None = None,
+    slug: str | None = None,
+    render_kind: str | None = None,
+) -> None:
+    """Persist the initial job doc.
+
+    Always seeds ``slug`` and ``render_kind`` (Telemetry: TEL-FS-01 +
+    TEL-FS-02) so the queue page can categorise even if the worker
+    crashes before any update. ``slug`` defaults to a derivation from
+    topic until the worker generates a real one; ``render_kind`` is
+    inferred from proposal.length_s + format if not provided.
+    """
+    if not slug:
+        # Derive a stable slug from topic + job_id suffix so the queue
+        # has SOMETHING to display before the worker generates the real
+        # canonical slug. Worker overwrites this once it builds the spec.
+        topic_slug = "".join(c if c.isalnum() else "-" for c in (topic or "untitled").lower())[:80].strip("-")
+        slug = f"{topic_slug}-{job_id[:8]}" if topic_slug else f"job-{job_id[:8]}"
+    if not render_kind:
+        # Infer from length_s. Long-form is anything over 120s.
+        length_s = proposal.get("length_s", 60)
+        render_kind = "long_form" if (length_s and length_s > 120) else "short"
     get_jobs().create(
         job_id,
         channel=channel,
@@ -167,6 +194,8 @@ def create_job(job_id: str, *, channel: str, topic: str, proposal: dict[str, Any
         owner_uid=owner_uid,
         status=STATUS_PENDING,
         stage="queued",
+        slug=slug,
+        render_kind=render_kind,
     )
 
 
@@ -175,17 +204,53 @@ def mark_stage(job_id: str, *, status: str, stage: str, **extra: Any) -> None:
     get_jobs().update(job_id, status=status, stage=stage, **extra)
 
 
-def mark_done(job_id: str, *, short_uri: str, youtube_url: str | None = None, thumb_uri: str | None = None) -> None:
+def mark_done(
+    job_id: str,
+    *,
+    short_uri: str,
+    youtube_url: str | None = None,
+    thumb_uri: str | None = None,
+    slug: str | None = None,
+    render_kind: str | None = None,
+) -> None:
     fields: dict[str, Any] = {"status": STATUS_DONE, "stage": "done", "short_uri": short_uri, "error": None}
     if youtube_url:
         fields["youtube_url"] = youtube_url
     if thumb_uri:
         fields["thumb_uri"] = thumb_uri
+    if slug:
+        fields["slug"] = slug
+    if render_kind:
+        fields["render_kind"] = render_kind
     get_jobs().update(job_id, **fields)
 
 
-def mark_failed(job_id: str, *, stage: str, error: str) -> None:
-    get_jobs().update(job_id, status=STATUS_FAILED, stage=stage, error=error[:2000])
+def mark_failed(
+    job_id: str,
+    *,
+    stage: str,
+    error: str,
+    slug: str | None = None,
+    render_kind: str | None = None,
+) -> None:
+    """Persist a failure with full context.
+
+    Telemetry: TEL-FS-01 (266) + TEL-FS-02 (266) — every failed job
+    in the last 30 days is missing slug + render_kind in Firestore,
+    so the queue page can't categorise failures or filter by render
+    kind. Now: callers SHOULD pass slug/render_kind when known so
+    the dashboard has enough to triage.
+    """
+    fields: dict[str, Any] = {
+        "status": STATUS_FAILED,
+        "stage": stage,
+        "error": error[:2000],
+    }
+    if slug:
+        fields["slug"] = slug
+    if render_kind:
+        fields["render_kind"] = render_kind
+    get_jobs().update(job_id, **fields)
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:

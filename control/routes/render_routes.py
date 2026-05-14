@@ -18,7 +18,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from control.core import jobs as jobs_mod
 from control.core import rate_limit
@@ -90,7 +90,11 @@ class RenderRequest(BaseModel):
     source_kind: str = "auto"
     source_ref: str | None = None
     length_s: int = 55
-    channel_overrides: dict[str, Any] = {}
+    # Use default_factory so each request gets a fresh dict.
+    # Pre-fix (catalogue W-13): a bare ``= {}`` is a mutable-default
+    # footgun — Pydantic v2 currently copies it but the pattern is
+    # easy to break (subclass / future SDK upgrade) and lints flag it.
+    channel_overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.post("/api/render", response_model=ConfirmResponse)

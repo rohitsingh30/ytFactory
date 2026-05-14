@@ -29,6 +29,54 @@ class JobLifecycleTest(unittest.TestCase):
         # Timestamps populated.
         self.assertIn("created_at", doc)
         self.assertIn("updated_at", doc)
+        # Telemetry: TEL-FS-01 + TEL-FS-02. Slug + render_kind MUST be
+        # seeded at create-time so failed jobs that never reach the
+        # worker still display in the queue with a real category.
+        self.assertIn("slug", doc)
+        self.assertTrue(doc["slug"], "slug must not be empty")
+        self.assertIn("aguero", doc["slug"].lower())
+        self.assertEqual(doc["render_kind"], "short")  # length_s=55 → short
+
+    def test_create_job_infers_long_form_render_kind(self):
+        # length_s > 120 → render_kind = "long_form"
+        jobs_mod.create_job("j-long", channel="historyrecapped",
+                            topic="Operation Mincemeat",
+                            proposal={"length_s": 600})
+        doc = jobs_mod.get_job("j-long")
+        assert doc is not None
+        self.assertEqual(doc["render_kind"], "long_form")
+        self.assertIn("operation-mincemeat", doc["slug"].lower())
+
+    def test_mark_failed_persists_slug_and_render_kind_when_passed(self):
+        # Telemetry: TEL-FS-01/02. Even when the worker finds the doc
+        # already has slug from create_job, mark_failed should accept
+        # explicit overrides so a worker that discovers the canonical
+        # slug mid-render can update it. 266 failed docs in 30d had
+        # neither field populated pre-fix.
+        jobs_mod.create_job("j-fail", channel="auto", topic="t",
+                            proposal={"length_s": 60})
+        jobs_mod.mark_failed("j-fail", stage="render",
+                             error="boom",
+                             slug="canonical-slug-x",
+                             render_kind="short")
+        doc = jobs_mod.get_job("j-fail")
+        assert doc is not None
+        self.assertEqual(doc["slug"], "canonical-slug-x")
+        self.assertEqual(doc["render_kind"], "short")
+        self.assertEqual(doc["status"], jobs_mod.STATUS_FAILED)
+        self.assertEqual(doc["stage"], "render")
+
+    def test_mark_done_persists_slug_and_render_kind_when_passed(self):
+        jobs_mod.create_job("j-done", channel="auto", topic="t",
+                            proposal={"length_s": 60})
+        jobs_mod.mark_done("j-done",
+                           short_uri="gs://b/x.mp4",
+                           slug="final-slug",
+                           render_kind="short")
+        doc = jobs_mod.get_job("j-done")
+        assert doc is not None
+        self.assertEqual(doc["slug"], "final-slug")
+        self.assertEqual(doc["render_kind"], "short")
 
     def test_mark_stage_advances_status(self):
         jobs_mod.create_job("j2", channel="auto", topic="t", proposal={})
