@@ -261,6 +261,16 @@ class ChannelSummary(BaseModel):
     has_overrides: bool = False
     variants_count: int = 0
 
+    # Disabled state — surfaced to the wizard so it can render greyed-out
+    # cards with a tooltip for in_rotation:false channels (scrollpulse,
+    # rhymetimejunction). The /api/render endpoint also rejects render
+    # requests for disabled channels with HTTP 422 — this field is the
+    # UX hint, not the security boundary. 2026-05-14 — replaces the
+    # earlier "hide them entirely" approach (Tier 0 batch C) which was
+    # confusing operators about their channel inventory.
+    disabled: bool = False
+    disabled_reason: str | None = None
+
     # Personality fields — populated from data/research/youtube/<account>.json
     # when the account has been auth'd + refreshed (see
     # pipeline.research.youtube + pipeline.research.channel_assets).
@@ -1112,6 +1122,8 @@ def list_channels() -> list[ChannelSummary]:
             audio_provider=str(ydoc.get("audio_provider") or "tts"),
             has_overrides=bool(overrides),
             variants_count=len(_list_variants(entry)),
+            disabled=bool(entry.get("disabled", False)),
+            disabled_reason=entry.get("disabled_reason"),
             avatar_url=personality["avatar_url"],
             banner_url=personality["banner_url"],
             youtube_url=personality["youtube_url"],
@@ -1162,6 +1174,8 @@ def get_channel(channel_key: str) -> ChannelSummary | None:
         audio_provider=str(ydoc.get("audio_provider") or "tts"),
         has_overrides=bool(overrides),
         variants_count=len(_list_variants(entry)),
+        disabled=bool(entry.get("disabled", False)),
+        disabled_reason=entry.get("disabled_reason"),
         avatar_url=personality["avatar_url"],
         banner_url=personality["banner_url"],
         youtube_url=personality["youtube_url"],
