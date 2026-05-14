@@ -42,47 +42,52 @@ class AiBeatSlideshow:
         work_dir: Path,
     ) -> VisualTrack:
         try:
-            from pipeline.images import generate_images_for_beats  # noqa: PLC0415
+            from pipeline.images.images import generate as _generate_image  # noqa: PLC0415
         except ImportError:
             return self._fallback_solid_color(spec, timeline, work_dir)
 
-        try:
-            images = generate_images_for_beats(
-                beats=[
-                    {"id": s.anchor_id, "text": s.text,
-                     "start_s": s.start_s, "end_s": s.end_s}
-                    for s in timeline
-                ],
-                provider=spec.extra.get("image_provider", "cloudrun_flux2_klein"),
-                style_prefix=spec.extra.get("image_style_prefix", ""),
-                width=spec.output_resolution[0],
-                height=spec.output_resolution[1],
-                cache_dir=work_dir / "images",
-            )
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("ai_beat_slideshow: image gen failed (%s) — "
-                            "falling back to solid color", exc)
+        # Generate one image per Segment.
+        images_dir = work_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        provider = spec.extra.get("image_provider", "cloudrun_flux2_klein")
+        style_prefix = spec.extra.get("image_style_prefix", "")
+        seed_base = int(spec.extra.get("image_seed", 42))
+        steps = int(spec.extra.get("image_steps", 4))
+
+        images: list[Path] = []
+        for i, seg in enumerate(timeline):
+            png_path = images_dir / f"beat_{i:03d}.png"
+            try:
+                _generate_image(
+                    prompt=seg.text,
+                    style_prefix=style_prefix,
+                    seed=seed_base + i,
+                    out_path=png_path,
+                    width=spec.output_resolution[0],
+                    height=spec.output_resolution[1],
+                    steps=steps,
+                    provider=provider,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("ai_beat_slideshow: image %d failed (%s) — "
+                                "falling back to solid color for this beat", i, exc)
+                continue
+            images.append(png_path)
+
+        if not images:
+            _logger.warning("ai_beat_slideshow: 0 images produced — "
+                            "falling back to solid color")
             return self._fallback_solid_color(spec, timeline, work_dir)
 
-        # Stitch the per-beat images into one continuous video using
-        # the existing compose helper.
-        try:
-            from pipeline.compose import build_slideshow_video  # noqa: PLC0415
-        except ImportError:
-            return self._fallback_solid_color(spec, timeline, work_dir)
-
+        # Stitch one image per beat into a continuous video. Each image
+        # is held for the beat's duration. Bigbang PR adds Ken Burns
+        # motion via a ffmpeg zoompan filter; today we use plain
+        # framebatch-per-second.
         out_path = work_dir / "slideshow.mp4"
         try:
-            build_slideshow_video(
-                images=images,
-                beats=timeline,
-                out_path=out_path,
-                width=spec.output_resolution[0],
-                height=spec.output_resolution[1],
-                fps=spec.output_fps,
-            )
+            self._stitch_images(images, timeline, spec, out_path)
         except Exception as exc:  # noqa: BLE001
-            _logger.warning("ai_beat_slideshow: compose failed (%s) — "
+            _logger.warning("ai_beat_slideshow: stitch failed (%s) — "
                             "falling back to solid color", exc)
             return self._fallback_solid_color(spec, timeline, work_dir)
 
@@ -95,6 +100,44 @@ class AiBeatSlideshow:
                 "images": [str(p) for p in images],
             },
         )
+
+    def _stitch_images(
+        self,
+        images: list[Path],
+        timeline: Timeline,
+        spec: Any,
+        out_path: Path,
+    ) -> None:
+        """Stitch per-beat images into a continuous video.
+
+        Builds an ffmpeg concat-demuxer file: each image held for its
+        beat's [start_s, end_s] window. Bigbang PR plumbs Ken Burns
+        motion + transitions; today's pass is straight cuts.
+        """
+        from pipeline.render.shared.concat_safe import concat_file_line  # noqa: PLC0415
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        concat_list = out_path.parent / f"{out_path.stem}_concat.txt"
+        lines: list[str] = []
+        for i, img in enumerate(images):
+            seg = timeline[i] if i < len(timeline) else None
+            duration = max(seg.end_s - seg.start_s if seg else 1.0, 0.1)
+            lines.append(concat_file_line(img.resolve()))
+            lines.append(f"duration {duration:.3f}")
+        # Last image needs to repeat for proper concat-demuxer parsing.
+        if images:
+            lines.append(concat_file_line(images[-1].resolve()))
+        concat_list.write_text("\n".join(lines))
+
+        w, h = spec.output_resolution
+        run_ffmpeg([
+            "-f", "concat", "-safe", "0", "-i", str(concat_list),
+            "-vsync", "vfr",
+            "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+                   f"crop={w}:{h},fps={spec.output_fps},format=yuv420p",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            str(out_path),
+        ])
 
     def _fallback_solid_color(
         self, spec: Any, timeline: Timeline, work_dir: Path,

@@ -53,11 +53,10 @@ class WordCaptionPngs:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Existing renderer-side word PNG renderer. The exact name
-            # may differ across the legacy modules; the bigbang PR
-            # consolidates all caption-rendering helpers under
-            # pipeline.render.overlays.* and removes this delegation.
-            from pipeline.compose import render_word_caption_pngs  # noqa: PLC0415
+            # Word-caption rendering is in pipeline.captions, NOT
+            # pipeline.compose. The bigbang PR collapses these helpers
+            # under pipeline.render.overlays.* and removes this delegation.
+            from pipeline.captions import render_word_caption  # noqa: PLC0415
         except ImportError:
             # Helper not available on this branch — return empty so the
             # engine still produces a video (without word captions).
@@ -68,11 +67,13 @@ class WordCaptionPngs:
         for i, seg in enumerate(timeline):
             png_path = out_dir / f"word_{i:03d}.png"
             try:
-                render_word_caption_pngs(
-                    text=seg.text,
-                    out_path=png_path,
+                # render_word_caption signature today:
+                # render_word_caption(text, out_path, canvas_w=..., font_size=..., text_rgba=...).
+                render_word_caption(
+                    seg.text,
+                    png_path,
+                    canvas_w=spec.output_resolution[0],
                     font_size=font_size,
-                    text_rgba=spec.caption_style.text_rgba,
                 )
             except Exception:  # noqa: BLE001
                 # Skip individual rendering failures so a corrupted
