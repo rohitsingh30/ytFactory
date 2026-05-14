@@ -84,7 +84,7 @@ from pipeline import observability as obs
 # and authored-text caption alignment. Lives in pipeline.render.long_form
 # now (was historyrecapped/scripts/render_long_form.py before the
 # 2026-05-05 renderer-promotion refactor).
-from pipeline.render.long_form import (  # type: ignore
+from pipeline.render._legacy.long_form import (  # type: ignore
     synth_long_narration,
     build_caption_pngs_from_chunks,
     render_watermark_png,
@@ -588,7 +588,7 @@ def _build_filler_video(
 
     list_txt = cache_dir / "_filler_concat.txt"
     # Audit Q2.25 — concat demuxer single-quote escape.
-    from .shared.concat_safe import concat_file_line  # noqa: PLC0415
+    from pipeline.render.shared.concat_safe import concat_file_line  # noqa: PLC0415
     list_txt.write_text("\n".join(concat_file_line(p.resolve()) for p in sequence))
     raw = cache_dir / "_filler_raw.mp4"
     _ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_txt), "-c", "copy", str(raw)])
@@ -635,7 +635,7 @@ def _overlay_clip_on_filler(
 
     list_txt = cache_dir / f"_ov_list_{at_s:.2f}.txt"
     # Audit Q2.25 — concat demuxer single-quote escape.
-    from .shared.concat_safe import concat_file_line  # noqa: PLC0415
+    from pipeline.render.shared.concat_safe import concat_file_line  # noqa: PLC0415
     list_txt.write_text("\n".join(concat_file_line(p.resolve()) for p in parts))
     _ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_txt), "-c", "copy", str(out)])
     for p in (head, tail):
@@ -716,7 +716,7 @@ def _splice_overlays_batch(
 
     list_txt = cache_dir / "_splice_list.txt"
     # Audit Q2.25 — concat demuxer single-quote escape.
-    from .shared.concat_safe import concat_file_line  # noqa: PLC0415
+    from pipeline.render.shared.concat_safe import concat_file_line  # noqa: PLC0415
     list_txt.write_text("\n".join(concat_file_line(p.resolve()) for p in parts))
     out = cache_dir / "spliced.mp4"
     _ffmpeg([

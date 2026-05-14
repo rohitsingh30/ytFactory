@@ -49,7 +49,7 @@ class TtsChunked:
         script: dict[str, Any],
         work_dir: Path,
     ) -> AudioResult:
-        from pipeline.render.long_form import synth_long_narration  # noqa: PLC0415
+        from pipeline.render._legacy.long_form import synth_long_narration  # noqa: PLC0415
 
         narration_text = self._narration_text(script)
         out_path = work_dir / "narration.wav"

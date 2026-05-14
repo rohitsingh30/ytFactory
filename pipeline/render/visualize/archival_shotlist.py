@@ -47,7 +47,7 @@ class ArchivalShotlist:
         if shotlist_path and Path(shotlist_path).exists():
             try:
                 import json  # noqa: PLC0415
-                from pipeline.render.long_form import (  # noqa: PLC0415
+                from pipeline.render._legacy.long_form import (  # noqa: PLC0415
                     _trim_shotlist_clips, _concat_and_pad,
                 )
                 shotlist = json.loads(Path(shotlist_path).read_text())

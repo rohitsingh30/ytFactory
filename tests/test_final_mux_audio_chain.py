@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-import pipeline.render.long_form as lf
+import pipeline.render._legacy.long_form as lf
 
 
 def _have_ffmpeg() -> bool:

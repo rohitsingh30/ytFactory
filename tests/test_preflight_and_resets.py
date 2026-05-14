@@ -154,61 +154,39 @@ class ResetMlxStateTests(unittest.TestCase):
 
 
 class RendererPreflightWiringTests(unittest.TestCase):
-    """Each renderer entry point MUST call preflight.power_check at the
-    top of its driver. If someone refactors and drops the call, the
+    """The engine dispatch entry point MUST call preflight.power_check at
+    the top of its driver. If someone refactors and drops the call, the
     Low-Power-Mode crash class regresses silently."""
 
     def _read(self, mod) -> str:
         with open(mod.__file__) as f:
             return f.read()
 
-    def test_long_form_main_calls_power_check(self):
-        from pipeline.render import long_form
-        src = self._read(long_form)
-        # Either the new shared call OR the backward-compat shim must be present.
-        self.assertTrue(
-            ("_preflight_power_check()" in src) or ("preflight.power_check" in src),
-            "long_form.main must invoke a preflight power check",
-        )
-
-    def test_footage_only_render_calls_power_check(self):
-        from pipeline.render import footage_only
-        self.assertIn("power_check(", self._read(footage_only))
-
-    def test_shorts_make_short_calls_power_check(self):
-        from pipeline.render import shorts
-        self.assertIn("power_check(", self._read(shorts))
-
-    def test_sports_doc_main_calls_power_check(self):
-        from pipeline.render import sports_doc
-        self.assertIn("power_check(", self._read(sports_doc))
+    def test_engine_main_calls_power_check(self):
+        from pipeline.render import __main__ as engine_main
+        src = self._read(engine_main)
+        self.assertIn("power_check(", src)
 
 
 class RendererF5ResetWiringTests(unittest.TestCase):
-    """Each renderer that uses F5-TTS-MLX must drop the singleton at the
-    renderer-stage boundary so 1.35 GB doesn't leak into video/mux."""
+    """Each engine that may use F5-TTS-MLX must drop the singleton at the
+    audio-stage boundary so 1.35 GB doesn't leak into video/mux."""
 
     def _read(self, mod) -> str:
         with open(mod.__file__) as f:
             return f.read()
 
-    def test_long_form_drops_f5_at_stage_boundary(self):
-        from pipeline.render import long_form
-        src = self._read(long_form)
+    def test_short_engine_drops_f5_at_stage_boundary(self):
+        from pipeline.render import short_engine
+        src = self._read(short_engine)
         self.assertIn("reset_mlx_state(drop_f5=True", src)
-        self.assertIn("long-form stage-1 TTS", src)
+        self.assertIn("short stage-1 TTS", src)
 
-    def test_footage_only_drops_f5_at_stage_boundary(self):
-        from pipeline.render import footage_only
-        self.assertIn("reset_mlx_state(drop_f5=True", self._read(footage_only))
-
-    def test_shorts_drops_f5_when_provider_is_f5(self):
-        from pipeline.render import shorts
-        self.assertIn("reset_mlx_state(drop_f5=True", self._read(shorts))
-
-    def test_sports_doc_drops_f5_when_provider_is_f5(self):
-        from pipeline.render import sports_doc
-        self.assertIn("reset_mlx_state(drop_f5=True", self._read(sports_doc))
+    def test_long_engine_drops_f5_at_stage_boundary(self):
+        from pipeline.render import long_engine
+        src = self._read(long_engine)
+        self.assertIn("reset_mlx_state(drop_f5=True", src)
+        self.assertIn("long stage-1 TTS", src)
 
 
 if __name__ == "__main__":

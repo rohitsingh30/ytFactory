@@ -301,12 +301,28 @@ def _run_overlapped(
 
         # Main thread: audio + timeline (sequential — timeline needs audio).
         audio = audio_plugin.synth(spec, script, work_dir)
+        _drop_f5_after_audio(spec, label="short stage-1 TTS (post-overlap)")
         timeline = timeline_plugin.build(spec, script, audio)
 
         # Re-join.
         visuals = visuals_fut.result()
 
     return audio, timeline, visuals
+
+
+def _drop_f5_after_audio(spec: RenderSpec, *, label: str) -> None:
+    """Free F5-TTS-MLX weights after the audio stage when the renderer
+    used local F5. Same guard the legacy renderers wired into stage
+    boundaries — keeps 1.35 GB from leaking into the visualize/mux
+    Metal context. No-op on cloud TTS providers."""
+    provider = (spec.voice_provider or "").lower()
+    if "f5" not in provider:
+        return
+    try:
+        from pipeline.preflight import reset_mlx_state  # noqa: PLC0415
+        reset_mlx_state(drop_f5=True, label=label)
+    except Exception:
+        pass
 
 
 def _run_sequential(
@@ -322,6 +338,7 @@ def _run_sequential(
     when the overlap gate refuses (local TTS, local image-gen, or
     YTFACTORY_DISABLE_STAGE_OVERLAP=1)."""
     audio = audio_plugin.synth(spec, script, work_dir)
+    _drop_f5_after_audio(spec, label="short stage-1 TTS")
     timeline = timeline_plugin.build(spec, script, audio)
     visuals = visualize_plugin.produce(spec, timeline, work_dir)
     return audio, timeline, visuals

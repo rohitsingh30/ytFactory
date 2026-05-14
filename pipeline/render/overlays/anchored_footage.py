@@ -1,21 +1,24 @@
 """Anchored foreground footage OverlayProducer (sports_doc shape).
 
-Each Segment in the timeline that has an ``extras['footage_url']``
-field becomes a layer-10 OverlayElement carrying the trimmed clip.
-The visualize plugin (typically ``footage_filler``) renders the
-b-roll background; this overlay producer composites the foreground
-match clips on top at their authored anchors.
+Each footage_plan entry becomes a layer-10 OverlayElement carrying
+the trimmed clip. The visualize plugin (typically
+``footage_filler``) renders the b-roll background; this overlay
+producer composites foreground match clips on top at their authored
+anchors.
 
 Plugin activation: ``spec.overlay_timeline = True`` in the wizard.
 Pairs with ``spec.visual_mode = footage_filler``.
 
-Today's impl is a delegating wrapper around
-``pipeline.render.sports_doc._prep_footage_clip``. Bigbang PR moves
-the body inline.
+The download + trim helpers were inlined from the legacy
+``pipeline.render.sports_doc._download_source`` /
+``_prep_footage_clip`` on 2026-05-14 as part of the bigbang
+follow-up.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -26,17 +29,74 @@ from pipeline.render.contracts import (
     Timeline,
     register_plugin,
 )
+from pipeline.render.shared.trim_letterbox import trim_clip_letterbox
 
 _logger = logging.getLogger(__name__)
+
+
+def _slug_from_url(url: str) -> str:
+    """Stable file-safe slug for caching downloads from a YouTube URL."""
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+
+def _download_source(url: str, sources_dir: Path) -> Path:
+    """yt-dlp the source video into sources_dir/<hash>.mp4. Cached.
+
+    Inlined from legacy ``pipeline.render.sports_doc._download_source``
+    2026-05-14.
+    """
+    sources_dir.mkdir(parents=True, exist_ok=True)
+    target = sources_dir / f"{_slug_from_url(url)}.mp4"
+    if target.exists() and target.stat().st_size > 1024 * 100:
+        return target
+    print(f"[dl  ] yt-dlp {url} → {target.name}")
+    subprocess.run([
+        "yt-dlp",
+        "-f", "best[ext=mp4][height<=1080]/best[ext=mp4]/best",
+        "-o", str(target),
+        "--no-progress", "--no-warnings",
+        url,
+    ], check=True)
+    return target
+
+
+def _prep_footage_clip(
+    entry: dict[str, Any],
+    sources_dir: Path,
+    cache_dir: Path,
+    out_w: int,
+    out_h: int,
+    fps: int,
+    grade_filter: str | None,
+) -> Path:
+    """Download source, trim to [in_s, out_s], normalize to out_w x out_h fps.
+
+    Reuses :func:`pipeline.render.shared.trim_letterbox.trim_clip_letterbox`
+    for the blurred-letterbox path on aspect mismatches + the stream-
+    copy short-circuit when src already matches.
+
+    Inlined from legacy ``pipeline.render.sports_doc._prep_footage_clip``
+    2026-05-14.
+    """
+    cid = entry["id"]
+    out = cache_dir / "clips" / f"{cid}.mp4"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.exists() and out.stat().st_size > 1024 * 100:
+        return out
+    src = _download_source(entry["url"], sources_dir)
+    trim_clip_letterbox(
+        src, float(entry["in_s"]), float(entry["out_s"]), out,
+        out_w=out_w, out_h=out_h, fps=fps, grade_filter=grade_filter,
+    )
+    return out
 
 
 class AnchoredFootage:
     """Foreground match-clips composited at authored anchors.
 
-    Reads ``footage_plan`` entries from ``spec.extra['footage_plan_path']``
-    OR walks ``timeline`` for Segments with
-    ``extras['footage_url']``. Trims each clip via the existing
-    sports_doc helper, returns one OverlayElement per clip.
+    Reads ``footage_plan`` entries from ``spec.extra['footage_plan_path']``.
+    Trims each clip via the inlined helper, returns one OverlayElement
+    per clip.
     """
 
     def produce(
@@ -52,12 +112,6 @@ class AnchoredFootage:
 
         try:
             import json  # noqa: PLC0415
-            from pipeline.render.sports_doc import _prep_footage_clip  # noqa: PLC0415
-        except ImportError:
-            _logger.warning("anchored_footage: sports_doc helpers unavailable")
-            return []
-
-        try:
             plan = json.loads(Path(footage_plan_path).read_text())
         except Exception as exc:  # noqa: BLE001
             _logger.warning("anchored_footage: failed to parse footage_plan: %s", exc)

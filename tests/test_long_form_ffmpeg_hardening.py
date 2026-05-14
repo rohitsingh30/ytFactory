@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 
-from pipeline.render import long_form as lf
+from pipeline.render._legacy import long_form as lf
 
 
 class TestFfmpegStderrCapture(unittest.TestCase):

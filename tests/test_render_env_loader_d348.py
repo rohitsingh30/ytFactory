@@ -125,7 +125,7 @@ class RenderEntryPointsUseSharedLoaderTest(unittest.TestCase):
     a per-module copy, these tests catch the regression."""
 
     def test_long_form_load_env_calls_shared(self):
-        from pipeline.render import long_form
+        from pipeline.render._legacy import long_form
         from unittest.mock import patch as _patch
         with _patch(
             "pipeline.render.shared.env_loader.load_dotenv_into_environ"
@@ -134,7 +134,7 @@ class RenderEntryPointsUseSharedLoaderTest(unittest.TestCase):
         m.assert_called_once_with(Path("/some/repo"))
 
     def test_sports_doc_load_env_calls_shared(self):
-        from pipeline.render import sports_doc
+        from pipeline.render._legacy import sports_doc
         from unittest.mock import patch as _patch
         with _patch(
             "pipeline.render.shared.env_loader.load_dotenv_into_environ"

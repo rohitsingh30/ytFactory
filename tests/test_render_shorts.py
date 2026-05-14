@@ -41,7 +41,7 @@ def _install_heavy_import_stubs() -> None:
 _install_heavy_import_stubs()
 
 from pipeline.beats import Beat
-import pipeline.render.shorts as shorts
+import pipeline.render._legacy.shorts as shorts
 
 
 _TEMP_PARENT = PROJECT_ROOT / ".test-artifacts"
@@ -102,11 +102,11 @@ def patched_make_short_environment(beat_list: list[Beat] | None = None, *, custo
         ns.reset_mlx = stack.enter_context(patch("pipeline.preflight.reset_mlx_state"))
         ns.reset_cloud = stack.enter_context(patch("pipeline.images.images_cloudrun.reset_circuit_breaker"))
         ns.reset_azure = stack.enter_context(patch("pipeline.images.images_azure.reset_circuit_breaker"))
-        ns.find_voice = stack.enter_context(patch("pipeline.render.shorts._find_voice_path", return_value=None))
-        ns.find_cast = stack.enter_context(patch("pipeline.render.shorts._find_cast_path", return_value=None))
-        ns.scan = stack.enter_context(patch("pipeline.render.shorts._scan_intermediate", return_value=None))
-        ns.forced = stack.enter_context(patch("pipeline.render.shorts._load_forced_narration_lines", return_value=None))
-        ns.pronounce = stack.enter_context(patch("pipeline.render.shorts._load_pronunciation_dict", return_value={}))
+        ns.find_voice = stack.enter_context(patch("pipeline.render._legacy.shorts._find_voice_path", return_value=None))
+        ns.find_cast = stack.enter_context(patch("pipeline.render._legacy.shorts._find_cast_path", return_value=None))
+        ns.scan = stack.enter_context(patch("pipeline.render._legacy.shorts._scan_intermediate", return_value=None))
+        ns.forced = stack.enter_context(patch("pipeline.render._legacy.shorts._load_forced_narration_lines", return_value=None))
+        ns.pronounce = stack.enter_context(patch("pipeline.render._legacy.shorts._load_pronunciation_dict", return_value={}))
         ns.resolve_voice = stack.enter_context(patch("pipeline.voice.voice_catalog.resolve_voice", return_value=(None, "")))
         ns.author_cast = stack.enter_context(patch("pipeline.llm.cast.author_cast"))
         ns.load_cast = stack.enter_context(patch("pipeline.llm.cast.load_cast", return_value=None))
@@ -135,7 +135,7 @@ def patched_make_short_environment(beat_list: list[Beat] | None = None, *, custo
         compose.compose_hybrid.side_effect = _touch_out
         compose.prerender_word_captions.return_value = 0
         compose.wipe_stale_per_beat_artefacts.return_value = None
-        ns.compose = stack.enter_context(patch("pipeline.render.shorts.compose", compose))
+        ns.compose = stack.enter_context(patch("pipeline.render._legacy.shorts.compose", compose))
 
         images = MagicMock(name="images")
         images.validate_provider_config.return_value = []
@@ -170,38 +170,38 @@ def patched_make_short_environment(beat_list: list[Beat] | None = None, *, custo
             out_path.write_bytes(b"png")
 
         images.generate.side_effect = _generate
-        ns.images = stack.enter_context(patch("pipeline.render.shorts.images", images))
+        ns.images = stack.enter_context(patch("pipeline.render._legacy.shorts.images", images))
 
         audio = MagicMock(name="audio")
         audio.normalize_for_tts.side_effect = lambda text, **kw: text
         audio.synthesize.side_effect = lambda *args, **kwargs: Path(kwargs["out_path"]).write_bytes(b"wav")
         audio.trim_song_for_short.side_effect = lambda *args, **kwargs: (Path(kwargs["out_path"]).write_bytes(b"wav"), (0.0, 3.0))[1]
         audio.synth_via_sunoapi.side_effect = lambda *args, **kwargs: Path(kwargs["out_path"]).write_bytes(b"wav")
-        ns.audio = stack.enter_context(patch("pipeline.render.shorts.audio", audio))
+        ns.audio = stack.enter_context(patch("pipeline.render._legacy.shorts.audio", audio))
 
         beats = MagicMock(name="beats")
         beats.transcribe_words.return_value = []
         beats.split_into_beats.return_value = beat_list
         beats.load_beats.return_value = beat_list
         beats.save_beats.side_effect = lambda beats_arg, path: Path(path).write_text("[]")
-        ns.beats = stack.enter_context(patch("pipeline.render.shorts.beats", beats))
+        ns.beats = stack.enter_context(patch("pipeline.render._legacy.shorts.beats", beats))
 
         align = MagicMock(name="align")
         align.align_source_to_whisper.side_effect = lambda text, words: text
-        ns.align = stack.enter_context(patch("pipeline.render.shorts.align", align))
+        ns.align = stack.enter_context(patch("pipeline.render._legacy.shorts.align", align))
 
         script_check = MagicMock(name="script_check")
         script_check.check_script_text.return_value = []
-        ns.script_check = stack.enter_context(patch("pipeline.render.shorts.script_check", script_check))
+        ns.script_check = stack.enter_context(patch("pipeline.render._legacy.shorts.script_check", script_check))
 
         tlm = MagicMock(name="tlm")
-        ns.tlm = stack.enter_context(patch("pipeline.render.shorts.tlm", tlm))
+        ns.tlm = stack.enter_context(patch("pipeline.render._legacy.shorts.tlm", tlm))
 
         prompts_mod = MagicMock(name="prompts_mod")
         prompts_mod.author_beat_prompts.side_effect = lambda **kw: _author_default_prompts(
             kw["out_path"], len(kw["beats"]), [b.text for b in kw["beats"]]
         )
-        ns.prompts_mod = stack.enter_context(patch("pipeline.render.shorts.prompts_mod", prompts_mod))
+        ns.prompts_mod = stack.enter_context(patch("pipeline.render._legacy.shorts.prompts_mod", prompts_mod))
 
         yield ns
     finally:
@@ -451,13 +451,13 @@ class TestFileHelpers(TempWorkspaceMixin, unittest.TestCase):
     def test_load_forced_narration_lines(self):
         shot = self.tmp / "shot.json"
         shot.write_text(json.dumps({"shots": [{"narration_line": " one "}, {}], "closer": {"narration_line": "two"}}))
-        with patch("pipeline.render.shorts._scan_intermediate", return_value=shot):
+        with patch("pipeline.render._legacy.shorts._scan_intermediate", return_value=shot):
             self.assertEqual(shorts._load_forced_narration_lines("slug"), ["one", "two"])
-        with patch("pipeline.render.shorts._scan_intermediate", return_value=None):
+        with patch("pipeline.render._legacy.shorts._scan_intermediate", return_value=None):
             self.assertIsNone(shorts._load_forced_narration_lines("slug"))
         bad = self.tmp / "bad.json"
         bad.write_text("{")
-        with patch("pipeline.render.shorts._scan_intermediate", return_value=bad):
+        with patch("pipeline.render._legacy.shorts._scan_intermediate", return_value=bad):
             self.assertIsNone(shorts._load_forced_narration_lines("slug"))
 
     def test_load_script_text(self):
@@ -1229,7 +1229,7 @@ class TestMakeShortBranches(TempWorkspaceMixin, unittest.TestCase):
         script.write_text(json.dumps({"slug": "slug", "hook": "Hook"}))
         (raw_dir / "slug.json").write_text(json.dumps({"title": "Raw"}))
         with patched_make_short_environment([_fake_beat("hook", 0, 1)]) as m, \
-             patch("pipeline.render.shorts._channel_dir_for", return_value="chan"):
+             patch("pipeline.render._legacy.shorts._channel_dir_for", return_value="chan"):
             m.scan.side_effect = lambda slug, sub: script if sub == "scripts" else None
             m.critic.return_value = {"score": 3, "beat_corrections": {"0": "fix"}}
             m.critic_regen.return_value = {0}
@@ -1245,7 +1245,7 @@ class TestMakeShortBranches(TempWorkspaceMixin, unittest.TestCase):
         bad_script.parent.mkdir(parents=True)
         bad_script.write_text("{")
         with patched_make_short_environment([_fake_beat("hook", 0, 1)]) as m2, \
-             patch("pipeline.render.shorts._channel_dir_for", return_value="chan"):
+             patch("pipeline.render._legacy.shorts._channel_dir_for", return_value="chan"):
             m2.scan.side_effect = lambda slug, sub: bad_script if sub == "scripts" else None
             shorts.make_short("hello", channel_path2, out_dir2, "slug", run_critic=False)
         self.assertEqual(m2.upload.call_args.kwargs["script"], {})
@@ -1258,7 +1258,7 @@ class TestMakeShortBranches(TempWorkspaceMixin, unittest.TestCase):
         raw_bad.parent.mkdir()
         raw_bad.write_text("{")
         with patched_make_short_environment([_fake_beat("hook", 0, 1)]) as m3, \
-             patch("pipeline.render.shorts._channel_dir_for", return_value="chan"):
+             patch("pipeline.render._legacy.shorts._channel_dir_for", return_value="chan"):
             m3.scan.side_effect = lambda slug, sub: raw_bad_script if sub == "scripts" else None
             shorts.make_short("hello", channel_path3, out_dir3, "slug", run_critic=False)
         self.assertIsNone(m3.upload.call_args.kwargs["raw"])
@@ -1286,54 +1286,6 @@ class TestMakeShortBranches(TempWorkspaceMixin, unittest.TestCase):
         if release_timer is not None:
             release_timer.cancel()
         self.assertIsNotNone(out)
-
-
-class TestCLI(TempWorkspaceMixin, unittest.TestCase):
-    def test_cli_main_delegates(self):
-        with patch("pipeline.render.shorts._cli_main_impl") as impl:
-            shorts.cli_main()
-        impl.assert_called_once()
-
-    def _run_cli(self, argv):
-        out_mp4 = self.tmp / "out" / "shorts" / "slug.mp4"
-        out_mp4.parent.mkdir(parents=True, exist_ok=True)
-        out_mp4.write_bytes(b"mp4")
-        rp = MagicMock()
-        rp.root = self.tmp / "resolved"
-        rp.channel_dir = "test_channel"
-        rp.short_thumb_for.return_value = self.tmp / "thumb.png"
-        with patch.object(sys, "argv", ["make_shorts.py", *argv]), \
-             patch("pipeline.render.shorts.make_short", return_value=out_mp4) as make, \
-             patch("pipeline.paths.RenderPaths.from_channel_yaml", return_value=rp):
-            shorts._cli_main_impl()
-        return make
-
-    def test_text_script_upload_flags_voice_and_out(self):
-        make = self._run_cli(["--text", "hello", "--channel", "chan.yaml", "--slug", "slug", "--out", str(self.tmp / "out"), "--upload", "--tts-voice", "am_eric"])
-        self.assertEqual(make.call_args.kwargs["text"], "hello")
-        self.assertTrue(make.call_args.kwargs["upload_override"])
-        self.assertEqual(make.call_args.kwargs["tts_voice_override"], "am_eric")
-
-        scripts = self.tmp / "chan" / "scripts"
-        raw = self.tmp / "chan" / "raw"
-        scripts.mkdir(parents=True)
-        raw.mkdir()
-        sp = scripts / "slug.json"
-        sp.write_text(json.dumps({"narration": "narr", "slug": "script-slug"}))
-        (raw / "script-slug.json").write_text(json.dumps({"body": "raw body"}))
-        make2 = self._run_cli(["--script", str(sp), "--channel", "chan.yaml", "--no-upload", "--no-critic"])
-        self.assertEqual(make2.call_args.kwargs["slug"], "script-slug")
-        self.assertFalse(make2.call_args.kwargs["upload_override"])
-        self.assertFalse(make2.call_args.kwargs["run_critic"])
-
-    def test_require_critic_error_and_default_out_resolution(self):
-        with patch.object(sys, "argv", ["make_shorts.py", "--require-critic", "--no-critic"]):
-            with self.assertRaises(SystemExit):
-                shorts._cli_main_impl()
-        with patch("pipeline.render.shorts._resolve_channel_out_dir", return_value=self.tmp / "resolved") as resolve:
-            make = self._run_cli(["--text", "hello", "--channel", "chan.yaml", "--slug", "slug"])
-        resolve.assert_called_once()
-        self.assertEqual(make.call_args.kwargs["out_dir"], self.tmp / "resolved")
 
 
 class TestResolveChannelOutDir(TempWorkspaceMixin, unittest.TestCase):

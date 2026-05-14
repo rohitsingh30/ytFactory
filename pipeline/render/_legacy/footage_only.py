@@ -509,7 +509,7 @@ def _build_silent_video(channel: str, slug: str, shotlist: dict, scratch: Path) 
     # Audit Q2.25 — concat demuxer single-quote escape (filename-only
     # here, but a clip filename containing a literal `'` would still
     # break the parser; -safe 0 + cwd-relative names doesn't change that).
-    from .shared.concat_safe import concat_file_line  # noqa: PLC0415
+    from pipeline.render.shared.concat_safe import concat_file_line  # noqa: PLC0415
     concat_list.write_text("\n".join(concat_file_line(p.name) for p in clip_paths) + "\n")
 
     silent = scratch / "video.mp4"

@@ -73,6 +73,7 @@ def render_long(
     # 1. Audio (chunked by default)
     audio_plugin: AudioSynthesizer = get_plugin("audio", _long_audio_plugin_name(spec))
     audio: AudioResult = audio_plugin.synth(spec, script, work_dir)
+    _drop_f5_after_audio(spec, label="long stage-1 TTS")
     _logger.info("render_long: audio=%s duration=%.2fs chunks=%s",
                  audio.narration_path.name, audio.duration_s,
                  len(audio.chunk_timings) if audio.chunk_timings else 0)
@@ -167,3 +168,18 @@ def _extract_sections(script: dict[str, Any], timeline: Timeline) -> list[Sectio
 
 
 __all__ = ["render_long"]
+
+
+def _drop_f5_after_audio(spec: RenderSpec, *, label: str) -> None:
+    """Free F5-TTS-MLX weights after the audio stage when the renderer
+    used local F5. Same guard the legacy renderers wired into stage
+    boundaries — keeps 1.35 GB from leaking into the visualize/mux
+    Metal context. No-op on cloud TTS providers."""
+    provider = (spec.voice_provider or "").lower()
+    if "f5" not in provider:
+        return
+    try:
+        from pipeline.preflight import reset_mlx_state  # noqa: PLC0415
+        reset_mlx_state(drop_f5=True, label=label)
+    except Exception:
+        pass

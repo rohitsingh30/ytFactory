@@ -339,7 +339,7 @@ class MakeShortEraAnchorIntegrationTest(unittest.TestCase):
         self._mixin.tearDown()
 
     def test_known_era_anchor_threaded_to_build_full_prompt(self):
-        from pipeline.render import shorts
+        from pipeline.render._legacy import shorts
         channel_path, out_dir = self._mixin.write_channel()
         (out_dir / "narrations").mkdir()
         narration = out_dir / "narrations" / "baghdad-test.json"
@@ -369,7 +369,7 @@ class MakeShortEraAnchorIntegrationTest(unittest.TestCase):
     def test_legacy_era_lock_field_also_honoured(self):
         # The pre-Phase-4b test fixture used metadata.era_lock; honour
         # both spellings during the migration window.
-        from pipeline.render import shorts
+        from pipeline.render._legacy import shorts
         channel_path, out_dir = self._mixin.write_channel()
         (out_dir / "narrations").mkdir()
         narration = out_dir / "narrations" / "baghdad-test.json"
@@ -389,7 +389,7 @@ class MakeShortEraAnchorIntegrationTest(unittest.TestCase):
         self.assertIn("Mongol", prefix)
 
     def test_unknown_era_falls_back_silently(self):
-        from pipeline.render import shorts
+        from pipeline.render._legacy import shorts
         channel_path, out_dir = self._mixin.write_channel()
         (out_dir / "narrations").mkdir()
         narration = out_dir / "narrations" / "baghdad-test.json"
@@ -408,7 +408,7 @@ class MakeShortEraAnchorIntegrationTest(unittest.TestCase):
         self.assertIsNone(kwargs.get("era_anchor_prefix"))
 
     def test_no_metadata_falls_back_silently(self):
-        from pipeline.render import shorts
+        from pipeline.render._legacy import shorts
         channel_path, out_dir = self._mixin.write_channel()
         (out_dir / "narrations").mkdir()
         narration = out_dir / "narrations" / "baghdad-test.json"
@@ -425,7 +425,7 @@ class MakeShortEraAnchorIntegrationTest(unittest.TestCase):
         self.assertIsNone(kwargs.get("era_anchor_prefix"))
 
     def test_malformed_script_json_does_not_crash(self):
-        from pipeline.render import shorts
+        from pipeline.render._legacy import shorts
         channel_path, out_dir = self._mixin.write_channel()
         (out_dir / "narrations").mkdir()
         narration = out_dir / "narrations" / "baghdad-test.json"

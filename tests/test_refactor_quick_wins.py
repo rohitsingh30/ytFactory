@@ -196,7 +196,7 @@ class Libx264ThreadsCapWiringTests(unittest.TestCase):
         )
 
     def test_footage_only_silent_video_jobs_pass_threads_3(self):
-        from pipeline.render import footage_only
+        from pipeline.render._legacy import footage_only
         src = self._read(footage_only)
         # _build_silent_video has 3 job variants (image ken-burns,
         # passthrough scale, letterbox). All run under run_parallel.

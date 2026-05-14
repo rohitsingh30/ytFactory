@@ -348,7 +348,7 @@ def _wav_concat_with_silence(wavs: list[Path], silence_s: float, out_wav: Path) 
     ])
     list_txt = out_wav.parent / "_concat_list.txt"
     # Audit Q2.25 — concat demuxer single-quote escape.
-    from .shared.concat_safe import concat_file_line  # noqa: PLC0415
+    from pipeline.render.shared.concat_safe import concat_file_line  # noqa: PLC0415
     lines: list[str] = []
     for i, w in enumerate(wavs):
         if i > 0:
@@ -844,7 +844,7 @@ def _concat_and_pad(
     Extracted from :func:`build_video_track`. The ``target_duration_s``
     parameter is the only TTS-derived input.
     """
-    from .shared.concat_safe import concat_file_line  # noqa: PLC0415
+    from pipeline.render.shared.concat_safe import concat_file_line  # noqa: PLC0415
     list_txt = cache_dir / "_concat_clips.txt"
     list_txt.write_text("\n".join(concat_file_line(p.resolve()) for p in clip_paths))
     video_path = cache_dir / "video.mp4"

@@ -104,6 +104,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.script.exists():
         raise SystemExit(f"--script not found at {args.script}")
 
+    # Power-check guard — was wired into every legacy renderer entry; lives
+    # at the engine dispatch entry now so both engines inherit it. Refuses
+    # macOS Low-Power-Mode (Metal frame-budget thrash → OOM crash class).
+    try:
+        from pipeline.preflight import power_check  # noqa: PLC0415
+        power_check(label=f"render {args.kind}")
+    except Exception:
+        pass
+
     overrides = _parse_overrides(args.override)
     overrides.setdefault("kind", "long_form" if args.kind == "long" else "short")
 

@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from pipeline.render.long_form import _probe_wav_params, _wav_concat_with_silence
+from pipeline.render._legacy.long_form import _probe_wav_params, _wav_concat_with_silence
 
 
 def _have_ffmpeg() -> bool:
