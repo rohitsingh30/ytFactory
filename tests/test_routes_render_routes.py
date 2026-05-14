@@ -376,6 +376,33 @@ class TestJobOwnerFence(unittest.IsolatedAsyncioTestCase):
         doc = jobs_mod.get_job(job_id)
         self.assertEqual(doc["owner_uid"], "alice@example.com")
 
+    async def test_post_render_rejects_unknown_channel(self) -> None:
+        async with await self._client(user="alice@example.com") as c:
+            r = await c.post("/api/render", json={
+                "channel": "nonexistent_channel_xyz",
+                "topic": "test topic",
+                "length_s": 55,
+            })
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("unknown channel", r.json().get("detail", ""))
+
+    async def test_post_render_rejects_disabled_channel(self) -> None:
+        """Defense-in-depth: even though the wizard greys out
+        in_rotation:false channels, a savvy user hitting /api/render
+        directly must NOT be able to bypass the gate. Pre-fix
+        catalogue: NCH-08 + telemetry TEL-LOG-14 (4 scrollpulse
+        crashes), TEL-FS-16 (5 rhyme crashes)."""
+        async with await self._client(user="alice@example.com") as c:
+            r = await c.post("/api/render", json={
+                "channel": "scrollpulse",  # in_rotation:false
+                "topic": "test topic",
+                "length_s": 55,
+            })
+        self.assertEqual(r.status_code, 422, r.text)
+        detail = r.json().get("detail", "")
+        self.assertIn("currently disabled", detail)
+        self.assertIn("scrollpulse", detail)
+
 
 if __name__ == "__main__":
     unittest.main()

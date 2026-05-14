@@ -82,27 +82,48 @@ class TestChannelRegistryFilters(unittest.TestCase):
     """Pin the in_rotation filter so out-of-rotation channels never
     appear in the wizard. Telemetry: TEL-LOG-14 = 4 scrollpulse renders
     crashed in 14d because the wizard exposed it but the worker can't
-    find pipeline/channels/scrollpulse.yaml. Catalogue: NCH-03, YAML-01."""
+    find pipeline/channels/scrollpulse.yaml. Catalogue: NCH-03, YAML-01.
 
-    def test_out_of_rotation_channels_are_filtered(self):
-        keys = {entry["key"] for entry in CHANNEL_REGISTRY}
-        # scrollpulse declared in_rotation: false in pipeline/channels.yaml
-        # → MUST NOT appear in CHANNEL_REGISTRY (and therefore not in the
-        # wizard / chat picker / niche picker).
-        self.assertNotIn(
-            "scrollpulse", keys,
-            "scrollpulse is in_rotation:false in channels.yaml; the wizard "
-            "registry must filter it out — exposing it lets users submit "
-            "renders that crash with FileNotFoundError on the missing YAML",
-        )
+    2026-05-14 update: out-of-rotation channels are NO LONGER hidden —
+    they appear in the registry with disabled=True + a disabled_reason
+    so the wizard can render them greyed-out with a tooltip. The
+    server-side /api/render guard rejects them at submit, so the UX
+    is informative without being crash-prone.
+    """
 
-    def test_in_rotation_channels_are_included(self):
+    def test_all_known_channels_appear_in_registry(self):
         keys = {entry["key"] for entry in CHANNEL_REGISTRY}
-        # All these are in_rotation: true in channels.yaml.
+        # All 7 should appear — including the 2 disabled ones.
         for slug in ("mystoriesanimated", "historyrecapped",
-                     "sportsrecapped", "cosmosdecoded", "hindutavaanimated"):
-            self.assertIn(slug, keys,
-                          f"{slug} is in_rotation:true and should appear")
+                     "sportsrecapped", "cosmosdecoded", "hindutavaanimated",
+                     "scrollpulse", "rhymetimejunction"):
+            self.assertIn(slug, keys, f"{slug} missing from registry")
+
+    def test_in_rotation_channels_are_not_disabled(self):
+        in_rot = {"mystoriesanimated", "historyrecapped",
+                  "sportsrecapped", "cosmosdecoded", "hindutavaanimated"}
+        for entry in CHANNEL_REGISTRY:
+            if entry["key"] in in_rot:
+                self.assertFalse(
+                    entry.get("disabled"),
+                    f"{entry['key']} is in_rotation:true but registry "
+                    f"marks it disabled",
+                )
+                self.assertIsNone(entry.get("disabled_reason"))
+
+    def test_out_of_rotation_channels_are_marked_disabled(self):
+        out_rot = {"scrollpulse", "rhymetimejunction"}
+        for entry in CHANNEL_REGISTRY:
+            if entry["key"] in out_rot:
+                self.assertTrue(
+                    entry.get("disabled"),
+                    f"{entry['key']} is in_rotation:false but registry "
+                    f"doesn't mark it disabled",
+                )
+                # disabled_reason must be a non-empty string explaining why.
+                reason = entry.get("disabled_reason")
+                self.assertIsInstance(reason, str)
+                self.assertTrue(len(reason) > 10)
 
 
 # ── load/save user defaults ───────────────────────────────────────────────

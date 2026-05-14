@@ -56,11 +56,17 @@ def _build_channel_registry() -> list[dict[str, Any]]:
     channel-locations SoT in ``pipeline.channels``. Paths are derived,
     never hardcoded — renaming ``pipeline/channels`` is one edit there.
 
-    Filters by ``in_rotation`` so out-of-rotation channels (scrollpulse,
-    rhymetimejunction with broken audio, etc.) don't appear in the
-    wizard. Telemetry: TEL-LOG-14 = 4 scrollpulse renders crashed in
-    14d because the wizard exposed it but the worker can't find
-    pipeline/channels/scrollpulse.yaml. NCH-03 + NCH-08 + YAML-01.
+    All known channels appear in the registry so the wizard can show
+    a complete inventory. Channels that are not in_rotation get
+    ``disabled=True`` + a ``disabled_reason`` so the wizard can render
+    them greyed-out with a tooltip instead of silently hiding them.
+    The server-side render endpoint (``control/routes/render_routes.py
+    :render``) ALSO rejects renders for disabled channels with 422,
+    so a savvy user hitting the API directly can't bypass the UX.
+
+    Telemetry: TEL-LOG-14 (4 scrollpulse crashes), TEL-FS-16 (5 rhyme
+    crashes) — pre-fix the wizard exposed both as fully usable.
+    Catalogue: NCH-03, NCH-08, YAML-01.
     """
     from pipeline.channels import (  # noqa: PLC0415 — avoid circular at import
         _channel_yaml_path, _channel_variants_dir, get_channel,
@@ -69,10 +75,6 @@ def _build_channel_registry() -> list[dict[str, Any]]:
     for p in _CHANNEL_PRESENTATION:
         slug = p["key"]
         ch = get_channel(slug)
-        # Filter: only channels that are BOTH registered AND in_rotation
-        # appear in the wizard. Unregistered = wasn't added to channels.yaml
-        # → presentation entry is stale. Out-of-rotation = explicitly
-        # disabled by the operator → must not be picker-selectable.
         if ch is None:
             # Presentation entry has no matching registry row; skip.
             # Loud log so the drift surfaces during boot.
@@ -82,9 +84,28 @@ def _build_channel_registry() -> list[dict[str, Any]]:
                 "not registered in pipeline/channels.yaml", slug,
             )
             continue
-        if not ch.in_rotation:
-            # Operator disabled this channel — don't expose in wizard.
-            continue
+        # Reason text — surfaced to the wizard for the disabled tooltip.
+        disabled = not ch.in_rotation
+        disabled_reason: str | None = None
+        if disabled:
+            # Best-effort signal — cheap heuristic by slug for the two
+            # known cases. Unknown out-of-rotation channels get a generic
+            # message until somebody sets a per-channel reason.
+            if slug == "scrollpulse":
+                disabled_reason = (
+                    "Channel YAML not yet authored — see "
+                    "pipeline/channels.yaml comment + Tier 2 todo."
+                )
+            elif slug == "rhymetimejunction":
+                disabled_reason = (
+                    "Renders need scripts/<slug>.json hand-authored via "
+                    "/make-rhyme first; auto-author path is Tier 2."
+                )
+            else:
+                disabled_reason = (
+                    "Channel marked in_rotation:false in "
+                    "pipeline/channels.yaml — see comment for reason."
+                )
         out.append({
             "key": slug,
             "label": p["label"],
@@ -94,6 +115,8 @@ def _build_channel_registry() -> list[dict[str, Any]]:
                              if p["has_variants"] else None),
             "language": p["language"],
             "default_format": p["default_format"],
+            "disabled": disabled,
+            "disabled_reason": disabled_reason,
         })
     return out
 

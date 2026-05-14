@@ -110,6 +110,32 @@ async def render(
     """
     if not (req.topic or "").strip():
         raise HTTPException(status_code=422, detail="topic is required")
+    # Defense-in-depth: reject renders for in_rotation:false channels
+    # at the API boundary so even direct API calls (bypassing the
+    # wizard) can't crash the worker. Pre-fix the wizard hid these
+    # channels but the API would happily accept them. Catalogue:
+    # NCH-08 + telemetry TEL-LOG-14 (4 scrollpulse crashes), TEL-FS-16
+    # (5 rhyme crashes).
+    from pipeline.channels import get_channel  # noqa: PLC0415
+    ch = get_channel(req.channel)
+    if ch is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"unknown channel {req.channel!r} — "
+                f"not registered in pipeline/channels.yaml"
+            ),
+        )
+    if not ch.in_rotation:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"channel {req.channel!r} is currently disabled "
+                f"(in_rotation:false in pipeline/channels.yaml). "
+                f"See the wizard's tooltip for the reason and "
+                f"the Tier 2 fix to bring it back."
+            ),
+        )
     rate_limit.check_and_increment(request, "confirm")
 
     proposal = ShortProposal(
