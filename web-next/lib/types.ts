@@ -73,6 +73,7 @@ export type FieldKind =
   | "switch"
   | "url"
   | "datetime"
+  | "preview_select"
   | "hidden";
 
 export interface FieldOption {
