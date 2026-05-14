@@ -223,10 +223,41 @@ def _kokoro_chunk(
     )
 
 
-def _ffmpeg(args: list[str]) -> None:
-    proc = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *args], check=False)
+def _ffmpeg(args: list[str], *, timeout: float | None = None) -> None:
+    """Run ffmpeg with stderr captured.
+
+    Tier 0 batch E (2026-05-14) hardening:
+    - stderr is captured so failures surface the actual ffmpeg error
+      message in the RuntimeError (pre-fix R-30: stderr went to the
+      worker tail buffer and got overwritten by OTel metric dumps,
+      leaving us with opaque "ffmpeg failed: ..." messages).
+    - Optional timeout (seconds). None = no timeout (default; preserves
+      existing behaviour for the multi-minute panel kenburns / long-form
+      compose calls). Callers that know their command should finish in
+      bounded time SHOULD pass a value.
+
+    On non-zero exit, raises RuntimeError that includes the last 1500
+    chars of stderr so the worker subprocess tail captured by entrypoint.py
+    actually carries the root cause.
+    """
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"ffmpeg timed out after {timeout}s: {' '.join(args[:6])}…"
+        ) from e
     if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {' '.join(args)}")
+        stderr_tail = (proc.stderr or "")[-1500:].strip()
+        raise RuntimeError(
+            f"ffmpeg failed (exit={proc.returncode}): "
+            f"{' '.join(args[:6])}…\nstderr:\n{stderr_tail}"
+        )
 
 
 def _atempo(in_wav: Path, out_wav: Path, factor: float) -> None:
@@ -278,6 +309,11 @@ def _probe_wav_params(wav: Path) -> tuple[int, str]:
             str(wav),
         ],
         capture_output=True, text=True, check=False,
+        # Tier 0 batch E (2026-05-14): cap ffprobe at 30s so a hung
+        # probe (e.g. corrupt WAV header, network-mounted file in
+        # GCS Fuse pause) doesn't stall the entire render. R-19 in
+        # the catalogue. 30s is generous — typical local probe is <50ms.
+        timeout=30,
     )
     rate = 44100
     layout = "mono"
@@ -622,13 +658,18 @@ def _trim_clip_letterbox(
     src_w: int | None = None
     src_h: int | None = None
     try:
+        # Tier 0 batch E (2026-05-14): cap ffprobe at 30s. A hung ffprobe
+        # (e.g. corrupt source video, network mount stall) would block
+        # the entire trim_clip_letterbox call indefinitely. R-19 in the
+        # catalogue. Typical local probe is <100ms.
         probe = subprocess.check_output([
             "ffprobe", "-v", "error", "-select_streams", "v:0",
             "-show_entries", "stream=width,height",
             "-of", "default=noprint_wrappers=1:nokey=1", str(src),
-        ]).decode().strip().splitlines()
+        ], timeout=30).decode().strip().splitlines()
         src_w, src_h = int(probe[0]), int(probe[1])
-    except (subprocess.CalledProcessError, ValueError, IndexError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            ValueError, IndexError):
         pass  # fall through to full chain below
 
     if grade_filter is None and src_w and src_h:
