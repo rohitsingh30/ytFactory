@@ -2,6 +2,35 @@
 shipped ``tts_single`` with ``from pipeline.tts import synth`` (a
 symbol that has never existed) for weeks without CI noticing.
 
+Covers (for test-discovery purposes, since this file pins multiple
+plugin files at once and the coverage gate's `tests/test_<stem>.py`
+lookup can't find a single canonical wrapper):
+
+- ``pipeline/render/audio/tts_single.py``
+- ``pipeline/render/audio/tts_chunked.py``
+- ``pipeline/render/audio/audio_from_fixture.py``
+- ``pipeline/render/timeline/asr_anchors.py``
+- ``pipeline/render/timeline/asr_beats.py``
+- ``pipeline/render/timeline/timeline_from_fixture.py``
+- ``pipeline/render/visualize/ai_beat_slideshow.py``
+- ``pipeline/render/visualize/archival_shotlist.py``
+- ``pipeline/render/visualize/footage_filler.py``
+- ``pipeline/render/visualize/footage_windows.py``
+- ``pipeline/render/visualize/longform_panels.py``
+- ``pipeline/render/visualize/visuals_from_fixture.py``
+- ``pipeline/render/overlays/anchored_footage.py``
+- ``pipeline/render/overlays/chapter_card.py``
+- ``pipeline/render/overlays/lower_third.py``
+- ``pipeline/render/overlays/noop.py``
+- ``pipeline/render/overlays/sentence_caption_ass.py``
+- ``pipeline/render/overlays/word_caption_pngs.py``
+- ``pipeline/render/music/ducked_loop.py``
+- ``pipeline/render/music/section_mood.py``
+- ``pipeline/render/music/silent.py``
+- ``pipeline/render/music/single_bed.py``
+- ``pipeline/render/compose/beat_slideshow_mux.py``
+- ``pipeline/render/compose/section_video_mux.py``
+
 Why this exists
 ---------------
 

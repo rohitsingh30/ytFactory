@@ -284,5 +284,90 @@ class LongEngineBoundaryEventsTest(_BaseEngineProgressTest):
         )
 
 
+class ShortEngineOverlappedPathBoundaryEventsTest(_BaseEngineProgressTest):
+    """Pin the OVERLAPPED dispatch path: when both providers are
+    cloud-bound, the engine kicks off visualize on a worker thread
+    while audio + timeline run on the main thread. Boundary events
+    for the overlap path fire from a different code branch than
+    the sequential path — must independently exercise both."""
+
+    def _build_spec(self):
+        # Set both providers to cloud-bound names so gpu_safe_to_overlap
+        # returns True. The fixture-loading plugin overrides ensure we
+        # don't actually hit any cloud — the providers are just naming
+        # tokens for the gate.
+        return build_spec({
+            "channel": "test_channel",
+            "channel_overrides": {
+                "kind": "short",
+                "captions_enabled": False,
+                "music_policy": "none",
+                "voice_provider": "cloudrun_chatterbox",
+                "image_provider": "cloudrun_flux2_klein",
+                "audio_plugin": "audio_from_fixture",
+                "timeline_plugin": "timeline_from_fixture",
+                "visualize_plugin": "visuals_from_fixture",
+                "audio_fixture_path": str(self.audio_fixture),
+                "visuals_fixture_path": str(self.visuals_fixture),
+                "timeline_fixture_path": str(self.timeline_fixture),
+            },
+        }, channel_yaml_path=None, variant_yaml_path=None)
+
+    def test_overlapped_short_fires_event_for_every_substage(self):
+        spec = self._build_spec()
+        events: list[tuple[str, str]] = []
+        out = self.tmp / "out" / "short.mp4"
+        render_short(
+            spec,
+            script={"narration": "smoke", "beats": [
+                {"text": "first"}, {"text": "second"},
+            ]},
+            work_dir=self.tmp / "work",
+            out_path=out,
+            progress_cb=lambda s, m: events.append((s, m)),
+        )
+
+        by_stage = self._events_by_stage(events)
+        for required in ("tts", "asr", "images", "compose"):
+            self.assertIn(
+                required, by_stage,
+                f"overlapped engine never fired a {required!r} event; "
+                f"events={events!r}",
+            )
+
+    def test_overlapped_emits_visualize_boundary_events_from_main_thread(self):
+        """Per the engine docstring, visualize boundary events fire on
+        the MAIN thread (before .submit() and after .result()) so
+        progress_cb invocations don't race with audio/timeline events
+        coming from the same thread. Pin both events show up exactly
+        once for the visualize stage on the overlapped path."""
+        spec = self._build_spec()
+        events: list[tuple[str, str]] = []
+        out = self.tmp / "out" / "short.mp4"
+        render_short(
+            spec,
+            script={"narration": "smoke", "beats": [
+                {"text": "first"}, {"text": "second"},
+            ]},
+            work_dir=self.tmp / "work",
+            out_path=out,
+            progress_cb=lambda s, m: events.append((s, m)),
+        )
+
+        images_events = [m for s, m in events if s == "images"]
+        # Engine fires "Generating ..." before .submit and "Visuals
+        # ready: ..." after .result() — both on the main thread.
+        self.assertTrue(
+            any("Generating" in m for m in images_events),
+            f"missing 'Generating ...' event on overlapped path; "
+            f"got {images_events!r}",
+        )
+        self.assertTrue(
+            any("Visuals ready" in m for m in images_events),
+            f"missing 'Visuals ready ...' event on overlapped path; "
+            f"got {images_events!r}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -121,26 +121,26 @@ class LoadDotenvTest(unittest.TestCase):
 
 class RenderEntryPointsUseSharedLoaderTest(unittest.TestCase):
     """Audit D3.48 — pin that all three render entry points delegate
-    to the shared loader. If a future refactor accidentally restores
-    a per-module copy, these tests catch the regression."""
+    to the shared loader.
 
-    def test_long_form_load_env_calls_shared(self):
-        from pipeline.render._legacy import long_form
-        from unittest.mock import patch as _patch
-        with _patch(
-            "pipeline.render.shared.env_loader.load_dotenv_into_environ"
-        ) as m:
-            long_form._load_env(Path("/some/repo"))
-        m.assert_called_once_with(Path("/some/repo"))
+    Pre-2026-05-14 this asserted the legacy renderer modules
+    (`_legacy/long_form.py`, `_legacy/sports_doc.py`) delegated to
+    the shared loader. Those legacy modules were deleted in the
+    bigbang cleanup (their orchestrator entrypoints are replaced by
+    the engine path; the helpers were moved into the plugin layer).
+    The shared loader itself is still pinned by the `LoadDotenvTest`
+    + `StripOuterQuotesTest` classes above.
+    """
 
-    def test_sports_doc_load_env_calls_shared(self):
-        from pipeline.render._legacy import sports_doc
-        from unittest.mock import patch as _patch
-        with _patch(
-            "pipeline.render.shared.env_loader.load_dotenv_into_environ"
-        ) as m:
-            sports_doc._load_env(Path("/some/repo"))
-        m.assert_called_once_with(Path("/some/repo"))
+    def test_shared_loader_module_is_importable(self):
+        # Smoke: the shared loader API still exists and the cloud
+        # worker / engine path can reach it.
+        from pipeline.render.shared.env_loader import (
+            load_dotenv_into_environ,
+            _strip_outer_quotes,
+        )
+        self.assertTrue(callable(load_dotenv_into_environ))
+        self.assertTrue(callable(_strip_outer_quotes))
 
 
 if __name__ == "__main__":

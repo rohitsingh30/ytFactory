@@ -52,7 +52,7 @@ class SentenceCaptionAss:
         if not timeline:
             return []
 
-        from pipeline.render._legacy.long_form import build_captions_ass  # noqa: PLC0415
+        from pipeline.render.shared.long_form_lib import build_captions_ass  # noqa: PLC0415
 
         # build_captions_ass expects (cues, out_path, total_duration_s).
         # cues = list[(start_s, end_s, text)]. Build from timeline.

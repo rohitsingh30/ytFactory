@@ -62,7 +62,7 @@ class FootageWindows:
             return self._fallback_solid_color(spec, timeline, work_dir)
 
         try:
-            from pipeline.render._legacy.footage_only import _build_silent_video  # noqa: PLC0415
+            from pipeline.render.shared.footage_only_lib import _build_silent_video  # noqa: PLC0415
             import json  # noqa: PLC0415
             shotlist = json.loads(path.read_text())
             channel = spec.channel

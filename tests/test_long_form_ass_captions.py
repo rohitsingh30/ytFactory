@@ -28,8 +28,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from pipeline.render._legacy import long_form
-from pipeline.render._legacy.long_form import (
+from pipeline.render.shared import long_form_lib as long_form
+from pipeline.render.shared.long_form_lib import (
     _ass_color_from_rgba,
     _ass_escape,
     _ffmpeg_has_libass,

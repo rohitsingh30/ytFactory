@@ -27,7 +27,7 @@ from pathlib import Path
 # Top-level imports so scripts/coverage_gate.py's import-grep
 # discovers this file as a related test for the production modules.
 from pipeline.render.spec import build_spec, CaptionsLayout
-from pipeline.render._legacy.shorts import _resolve_caption_dispatch
+from pipeline.render.shared.caption_dispatch import _resolve_caption_dispatch
 from pipeline.captions import render_beat_caption
 from pipeline.beats import Beat
 

@@ -41,7 +41,7 @@ class LongformPanels:
         work_dir: Path,
     ) -> VisualTrack:
         try:
-            from pipeline.render._legacy.long_form import (  # noqa: PLC0415
+            from pipeline.render.shared.long_form_lib import (  # noqa: PLC0415
                 build_image_panels_video,
             )
         except ImportError:

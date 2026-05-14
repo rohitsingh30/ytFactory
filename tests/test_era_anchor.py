@@ -320,126 +320,15 @@ class BuildFullPromptEraAnchorTest(unittest.TestCase):
 
 
 # ---------- shorts.py end-to-end era load ------------------------------
-
-
-class MakeShortEraAnchorIntegrationTest(unittest.TestCase):
-    """Pin the script.metadata.era_anchor → build_full_prompt
-    plumbing in pipeline/render/shorts.py::make_short."""
-
-    def setUp(self):
-        from tests.test_render_shorts import (  # noqa: PLC0415
-            TempWorkspaceMixin, patched_make_short_environment, _fake_beat,
-        )
-        self._mixin = TempWorkspaceMixin()
-        self._mixin.setUp()
-        self._patched_env = patched_make_short_environment
-        self._fake_beat = _fake_beat
-
-    def tearDown(self):
-        self._mixin.tearDown()
-
-    def test_known_era_anchor_threaded_to_build_full_prompt(self):
-        from pipeline.render._legacy import shorts
-        channel_path, out_dir = self._mixin.write_channel()
-        (out_dir / "narrations").mkdir()
-        narration = out_dir / "narrations" / "baghdad-test.json"
-        narration.write_text(json.dumps({
-            "metadata": {"era_anchor": "13c-mongol-yuan-warband"},
-        }))
-        # Ensure _find_script_path picks up the file (the helper looks
-        # for it under the channel's narrations dir at scan time).
-        # The mixin's write_channel arrangement has out_dir as channel
-        # root — narration above lives at <out_dir>/narrations/<slug>.json.
-        with self._patched_env([self._fake_beat("hook beat", 0, 1)]) as m:
-            # Override _find_script_path to point at our narration so
-            # the metadata-load branch fires.
-            from unittest.mock import patch
-            with patch.object(shorts, "_find_script_path", return_value=narration):
-                shorts.make_short(
-                    "baghdad text", channel_path, out_dir,
-                    "baghdad-test", run_critic=False,
-                )
-        # Assert build_full_prompt received the era prefix.
-        kwargs = m.images.build_full_prompt.call_args_list[0].kwargs
-        prefix = kwargs.get("era_anchor_prefix")
-        self.assertIsNotNone(prefix)
-        self.assertIn("Mongol", prefix)
-        self.assertIn("lamellar", prefix)
-
-    def test_legacy_era_lock_field_also_honoured(self):
-        # The pre-Phase-4b test fixture used metadata.era_lock; honour
-        # both spellings during the migration window.
-        from pipeline.render._legacy import shorts
-        channel_path, out_dir = self._mixin.write_channel()
-        (out_dir / "narrations").mkdir()
-        narration = out_dir / "narrations" / "baghdad-test.json"
-        narration.write_text(json.dumps({
-            "metadata": {"era_lock": "13c-mongol-yuan-warband"},
-        }))
-        with self._patched_env([self._fake_beat("hook beat", 0, 1)]) as m:
-            from unittest.mock import patch
-            with patch.object(shorts, "_find_script_path", return_value=narration):
-                shorts.make_short(
-                    "baghdad text", channel_path, out_dir,
-                    "baghdad-test", run_critic=False,
-                )
-        kwargs = m.images.build_full_prompt.call_args_list[0].kwargs
-        prefix = kwargs.get("era_anchor_prefix")
-        self.assertIsNotNone(prefix)
-        self.assertIn("Mongol", prefix)
-
-    def test_unknown_era_falls_back_silently(self):
-        from pipeline.render._legacy import shorts
-        channel_path, out_dir = self._mixin.write_channel()
-        (out_dir / "narrations").mkdir()
-        narration = out_dir / "narrations" / "baghdad-test.json"
-        narration.write_text(json.dumps({
-            "metadata": {"era_anchor": "13c-mongolian-warband"},  # typo
-        }))
-        with self._patched_env([self._fake_beat("hook beat", 0, 1)]) as m:
-            from unittest.mock import patch
-            with patch.object(shorts, "_find_script_path", return_value=narration):
-                shorts.make_short(
-                    "baghdad text", channel_path, out_dir,
-                    "baghdad-test", run_critic=False,
-                )
-        kwargs = m.images.build_full_prompt.call_args_list[0].kwargs
-        # Unknown era → no prefix (fallback).
-        self.assertIsNone(kwargs.get("era_anchor_prefix"))
-
-    def test_no_metadata_falls_back_silently(self):
-        from pipeline.render._legacy import shorts
-        channel_path, out_dir = self._mixin.write_channel()
-        (out_dir / "narrations").mkdir()
-        narration = out_dir / "narrations" / "baghdad-test.json"
-        # Script has no metadata.era_anchor at all.
-        narration.write_text(json.dumps({"hook": "test"}))
-        with self._patched_env([self._fake_beat("hook beat", 0, 1)]) as m:
-            from unittest.mock import patch
-            with patch.object(shorts, "_find_script_path", return_value=narration):
-                shorts.make_short(
-                    "baghdad text", channel_path, out_dir,
-                    "baghdad-test", run_critic=False,
-                )
-        kwargs = m.images.build_full_prompt.call_args_list[0].kwargs
-        self.assertIsNone(kwargs.get("era_anchor_prefix"))
-
-    def test_malformed_script_json_does_not_crash(self):
-        from pipeline.render._legacy import shorts
-        channel_path, out_dir = self._mixin.write_channel()
-        (out_dir / "narrations").mkdir()
-        narration = out_dir / "narrations" / "baghdad-test.json"
-        narration.write_text("{ not valid json")
-        with self._patched_env([self._fake_beat("hook beat", 0, 1)]) as m:
-            from unittest.mock import patch
-            with patch.object(shorts, "_find_script_path", return_value=narration):
-                # Must not raise — render should still proceed.
-                shorts.make_short(
-                    "baghdad text", channel_path, out_dir,
-                    "baghdad-test", run_critic=False,
-                )
-        kwargs = m.images.build_full_prompt.call_args_list[0].kwargs
-        self.assertIsNone(kwargs.get("era_anchor_prefix"))
+#
+# The `MakeShortEraAnchorIntegrationTest` class that previously lived
+# here pinned the script.metadata.era_anchor → build_full_prompt
+# plumbing inside `pipeline/render/_legacy/shorts.py::make_short`.
+# That orchestrator was deleted in the 2026-05-14 bigbang cleanup
+# (engine path now does the same plumbing in the engines + plugin
+# layer). The era_anchor logic itself is still pinned by every test
+# class above this comment + `BuildFullPromptEraAnchorTest` which
+# exercises the bottom-of-stack `images.build_full_prompt`.
 
 
 if __name__ == "__main__":
