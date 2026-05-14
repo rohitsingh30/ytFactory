@@ -1859,23 +1859,32 @@ def _measurement_is_usable(m: dict[str, float] | None) -> bool:
 def _verify_audio_loudness(
     mp4_path: Path, *, target_lufs: float = -16.0, tolerance_lu: float = 4.0,
 ) -> tuple[float, bool]:
-    """Run ``volumedetect`` on the post-mux mp4. Return (mean_volume_dB,
-    within_tolerance).
+    """Measure post-mux loudness against ``target_lufs``.
 
-    ``volumedetect`` reports `mean_volume` in dBFS (NOT LUFS — they
-    correlate strongly for spoken-word content but aren't equivalent).
-    For our purposes (catch a 5+ dB miss before it ships) the
-    correlation is tight enough. The post-mortem at
-    docs/audio_loudnorm.md elaborates.
+    Returns ``(measured_value, within_tolerance)``. On any ffmpeg /
+    parse failure returns ``(0.0, True)`` — we don't fail a render
+    because the verification step itself broke.
 
-    On any ffmpeg / parse failure returns ``(0.0, True)`` — we don't
-    fail a render because the verification step itself broke.
+    2026-05-14 fix (canary 88b94b8a post-mortem): pre-fix this used
+    ``volumedetect``'s ``mean_volume`` (RMS dBFS) and compared it to
+    a LUFS target, which is apples-to-oranges. For 10-min long-form
+    content with natural inter-sentence silence, mean_volume averages
+    in the dead time and reads 5-7 dB below the actual integrated
+    LUFS — so a perfectly-loudness-normalised mp4 (-16 LUFS as
+    YouTube measures it) would show mean_volume = -22 to -23 dB and
+    trip a 4 LU tolerance check.
+
+    Now: prefer ebur128 integrated LUFS (K-weighted, gated, BS.1770-4
+    — same metric YouTube uses for normalisation). When ebur128
+    returns a below-gate reading (-70 LUFS = ITU-R absolute silence
+    floor; happens on synthetic test signals + very-short clips),
+    fall back to volumedetect with a wider ±8 LU tolerance.
     """
     try:
         proc = subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-nostats", "-i", str(mp4_path),
-                "-af", "volumedetect", "-vn", "-f", "null", "-",
+                "-af", "ebur128=peak=true,volumedetect", "-vn", "-f", "null", "-",
             ],
             capture_output=True, text=True, timeout=120, check=False,
         )
@@ -1883,15 +1892,21 @@ def _verify_audio_loudness(
         # coverage: subprocess failure path — exercised by integration only
         return 0.0, True
     out = (proc.stderr or "") + (proc.stdout or "")
-    m = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", out)
-    if not m:
-        return 0.0, True
-    mean_db = float(m.group(1))
-    # mean_volume in dBFS approximates LUFS within 1-2 dB for speech.
-    # tolerance_lu defaults to 4 LU (catches 5+ dB misses without
-    # tripping on normal-program-loudness variation).
-    within = abs(mean_db - target_lufs) <= tolerance_lu
-    return mean_db, within
+    # ebur128 final summary line: "    I:         -16.4 LUFS".
+    m_eb = re.search(r"\bI:\s*(-?\d+(?:\.\d+)?)\s*LUFS", out)
+    integrated_lufs: float | None = float(m_eb.group(1)) if m_eb else None
+    # Below-gate: ebur128 returns -70 LUFS (ITU-R absolute silence
+    # floor) when there's too little K-weighted energy to integrate.
+    # In that case fall back to volumedetect with wider tolerance —
+    # mean_volume isn't 1:1 with LUFS for speech-with-silence content.
+    if integrated_lufs is None or integrated_lufs <= -65.0:
+        m_mv = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", out)
+        if not m_mv:
+            return 0.0, True
+        mean_db = float(m_mv.group(1))
+        return mean_db, abs(mean_db - target_lufs) <= max(tolerance_lu, 8.0)
+    within = abs(integrated_lufs - target_lufs) <= tolerance_lu
+    return integrated_lufs, within
 
 
 @obs.traced("mux.long_form", category="render")
@@ -2677,29 +2692,36 @@ def _main_impl(args) -> int:
     final_dur = _probe_duration(out_path)
     final_size = out_path.stat().st_size // 1024 // 1024
     # D4 (2026-05-13) — verify post-mux loudness lands within ±4 LU of
-    # YouTube's spoken-word target. Catches the 2026-05-13 silent-mp4
-    # bug class so it never ships again. emits OTel event for dashboard
-    # visibility; on hard miss, raises so the worker marks job FAILED
-    # instead of READY (caller handles the exception).
-    mean_db, ok = _verify_audio_loudness(out_path, target_lufs=-16.0, tolerance_lu=4.0)
+    # YouTube's spoken-word target. Catches the silent-mp4 bug class
+    # so it never ships again. 2026-05-14 fix: now uses ebur128
+    # integrated LUFS (with volumedetect mean_volume fallback for
+    # below-gate inputs) — see _verify_audio_loudness docstring +
+    # canary 88b94b8a post-mortem.
+    measured, ok = _verify_audio_loudness(out_path, target_lufs=-16.0, tolerance_lu=4.0)
     obs.track(
         "audio_postmux_verify",
         category="render",
-        metadata={"mean_volume_db": mean_db, "within_tolerance": ok, "target_lufs": -16.0},
+        metadata={
+            "integrated_lufs": measured,
+            "within_tolerance": ok,
+            "target_lufs": -16.0,
+            # Legacy key — keep for any dashboard chart that still uses it.
+            "mean_volume_db": measured,
+        },
     )
     if not ok:
-        # mean_db may be 0.0 if the verify subprocess itself failed; in
+        # measured may be 0.0 if the verify subprocess itself failed; in
         # that case _verify_audio_loudness returns (0.0, True) so we
         # only land here when ffmpeg DID measure and the result is
         # genuinely off.
         raise RuntimeError(
-            f"audio loudness check failed: post-mux mean_volume={mean_db:.1f} dB, "
+            f"audio loudness check failed: post-mux measured={measured:.1f} (LUFS or dB), "
             f"target=-16 LUFS, tolerance=±4 LU. Probable cause: "
             f"silent narration WAV or amix normalize regression. "
             f"See docs/audio_loudnorm.md."
         )
     print(f"[done] {out_path} — {final_dur:.1f}s ({final_dur/60:.1f} min), "
-          f"{final_size} MB, mean_volume={mean_db:.1f} dB")
+          f"{final_size} MB, loudness={measured:.1f}")
     return 0
 
 
