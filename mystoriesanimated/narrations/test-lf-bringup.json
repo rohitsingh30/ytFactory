@@ -1,7 +1,0 @@
-{
-  "slug": "test-lf-bringup",
-  "title_options": ["Test"],
-  "narration": "This is a test narration. It is short. Just enough words to verify the pipeline boots.",
-  "sections": [{"id": "s1", "title": "T", "text": "This is a test narration. It is short. Just enough words to verify the pipeline boots.", "target_s": 30, "visual_brief": null}],
-  "panels": [{"scene": "A small round-headed character sits at a kitchen counter looking at their phone, soft warm light", "hold_s": 30}]
-}

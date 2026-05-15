@@ -91,7 +91,7 @@ SKILL.md cross-reference if the wording changes.
 29. SEO bundle (title, description, tags, hashtags) for every
     `/make-*` skill.
 30. Source/citation list mandatory for any factual format
-    (history, sports doc, AI-recap).
+    (history, sports doc, etc.).
 30b. **SKILL.md frontmatter `description:` MUST be ≤1024 chars.**
     The Claude Skills loader rejects the SKILL outright on overflow
     (silent failure at session start: `✖ .claude/skills/<name>/SKILL.md:

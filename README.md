@@ -112,8 +112,8 @@ data/                   # cross-channel state ONLY (per-channel state lives in <
 # Per-channel folders — every channel matches the canonical spec in
 # docs/channel_layout.md. RenderPaths.for_channel(...) is the only
 # correct way to derive paths within a channel.
-airecap/  cosmosdecoded/  hindutavaanimated/  historyrecapped/
-mystoriesanimated/  rhymetimejunction/  sportstoriesanimated/
+cosmosdecoded/  hindutavaanimated/  historyrecapped/
+mystoriesanimated/  rhymetimejunction/  sportsrecapped/
 ```
 
 For the canonical per-channel layout (every subdir, niche rules,
@@ -177,9 +177,8 @@ commercial-licensed** — `$0/render`, no per-character caps:
 | historyrecapped (long-form sleep) | `f5_tts` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
 | mystoriesanimated (parent) | `chatterbox` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
 | mystoriesanimated/variants/* | `f5_tts` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
-| sportstoriesanimated | `f5_tts` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
+| sportsrecapped | `f5_tts` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
 | hindutavaanimated | `kokoro` | `hf_alpha` (Hindi female) | Apache 2.0 |
-| airecap | `kokoro` | `am_michael` | Apache 2.0 |
 | rhymetimejunction | n/a (sung audio via Suno) | external_song | n/a |
 
 **Voice cloning details:** F5-TTS-MLX and Chatterbox both clone from a
@@ -219,18 +218,18 @@ YTFACTORY_AGENT_TOKEN=$YTFACTORY_AGENT_TOKEN \
 | YouTube channel | Source | Aesthetic |
 |---|---|---|
 | **MyStoriesAnimated** | Reddit (AITA / TIFU / etc.) | Flat 2D crayon, pastel fills |
-| **SportsStoriesAnimated** | Football moments | Tifo line-art + real broadcast cut-ins at the climactic moment |
+| **SportsRecapped** | Football moments | Tifo line-art + real broadcast cut-ins at the climactic moment |
 | **HindutavaAnimated** | Mahabharat episodes | Amar Chitra Katha comic-book, Hindi narration |
 | **History Recapped** | War/military stories | 100% archival footage with documentary narration |
 | **Rhyme Time Junction** | Bilingual nursery rhymes | Continuous animation, Hinglish lyrics, recurring mascots |
-| **AI Recap** *(X-first, scaffolded 2026-05-03)* | Daily AI/tech announcements | Clean isometric editorial illustration |
+| **Cosmos Decoded** | Physics + space "how we knew" | Footage-only documentary, archival science imagery |
 
 Other channel YAMLs are research / variant configs that share a target.
 
 ### Cross-posting to X (Twitter)
 
 Each channel can opt into cross-posting to X by adding an `x:` block to
-its `config.yaml` (see `airecap/config.yaml` for the canonical shape).
+its `config.yaml`.
 The X uploader sits at Stage 8b and reuses the same rendered mp4 the
 YouTube uploader ships:
 
@@ -243,9 +242,8 @@ YouTube uploader ships:
 - See [`docs/X_SETUP.md`](./docs/X_SETUP.md) for the full per-handle
   bring-up flow.
 
-X is the **primary** monetization platform for AI Recap (highest-RPM
-niche after crypto on X creator revenue sharing); a secondary
-cross-post path for the other channels.
+X is a secondary cross-post path for channels that opt in via the
+`x:` block in `config.yaml`.
 
 ## Cost
 
@@ -281,7 +279,7 @@ OpenAI gpt-5.3-chat at <100 chat sessions).
 | ✅ | YOUTUBE_UPLOAD light worker (post-upload GC inside) |
 | ✅ | RESEARCH_HANDOFF light worker (calls into pipeline/research.py) |
 | ✅ | scripts/laptop_cleanup.py (dry-run reclaims ~1.9 GiB) |
-| ✅ | X (Twitter) cross-post — pipeline/x_upload.py + airecap channel scaffold |
+| ✅ | X (Twitter) cross-post — pipeline/x_upload.py |
 
 | 🟡 deferred | why |
 |---|---|

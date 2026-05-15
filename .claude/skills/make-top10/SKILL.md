@@ -35,8 +35,8 @@ redirect. Lock these five:
   user's topic doesn't fit any existing channel
   (paranormal / true-crime / mystery / horror don't fit any of
   historyrecapped / hindutavaanimated / mystoriesanimated /
-  sportstoriesanimated / rhymetimejunction / airecap as of
-  2026-05-04), tell them to run `/create-youtube-channel` first.
+  sportsrecapped / rhymetimejunction / cosmosdecoded), tell them to
+  run `/create-youtube-channel` first.
 - **Topic** — the curatorial frame. e.g. "10 unsolved alien
   abduction cases", "10 most disturbing real-life horror
   incidents", "10 cold cases that still haunt investigators".

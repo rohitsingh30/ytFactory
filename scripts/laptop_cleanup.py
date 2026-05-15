@@ -46,7 +46,6 @@ DATA = PROJECT_ROOT / "data"
 # repo root) prevents accidentally pruning dirs that AREN'T channel
 # dirs (control/, workers/, etc.).
 CHANNEL_DIRS = (
-    "airecap",
     "cosmosdecoded",
     "hindutavaanimated",
     "historyrecapped",

@@ -766,10 +766,8 @@ def _render_impl(channel: str, slug: str, *, do_upload: bool = False, aspect_ove
     # ``YTFACTORY_SKIP_POWER_CHECK=1`` if you understand the risk.
     power_check(label="footage-only Shorts/long-form")
 
-    # Reset the cloud-image circuit breaker per-render — see
-    # pipeline/images_cloudrun.py + pipeline/render/shorts.py for the
-    # rationale.
-    from pipeline.images_cloudrun import reset_circuit_breaker  # noqa: PLC0415
+    # Reset the cloud-image circuit breaker per-render.
+    from pipeline.images.images_cloudrun import reset_circuit_breaker  # noqa: PLC0415
     reset_circuit_breaker()
 
     paths = RenderPaths.from_channel_dir(channel, project_root=REPO_ROOT)

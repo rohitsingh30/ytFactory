@@ -143,7 +143,7 @@ def _verify_with_x(creds: dict) -> tuple[bool, str]:
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: setup_x_credentials.py <account>")
-        print("       (e.g. airecap, historyrecapped, mystoriesanimated)")
+        print("       (e.g. historyrecapped, mystoriesanimated, sportsrecapped)")
         return 2
     account = sys.argv[1].strip()
     if not re.fullmatch(r"[A-Za-z0-9_\-]+", account):
@@ -164,7 +164,7 @@ def main() -> int:
     consumer_secret = _prompt("API Key Secret (consumer_secret)", validator=_v_consumer_secret)
     access_token = _prompt("Access Token", validator=_v_access_token)
     access_token_secret = _prompt("Access Token Secret", validator=_v_access_token_secret)
-    handle = input("Handle (e.g. airecap, no @): ").strip().lstrip("@") or account
+    handle = input("Handle (e.g. mystoriesanimated, no @): ").strip().lstrip("@") or account
 
     creds = {
         "consumer_key": consumer_key,

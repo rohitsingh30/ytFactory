@@ -133,7 +133,7 @@ For each `refix` row, print the channel-appropriate re-render command:
 | `mystoriesanimated` | `/make-mystories-short` (re-pick variant) | one of nine variants |
 | `hindutavaanimated` | `/make-hindutava-short` or `/make-hindutava-long` or `/make-katha` | by length |
 | `sportsrecapped` | `/make-last5`, `/make-ranking`, `/make-tweet-reaction`, `/make-sports-doc` | by format |
-| `scrollpulse` | `/make-reddit-thread` or `/make-tweet-reaction` (default split-screen) · AI Recap variant has no skill yet — flag manually | by format |
+| `scrollpulse` | `/make-reddit-thread` or `/make-tweet-reaction` (default split-screen) | by format |
 | `rhymetimejunction` | `/make-rhyme` | bilingual rhymes |
 
 Print as a fenced bash block so the user can copy-paste:

@@ -164,8 +164,8 @@ inspect_token_status('<slug>')['state']  # must be 'ok'
 ## 4. Local repo scaffold
 
 Create `/Users/rohit/ytFactory/<slug>/` with this layout. Mirror the
-structure of `airecap/` or another minimal channel — config.yaml +
-learnings/channel.md + empty state dirs.
+structure of `cosmosdecoded/` or another minimal channel — config.yaml +
+empty state dirs.
 
 ```
 <slug>/

@@ -179,7 +179,7 @@ class RenderPaths:
     ) -> "RenderPaths":
         """Build a :class:`RenderPaths` for ``(channel, niche)``.
 
-        ``niche`` is None for flat channels (airecap, cosmosdecoded,
+        ``niche`` is None for flat channels (cosmosdecoded,
         hindutavaanimated, historyrecapped, rhymetimejunction) and a
         bare niche slug (e.g. ``"reddit_amitheasshole"``,
         ``"ranked"``) for niched ones.

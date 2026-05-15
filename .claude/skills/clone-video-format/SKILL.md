@@ -408,7 +408,6 @@ Cheat sheet (do NOT hardcode — read on each run, channels evolve):
 | Top-5 / countdown / sports highlights | `sportsrecapped/ranked` |
 | Last-N head-to-head sports | `sportsrecapped` (use /make-last5) |
 | Cosmos / space / NASA explainer | `cosmosdecoded` |
-| AI / tech recap | `scrollpulse` (use the `ai_recap` variant — `scrollpulse/variants/ai_recap.yaml`) |
 | Bilingual Hindi-English nursery rhyme + mascots | `rhymetimejunction` |
 | Long-form sports doc 20-30m | `sportsrecapped` (doc) |
 

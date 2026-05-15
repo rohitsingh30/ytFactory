@@ -33,8 +33,8 @@ sibling topic files in this dir or in the dual-saved memory/project doc.
   worker crashes pre-writeback (e.g. "Internal error running task"),
   the `jobs/<id>` doc stays at `status=pending, stage=dispatching`
   forever and ghosts `/api/queue` Queued column. Caught when a
-  3.5-day-old `airecap` test render kept showing in the Queued
-  column with the Cloud Run execution itself reporting `Completed`
+  3.5-day-old test render kept showing in the Queued column with
+  the Cloud Run execution itself reporting `Completed`
   with failure. Mitigation design (Option A sweeper extending the
   existing reaper loop + Option B SIGTERM/atexit writeback in 4
   render entrypoints) shipped to `docs/jobs_collection_reaper.md`;

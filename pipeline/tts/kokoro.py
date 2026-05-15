@@ -2,7 +2,7 @@
 
 Apache 2.0, ~169 MB model + 26 MB voices. Fixed voice library; channel
 ``tts_voice`` is one of the Kokoro voice IDs (``af_bella``, ``hf_alpha``,
-etc.). Default for airecap, hindutavaanimated, and historyrecapped Shorts.
+etc.). Default for hindutavaanimated and historyrecapped Shorts.
 
 Provider-specific behaviour:
 

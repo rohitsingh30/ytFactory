@@ -65,13 +65,13 @@ class TestTracedDecorator(_Base):
         self.assertTrue(isinstance(s.attributes["ytfactory.meta.d"], str))
 
     def test_decorator_extra_metadata_appended(self) -> None:
-        @obs.traced("test.extra", extra_metadata={"channel": "airecap"})
+        @obs.traced("test.extra", extra_metadata={"channel": "historyrecapped"})
         def f():
             return 1
 
         f()
         s = self._spans()[0]
-        self.assertEqual(s.attributes["ytfactory.meta.channel"], "airecap")
+        self.assertEqual(s.attributes["ytfactory.meta.channel"], "historyrecapped")
 
 
 class TestLLMModulesEmitSpans(_Base):
