@@ -104,8 +104,22 @@ class AsrBeats:
         try:
             beats = split_with_forced_boundaries(
                 words=words,
-                forced_lines=forced_lines,
+                forced_narration_lines=forced_lines,
             )
+        except TypeError as exc:
+            # Wrong kwarg name → re-raise with a clear message so the
+            # signature drift is obvious next time. asr_beats called
+            # ``forced_lines=`` from 2026-05-14 → 2026-05-15 against a
+            # function that expects ``forced_narration_lines=`` —
+            # silently swallowed by the BLE001 catch below, producing
+            # a 100+ word-segment fallback timeline that broke captions
+            # AND visuals on every cloud short. Surfaced by job
+            # f1e319a3 canary on 2026-05-15.
+            _logger.error(
+                "asr_beats: split_with_forced_boundaries TypeError — "
+                "fix the kwarg drift: %s", exc,
+            )
+            raise
         except Exception as exc:  # noqa: BLE001
             _logger.warning("asr_beats: beat-split failed (%s) — "
                             "falling back to one segment per word", exc)

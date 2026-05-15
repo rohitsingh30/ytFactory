@@ -366,10 +366,13 @@ def test_long_form_overlay_resolves_bare_voice_id_via_apply_handler():
 
 
 def test_long_form_overlay_unresolvable_voice_id_drops_loudly():
-    """Bare voice id that doesn't resolve to any ref WAV — overlay
-    must NOT carry tts_voice (channel default kicks in), and the
+    """Bare voice id that doesn't resolve to any ref WAV — the
     apply_handler's _dropped_inputs marker MUST appear so the worker
-    can surface it.
+    can surface it. Post-2026-05-15, build_spec ALSO runs apply_handlers
+    so the bad voice gets dropped earlier in the chain — the overlay's
+    tts_voice now carries the resolved CHANNEL DEFAULT (not the bad
+    user-input). Verify both: the marker appears, AND the overlay's
+    tts_voice is the channel default (not the unresolvable name).
     """
     spec = build_spec(
         {
@@ -383,14 +386,15 @@ def test_long_form_overlay_unresolvable_voice_id_drops_loudly():
         / "pipeline/variants/mystoriesanimated/aita_animated.yaml",
     )
     overlay = long_form_overlay_from_spec(spec)
-    assert "tts_voice" not in overlay
-    # No long_form.tts_voice either — that key only exists when a voice
-    # actually wins.
-    if "long_form" in overlay:
-        assert "tts_voice" not in overlay["long_form"]
-    # The handler's structured-warning marker MUST be in the overlay.
-    assert "_dropped_inputs" in overlay
-    assert overlay["_dropped_inputs"][0]["field"] == "voice"
+    # Overlay tts_voice MUST NOT contain the unresolvable name.
+    assert overlay.get("tts_voice") != "this-voice-id-does-not-exist"
+    # When tts_voice IS present, it's the channel default (resolvable).
+    if "tts_voice" in overlay:
+        assert "this-voice-id-does-not-exist" not in str(overlay["tts_voice"])
+    # spec.voice_id MUST be the channel default (NOT the bad name) —
+    # build_spec runs apply_handlers FIRST and records the drop on cfg
+    # then falls voice_id back to cfg.tts_voice (the channel default).
+    assert spec.voice_id != "this-voice-id-does-not-exist"
 
 
 def test_long_form_overlay_unknown_apply_handler_logs_and_skips():

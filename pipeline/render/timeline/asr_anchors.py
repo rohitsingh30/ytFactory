@@ -95,7 +95,23 @@ class AsrAnchors:
                     seg.kind = kind
                     if i < len(sections):
                         sec = sections[i]
-                        seg.text = sec.get("body") or sec.get("narration") or seg.text
+                        # 2026-05-15 — accept ``text`` as a section-body
+                        # alias. cosmosdecoded + several historyrecapped
+                        # script variants populate ``text`` (not ``body``
+                        # / ``narration``); the prior ``body`` /
+                        # ``narration`` only chain emitted Segments with
+                        # text="" → empty scene → ``longform_panels``
+                        # raised ValueError("panel 0 missing 'scene'
+                        # field") → 26 minutes of solid black on the
+                        # 2026-05-15 cosmos hubble render (job
+                        # f37bb01a). See
+                        # tests/render/timeline/test_asr_anchors_section_text_fields.py.
+                        seg.text = (
+                            sec.get("body")
+                            or sec.get("text")
+                            or sec.get("narration")
+                            or seg.text
+                        )
                         seg.anchor_id = str(sec.get("id") or f"sec_{i:03d}")
                 _logger.info("asr_anchors: cloud whisper anchored %d sections",
                              len(cloud_segs))
@@ -136,32 +152,58 @@ class AsrAnchors:
         # Find each section title's position in the word stream by
         # token-prefix match. First match wins. Same approach as
         # sports_doc._align_anchors_to_narration.
-        out: list[Segment] = []
+        #
+        # 2026-05-15 (v16) — TWO-PASS computation. Pre-fix, end_s
+        # defaulted to ``total_s`` and only narrowed if a LATER
+        # section's anchor was found. When NO later anchor matched
+        # (the common case — section titles are usually paraphrased
+        # in narration, so first-6-words sliding-window match fails),
+        # every section's end_s stayed at ``total_s`` → segments
+        # overlapped → ``Segment.end_s - start_s`` produced
+        # ``hold_s`` values like 1415s for a 1500s narration → the
+        # downstream ffmpeg kenburns rendered 42,456 frames for ONE
+        # panel before the next started, the cloud-run JOB hit its
+        # 1-hour wall, render killed.
+        #
+        # Surfaced by Pompeii long-form (job ba3e7578) on the 2026-
+        # 05-15 v15 deploy: panels gen'd correctly (10/10) but
+        # ``[seg ] 1/10 1415.2s zoom→1.08 (42456f)`` proved seg 0
+        # owned all 1415 seconds → ffmpeg stuck on encode, JOB
+        # cancelled at 38min in.
+        #
+        # Pinned by tests/render/timeline/test_asr_anchors_section_text_fields.py
+        # ::AnchoredSegmentsAreNonOverlappingTest.
+
+        # Pass 1: derive start_s for every section, monotonically.
+        starts: list[float] = []
         prev_end = 0.0
         for i, sec in enumerate(sections):
             title = (sec.get("title") or "").strip()
             start_s = self._find_anchor_start(title, words, after_s=prev_end)
             if start_s is None:
-                # Unanchored section — fall back to equal-share offset
-                # so the timeline is monotonic. The visualize plugin
-                # will still show something for this section.
+                # Unanchored — fall back to equal-share offset.
                 start_s = (i / len(sections)) * total_s
-            # End = next section's start (or total duration for the last).
-            end_s = total_s
-            for next_i in range(i + 1, len(sections)):
-                next_title = (sections[next_i].get("title") or "").strip()
-                next_start = self._find_anchor_start(next_title, words, after_s=start_s)
-                if next_start is not None:
-                    end_s = next_start
-                    break
+            # Monotonicity guard: never go backward in time. (Equal-
+            # share fallback can technically produce an offset earlier
+            # than prev_end if a previous section was anchored late;
+            # clamp.)
+            start_s = max(start_s, prev_end)
+            starts.append(start_s)
+            prev_end = start_s
+
+        # Pass 2: end_s[i] = starts[i+1] (or total_s for last section).
+        out: list[Segment] = []
+        for i, sec in enumerate(sections):
+            end_s = starts[i + 1] if i + 1 < len(sections) else total_s
             out.append(Segment(
-                start_s=start_s,
+                start_s=starts[i],
                 end_s=end_s,
-                text=sec.get("body") or sec.get("narration") or "",
+                # 2026-05-15 — accept ``text`` alias. See cloud-path
+                # comment above for the cosmos hubble regression.
+                text=sec.get("body") or sec.get("text") or sec.get("narration") or "",
                 anchor_id=str(sec.get("id") or f"sec_{i:03d}"),
                 kind=kind,
             ))
-            prev_end = start_s
         return out
 
     def _find_anchor_start(
@@ -194,7 +236,9 @@ class AsrAnchors:
                 Segment(
                     start_s=start_s,
                     end_s=end_s,
-                    text=sections[i].get("body") or sections[i].get("narration") or "",
+                    # 2026-05-15 — ``text`` alias accepted; see _anchor
+                    # path above for the cosmos hubble regression.
+                    text=sections[i].get("body") or sections[i].get("text") or sections[i].get("narration") or "",
                     anchor_id=str(sections[i].get("id") or f"sec_{i:03d}"),
                     kind=kind,
                 )
@@ -207,7 +251,7 @@ class AsrAnchors:
             Segment(
                 start_s=i * share,
                 end_s=(i + 1) * share,
-                text=sections[i].get("body") or sections[i].get("narration") or "",
+                text=sections[i].get("body") or sections[i].get("text") or sections[i].get("narration") or "",
                 anchor_id=str(sections[i].get("id") or f"sec_{i:03d}"),
                 kind=kind,
             )

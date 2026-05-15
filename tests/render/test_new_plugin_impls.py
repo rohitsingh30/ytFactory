@@ -98,6 +98,38 @@ class WordCaptionPngsProtocolTest(unittest.TestCase):
         size = WordCaptionPngs()._font_size_for_density(spec)
         self.assertEqual(size, spec.caption_style.font_size_standard)
 
+    def test_import_failure_logs_warning_and_returns_empty(self):
+        # Pre-2026-05-15 fix: ImportError was caught silently → cloud
+        # renders shipped with ZERO captions and no log line. Now we
+        # WARN so the missing-captions class of regression is at least
+        # surfaced. Pinned by job f1e319a3 canary.
+        import logging
+        import sys
+        from unittest.mock import patch
+        spec = build_spec({"channel": "x", "channel_overrides": {}},
+                          channel_yaml_path=None, variant_yaml_path=None)
+        audio = AudioResult(narration_path=Path("/tmp/n.wav"), duration_s=1.0)
+        timeline: Timeline = [Segment(start_s=0, end_s=1, text="hi", anchor_id="x")]
+
+        # Force the import to fail by hiding the captions module.
+        original = sys.modules.get("pipeline.captions")
+        sys.modules["pipeline.captions"] = None  # triggers ImportError
+        try:
+            with self.assertLogs(level=logging.WARNING) as logs:
+                result = WordCaptionPngs().produce(spec, timeline, audio)
+        finally:
+            if original is not None:
+                sys.modules["pipeline.captions"] = original
+            else:
+                sys.modules.pop("pipeline.captions", None)
+        self.assertEqual(result, [])
+        # Warning must mention the missing module so the operator can
+        # debug the Docker COPY / requirements regression.
+        self.assertTrue(
+            any("captions" in msg.lower() for msg in logs.output),
+            f"expected captions-related warning; got: {logs.output}",
+        )
+
 
 class DuckedLoopProtocolTest(unittest.TestCase):
     def test_satisfies_music_composer_protocol(self):

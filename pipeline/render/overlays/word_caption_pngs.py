@@ -57,10 +57,21 @@ class WordCaptionPngs:
             # pipeline.compose. The bigbang PR collapses these helpers
             # under pipeline.render.overlays.* and removes this delegation.
             from pipeline.captions import render_word_caption  # noqa: PLC0415
-        except ImportError:
+        except ImportError as exc:
             # Helper not available on this branch — return empty so the
             # engine still produces a video (without word captions).
-            # The bigbang PR makes this hard-required.
+            # Surfaced by job f1e319a3 canary 2026-05-15: pre-fix this
+            # ImportError was caught silently → cloud renders shipped
+            # with ZERO captions and no log line in either side, very
+            # hard to debug. Now we WARN so the missing-captions class
+            # of regression is at least surfaced in worker logs.
+            import logging as _logging  # noqa: PLC0415
+            _logging.getLogger(__name__).warning(
+                "word_caption_pngs: pipeline.captions.render_word_caption "
+                "import failed (%s) — captions disabled for this render. "
+                "Check Docker COPY rules / requirements.txt for missing "
+                "Pillow dep.", exc,
+            )
             return []
 
         elements: list[OverlayElement] = []

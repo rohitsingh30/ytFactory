@@ -112,6 +112,25 @@ class AlignViaCloudTest(unittest.TestCase):
             with self.assertRaises(CloudRunAsrUnavailable):
                 align_via_cloud(self.wav, mode="beats")
 
+    def test_chunked_encoding_error_raises_unavailable(self):
+        # v17 — ChunkedEncodingError is the requests-library equivalent
+        # of urllib's IncompleteRead (truncated response body during
+        # streaming read). Pre-fix this propagated uncaught and would
+        # crash the long-form render mid-ASR. Pin the catch so callers
+        # fall back to local whisper instead.
+        from pipeline.asr_cloudrun import (
+            CloudRunAsrUnavailable, align_via_cloud,
+        )
+        with patch(
+            "requests.post",
+            side_effect=requests.exceptions.ChunkedEncodingError(
+                "Connection broken: IncompleteRead(123 bytes read, 4500 more expected)"
+            ),
+        ):
+            with self.assertRaises(CloudRunAsrUnavailable) as ctx:
+                align_via_cloud(self.wav, mode="beats")
+            self.assertIn("ChunkedEncodingError", str(ctx.exception))
+
     def test_5xx_raises_unavailable(self):
         from pipeline.asr_cloudrun import (
             CloudRunAsrUnavailable, align_via_cloud,

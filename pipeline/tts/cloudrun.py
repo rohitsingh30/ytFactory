@@ -287,6 +287,7 @@ def _post_synth(payload: dict) -> dict:
     """
     import urllib.error  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415
+    import http.client  # noqa: PLC0415
 
     url = _service_url(model=payload.get("model"))
     token = _get_id_token(url)
@@ -352,7 +353,21 @@ def _post_synth(payload: dict) -> dict:
                 ) from e
             # 4xx (other than 429) — caller's bad input.
             raise
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
+        except (urllib.error.URLError, TimeoutError, OSError,
+                http.client.HTTPException) as e:
+            # 2026-05-15 (v17) — added ``http.client.HTTPException``
+            # (umbrella for IncompleteRead, RemoteDisconnected,
+            # BadStatusLine, …). Pre-fix, an IncompleteRead inside
+            # ``resp.read()`` propagated uncaught through this retry
+            # loop and crashed the entire long-form render mid-TTS.
+            # Surfaced by cosmosdecoded "How we knew universe is
+            # expanding" job 9450bfd9 on 2026-05-15: chatterbox cloud
+            # service tore the response stream after 17570/577414
+            # bytes during 5-way fan-out, no retry, render dead.
+            # IncompleteRead is NOT an OSError subclass — it inherits
+            # only from HTTPException. See
+            # tests/test_tts_cloudrun_full.py
+            # ::TestSynthCloudRunIncompleteReadRetry.
             last_net_error = e
             if attempt + 1 >= max_attempts:
                 raise CloudRunUnavailable(

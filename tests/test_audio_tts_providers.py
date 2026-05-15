@@ -79,7 +79,14 @@ class SynthesizeDispatcherTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             audio.synthesize(
                 "x",
-                voice="pipeline/voice_refs/theo.wav",
+                # Use sports_male_intense.wav specifically — it has NO .txt
+                # sidecar in voice_refs/, so the 2026-05-15 voice resolver
+                # returns an empty transcript and the dispatcher's
+                # "ref_audio_text required" check still fires when the
+                # caller passes None. Using theo.wav (which DOES have a
+                # sidecar) would silently auto-fill ref_audio_text and
+                # bypass the validation we're trying to test.
+                voice="pipeline/voice_refs/sports_male_intense.wav",
                 out_path=Path("/tmp/never.wav"),
                 provider="f5_tts",
                 ref_audio_text=None,
@@ -108,7 +115,13 @@ class SynthesizeDispatcherTest(unittest.TestCase):
             )
             mock.assert_called_once()
             kwargs = mock.call_args.kwargs
-            self.assertEqual(kwargs["ref_audio_path"], "pipeline/voice_refs/theo.wav")
+            # 2026-05-15: dispatcher now resolves voice via
+            # pipeline.voice.voice_catalog → absolute path. Use suffix
+            # match instead of exact equality.
+            self.assertTrue(
+                kwargs["ref_audio_path"].endswith("pipeline/voice_refs/theo.wav"),
+                f"got {kwargs['ref_audio_path']!r}",
+            )
             self.assertEqual(kwargs["ref_audio_text"], "some transcript")
 
     def test_chatterbox_routes_to_synth_chatterbox(self):
@@ -121,9 +134,11 @@ class SynthesizeDispatcherTest(unittest.TestCase):
                 provider="chatterbox",
             )
             mock.assert_called_once()
-            self.assertEqual(
-                mock.call_args.kwargs["ref_audio_path"],
-                "pipeline/voice_refs/sarah.wav",
+            self.assertTrue(
+                mock.call_args.kwargs["ref_audio_path"].endswith(
+                    "pipeline/voice_refs/sarah.wav"
+                ),
+                f"got {mock.call_args.kwargs['ref_audio_path']!r}",
             )
 
     def test_styletts2_routes_to_synth_styletts2(self):
@@ -400,6 +415,104 @@ class IndicParlerLiveSynthTest(_LiveSynthBase):
                 out_path=out, speed=0.85, provider="indic_parler",
             )
             self._assert_valid_wav(out)
+
+
+# ---------- 4. Voice resolver wiring (added 2026-05-15) -------------------
+
+
+class SynthesizeVoiceResolutionTest(unittest.TestCase):
+    """The dispatcher MUST resolve bare voice names (e.g. ``"sarah"``)
+    to on-disk WAV paths before handing them to any provider. Pre-2026-05-15
+    the wizard form sent ``voice="sarah"`` and chatterbox crashed with
+    ``Path("sarah").read_bytes()`` → FileNotFoundError. Surfaced by
+    job 215e411b canary."""
+
+    def _capture_synth_kwargs(self, voice: str, ref_audio_text: str | None = None):
+        """Drive synthesize() with the impl stubbed; return the kwargs
+        the provider actually receives."""
+        captured = {}
+
+        def _fake_impl(text, *, voice, out_path, speed, provider,
+                        ref_audio_text=None, modulation=None,
+                        pronunciation_dict=None, language="en",
+                        narration_prosody=None):
+            captured["voice"] = voice
+            captured["ref_audio_text"] = ref_audio_text
+            # Write a token wav so synthesize()'s post-call probe
+            # doesn't raise.
+            out_path.write_bytes(b"RIFF" + b"\x00" * 40)
+            return out_path
+
+        with tempfile.TemporaryDirectory() as td:
+            out_path = Path(td) / "test.wav"
+            with patch("pipeline.audio._synthesize_impl", side_effect=_fake_impl):
+                audio.synthesize(
+                    "hello world", voice=voice, out_path=out_path,
+                    provider="kokoro", ref_audio_text=ref_audio_text,
+                )
+        return captured
+
+    def test_bare_name_resolves_to_voice_refs_wav_path(self):
+        # "sarah" → pipeline/voice_refs/sarah.wav (real file in repo).
+        captured = self._capture_synth_kwargs("sarah")
+        self.assertTrue(captured["voice"].endswith("voice_refs/sarah.wav"))
+
+    def test_bare_name_picks_up_transcript_sidecar(self):
+        # voice_refs/sarah.txt exists in the repo → resolved transcript
+        # should land in ref_audio_text when caller didn't pass one.
+        captured = self._capture_synth_kwargs("sarah", ref_audio_text=None)
+        self.assertTrue(captured["ref_audio_text"])
+        self.assertGreater(len(captured["ref_audio_text"]), 10)
+
+    def test_caller_provided_ref_audio_text_overrides_catalog_transcript(self):
+        # /make-* skills sometimes pass per-render transcripts.
+        # Resolution must not clobber that.
+        captured = self._capture_synth_kwargs(
+            "sarah", ref_audio_text="caller-provided override",
+        )
+        self.assertEqual(captured["ref_audio_text"], "caller-provided override")
+
+    def test_path_style_voice_passes_through_unchanged(self):
+        # Already a path → resolver returns it as-is (resolved to abs).
+        captured = self._capture_synth_kwargs("pipeline/voice_refs/sarah.wav")
+        self.assertTrue(captured["voice"].endswith("voice_refs/sarah.wav"))
+
+    def test_unresolvable_voice_logs_warning_and_propagates_original(self):
+        # Voice not in catalog AND not on disk → resolver raises but
+        # synthesize() catches it (best-effort) and lets the provider
+        # see the original value so it can produce a more specific
+        # error than our generic "not found".
+        import logging
+        with patch.object(audio, "_synthesize_impl") as mock_impl:
+            mock_impl.return_value = Path("/tmp/never.wav")
+            # Stub the post-call wav probe so it doesn't crash on the fake path.
+            def _fake_impl(text, *, voice, out_path, **kw):
+                captured.append(voice)
+                out_path.write_bytes(b"RIFF" + b"\x00" * 40)
+                return out_path
+            captured = []
+            mock_impl.side_effect = _fake_impl
+            with tempfile.TemporaryDirectory() as td:
+                out_path = Path(td) / "test.wav"
+                with self.assertLogs(level=logging.WARNING) as logs:
+                    audio.synthesize(
+                        "hello", voice="totally-fake-voice-name",
+                        out_path=out_path, provider="kokoro",
+                    )
+        # Original unresolved value reached the provider.
+        self.assertEqual(captured, ["totally-fake-voice-name"])
+        # And we logged a warning so operators can see the resolution failure.
+        self.assertTrue(
+            any("voice resolution failed" in msg for msg in logs.output),
+            f"expected resolution-failed warning in logs: {logs.output}",
+        )
+
+    def test_empty_voice_passes_through_as_none(self):
+        # Description-driven providers (indic_parler) accept empty voice.
+        captured = self._capture_synth_kwargs("")
+        # Resolver returns None for empty input → synthesize keeps the
+        # original empty string.
+        self.assertEqual(captured["voice"], "")
 
 
 if __name__ == "__main__":

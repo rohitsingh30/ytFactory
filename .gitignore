@@ -128,3 +128,8 @@ docs/screenshots/
 .copilot/
 .copilot-session/
 .work/
+
+# Loop driver scripts (Playwright dev-only; not production code)
+scripts/loop/
+data/critiques/
+data/loop/

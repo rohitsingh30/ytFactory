@@ -271,24 +271,64 @@ def synthesize(
     impl docstring carries the long-form behaviour notes.
     """
     chars = len(text or "")
+
+    # Resolve voice ID → on-disk path BEFORE any provider sees it.
+    # Pre-2026-05-15 the dispatcher passed bare names like "sarah"
+    # straight through, and chatterbox cloud tried Path("sarah").read_bytes()
+    # → FileNotFoundError on every wizard render that defaulted to
+    # ``voice="sarah"`` (the dropdown sends voice IDs, not paths).
+    # Now ALL providers (chatterbox / cosyvoice / f5 / higgs / kokoro /
+    # parler) get the same canonical resolved path AND transcript so:
+    #   1. bare "sarah" → pipeline/voice_refs/sarah.wav
+    #   2. catalog name → catalog entry's wav + transcript
+    #   3. path-style ("pipeline/voice_refs/x.wav") → returned as-is
+    #   4. None / empty → providers that don't need a ref still work
+    # Surfaced by job 215e411b canary on 2026-05-15.
+    resolved_voice = voice
+    resolved_transcript = ref_audio_text
+    if voice:
+        try:
+            from pipeline.voice.voice_catalog import resolve_voice as _resolve  # noqa: PLC0415
+            from pathlib import Path as _Path  # noqa: PLC0415
+            project_root = _Path(__file__).resolve().parents[2]
+            wav_path, catalog_transcript = _resolve(voice, project_root)
+            if wav_path is not None:
+                resolved_voice = str(wav_path)
+            # Catalog transcript wins over caller-provided ref_audio_text
+            # ONLY when caller didn't pass one (so make_* skills can still
+            # override per-render).
+            if catalog_transcript and not ref_audio_text:
+                resolved_transcript = catalog_transcript
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            # Resolution failure (voice not in catalog AND not on disk) →
+            # log + propagate the original value. The provider will raise
+            # a more specific error which is still better than a silent
+            # path-not-found further downstream.
+            import logging as _logging  # noqa: PLC0415
+            _logging.getLogger(__name__).warning(
+                "voice resolution failed for %r (%s) — provider will "
+                "see the unresolved value", voice, exc,
+            )
+
     metadata = {
         "provider": provider,
         "language": language,
         "speed": speed,
         "chars": chars,
-        "voice": str(voice)[:200] if voice else None,
-        "has_ref_text": bool(ref_audio_text),
+        "voice": str(resolved_voice)[:200] if resolved_voice else None,
+        "voice_input": str(voice)[:200] if voice and voice != resolved_voice else None,
+        "has_ref_text": bool(resolved_transcript),
         "has_prosody": bool(narration_prosody),
         "out_path": str(out_path),
     }
     with obs.timed("tts_synth", category="tts", metadata=metadata) as t:
         result = _synthesize_impl(
             text,
-            voice=voice,
+            voice=resolved_voice,
             out_path=out_path,
             speed=speed,
             provider=provider,
-            ref_audio_text=ref_audio_text,
+            ref_audio_text=resolved_transcript,
             modulation=modulation,
             pronunciation_dict=pronunciation_dict,
             language=language,

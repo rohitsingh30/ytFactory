@@ -58,10 +58,17 @@ class TestCloudRunDispatch(unittest.TestCase):
 
     def test_cloudrun_f5_requires_ref_text(self) -> None:
         """Missing ref_audio_text must raise the same error as f5_tts."""
+        # sports_male_intense.wav has no .txt sidecar so the 2026-05-15
+        # voice resolver returns an empty transcript; the dispatcher's
+        # ref_audio_text check still fires. Using sarah.wav (which DOES
+        # have a sidecar) would silently auto-fill ref_audio_text.
+        no_sidecar_wav = (
+            PROJECT_ROOT / "pipeline" / "voice_refs" / "sports_male_intense.wav"
+        )
         with self.assertRaises(ValueError) as ctx:
             audio.synthesize(
                 "Hello world.",
-                voice=str(REF_WAV),
+                voice=str(no_sidecar_wav),
                 out_path=Path("/tmp/never.wav"),
                 provider="cloudrun_f5",
                 ref_audio_text=None,

@@ -288,6 +288,9 @@ def build_full_prompt(
     era_anchor_prefix: str | None = None,
     key_visual_weight: float = 1.4,
     weighted: bool = True,
+    refined_visual: str | None = None,
+    refined_scene: str | None = None,
+    style_block: str | None = None,
 ) -> str:
     """Compose the final prompt string fed to the diffusion model.
 
@@ -312,19 +315,70 @@ def build_full_prompt(
     `(text:weight)` syntax (Flux). The key_visual is then emitted as
     plain text — still first, so it still gets attention priority via
     position alone.
+
+    Refined-prompt mode (added 2026-05-14)
+    --------------------------------------
+
+    When the caller passes ALL THREE of ``refined_visual``, ``refined_scene``,
+    and ``style_block``, those structured fields replace ``key_visual``,
+    ``scene``, and ``style_prefix`` in the assembled string. The refined
+    fields come from
+    :func:`pipeline.images.prompt_refiner.refine_prompts_batch` — a
+    second LLM pre-step that rewrites the authored visual content for
+    FLUX.2 [klein] adherence (positive-rephrased negations, explicit
+    shot type + lighting, BFL-format style/mood block). See
+    ``data/research/flux2_prompting_2026-05-14.md``.
+
+    Critical invariants (post-2026-05-14 audit):
+
+    - ``era_anchor_prefix`` STILL prepends regardless of refined mode —
+      it is code-owned, never delegated to the refiner LLM.
+    - ``character_description`` STILL prepends regardless — the cast
+      lock must survive even if the refiner forgets it.
+
+    Refined assembly:
+
+        {era_anchor_prefix} {character_description}. {refined_visual}. {refined_scene}. {style_block}
+
+    Legacy assembly (unchanged when refined_* not supplied):
+
+        {era_anchor_prefix} {character_description}, ({key_visual}:1.4), {scene}. {style_prefix}
+
+    Render-time callers gate this behind ``YTFACTORY_PROMPT_REFINER=1``
+    — when OFF, they pass ``refined_* = None`` so the legacy path runs
+    even when ``prompts.json`` has cached refined fields. This is the
+    kill switch: clearing the env variable disables the refiner without
+    requiring cache invalidation.
+
+    Per-beat fallback: if **any** of the three refined fields is missing
+    or empty, the legacy path runs for that beat. This lets the refiner
+    return partial results (some beats refined, others empty) without
+    poisoning the whole render.
     """
+    using_refined = bool(
+        refined_visual and refined_visual.strip()
+        and refined_scene and refined_scene.strip()
+        and style_block and style_block.strip()
+    )
+
     parts: list[str] = []
     if era_anchor_prefix and era_anchor_prefix.strip():
         parts.append(era_anchor_prefix.strip())
     if character_description and character_description.strip():
         parts.append(character_description.strip())
-    if key_visual and key_visual.strip():
-        kv = key_visual.strip().rstrip(".")
-        parts.append(f"({kv}:{key_visual_weight})" if weighted else kv)
-    if scene and scene.strip():
-        parts.append(scene.strip())
-    if style_prefix and style_prefix.strip():
-        parts.append(style_prefix.strip())
+
+    if using_refined:
+        parts.append(refined_visual.strip().rstrip("."))
+        parts.append(refined_scene.strip().rstrip("."))
+        parts.append(style_block.strip())
+    else:
+        if key_visual and key_visual.strip():
+            kv = key_visual.strip().rstrip(".")
+            parts.append(f"({kv}:{key_visual_weight})" if weighted else kv)
+        if scene and scene.strip():
+            parts.append(scene.strip())
+        if style_prefix and style_prefix.strip():
+            parts.append(style_prefix.strip())
     return ". ".join(parts)
 
 

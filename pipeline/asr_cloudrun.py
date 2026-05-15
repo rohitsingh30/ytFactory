@@ -147,7 +147,16 @@ def align_via_cloud(
             headers=headers,
             timeout=_timeout_s(),
         )
-    except (requests.ConnectionError, requests.Timeout) as exc:
+    except (requests.ConnectionError, requests.Timeout,
+            requests.exceptions.ChunkedEncodingError) as exc:
+        # 2026-05-15 (v17) — added ChunkedEncodingError for the same
+        # reason as pipeline/tts/cloudrun.py::_post_synth: a truncated
+        # response body during read should fall back to local rather
+        # than crash the render. The TTS path hit this with
+        # http.client.IncompleteRead on cosmos job 9450bfd9; the
+        # requests-library equivalent on this code path is
+        # ChunkedEncodingError. Pinning at the same layer keeps both
+        # cloud clients symmetrically resilient.
         _logger.warning("cloud ASR call failed (%s) — caller will fall back",
                         type(exc).__name__)
         raise CloudRunAsrUnavailable(

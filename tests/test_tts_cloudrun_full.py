@@ -19,7 +19,7 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
-import pipeline.tts.cloudrun as _mod
+from pipeline.tts import cloudrun as _mod
 
 
 class TestServiceUrl(unittest.TestCase):
@@ -141,6 +141,18 @@ def _http_error(code: int, body: bytes = b"error"):
     return err
 
 
+def _bad_resp_with(exc: Exception):
+    """Return a context-manager mock whose .read() raises ``exc`` —
+    mimics the urllib response object as seen by ``with urlopen() as
+    resp:`` blocks. Used for IncompleteRead / RemoteDisconnected /
+    BadStatusLine retry tests (v17)."""
+    resp = MagicMock()
+    resp.read = MagicMock(side_effect=exc)
+    resp.__enter__ = MagicMock(return_value=resp)
+    resp.__exit__ = MagicMock(return_value=None)
+    return resp
+
+
 class TestPostSynth(unittest.TestCase):
     def setUp(self):
         self._url_patcher = patch.object(
@@ -243,6 +255,75 @@ class TestPostSynth(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=side_effects), \
              patch("time.sleep"):
             result = _mod._post_synth({"model": "f5", "text": "text"})
+        self.assertEqual(result["output_inline"], "ok")
+
+    def test_incomplete_read_during_resp_read_retries_then_succeeds(self):
+        """v17 — http.client.IncompleteRead inside resp.read() must be
+        caught + retried. Pre-fix this propagated uncaught and crashed
+        the entire long-form render mid-TTS. Surfaced by cosmosdecoded
+        job 9450bfd9 on 2026-05-15: 17570/577414 bytes received, then
+        connection torn, render dead.
+
+        IncompleteRead is NOT an OSError subclass — it inherits ONLY
+        from http.client.HTTPException. The catch was widened to
+        include the umbrella class.
+        """
+        import http.client  # noqa: PLC0415
+        # First attempt: urlopen returns a resp object whose .read()
+        # raises IncompleteRead. Second attempt: clean response.
+        bad_resp = MagicMock()
+        bad_resp.read = MagicMock(
+            side_effect=http.client.IncompleteRead(b"partial", 559844)
+        )
+        bad_resp.__enter__ = MagicMock(return_value=bad_resp)
+        bad_resp.__exit__ = MagicMock(return_value=None)
+
+        ok_resp = _make_http_resp({"output_inline": "ok"})
+        with patch("urllib.request.urlopen",
+                   side_effect=[bad_resp, ok_resp]), \
+             patch("time.sleep") as mock_sleep:
+            result = _mod._post_synth({"model": "chatterbox", "text": "x"})
+        self.assertEqual(result["output_inline"], "ok")
+        mock_sleep.assert_called_once_with(1)
+
+    def test_5_consecutive_incomplete_reads_raises_cloudrun_unavailable(self):
+        """If every attempt fails with IncompleteRead, the burnout
+        path converts to CloudRunUnavailable so callers fall back
+        to local TTS instead of crashing the render."""
+        import http.client  # noqa: PLC0415
+        bad_resp_template = lambda: _bad_resp_with(  # noqa: E731
+            http.client.IncompleteRead(b"x", 100)
+        )
+        responses = [bad_resp_template() for _ in range(5)]
+        with patch("urllib.request.urlopen", side_effect=responses), \
+             patch("time.sleep"):
+            with self.assertRaises(_mod.CloudRunUnavailable) as cm:
+                _mod._post_synth({"model": "chatterbox", "text": "x"})
+        self.assertIn("network error", str(cm.exception).lower())
+
+    def test_remote_disconnected_retries(self):
+        """RemoteDisconnected (TCP RST mid-stream) is also a
+        HTTPException — must be caught by the same widened net."""
+        import http.client  # noqa: PLC0415
+        bad_resp = _bad_resp_with(
+            http.client.RemoteDisconnected("connection closed by remote")
+        )
+        ok_resp = _make_http_resp({"output_inline": "ok"})
+        with patch("urllib.request.urlopen", side_effect=[bad_resp, ok_resp]), \
+             patch("time.sleep"):
+            result = _mod._post_synth({"model": "chatterbox", "text": "x"})
+        self.assertEqual(result["output_inline"], "ok")
+
+    def test_bad_status_line_retries(self):
+        """BadStatusLine (server sent invalid HTTP status) — same family."""
+        import http.client  # noqa: PLC0415
+        bad_resp = _bad_resp_with(
+            http.client.BadStatusLine("garbled response line")
+        )
+        ok_resp = _make_http_resp({"output_inline": "ok"})
+        with patch("urllib.request.urlopen", side_effect=[bad_resp, ok_resp]), \
+             patch("time.sleep"):
+            result = _mod._post_synth({"model": "chatterbox", "text": "x"})
         self.assertEqual(result["output_inline"], "ok")
 
 

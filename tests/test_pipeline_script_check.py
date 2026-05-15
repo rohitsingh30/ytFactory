@@ -240,5 +240,96 @@ class ReportTest(unittest.TestCase):
             sc.report(issues, fail_on_error=True)
 
 
+class NonEnglishLanguageGateTest(unittest.TestCase):
+    """Pin the 2026-05-15 Hindi-validator regression.
+
+    Backstory: every CTA / hook / wedge regex in
+    ``pipeline.llm.script_check`` was English-only. Job cdd90432
+    (HindutavaAnimated Krishna leela Short) was authored fluently by
+    the LLM in Devanagari but failed validation 3 times in a row::
+
+        stage 'rewrite' failed validation after 3 attempts:
+        long_narration(warning), missing_cta(error), missing_wedge(warning)
+
+    There's no way for any Devanagari ending to match
+    ``\\bam i wrong\\b`` etc., so the gate would reject every Hindi
+    rewrite forever.
+
+    The fix routes every non-English channel (``tts_language``
+    anything other than ``en`` / ``en-us`` / ``en-gb`` / unset)
+    through a single ``non_english_cta_skipped`` info entry instead
+    of running the four English-only checks. Per-language regex
+    sets are the next pass; for now we trust the LLM to land its
+    own close in the requested locale.
+    """
+
+    def _check(self, text: str, channel_cfg: dict | None) -> list:
+        from pipeline.llm.script_check import check_script_text
+        return check_script_text(text, channel_cfg=channel_cfg)
+
+    def test_hindi_text_skips_english_only_checks(self):
+        # Devanagari narration with NO English CTA / hook / wedge.
+        text = (
+            "बहुत समय पहले, वृंदावन में एक छोटा बालक रहता था। "
+            "उसका नाम कृष्ण था। एक दिन, उसने गोवर्धन पर्वत उठा लिया।"
+        )
+        cfg = {"tts_language": "hi", "closer_format": "subscribe"}
+        issues = self._check(text, cfg)
+        # Should NOT contain missing_cta / missing_wedge / weak_hook
+        names = {i.code for i in issues}
+        self.assertNotIn("missing_cta", names)
+        self.assertNotIn("missing_wedge", names)
+        self.assertNotIn("weak_hook", names)
+        # SHOULD contain the gate marker
+        self.assertIn("non_english_cta_skipped", names)
+
+    def test_english_text_still_runs_all_checks(self):
+        # Plain English narration without a CTA — regression sentinel
+        # that the gate doesn't accidentally also disable for English.
+        text = "This is a story about Krishna. He lifted a mountain. The end."
+        cfg = {"tts_language": "en", "closer_format": "subscribe"}
+        issues = self._check(text, cfg)
+        names = {i.code for i in issues}
+        # missing_cta SHOULD still fire on English without CTA.
+        self.assertIn("missing_cta", names)
+        # gate marker should NOT appear for English channels
+        self.assertNotIn("non_english_cta_skipped", names)
+
+    def test_unset_tts_language_defaults_to_english(self):
+        # No tts_language → assume English → all checks run.
+        text = "A short narration with no closing question."
+        cfg = {"closer_format": "subscribe"}
+        issues = self._check(text, cfg)
+        names = {i.code for i in issues}
+        self.assertIn("missing_cta", names)
+        self.assertNotIn("non_english_cta_skipped", names)
+
+    def test_en_us_and_en_gb_are_treated_as_english(self):
+        for lang in ("en", "en-US", "EN-GB", " en ", "en-us"):
+            text = "A short narration with no closing question."
+            cfg = {"tts_language": lang, "closer_format": "subscribe"}
+            issues = self._check(text, cfg)
+            names = {i.code for i in issues}
+            self.assertIn(
+                "missing_cta", names,
+                f"tts_language={lang!r} should be treated as English",
+            )
+            self.assertNotIn(
+                "non_english_cta_skipped", names,
+                f"tts_language={lang!r} should NOT trigger language gate",
+            )
+
+    def test_other_locales_skip_checks(self):
+        for lang in ("hi", "es", "ta", "ar", "ja", "zh-CN"):
+            text = "Some non-english text — checker shouldn't pile on."
+            cfg = {"tts_language": lang, "closer_format": "subscribe"}
+            issues = self._check(text, cfg)
+            names = {i.code for i in issues}
+            self.assertNotIn(
+                "missing_cta", names,
+                f"tts_language={lang!r} should skip English-only checks",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

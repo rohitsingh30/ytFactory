@@ -24,6 +24,7 @@ from pipeline.render.contracts import (
     register_plugin,
 )
 from pipeline.render.shared.ffmpeg_helpers import probe_duration, run_ffmpeg
+from pipeline.render.visualize._fallback import _fallback_to_longform_panels
 
 _logger = logging.getLogger(__name__)
 
@@ -79,21 +80,37 @@ class ArchivalShotlist:
     def _fallback_solid_color(
         self, spec: Any, timeline: Timeline, work_dir: Path,
     ) -> VisualTrack:
-        out_path = work_dir / "archival_shotlist_fallback.mp4"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        duration_s = timeline[-1].end_s if timeline else 1.0
-        w, h = spec.output_resolution
-        run_ffmpeg([
-            "-f", "lavfi", "-t", f"{duration_s:.3f}",
-            "-i", f"color=c=0x141414:s={w}x{h}:r={spec.output_fps}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            str(out_path),
-        ])
-        return VisualTrack(
-            video_path=out_path,
-            duration_s=probe_duration(out_path),
-            extras={"source": "archival_shotlist_fallback"},
+        """Fall back to AI panel slideshow when shotlist is missing.
+
+        Pre-2026-05-15 this returned a solid-color stand-in
+        (``ffmpeg color=c=0x141414``) which produced 26 minutes of
+        near-black video on every cloud long-form render of
+        cosmosdecoded / historyrecapped — channels that pick
+        ``visual_mode=archival_shotlist`` by default but that the
+        wizard pipeline never authors a shotlist for.
+
+        Surfaced by job ce309c80 (CosmosDecoded "How We Knew Universe
+        Expanding" long-form) on 2026-05-15. Audio + chapter cards +
+        music + lower-thirds all rendered fine; the visual track
+        was 26 min of solid #141414. Unwatchable.
+
+        New behaviour: fall back to ``longform_panels`` (AI panel
+        slideshow) which generates a Flux panel per timeline segment.
+        Same pattern as the cloud-TTS auto-fallback to local f5 —
+        a missing data source MUST resolve to something the viewer
+        can see, not a flat color.
+
+        If even longform_panels fails (helper absent / image-gen API
+        down / panel gen errors), THIS method is called recursively
+        — guard with a sentinel so we don't loop. The recursive
+        path falls back to the OLD solid color so the engine still
+        produces a video file (better than a hard crash).
+        """
+        return _fallback_to_longform_panels(
+            spec, timeline, work_dir,
+            sentinel_kwarg="_archival_shotlist_already_falling_back",
+            color="0x141414",
+            label="archival_shotlist_fallback",
         )
 
 

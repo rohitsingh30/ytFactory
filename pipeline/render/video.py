@@ -276,68 +276,65 @@ def render_long_form(
     except Exception as exc:  # noqa: BLE001
         _logger.warning("emit_artifact(envelope/script) failed: %s", exc)
 
-    # Stage C: invoke pipeline.render.long_form as a subprocess so its
-    # internal stage-by-stage prints continue to flow through the
-    # worker's existing log tailer (which classifies them into substage
-    # progress markers via _classify_renderer_line).
+    # Stage C: invoke the engine in-process via render_via_engines.
+    #
+    # Pre-2026-05-15 this shelled out to ``python -m pipeline.render.long_form``
+    # which hasn't existed since the bigbang renderer-consolidation
+    # (2026-05-14) deleted the four legacy per-kind modules. Cloud
+    # render-worker hits surfaced this on 2026-05-15 — every long-form
+    # render in production failed with::
+    #
+    #     /usr/local/bin/python: No module named pipeline.render.long_form
+    #     RuntimeError: pipeline.render.long_form exited with code 1.
+    #
+    # The new entrypoint at ``pipeline.render.__main__`` is the
+    # canonical CLI replacement, but the cloud-worker dispatch already
+    # has the typed RenderSpec built (after build_spec applied every
+    # form override / channel YAML key) — so re-spawning a Python
+    # subprocess just to re-derive the same spec is wasteful AND would
+    # need every override projected back to ``--override KEY=VALUE``
+    # flags which the new entrypoint can't accept for nested paths.
+    #
+    # Calling ``render_via_engines`` directly in-process is the cleanest
+    # fix: same engine dispatch, same plugin chain, same progress_cb
+    # shape (which the engine already fires via its ``_emit`` helper —
+    # no stdout-classifier needed on the in-process path).
     if progress_cb:
         progress_cb("narrate", "long-form chunked narration starting")
 
-    channel_arg = _channel_arg_for_long_form(spec, paths)
-
-    # Build a per-render YAML overlay from the form-driven RenderSpec
-    # (Slice-2.P2 — 2026-05-12). long_form.py picks this up via its new
-    # ``--config <path>`` flag and deep-merges it on top of the channel
-    # YAML, so the user's form picks (voice, music_bed, output_resolution,
-    # render_mode, captions_density, …) actually take effect on the
-    # long-form path. Pre-2026-05-12 video.render_long_form shelled out
-    # with only ``--channel/--slug`` and EVERY spec field except
-    # duration_target_s was silently dropped — long_form.py would read
-    # the channel YAML defaults regardless of what the user picked.
-    #
-    # The overlay is built by :func:`pipeline.render.input_registry.long_form_overlay_from_spec`
-    # (P3 — descriptor-driven so adding a new form input is one entry,
-    # not five). Until the registry lands, we still write the overlay
-    # file (empty dict is harmless) so the wiring is in place.
-    overlay_path = work_dir / "long_form_overlay.yaml"
-    overlay: dict = {}
-    try:
-        from pipeline.render.input_registry import long_form_overlay_from_spec  # noqa: PLC0415
-        overlay = long_form_overlay_from_spec(spec) or {}
-    except ImportError:
-        # Registry not yet shipped — keep overlay empty. long_form.py
-        # gracefully no-ops on empty overlay.
-        overlay = {}
-    except Exception as exc:  # noqa: BLE001
-        _logger.warning("long_form_overlay_from_spec failed: %s — "
-                        "proceeding with channel YAML only", exc)
-        overlay = {}
-    overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=True))
-    _logger.info("render_long_form: overlay → %s (%d top-level keys)",
-                 overlay_path, len(overlay))
-
-    cmd = [
-        sys.executable, "-m", "pipeline.render.long_form",
-        "--channel", channel_arg,
-        "--slug", env.slug,
-        "--config", str(overlay_path),
-    ]
-    _logger.info("render_long_form: invoking %s", " ".join(cmd))
-
-    log_path = work_dir / "long_form_renderer.log"
-    rc = _stream_subprocess(cmd, log_path=log_path, progress_cb=progress_cb)
-    if rc != 0:
-        # Surface via the central helper — see _format_subprocess_failure
-        # for the noise-tolerant traceback extraction. The helper has
-        # full unit coverage; this raise is the integration path.
-        # coverage: integration path requiring real long_form subprocess
-        raise RuntimeError(_format_subprocess_failure(rc, log_path))
-
     mp4_path = paths.long_form_for(env.slug)
+    mp4_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Use the legacy long-form dict shape we just wrote — long_engine's
+    # plugins read sections[]/panels[]/narration off the same shape.
+    script_dict = json.loads(narration_path.read_text())
+
+    _logger.info(
+        "render_long_form: in-process render via engines → %s "
+        "(sections=%d panels=%d)",
+        mp4_path,
+        len(script_dict.get("sections") or []),
+        len(script_dict.get("panels") or []),
+    )
+
+    try:
+        render_via_engines(
+            spec,
+            script=script_dict,
+            work_dir=work_dir,
+            out_path=mp4_path,
+            progress_cb=progress_cb,
+        )
+    except Exception as exc:
+        # coverage: integration path requiring real engine + cloud TTS
+        raise RuntimeError(
+            f"long-form engine render failed for slug={env.slug!r}: {exc}"
+        ) from exc
+
     if not mp4_path.exists():
-        # Fallback: scan the channel dir for the slug mp4 (long_form.py
-        # writes to paths.long_form_for(slug) by convention but we
-        # cross-check).
+        # Fallback: scan the channel dir for the slug mp4 (engines write
+        # to out_path explicitly, but cross-check matches the legacy
+        # behaviour).
         candidates = list(paths.root.rglob(f"{env.slug}.mp4"))
         if candidates:
             mp4_path = candidates[0]
@@ -348,7 +345,7 @@ def render_long_form(
             )
         else:
             raise RuntimeError(
-                f"pipeline.render.long_form succeeded but produced no mp4. "
+                f"long-form engine returned without producing mp4. "
                 f"Expected at {mp4_path}; channel root: {paths.root}"
             )
 

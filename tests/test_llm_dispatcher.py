@@ -160,6 +160,49 @@ class TierMappingTest(unittest.TestCase):
                          "claude-opus-4-7-internal")
 
 
+class PromptRefineStageTest(unittest.TestCase):
+    """The prompt_refine stage was added 2026-05-14 for the FLUX.2 [klein]
+    DALL-E 3-style refiner (see pipeline/images/prompt_refiner.py).
+
+    Pin its dispatcher defaults so future budget / model retuning doesn't
+    silently break the cheap-tier optimisation that gives the refiner its
+    ~$0.30/day cost target.
+    """
+
+    def setUp(self) -> None:
+        self._saved = _clear_backend_env([
+            "YTFACTORY_MODEL_PROMPT_REFINE",
+            "YTFACTORY_MAX_TOKENS_PROMPT_REFINE",
+        ])
+
+    def tearDown(self) -> None:
+        _clear_backend_env([
+            "YTFACTORY_MODEL_PROMPT_REFINE",
+            "YTFACTORY_MAX_TOKENS_PROMPT_REFINE",
+        ])
+        _restore_env(self._saved)
+
+    def test_model_default_is_haiku_tier(self) -> None:
+        # Refiner runs on a Haiku-tier model — it's a focused rewrite, not
+        # an authoring decision. OPUS would be 10× more expensive for no
+        # quality gain on this task.
+        self.assertEqual(llm_cli.model_for("prompt_refine"), "haiku")
+
+    def test_model_env_override_applies(self) -> None:
+        os.environ["YTFACTORY_MODEL_PROMPT_REFINE"] = "sonnet"
+        self.assertEqual(llm_cli.model_for("prompt_refine"), "sonnet")
+
+    def test_max_tokens_default_is_8192(self) -> None:
+        # Batched output for 30 beats × ~110 tokens/beat ≈ 3.3k tokens.
+        # 8192 gives ~50% margin for long-form 60+ beat renders without
+        # blowing the cheap-tier budget.
+        self.assertEqual(llm_cli.max_tokens_for("prompt_refine"), 8192)
+
+    def test_max_tokens_env_override_applies(self) -> None:
+        os.environ["YTFACTORY_MAX_TOKENS_PROMPT_REFINE"] = "16000"
+        self.assertEqual(llm_cli.max_tokens_for("prompt_refine"), 16000)
+
+
 class DispatcherRoutingTest(unittest.TestCase):
     """Verify ``call_claude_cli`` dispatches to the right private function."""
 

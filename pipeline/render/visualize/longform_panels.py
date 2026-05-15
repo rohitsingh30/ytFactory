@@ -51,29 +51,100 @@ class LongformPanels:
 
         out_path = work_dir / "panels_video.mp4"
 
-        # build_image_panels_video signature today expects:
-        # (panels, narration_dur_s, out_path, image_w, image_h, fps, ...)
-        # — we pass minimal args and let the helper use channel YAML
-        # defaults for the rest. Bigbang PR plumbs spec fields through
-        # explicitly.
+        # 2026-05-15 — pin the real kwargs for build_image_panels_video.
+        # Pre-fix this caller passed ``narration_dur_s=`` /
+        # ``out_path=`` / ``image_w=`` / ``image_h=`` — NONE of which
+        # exist on the helper's signature. The ``except (TypeError,
+        # Exception)`` block below swallowed the kwarg-mismatch and
+        # fell through to solid color, which is why every cloud
+        # long-form render of historyrecapped / cosmosdecoded landed
+        # at panels_fallback.mp4 (still solid color) even after the
+        # archival_shotlist / footage_windows fallbacks dispatched to
+        # longform_panels. Surfaced by job d8a0a076 ("The fall of the
+        # Roman Empire") on 2026-05-15 — the v13 chain "archival/footage
+        # → longform_panels → solid color" was broken at the last
+        # step.
+        #
+        # The real signature is:
+        #   build_image_panels_video(
+        #       panels, style_prefix, image_provider, image_seed,
+        #       image_steps, image_width, image_height, cache_dir,
+        #       out_w=1920, out_h=1080, fps=30, crossfade_s=1.5,
+        #       zoom_factor=1.08,
+        #   )
+        # — note it RETURNS the out path (writes to cache_dir/video.mp4)
+        # and doesn't accept ``out_path`` as a kwarg. We post-move the
+        # produced video to our requested out_path below.
         panels = self._panels_from_timeline(timeline)
         if not panels:
             return self._fallback_solid_color(spec, timeline, work_dir)
 
+        provider = (spec.extra or {}).get("image_provider", "cloudrun_flux2_klein")
+        style_prefix = (spec.extra or {}).get("image_style_prefix", "")
+        seed_base = int((spec.extra or {}).get("image_seed", 42))
+        steps = int((spec.extra or {}).get("image_steps", 4))
+
+        # 2026-05-15 (v16) — defensively rescale ``hold_s`` so the
+        # sum of holds matches the timeline's narrated duration.
+        # Pre-fix the asr_anchors plugin could emit overlapping
+        # segments (each ``end_s = total_s``); ``_panels_from_timeline``
+        # then derived ``hold_s = end_s - start_s`` which produced
+        # 1415s per panel for a 1500s render — kenburns then
+        # rendered 42,456 ffmpeg frames for ONE panel before the
+        # next started, blowing through the cloud-run JOB wall.
+        # asr_anchors's 2-pass refactor (same v16) is the root-cause
+        # fix; this call is the belt-and-braces net so any future
+        # TimelineBuilder regression cannot reproduce the disaster.
+        # See tests/render/visualize/test_long_form_fallback.py
+        # ::LongformPanelsAdjustHoldsToNarrationTest.
+        narration_dur_s = (
+            timeline[-1].end_s if timeline else 0.0
+        )
+        if narration_dur_s > 0.0:
+            try:
+                from pipeline.render.shared.long_form_lib import (  # noqa: PLC0415
+                    _adjust_panel_holds_to_dur,
+                )
+                _adjust_panel_holds_to_dur(panels, narration_dur_s=narration_dur_s)
+            except Exception as exc:  # noqa: BLE001 — defensive only
+                import logging as _logging  # noqa: PLC0415
+                _logging.getLogger(__name__).warning(
+                    "longform_panels: _adjust_panel_holds_to_dur "
+                    "unavailable (%s) — proceeding with raw holds",
+                    exc,
+                )
+
         try:
-            build_image_panels_video(
+            produced = build_image_panels_video(
                 panels=panels,
-                narration_dur_s=timeline[-1].end_s if timeline else 0.0,
-                out_path=out_path,
-                image_w=spec.output_resolution[0],
-                image_h=spec.output_resolution[1],
+                style_prefix=style_prefix,
+                image_provider=provider,
+                image_seed=seed_base,
+                image_steps=steps,
+                image_width=spec.output_resolution[0],
+                image_height=spec.output_resolution[1],
+                cache_dir=work_dir,
+                out_w=spec.output_resolution[0],
+                out_h=spec.output_resolution[1],
                 fps=spec.output_fps,
             )
-        except (TypeError, Exception):  # noqa: BLE001
-            # Signature mismatch or render error — fall back to solid
-            # color so the engine still produces something. Bigbang PR
-            # tightens this contract.
+        except Exception as exc:  # noqa: BLE001 — last-resort fallback MUST not crash
+            import logging as _logging  # noqa: PLC0415
+            _logging.getLogger(__name__).warning(
+                "longform_panels: build_image_panels_video failed (%s) — "
+                "falling back to solid color. Helper signature may have "
+                "drifted again; see tests/render/visualize/"
+                "test_long_form_fallback.py::LongformPanelsBuildKwargContractTest "
+                "for the contract pin.",
+                exc,
+            )
             return self._fallback_solid_color(spec, timeline, work_dir)
+
+        # Move the helper's output to our requested out_path so the
+        # engine's mux step finds it where it expects.
+        if produced != out_path:
+            import shutil as _shutil  # noqa: PLC0415
+            _shutil.move(str(produced), str(out_path))
 
         return VisualTrack(
             video_path=out_path,
@@ -82,15 +153,45 @@ class LongformPanels:
         )
 
     def _panels_from_timeline(self, timeline: Timeline) -> list[dict]:
-        return [
-            {
+        # 2026-05-15 — include hold_s so _assemble_panel_kenburns can
+        # size each clip to the timeline segment. Pre-fix this only
+        # passed scene + start_s/end_s; the kenburns helper read
+        # panel.get("hold_s", 20) which defaulted to 20s per panel —
+        # for a 23min render that's 1380s of visuals vs 1431s narration,
+        # close enough to look fine ONLY if the helper's
+        # _adjust_panel_holds_to_dur ran (it does on the main path).
+        # Defensive: pass the real per-segment hold derived from
+        # timeline so even if downstream skips the adjust step the
+        # visuals match the narration timing.
+        #
+        # 2026-05-15 (P2) — derive a non-empty scene fallback when
+        # ``seg.text`` is empty. ``_generate_panel_stills`` raises
+        # ValueError("panel N missing 'scene' field") on the first
+        # empty-scene panel, which trips the outer ``except Exception``
+        # → solid color for the whole render. This bit the cosmos
+        # hubble long-form (job f37bb01a) when asr_anchors emitted
+        # text="" because the script's section bodies live in
+        # ``sec.text`` (not ``sec.body``). asr_anchors now reads the
+        # text alias too — but other future schema drift (visual_brief
+        # only, summary only, etc) would re-surface this same crash;
+        # this fallback makes the helper robust to any seg.text=""
+        # regardless of root cause. Fallback uses anchor_id so the
+        # generated panel is at least loosely thematic to that section.
+        out = []
+        for i, seg in enumerate(timeline):
+            hold_s = max(0.5, seg.end_s - seg.start_s)
+            scene = (seg.text or "").strip()
+            if not scene:
+                anchor = seg.anchor_id or f"section {i + 1}"
+                scene = f"Establishing scene for {anchor}"
+            out.append({
                 "id": seg.anchor_id,
-                "scene": seg.text,
+                "scene": scene,
                 "start_s": seg.start_s,
                 "end_s": seg.end_s,
-            }
-            for seg in timeline
-        ]
+                "hold_s": hold_s,
+            })
+        return out
 
     def _fallback_solid_color(
         self, spec: Any, timeline: Timeline, work_dir: Path,

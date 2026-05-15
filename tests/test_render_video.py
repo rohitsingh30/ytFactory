@@ -581,5 +581,167 @@ class RenderViaEnginesDispatchTest(unittest.TestCase):
         self.assertIsNone(seen.get("progress_cb"))
 
 
+class RenderLongFormInProcessDispatchTest(unittest.TestCase):
+    """Pin the 2026-05-15 cloud-fix: ``render_long_form`` calls
+    ``render_via_engines`` IN-PROCESS instead of subprocess-spawning
+    ``python -m pipeline.render.long_form`` (a module that no longer
+    exists post the 2026-05-14 renderer-consolidation bigbang).
+
+    The pre-fix version had a `cmd = [sys.executable, "-m",
+    "pipeline.render.long_form", ...]` block. Every cloud long-form
+    render hit::
+
+        /usr/local/bin/python: No module named pipeline.render.long_form
+        RuntimeError: pipeline.render.long_form exited with code 1.
+
+    This test hard-fails if the subprocess pattern is reintroduced AND
+    asserts the engine receives the legacy long-form dict shape via
+    `script=` plus the worker's progress_cb forwarded.
+    """
+
+    def test_render_long_form_calls_render_via_engines_in_process(self):
+        from unittest.mock import MagicMock, patch
+        from pipeline.render.spec import RenderKind, RenderSpec
+
+        spec = MagicMock(spec=RenderSpec)
+        spec.kind = RenderKind.LONG_FORM
+        spec.channel = "sportsrecapped"
+        spec.duration_target_s = 1800
+        spec.aspect_ratio = "16:9"
+        spec.output_resolution = (1920, 1080)
+
+        # Stub envelope shape.
+        env = MagicMock()
+        env.slug = "test-slug-abc123"
+        env.kind = "long_form"
+        env.title_options = ["A", "B"]
+        env.long_form = MagicMock()
+        env.long_form.sections = [MagicMock(), MagicMock()]
+        env.long_form.panels = [MagicMock()]
+        env.long_form.hook = "hook text"
+        env.to_legacy_long_form_dict = MagicMock(return_value={
+            "slug": "test-slug-abc123",
+            "narration": "n",
+            "sections": [{"id": "s1", "title": "T1", "text": "x"}],
+            "panels": [{"scene": "scene-1", "hold_s": 4.0}],
+        })
+        env.to_dict = MagicMock(return_value={"slug": "test-slug-abc123"})
+
+        captured = {}
+
+        def fake_render_via_engines(s, *, script, work_dir, out_path, progress_cb=None):
+            captured["spec"] = s
+            captured["script"] = script
+            captured["work_dir"] = work_dir
+            captured["out_path"] = out_path
+            captured["progress_cb"] = progress_cb
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(b"fake mp4 bytes")
+            return out_path
+
+        cb = lambda stage, msg: None
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            paths = MagicMock()
+            paths.narration_for = lambda slug: tmp_path / f"{slug}.json"
+            paths.long_form_for = lambda slug: tmp_path / f"{slug}.mp4"
+            paths.root = tmp_path
+
+            with patch("pipeline.render.video.rewrite_long_form", return_value=env), \
+                 patch("pipeline.render.video._resolve_paths", return_value=paths), \
+                 patch("pipeline.render.video._merged_channel_cfg", return_value={}), \
+                 patch("pipeline.render.video._raw_story_from_proposal", return_value="raw"), \
+                 patch("pipeline.render.video.render_via_engines",
+                       side_effect=fake_render_via_engines) as mock_engine, \
+                 patch("subprocess.Popen") as mock_popen, \
+                 patch("subprocess.run") as mock_run:
+
+                from pipeline.render.video import render_long_form
+                mp4 = render_long_form(
+                    spec=spec,
+                    proposal={},
+                    work_dir=tmp_path / "work",
+                    job_id="job-xyz",
+                    progress_cb=cb,
+                )
+
+        # Engine called in-process — NOT subprocess.
+        self.assertTrue(mock_engine.called,
+            "render_long_form MUST call render_via_engines in-process. "
+            "If this fails, the legacy subprocess pattern was re-introduced "
+            "and the cloud worker will hit ModuleNotFoundError again.")
+        self.assertFalse(mock_popen.called,
+            "render_long_form MUST NOT subprocess any renderer. The legacy "
+            "`python -m pipeline.render.long_form` module was deleted in the "
+            "2026-05-14 bigbang.")
+        # subprocess.run is OK to allow other helpers but not for the renderer
+        # — assert specifically that no python -m pipeline.render.long_form
+        # was invoked.
+        for call in mock_run.call_args_list:
+            args = call.args[0] if call.args else call.kwargs.get("args", [])
+            if isinstance(args, list):
+                joined = " ".join(str(a) for a in args)
+                self.assertNotIn(
+                    "pipeline.render.long_form", joined,
+                    "Removed module pipeline.render.long_form must not be "
+                    "subprocess-invoked.",
+                )
+
+        # Engine received the legacy dict shape (sections + panels).
+        self.assertIn("sections", captured["script"])
+        self.assertIn("panels", captured["script"])
+        # progress_cb forwarded.
+        self.assertIs(captured["progress_cb"], cb,
+            "progress_cb MUST be forwarded into the engine so the dashboard "
+            "timeline keeps receiving live stage events during the in-process "
+            "render.")
+        # mp4 written at expected path.
+        self.assertEqual(mp4, captured["out_path"])
+
+    def test_render_long_form_raises_runtime_error_when_engine_fails(self):
+        from unittest.mock import MagicMock, patch
+        from pipeline.render.spec import RenderKind, RenderSpec
+
+        spec = MagicMock(spec=RenderSpec)
+        spec.kind = RenderKind.LONG_FORM
+        spec.channel = "sportsrecapped"
+        spec.duration_target_s = 1800
+
+        env = MagicMock()
+        env.slug = "boom-slug"
+        env.kind = "long_form"
+        env.title_options = []
+        env.long_form = MagicMock()
+        env.long_form.sections = []
+        env.long_form.panels = []
+        env.long_form.hook = ""
+        env.to_legacy_long_form_dict = MagicMock(return_value={"slug": "boom-slug"})
+        env.to_dict = MagicMock(return_value={})
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            paths = MagicMock()
+            paths.narration_for = lambda slug: tmp_path / f"{slug}.json"
+            paths.long_form_for = lambda slug: tmp_path / f"{slug}.mp4"
+            paths.root = tmp_path
+
+            with patch("pipeline.render.video.rewrite_long_form", return_value=env), \
+                 patch("pipeline.render.video._resolve_paths", return_value=paths), \
+                 patch("pipeline.render.video._merged_channel_cfg", return_value={}), \
+                 patch("pipeline.render.video._raw_story_from_proposal", return_value="raw"), \
+                 patch("pipeline.render.video.render_via_engines",
+                       side_effect=ValueError("plugin missing")):
+
+                from pipeline.render.video import render_long_form
+                with self.assertRaisesRegex(RuntimeError, "long-form engine render failed"):
+                    render_long_form(
+                        spec=spec,
+                        proposal={},
+                        work_dir=tmp_path / "work",
+                        job_id="job-boom",
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()

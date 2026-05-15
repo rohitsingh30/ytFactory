@@ -62,9 +62,23 @@ source_adapter: manual
 #   2026-05-04 → 2026-05-06: Defaulted to local Kokoro hf_alpha.
 #   2026-05-06: Migrated to cloud Hindi (cloudrun_indicparler/indicf5).
 #   2026-05-07: Voice matrix bench → cloudrun_indicf5 wins all cells.
+#     Voice matrix replaced the legacy single bench voice with a
+#     3-ref rotation under pipeline/voice_refs/hindi-female-storyteller-{
+#     dramatic,calm,devotional}/. Catalog name resolves to the calm
+#     variant by default; channel-bench rotation picks per-render.
+#   2026-05-15: stale ``bench/hindutavaanimated__shorts__hindi_female_storyteller/``
+#     path removed — that dir was deleted by the 3-ref rotation but the
+#     YAML still referenced it. Cloud renders failed with::
+#
+#         cloudrun_indicf5 provider requires `ref_audio_text`
+#
+#     because the catalog resolver "skipped" the missing-WAV entry,
+#     unresolved name passed through to IndicF5 → no transcript →
+#     contract error. Switching to the catalog name lets the resolver
+#     pick a real on-disk ref + its transcript.
 tts_provider: cloudrun_indicf5
-tts_voice: pipeline/voice_refs/bench/hindutavaanimated__shorts__hindi_female_storyteller/ref.wav
-tts_ref_text: ये काफ़ी अच्छा होता है सेहत के लिए भी लोगों को भाता भी है चाहे कोई भी हो शौक से खाते हैं और शौक से पकाते हैं
+tts_voice: hindi-female-storyteller-calm
+tts_ref_text: प्यारी पद्मा, कल तुम्हारा खत मिला, आज जवाब लिख रही हूँ।
 tts_language: hi
 tts_speed: 1.0       # Per-sentence modulation in audio.py drives final pacing.
 

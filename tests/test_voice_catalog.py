@@ -196,10 +196,17 @@ class TestResolveVoice(unittest.TestCase):
 
     def test_name_style_not_found_empty_catalog(self):
         from pipeline.voice.voice_catalog import resolve_voice
-        with patch("pipeline.voice.voice_catalog._load_catalog", return_value={}):
-            with self.assertRaises(ValueError) as ctx:
-                resolve_voice("nonexistent", "/root")
-        self.assertIn("(empty catalog)", str(ctx.exception))
+        # Empty catalog AND nothing on disk under voice_refs/ →
+        # raises with the new error format that lists both catalog +
+        # on-disk options. Use a fresh tmpdir so the on-disk probe
+        # finds nothing.
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("pipeline.voice.voice_catalog._load_catalog", return_value={}):
+                with self.assertRaises(ValueError) as ctx:
+                    resolve_voice("nonexistent", tmp)
+        msg = str(ctx.exception)
+        self.assertIn("(empty catalog)", msg)
+        self.assertIn("(none)", msg)  # no on-disk voices either
 
     def test_name_style_not_found_lists_available(self):
         from pipeline.voice.voice_catalog import resolve_voice, VoiceEntry
@@ -207,11 +214,127 @@ class TestResolveVoice(unittest.TestCase):
             name="voice-a", path=MagicMock(spec=Path), transcript="",
             language="en", register="", duration_s=0.0, use_cases=()
         )
-        with patch("pipeline.voice.voice_catalog._load_catalog",
-                   return_value={"voice-a": existing}):
-            with self.assertRaises(ValueError) as ctx:
-                resolve_voice("voice-b", "/root")
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("pipeline.voice.voice_catalog._load_catalog",
+                       return_value={"voice-a": existing}):
+                with self.assertRaises(ValueError) as ctx:
+                    resolve_voice("voice-b", tmp)
         self.assertIn("voice-a", str(ctx.exception))
+
+
+class TestResolveVoiceBareNameFallback(unittest.TestCase):
+    """Bare-name fallback (added 2026-05-15): the wizard form sends
+    voice IDs like ``"sarah"`` (basenames discovered via filesystem
+    listing of voice_refs/*.wav). The catalog doesn't always have
+    these — they're legacy single-file refs predating the catalog.
+    Pre-fix the dispatcher passed ``"sarah"`` straight through and
+    chatterbox crashed with FileNotFoundError. The resolver now
+    probes voice_refs/<name>.wav and voice_refs/<name>/ref.wav as
+    a fallback before raising. Surfaced by job 215e411b canary."""
+
+    def setUp(self):
+        _clear_cache()
+
+    def tearDown(self):
+        _clear_cache()
+
+    def _make_root(self, *, layout: dict[str, str]) -> tempfile.TemporaryDirectory:
+        """layout maps relative-to-voice_refs paths → file content."""
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        vr = root / "pipeline" / "voice_refs"
+        vr.mkdir(parents=True)
+        for rel, content in layout.items():
+            f = vr / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(content)
+        return tmp
+
+    def test_bare_name_resolves_to_flat_wav(self):
+        from pipeline.voice.voice_catalog import resolve_voice
+        tmp = self._make_root(layout={"sarah.wav": "fake-wav-bytes"})
+        try:
+            with patch("pipeline.voice.voice_catalog._load_catalog", return_value={}):
+                wav, transcript = resolve_voice("sarah", tmp.name)
+            self.assertIsNotNone(wav)
+            self.assertTrue(wav.exists())
+            self.assertEqual(wav.name, "sarah.wav")
+            self.assertEqual(transcript, "")
+        finally:
+            tmp.cleanup()
+
+    def test_bare_name_resolves_to_flat_wav_with_transcript_sidecar(self):
+        from pipeline.voice.voice_catalog import resolve_voice
+        tmp = self._make_root(layout={
+            "sarah.wav": "fake-wav-bytes",
+            "sarah.txt": "She speaks with a calm warm voice.",
+        })
+        try:
+            with patch("pipeline.voice.voice_catalog._load_catalog", return_value={}):
+                wav, transcript = resolve_voice("sarah", tmp.name)
+            self.assertEqual(wav.name, "sarah.wav")
+            self.assertEqual(transcript, "She speaks with a calm warm voice.")
+        finally:
+            tmp.cleanup()
+
+    def test_bare_name_resolves_to_nested_ref_wav(self):
+        # Newer per-voice-folder layout: voice_refs/<name>/ref.wav
+        from pipeline.voice.voice_catalog import resolve_voice
+        tmp = self._make_root(layout={
+            "hindi-male-anurag-vardaan/ref.wav": "fake-wav-bytes",
+            "hindi-male-anurag-vardaan/ref.txt": "नमस्ते मेरा नाम अनुराग है।",
+        })
+        try:
+            with patch("pipeline.voice.voice_catalog._load_catalog", return_value={}):
+                wav, transcript = resolve_voice("hindi-male-anurag-vardaan", tmp.name)
+            self.assertEqual(wav.name, "ref.wav")
+            self.assertIn("अनुराग", transcript)
+        finally:
+            tmp.cleanup()
+
+    def test_bare_name_not_on_disk_raises_with_helpful_error(self):
+        from pipeline.voice.voice_catalog import resolve_voice
+        tmp = self._make_root(layout={"sarah.wav": "x", "michael.wav": "y"})
+        try:
+            with patch("pipeline.voice.voice_catalog._load_catalog", return_value={}):
+                with self.assertRaises(ValueError) as ctx:
+                    resolve_voice("totally-fake", tmp.name)
+        finally:
+            tmp.cleanup()
+        msg = str(ctx.exception)
+        # Error must list the available on-disk voices so the operator
+        # can spot the typo.
+        self.assertIn("sarah", msg)
+        self.assertIn("michael", msg)
+        # And tell them how to fix it.
+        self.assertIn("catalog.yaml", msg)
+        self.assertIn("totally-fake.wav", msg)
+
+    def test_catalog_takes_priority_over_bare_name_fallback(self):
+        # If the same name exists in BOTH catalog AND voice_refs/<n>.wav,
+        # catalog wins (it has the curated transcript + tested config).
+        from pipeline.voice.voice_catalog import resolve_voice, VoiceEntry
+        tmp = self._make_root(layout={
+            "sarah.wav": "fake-wav-bytes",  # bare-name fallback target
+            "sarah.txt": "fallback transcript",
+        })
+        try:
+            catalog_path = MagicMock(spec=Path)
+            entry = VoiceEntry(
+                name="sarah",
+                path=catalog_path,
+                transcript="catalog transcript wins",
+                language="en", register="", duration_s=0.0, use_cases=(),
+            )
+            with patch("pipeline.voice.voice_catalog._load_catalog",
+                       return_value={"sarah": entry}):
+                wav, transcript = resolve_voice("sarah", tmp.name)
+            # Catalog entry won — transcript is the catalog's, not the
+            # filesystem sidecar's.
+            self.assertEqual(transcript, "catalog transcript wins")
+            self.assertIs(wav, catalog_path)
+        finally:
+            tmp.cleanup()
 
 
 class TestListVoices(unittest.TestCase):
@@ -237,6 +360,55 @@ class TestListVoices(unittest.TestCase):
             result = list_voices("/root")
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].name, "v")
+
+
+class CatalogYamlIntegrityTest(unittest.TestCase):
+    """Pin the 2026-05-15 stale-WAV-path regression.
+
+    Backstory: ``hindi-female-storyteller`` in
+    ``pipeline/voice_refs/catalog.yaml`` pointed at
+    ``pipeline/voice_refs/bench/hindutavaanimated__shorts__hindi_female_storyteller/ref.wav``
+    — a path the 2026-05-07 voice-rotation refactor deleted. The
+    catalog entry survived the deletion. Cloud render of job
+    79cdca90 (HindutavaAnimated Krishna leela) failed with::
+
+        voice 'hindi-female-storyteller' catalog entry points at
+        missing WAV ... — skipping
+        cloudrun_indicf5 provider requires `ref_audio_text`
+
+    The catalog "skip on missing WAV" logic in voice_catalog.resolve_voice
+    is the right runtime fallback, but the warning was buried in
+    cloud logs and the actual symptom (missing ref_audio_text) was
+    the contract-level error from the IndicF5 client — operator had
+    to dig 2 layers deep to find the catalog drift.
+
+    This test pins every catalog entry's path against on-disk
+    presence so the next stale entry hard-fails at unit-test time.
+    """
+
+    def test_every_catalog_entry_points_at_extant_wav(self) -> None:
+        from pathlib import Path
+        from pipeline.voice.voice_catalog import _load_catalog
+        project_root = Path(__file__).resolve().parents[1]
+        # Real catalog (no monkey-patch).
+        _load_catalog.cache_clear()
+        catalog = _load_catalog(str(project_root))
+
+        missing: list[tuple[str, str]] = []
+        for name, entry in catalog.items():
+            wav_rel = entry.path
+            wav_abs = (project_root / wav_rel).resolve()
+            if not wav_abs.exists():
+                missing.append((name, str(wav_rel)))
+
+        self.assertFalse(
+            missing,
+            f"Catalog entries reference missing WAV files (will cause "
+            f"silent skip + downstream contract errors at render time): "
+            f"{missing}. Either delete the catalog entry or alias it to "
+            f"a real WAV path (see hindi-female-storyteller for the "
+            f"alias pattern shipped 2026-05-15).",
+        )
 
 
 if __name__ == "__main__":

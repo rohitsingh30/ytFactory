@@ -158,6 +158,13 @@ _DEFAULT_MODEL_BY_STAGE: dict[str, str] = {
     "audio_critic": "opus",
     "imitate_analyze": "opus",
     "imitate_apply": "opus",
+    # Prompt-refiner pre-step for FLUX.2 [klein] (DALL-E 3 playbook).
+    # See pipeline/images/prompt_refiner.py and
+    # data/research/flux2_prompting_2026-05-14.md. Runs ONCE per render
+    # (batched across all beats) and only needs to rewrite ~30 short
+    # scene strings into structured JSON — a Haiku-tier model handles
+    # this at ~10x lower cost than the OPUS tier used for authoring.
+    "prompt_refine": "haiku",
 }
 
 
@@ -222,6 +229,13 @@ _DEFAULT_MAX_TOKENS_BY_STAGE: dict[str, int] = {
     "audio_critic": 8192,
     "imitate_analyze": 8192,
     "imitate_apply": 8192,
+    # Prompt-refiner pre-step (FLUX.2 [klein] DALL-E 3 playbook). Batched
+    # output: ~30 beats × {refined_visual ~10 tokens, refined_scene
+    # ~80 tokens, style_block ~20 tokens} ≈ 3.3k content tokens plus JSON
+    # syntax + Haiku-tier reasoning (negligible) ≈ ~4-5k tokens of output.
+    # 8192 gives ~50% margin so the largest long-form (60+ beats) can't
+    # truncate.
+    "prompt_refine": 8192,
 }
 
 # Floor for any stage we haven't pinned explicitly. Keeps the old

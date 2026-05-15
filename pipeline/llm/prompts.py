@@ -22,6 +22,7 @@ linter-clean (DESIGN.md §14):
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -602,11 +603,116 @@ def _check_cast_contradictions(
 
 
 def _validate_and_clean(
-    raw: list,
+    raw,
     beats: list[Beat],
     opening_directives: dict | None,
     cast_narrator_desc: str | None = None,
 ) -> list[dict]:
+    # Azure-backend dispatcher quirk (2026-05-15): when ``output_json=True``
+    # without ``json_schema``, ``pipeline.llm.cli`` forces
+    # ``response_format={"type": "json_object"}`` on Azure — the model
+    # CANNOT return a bare array even when this stage's _SYSTEM prompt
+    # explicitly asks for one. Result: the LLM wraps the intended
+    # ``[{...}, {...}]`` in one of these dict shapes:
+    #
+    #   A. Single-key array envelope (most common):
+    #      ``{"beats":   [{...}, {...}]}``
+    #      ``{"prompts": [{...}, {...}]}``
+    #      ``{"items":   [{...}, {...}]}``
+    #
+    #   A'. Multi-key envelope where ONE field is the array and others
+    #       are metadata (rationale, debug notes, etc.) — the array is
+    #       always the largest list value:
+    #      ``{"prompts": [{...}, {...}], "rationale": "..."}``
+    #      ``{"items": [{...}, {...}], "metadata": {"version": 1}}``
+    #
+    #   B. Ordered-map (per-beat keyed object), surfaced by job f1e319a3
+    #      canary on 2026-05-15:
+    #      ``{"beat_1":  {"key_visual": "...", "scene": "..."},
+    #         "beat_2":  {"key_visual": "...", "scene": "..."},  ...}``
+    #      ``{"1":       {...}, "2":       {...},  ...}``
+    #      ``{"shot_01": {...}, "shot_02": {...},  ...}``
+    #
+    #   B'. Ordered-map where the model's keys don't follow any ``key_visual``
+    #       schema (Azure with non-English topic → Hindi or other locale
+    #       slipping in field names like ``mukhya_drashya`` or fully
+    #       free-form). Surfaced by job 79cdca90 (HindutavaAnimated
+    #       Krishna leela Short) on 2026-05-15: every value was a dict
+    #       but none had ``key_visual``/``scene``/``narration_line`` so
+    #       the strict majority-beat-shaped gate failed and Shape B
+    #       didn't unwrap. New gate: when ALL values are dicts AND there
+    #       are no list values at all, treat as ordered-map regardless of
+    #       per-value field names — let the per-item validation below
+    #       surface clearer errors than "expected JSON array got dict".
+    #
+    #   C. Flat single-beat dict (model truncated or only emitted one):
+    #      ``{"key_visual": "...", "scene": "..."}``  → cannot recover.
+    #
+    # Unwrap shapes A + A' + B + B' here rather than refactoring the
+    # dispatcher, which affects every output_json=True call site. C
+    # falls through to the count-mismatch error which is correct.
+    if isinstance(raw, dict):
+        # Shape A / A' — pick the LARGEST list value.
+        list_pairs = [(k, v) for k, v in raw.items() if isinstance(v, list)]
+        if list_pairs:
+            k, v = max(list_pairs, key=lambda kv: len(kv[1]))
+            print(
+                f"[prompts] unwrapping Azure JSON-object array envelope "
+                f"(picked key={k!r} from keys={list(raw)!r}) → "
+                f"array of {len(v)} items"
+            )
+            raw = v
+        else:
+            # Shape B / B' — ordered map of per-beat dicts.
+            values = list(raw.values())
+            if values and all(isinstance(v, dict) for v in values):
+                print(
+                    f"[prompts] unwrapping Azure JSON-object ordered-map "
+                    f"envelope (keys={list(raw)[:3]!r}…, n={len(values)}) "
+                    f"→ array of {len(values)} beat dicts"
+                )
+                raw = values
+            else:
+                # Shape C or unknown — log the keys so the next dispatch
+                # quirk is observable. The ValueError below carries the
+                # type name; this print carries the actual structure.
+                _kt = sorted({type(v).__name__ for v in raw.values()})
+                print(
+                    f"[prompts] could not unwrap Azure JSON-object envelope: "
+                    f"keys={list(raw)[:6]!r}{'…' if len(raw) > 6 else ''} "
+                    f"value-types={_kt!r} — falling through to ValueError"
+                )
+
+                # ``{"error": "<string>"}`` is Azure's soft-error shape —
+                # the model returned an error description IN the JSON
+                # object rather than throwing an HTTP error. Common when:
+                #   - Content filter rejected the prompt (Azure returns
+                #     200 with the rejection reason in 'error').
+                #   - The model's output truncated mid-JSON and
+                #     gpt-5.3-chat papered over by emitting just an
+                #     error wrapper.
+                #   - JSON schema validation failed model-side.
+                #
+                # Pre-2026-05-15 we swallowed this as "expected JSON
+                # array, got dict" — uninformative noise. Now surface
+                # the actual error text so operators can debug the
+                # filter trigger or rephrase the prompt. The render
+                # still falls through to the bare-Segment.text path
+                # (per cloud worker's try/except wrapping) so it
+                # doesn't crash the job.
+                if list(raw.keys()) == ["error"] or (
+                    "error" in raw and len(raw) <= 2
+                ):
+                    err_text = str(raw.get("error") or "")[:500]
+                    print(
+                        f"[prompts] Azure soft-error response: error={err_text!r} "
+                        f"(this means LLM authoring is dead for this run — "
+                        f"engine will fall back to bare Segment.text → "
+                        f"generic-looking beat images. Most common cause: "
+                        f"content filter on channel-prompt language or "
+                        f"JSON schema rejection. Re-check the _SYSTEM "
+                        f"template for filter-triggering language.)"
+                    )
     if not isinstance(raw, list):
         raise ValueError(f"expected JSON array, got {type(raw).__name__}")
     if len(raw) != len(beats):
@@ -710,6 +816,9 @@ def author_beat_prompts(
     narrator_visual_mode: str = "on_screen",
     supporting: list[dict] | None = None,
     ranks: list[dict] | None = None,
+    era_anchor_prefix: str | None = None,
+    mood: str | None = None,
+    channel_key: str | None = None,
 ) -> list[dict]:
     """Author per-beat image prompts via the claude CLI and cache to
     ``out_path`` (typically ``data/cache/<slug>/prompts.json``).
@@ -718,6 +827,24 @@ def author_beat_prompts(
     output that doesn't match beat count or schema (caller should
     fall through to the heuristic — make_shorts already handles None
     via images.load_prompts).
+
+    Refiner pre-step (2026-05-14)
+    -----------------------------
+
+    When the env flag ``YTFACTORY_PROMPT_REFINER=1`` is set, this
+    function runs an extra LLM call AFTER the existing
+    :func:`_validate_and_clean` pass via :func:`_maybe_refine_prompts`.
+    The refiner emits structured ``{refined_visual, refined_scene,
+    style_block}`` fields per beat which are merged into each cached
+    beat dict. Render-time consumers
+    (:func:`pipeline.images.images.build_full_prompt`) pick those up
+    when the same flag is set at render time.
+
+    The new kwargs ``era_anchor_prefix``, ``mood``, ``channel_key`` are
+    passed through to the refiner as informational context (the
+    refiner never owns era_anchor or character_description — those are
+    code-prepended at render time). They are optional; the legacy
+    caller signature still works.
     """
     user_prompt = _build_user_prompt(
         narration=narration,
@@ -757,8 +884,104 @@ def author_beat_prompts(
         cast_narrator_desc=cast_narrator_desc,
     )
 
+    # Optional refiner pass — FLUX.2 [klein] DALL-E 3 playbook. Behind a
+    # feature flag so the canary lands without surprising production
+    # renders. Pure additive — even if the refiner LLM fails, the
+    # cleaned beats are untouched and the renderer falls back.
+    cleaned = _maybe_refine_prompts(
+        cleaned,
+        era_anchor_prefix=era_anchor_prefix,
+        character_description=cast_narrator_desc,
+        style=style_prefix,
+        mood=mood,
+        channel_key=channel_key,
+    )
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w") as f:
         json.dump(cleaned, f, indent=2)
     print(f"[prompts] wrote {out_path}")
     return cleaned
+
+
+def _maybe_refine_prompts(
+    cleaned: list[dict],
+    *,
+    era_anchor_prefix: str | None,
+    character_description: str | None,
+    style: str | None,
+    mood: str | None,
+    channel_key: str | None,
+) -> list[dict]:
+    """Optional second-pass refiner — gated by ``YTFACTORY_PROMPT_REFINER``.
+
+    Calls :func:`pipeline.images.prompt_refiner.refine_prompts_batch`
+    and merges the returned ``refined_visual / refined_scene /
+    style_block / refined_version / refined_input_hash`` fields into
+    each beat dict in-place. Beats whose refiner slot is empty
+    (per-beat failure) are unmodified — the renderer will fall back to
+    the legacy path for those beats only.
+
+    Returns the same list it received (mutated). Never raises — every
+    failure mode is converted to "no refined fields added" so the
+    authoring path is robust.
+
+    Read by:
+    - :func:`pipeline.images.images.build_full_prompt` at render time
+      (also gated by the same env flag — kill-switch path).
+    """
+    if not _env_flag_enabled("YTFACTORY_PROMPT_REFINER"):
+        return cleaned
+    if not cleaned:
+        return cleaned
+
+    # Local import keeps the LLM-prompts module light at import time
+    # (the refiner module imports the heavy ``images`` module lazily
+    # too — see prompt_refiner.refine_prompts_batch).
+    from pipeline.images import prompt_refiner as _refiner  # noqa: PLC0415
+
+    try:
+        refined = _refiner.refine_prompts_batch(
+            cleaned,
+            era_anchor_prefix=era_anchor_prefix,
+            character_description=character_description,
+            style=style,
+            mood=mood,
+            channel_key=channel_key,
+        )
+    except Exception as exc:  # noqa: BLE001 — refiner is best-effort
+        print(
+            f"[prompts] refiner pre-step FAILED ({exc}); "
+            "all beats fall back to legacy path"
+        )
+        return cleaned
+
+    if len(refined) != len(cleaned):
+        print(
+            f"[prompts] refiner returned {len(refined)} slots for "
+            f"{len(cleaned)} beats; ignoring (whole batch falls back)"
+        )
+        return cleaned
+
+    refined_count = 0
+    for beat, slot in zip(cleaned, refined):
+        if slot:  # empty dict {} → per-beat fallback, leave beat untouched
+            beat.update(slot)
+            refined_count += 1
+    print(
+        f"[prompts] refiner: refined {refined_count}/{len(cleaned)} beats"
+    )
+    return cleaned
+
+
+def _env_flag_enabled(name: str) -> bool:
+    """Treat ``"1" / "true" / "yes" / "on"`` (case-insensitive) as
+    enabled. Anything else (including unset) is disabled.
+
+    Pulled out so tests can monkeypatch one place; matches the
+    convention used by :mod:`pipeline.niche_specs` and other
+    flag-gated features (see CLAUDE.md "Cloud-canonical writes
+    never re-create laptop channel folders").
+    """
+    val = os.environ.get(name, "").strip().lower()
+    return val in {"1", "true", "yes", "on"}

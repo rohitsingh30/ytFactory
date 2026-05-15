@@ -80,9 +80,22 @@ class BeatSlideshowMux:
             cur_label = out_label
 
         # Final video pad — add fps + format.
+        # 2026-05-15 — pad visual to audio.duration_s so the video stream
+        # doesn't end early when visual_track.duration_s < audio.duration_s.
+        # Pre-fix the AITA Short (job d3d5b40b) had visual=26s + audio=40.5s →
+        # 14.5s of audio with no video. ffmpeg cannot extend a video past
+        # its source duration without an explicit pad filter; ``-t {audio.duration_s}``
+        # CAPS the output to that length but doesn't EXTEND visuals.
+        # ``tpad=stop_mode=clone:stop_duration=N`` clones the last frame
+        # for the audio overrun (cleaner than a black hold). Computed
+        # delta is max(0, audio - visual); when visual >= audio,
+        # stop_duration=0 is a no-op.
         w, h = spec.output_resolution
+        visual_dur = max(0.001, visuals.duration_s)
+        pad_seconds = max(0.0, audio.duration_s - visual_dur)
         filter_parts.append(
             f"[{cur_label}]scale={w}:{h}:flags=lanczos,fps={spec.output_fps},"
+            f"tpad=stop_mode=clone:stop_duration={pad_seconds:.3f},"
             f"format=yuv420p[vout]"
         )
 

@@ -206,5 +206,94 @@ class BeatSlideshowMuxOverlayXyTest(unittest.TestCase):
         self.assertEqual(y, "(H-h)/2")
 
 
+class BeatSlideshowMuxAudioVideoDurationSyncTest(unittest.TestCase):
+    """Pin the 2026-05-15 audio-overrun bug.
+
+    Backstory: AITA Short job d3d5b40b rendered with visual_track =
+    26s but audio = 40.5s. Pre-fix the compose plugin used::
+
+        -t {audio.duration_s}
+
+    which CAPS the output duration but doesn't EXTEND visuals past
+    their source duration. ffmpeg silently truncated audio at 26s
+    of paired-stream output AND continued to write 40.5s of audio
+    after the visual stream ended → a 14.5s tail of audio over
+    nothing in the demuxed mp4.
+
+    Fix: ``tpad=stop_mode=clone:stop_duration=N`` after the scale
+    filter clones the last visual frame for the audio overrun.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix=".test-beat-mux-pad-"))
+        self.visuals_path = self.tmp / "visuals.mp4"
+        self.audio_path = self.tmp / "narr.wav"
+        self.music_path = self.tmp / "music.wav"
+        # Visual SHORTER than audio — the realistic AITA bug shape.
+        _make_mp4(self.visuals_path, duration_s=2.0)
+        _make_wav(self.audio_path, duration_s=4.0)
+        _make_wav(self.music_path, duration_s=4.0)
+        self.spec = build_spec(
+            {"channel": "x", "channel_overrides": {"music_policy": "ducked_loop"}},
+            channel_yaml_path=None, variant_yaml_path=None,
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_video_duration_matches_audio_when_visuals_shorter(self):
+        out_path = self.tmp / "out_padded.mp4"
+        BeatSlideshowMux().mux(
+            visuals=VisualTrack(video_path=self.visuals_path, duration_s=2.0),
+            audio=AudioResult(narration_path=self.audio_path, duration_s=4.0),
+            overlays=[],
+            music=self.music_path,
+            spec=self.spec,
+            out_path=out_path,
+        )
+        v_dur = float(_ffprobe(out_path, "-select_streams", "v:0",
+                               "-show_entries", "stream=duration",
+                               "-of", "default=nokey=1:noprint_wrappers=1"))
+        a_dur = float(_ffprobe(out_path, "-select_streams", "a:0",
+                               "-show_entries", "stream=duration",
+                               "-of", "default=nokey=1:noprint_wrappers=1"))
+        # Both streams MUST land on the same duration (within 200ms ffmpeg
+        # rounding). Pre-fix the AITA Short had a >14s mismatch.
+        self.assertAlmostEqual(
+            v_dur, a_dur, delta=0.2,
+            msg=f"video={v_dur:.2f}s audio={a_dur:.2f}s diff={abs(v_dur-a_dur):.2f}s "
+                f"— streams must end together (tpad pad missing?)",
+        )
+        # Both should be approximately the audio duration (4s).
+        self.assertAlmostEqual(v_dur, 4.0, delta=0.2)
+
+    def test_no_pad_when_visuals_already_longer_than_audio(self):
+        # Sentinel: when visuals already cover (or exceed) the audio,
+        # tpad with stop_duration=0 is a no-op and -t still trims to
+        # audio duration.
+        _make_mp4(self.visuals_path, duration_s=4.0)
+        _make_wav(self.audio_path, duration_s=2.0)
+        _make_wav(self.music_path, duration_s=2.0)
+
+        out_path = self.tmp / "out_no_pad.mp4"
+        BeatSlideshowMux().mux(
+            visuals=VisualTrack(video_path=self.visuals_path, duration_s=4.0),
+            audio=AudioResult(narration_path=self.audio_path, duration_s=2.0),
+            overlays=[],
+            music=self.music_path,
+            spec=self.spec,
+            out_path=out_path,
+        )
+        v_dur = float(_ffprobe(out_path, "-select_streams", "v:0",
+                               "-show_entries", "stream=duration",
+                               "-of", "default=nokey=1:noprint_wrappers=1"))
+        a_dur = float(_ffprobe(out_path, "-select_streams", "a:0",
+                               "-show_entries", "stream=duration",
+                               "-of", "default=nokey=1:noprint_wrappers=1"))
+        # Both bounded by audio duration (~2s).
+        self.assertAlmostEqual(v_dur, 2.0, delta=0.2)
+        self.assertAlmostEqual(a_dur, 2.0, delta=0.2)
+
+
 if __name__ == "__main__":
     unittest.main()

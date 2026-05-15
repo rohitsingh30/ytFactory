@@ -1225,6 +1225,254 @@ def _capture_renderer_stdout(
     return _ctx()
 
 
+def _backfill_yaml_image_keys(
+    current_extra: dict | None,
+    channel_yaml_path: Path,
+) -> dict:
+    """Copy YAML image_* keys into ``spec.extra`` if not already present.
+
+    ``build_spec()`` only routes ``proposal.overrides`` into
+    ``spec.extra``; it does not propagate channel-YAML keys like
+    ``image_style_prefix`` / ``image_provider`` / ``image_seed`` /
+    ``image_steps``. The legacy ``shorts.py`` orchestrator read those
+    directly off ``cfg`` (the loaded channel YAML); the new engine path
+    reads them off ``spec.extra``. Without this hop the cloud worker
+    silently runs every render with empty style and falls back to the
+    default image provider regardless of YAML.
+
+    Override priority preserved: any existing key in ``current_extra``
+    (typically a per-render proposal override) wins. We only fill in
+    the gaps. Returns the updated dict (mutates in place when
+    ``current_extra`` is provided; returns a fresh dict otherwise).
+
+    Best-effort: a corrupted/unreadable YAML logs a warning and the
+    return is whatever ``current_extra`` already had — the engine
+    still runs (with possibly degraded style), nothing crashes.
+    """
+    out: dict = dict(current_extra) if current_extra else {}
+    try:
+        import yaml  # noqa: PLC0415
+        cfg = yaml.safe_load(channel_yaml_path.read_text()) or {}
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.warning(
+            "image-key backfill: channel YAML unreadable (%s) — render proceeds without YAML defaults",
+            exc,
+        )
+        return out
+    # The engine's ai_beat_slideshow + image dispatcher read these off
+    # spec.extra. Keep the list in sync with their .get() call sites.
+    for key in (
+        "image_provider", "image_style_prefix",
+        "image_seed", "image_steps",
+        "force_positive",
+    ):
+        if key in cfg and out.get(key) in (None, ""):
+            out[key] = cfg[key]
+    return out
+
+
+def _author_prompts_for_engine(
+    *,
+    script_dict: dict,
+    channel_yaml_path: Path,
+    work_dir: Path,
+    style_prefix: str,
+    progress_cb: Callable[[str, str], None] | None = None,
+) -> dict:
+    """Author ``prompts.json`` + collect refiner context for the engine.
+
+    Returns a dict suitable for ``spec.extra.update(...)`` with the
+    four keys the ``ai_beat_slideshow`` plugin reads:
+
+      * ``prompts_path`` — absolute path to the freshly-written
+        ``prompts.json``
+      * ``era_anchor_prefix`` — costume/period tokens from the era
+        taxonomy, or ``None`` if the script has no recognised era
+      * ``character_description`` — narrator description from
+        ``cast.json``, or the channel YAML's ``character_description``
+        fallback, or ``None``
+      * ``mood`` — script ``metadata.mood`` if present, else ``None``
+
+    Every failure mode is best-effort: any exception inside this
+    function logs a warning and returns ``{}`` so the engine still
+    runs with bare ``Segment.text`` prompts (zero-regression contract).
+    Per-stage failures (e.g. cast.json missing) still produce a
+    valid prompts.json — only the corresponding spec.extra key is
+    omitted.
+
+    Why this lives in the cloud worker not in the engine
+    -----------------------------------------------------
+
+    The engines are channel/kind-agnostic and operate on a fully-built
+    ``RenderSpec``. The cloud worker, by contrast, has the full
+    side-channel context (cast.json on disk, era_taxonomy YAML, channel
+    YAML) it needs to prep the per-render artifacts. Pulling this into
+    the engine would re-introduce the legacy ``shorts.py`` orchestrator
+    we just deleted.
+
+    The refiner pre-step inside :func:`pipeline.llm.prompts.author_beat_prompts`
+    is independently gated by ``YTFACTORY_PROMPT_REFINER=1``. This
+    function unconditionally authors prompts.json (legacy parity);
+    the refiner only runs if the env flag is on.
+    """
+    out: dict = {}
+    try:
+        from pipeline import beats as _beats_mod  # noqa: PLC0415
+        from pipeline.llm import cast as _cast_mod, prompts as _prompts_mod  # noqa: PLC0415
+        from pipeline.paths import RenderPaths  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001 — best-effort  # coverage: import-failure path requires breaking pipeline imports system-wide
+        logger.warning(  # coverage: import-failure path requires breaking pipeline imports system-wide
+            "prompts authoring: import failed (%s) — engine will use bare Segment.text",  # coverage: import-failure path requires breaking pipeline imports system-wide
+            exc,
+        )
+        return {}  # coverage: import-failure path requires breaking pipeline imports system-wide
+
+    slug = script_dict.get("slug") or "unknown"
+    metadata = script_dict.get("metadata") or {}
+
+    # ----- Narration → Beat list ------------------------------------------
+    # Engine needs beats with `text` for the LLM prompt author. The cloud
+    # rewrite stage emits one of three shapes (matches the splitter logic
+    # in pipeline/render/short_engine.py::_build_preliminary_timeline that
+    # the visualize plugin already accepts):
+    #   1. shots[] with narration_line per shot (+ optional closer) — the
+    #      /make-* skill output shape (sportsrecapped, history, cosmos).
+    #   2. beats[] with text per beat — pre-segmented by an upstream pass.
+    #   3. plain narration string — what /make-script + the prorevenge
+    #      AITA-style channels produce. Sentence-split here.
+    #
+    # Pre-2026-05-15 P1b only handled shape 2 — the cloud worker logged
+    # "no beats in script — skipping" on every prorevenge render and the
+    # refiner was inert in production. Surfaced by the 215e411b canary.
+    raw_beats = script_dict.get("beats") or []
+    beat_list: list = []
+    if raw_beats:
+        for b in raw_beats:
+            text = (b.get("text") or "").strip()
+            if not text:
+                continue
+            # author_beat_prompts only reads .text / .start / .end — use a
+            # lightweight namespace rather than the full Beat dataclass so
+            # we don't need to fabricate Word-level timestamps here.
+            start = float(b.get("start") or 0.0)
+            end = float(b.get("end") or (start + 1.5))
+            beat_list.append(_beats_mod.Beat(text=text, start=start, end=end, words=[]))
+    else:
+        # Try shape 1 (shots) before falling back to shape 3 (narration).
+        lines: list[str] = []
+        for shot in script_dict.get("shots") or []:
+            line = (shot.get("narration_line") or shot.get("text") or "").strip()
+            if line:
+                lines.append(line)
+        closer = (script_dict.get("closer") or {}).get("narration_line")
+        if closer:
+            lines.append(closer.strip())
+        if not lines:
+            narration = (script_dict.get("narration") or "").strip()
+            if narration:
+                # Sentence boundary split — same regex short_engine uses.
+                lines = [
+                    s.strip() for s in re.split(r"(?<=[.!?])\s+", narration)
+                    if s.strip()
+                ]
+        # Synthetic 1.5s spacing — author_beat_prompts only uses
+        # beat.duration cosmetically (printed in the LLM user message).
+        # The real timeline comes from asr_beats post-TTS.
+        for i, line in enumerate(lines):
+            beat_list.append(
+                _beats_mod.Beat(
+                    text=line, start=i * 1.5, end=(i + 1) * 1.5, words=[],
+                )
+            )
+    if not beat_list:
+        logger.info("prompts authoring: no beats and no narration in script — skipping")
+        return {}
+
+    # ----- Cast / character description ----------------------------------
+    character_description: str | None = None
+    cast_supporting: list | None = None
+    default_emotion: str | None = None
+    try:
+        rp = RenderPaths.from_channel_yaml(channel_yaml_path)
+        cast_path = rp.cast_for(slug)
+        cast = _cast_mod.load_cast(cast_path)
+        if cast:
+            narrator = cast.get("narrator") or {}
+            character_description = (narrator.get("description") or "").strip() or None
+            default_emotion = (narrator.get("default_emotion") or "").strip() or None
+            cast_supporting = cast.get("supporting") or None
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.warning("prompts authoring: cast load failed (%s)", exc)
+    # Channel YAML fallback for older channels that haven't migrated to
+    # per-render cast.json yet (rhymetimejunction, some sportsrecapped).
+    if not character_description:
+        try:
+            import yaml  # noqa: PLC0415
+            channel_cfg = yaml.safe_load(channel_yaml_path.read_text()) or {}
+            character_description = (
+                channel_cfg.get("character_description") or ""
+            ).strip() or None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("prompts authoring: channel YAML fallback failed (%s)", exc)
+
+    # ----- Era anchor ------------------------------------------------------
+    era_anchor_prefix: str | None = None
+    era_key = metadata.get("era_anchor") or metadata.get("era_lock")
+    if era_key:
+        try:
+            from pipeline import era_anchor as _era_mod  # noqa: PLC0415
+            era_anchor_prefix = _era_mod.era_prefix_for(era_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("prompts authoring: era resolution failed (%s)", exc)
+
+    # ----- Mood ------------------------------------------------------------
+    mood = (metadata.get("mood") or default_emotion or "").strip() or None
+
+    # ----- Author --------------------------------------------------------
+    prompts_path = work_dir / "prompts.json"
+    if progress_cb:
+        # Tagged "tts" because that's the FIRST substage pill on the
+        # dashboard and the cascade-progress wiring requires the initial
+        # placeholder to attach to the earliest substage (see
+        # _compose_progress in this file). The message is explicit so
+        # operators reading logs / dashboard see it's prompt-authoring,
+        # not actual TTS that's running.
+        progress_cb("tts", "[prompts] LLM authoring per-beat image prompts")
+    try:
+        _prompts_mod.author_beat_prompts(
+            narration=script_dict.get("narration", "") or "",
+            beats=beat_list,
+            source_story=script_dict.get("source_story") or script_dict.get("narration") or "",
+            cast_narrator_desc=character_description,
+            cast_default_emotion=default_emotion,
+            style_prefix=style_prefix or "",
+            opening_directives=metadata.get("opening_directives"),
+            out_path=prompts_path,
+            narrator_visual_mode=metadata.get("narrator_visual_mode", "on_screen"),
+            supporting=cast_supporting,
+            ranks=metadata.get("ranks"),
+            era_anchor_prefix=era_anchor_prefix,
+            mood=mood,
+            channel_key=script_dict.get("channel") or metadata.get("channel"),
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.warning(
+            "prompts authoring: author_beat_prompts failed (%s) — "
+            "engine will use bare Segment.text",
+            exc,
+        )
+        return {}
+
+    out["prompts_path"] = str(prompts_path)
+    if era_anchor_prefix:
+        out["era_anchor_prefix"] = era_anchor_prefix
+    if character_description:
+        out["character_description"] = character_description
+    if mood:
+        out["mood"] = mood
+    return out
+
+
 def _run_renderer_via_engines(
     job: dict,
     work_dir: Path,
@@ -1289,6 +1537,44 @@ def _run_renderer_via_engines(
 
     # Read the script JSON the rewrite stage already wrote.
     script_dict = json.loads(Path(script_path).read_text())
+
+    # Author per-beat image prompts → ``<work_dir>/prompts.json`` and
+    # merge the refiner-context kwargs into ``spec.extra`` so the
+    # ``ai_beat_slideshow`` plugin can consume them. Best-effort — any
+    # failure inside this helper returns an empty dict so the engine
+    # falls back to bare ``Segment.text`` (zero-regression). The refiner
+    # pre-step inside ``author_beat_prompts`` is independently gated by
+    # ``YTFACTORY_PROMPT_REFINER=1`` — when off, this still writes
+    # legacy-shape prompts.json so the engine gets the structured
+    # ``{key_visual, scene}`` it needs for proper image-gen prompts.
+    #
+    # 2026-05-14 (P1b rubber-duck #1): ``build_spec()`` only puts
+    # ``proposal.overrides`` into ``spec.extra``; channel-YAML keys like
+    # ``image_style_prefix`` / ``image_provider`` / ``image_seed`` /
+    # ``image_steps`` are NOT propagated by default. Without this hop the
+    # cloud worker passes ``style_prefix=""`` to ``author_beat_prompts``
+    # and the visualize plugin renders without channel style — silent
+    # quality loss vs the legacy renderer. Hop the channel YAML once and
+    # backfill any image_* knobs ``build_spec`` didn't already populate.
+    spec.extra = _backfill_yaml_image_keys(spec.extra, Path(channel_yaml))
+
+    style_prefix = spec.extra.get("image_style_prefix", "") if spec.extra else ""
+    extra_updates = _author_prompts_for_engine(
+        script_dict=script_dict,
+        channel_yaml_path=Path(channel_yaml),
+        work_dir=work_dir,
+        style_prefix=style_prefix,
+        progress_cb=progress_cb,
+    )
+    if extra_updates:
+        # ``spec.extra`` is a dict on RenderSpec; safe to mutate.
+        if spec.extra is None:
+            spec.extra = {}  # coverage: defensive guard; backfill always returns a dict
+        spec.extra.update(extra_updates)
+        logger.info(
+            "renderer (engines): prompts.json authored, extra keys merged: %s",
+            sorted(extra_updates.keys()),
+        )
 
     # Resolve where the engine should write the mp4. Mirror the legacy
     # path so the worker's downstream upload + thumb steps find it.

@@ -34,23 +34,32 @@
 
 voices:
   hindi-female-storyteller:
-    path: pipeline/voice_refs/bench/hindutavaanimated__shorts__hindi_female_storyteller/ref.wav
-    transcript: "आ भोपाल सरकार से येही चाहते है की देश वासीयों का ध्यान रहे जिनसे उनका भविष्य उजवल हो"
+    # 2026-05-15 — re-pointed to hindi-female-storyteller-calm. The
+    # original ``bench/hindutavaanimated__shorts__hindi_female_storyteller/``
+    # WAV was deleted by the 2026-05-07 3-ref rotation but the catalog
+    # path was never updated. Cloud renders failed with::
+    #
+    #   voice 'hindi-female-storyteller' catalog entry points at missing
+    #   WAV ... — skipping
+    #   cloudrun_indicf5 provider requires `ref_audio_text`
+    #
+    # Aliasing here keeps any caller that still uses the legacy name
+    # (channel YAMLs, /make-* skills, manual CLI invocations) working
+    # while the underlying ref + transcript come from the calm variant
+    # of the new 3-ref rotation. See docs/research/hindi_voice_refs_2026_05_07.md.
+    path: pipeline/voice_refs/hindi-female-storyteller-calm/ref.wav
+    transcript: "प्यारी पद्मा, कल तुम्हारा खत मिला, आज जवाब लिख रही हूँ।"
     language: hi
     register: storyteller
     duration_s: 8.0
     use_cases: [hindutavaanimated/shorts, hindutavaanimated/kathaa]
     notes: |
-      Sourced from AI4Bharat IndicVoices-R (CC-BY-4.0); 65+dB SNR,
-      mid-pitch 200-220 Hz, 30-45 age band. Production winner in the
-      2026-05-07 Hindi voice matrix bench. Default voice for the
-      /make-hindutava-short skill.
-
-      LEGACY: produces flat synthesis on dramatic mythology content
-      because the IndicVoices-R "announcer-quality" filter selects
-      flat-F0 reading-task speakers. Replaced 2026-05-07 by the
+      LEGACY ALIAS (2026-05-15) — originally sourced from AI4Bharat
+      IndicVoices-R (CC-BY-4.0); 65+dB SNR, mid-pitch 200-220 Hz,
+      30-45 age band. Replaced 2026-05-07 by the
       hindi-female-storyteller-{dramatic,calm,devotional} 3-ref
-      rotation; kept here for compat. See
+      rotation. Kept here as a back-compat alias to the calm variant
+      so legacy callers don't 404. See
       docs/research/hindi_voice_refs_2026_05_07.md.
 
   hindi-female-madhavi-charudatta:

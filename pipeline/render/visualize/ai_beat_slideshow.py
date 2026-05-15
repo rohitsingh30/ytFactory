@@ -9,10 +9,34 @@ existing per-beat image-gen + Ken Burns chain. The bigbang PR moves
 the body fully into this module so shorts.py can be deleted.
 
 Plugin selection: ``spec.visual_mode = AI_BEAT_SLIDESHOW``.
+
+Optional refined-prompt path (2026-05-14)
+-----------------------------------------
+
+When ``spec.extra["prompts_path"]`` points to a ``prompts.json`` file
+containing per-beat ``{key_visual, scene[, refined_visual,
+refined_scene, style_block, refined_version, refined_input_hash]}``
+records, this plugin assembles the final image-gen prompt via
+:func:`pipeline.images.images.build_full_prompt` rather than passing
+the raw ``Segment.text``.
+
+When the ``YTFACTORY_PROMPT_REFINER=1`` env flag is set AND the cached
+``refined_*`` fields pass freshness checks via
+:func:`pipeline.images.prompt_refiner.refined_fields_for_render`, the
+refined fields replace ``key_visual``/``scene``/``style_prefix`` in
+the assembled prompt. Otherwise the legacy assembly path runs (or, if
+no prompts.json is provided, the bare ``Segment.text`` path runs —
+preserving the existing engine-test contract).
+
+This is the kill switch: clearing the env variable disables the
+refiner immediately, no cache invalidation required. See
+``data/research/flux2_prompting_2026-05-14.md`` for the design rationale.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +49,78 @@ from pipeline.render.contracts import (
 from pipeline.render.shared.ffmpeg_helpers import probe_duration, run_ffmpeg
 
 _logger = logging.getLogger(__name__)
+
+
+def _load_prompts_json(path: str | Path | None) -> list[dict] | None:
+    """Load prompts.json if a path is given; tolerate any read/parse failure.
+
+    Pulled out so callers can be tested without hitting the filesystem;
+    also keeps the produce() body readable.
+    """
+    if not path:
+        return None
+    try:
+        raw = Path(path).read_text()
+    except OSError as exc:
+        _logger.info("ai_beat_slideshow: prompts.json read skipped (%s)", exc)
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _logger.info("ai_beat_slideshow: prompts.json parse skipped (%s)", exc)
+        return None
+    if not isinstance(data, list):
+        _logger.info(
+            "ai_beat_slideshow: prompts.json is %s, expected list — skipping",
+            type(data).__name__,
+        )
+        return None
+    return data
+
+
+def _resolve_prompt_for_beat(
+    *,
+    beat: dict[str, Any] | None,
+    fallback_text: str,
+    style_prefix: str,
+    character_description: str | None,
+    era_anchor_prefix: str | None,
+    mood: str | None,
+) -> str:
+    """Assemble the final image-gen prompt for one beat.
+
+    Priority order:
+
+    1. Beat dict present + refined gate passes → ``build_full_prompt``
+       with refined_visual/scene/style_block (the DALL-E 3 playbook
+       path; see ``pipeline/images/prompt_refiner.py``).
+    2. Beat dict present, refined gate fails → ``build_full_prompt``
+       with legacy ``key_visual + scene + style_prefix``.
+    3. No beat dict → bare ``fallback_text`` (engine-test legacy
+       contract; works for fixture renders that have no prompts.json).
+    """
+    if beat is None:
+        return fallback_text
+    from pipeline.images import images as _images  # noqa: PLC0415
+    from pipeline.images.prompt_refiner import refined_fields_for_render  # noqa: PLC0415
+
+    rv, rs, sb = refined_fields_for_render(
+        beat,
+        era_anchor_prefix=era_anchor_prefix,
+        character_description=character_description,
+        style=style_prefix,
+        mood=mood,
+    )
+    return _images.build_full_prompt(
+        style_prefix=style_prefix,
+        character_description=character_description,
+        key_visual=beat.get("key_visual", ""),
+        scene=beat.get("scene", "") or fallback_text,
+        era_anchor_prefix=era_anchor_prefix,
+        refined_visual=rv,
+        refined_scene=rs,
+        style_block=sb,
+    )
 
 
 class AiBeatSlideshow:
@@ -54,13 +150,47 @@ class AiBeatSlideshow:
         seed_base = int(spec.extra.get("image_seed", 42))
         steps = int(spec.extra.get("image_steps", 4))
 
+        # Optional refined-prompt context. All four kwargs are
+        # backward-compatible: callers that don't populate spec.extra
+        # get the legacy "bare Segment.text" path unchanged.
+        prompts_path = spec.extra.get("prompts_path")
+        custom_prompts = _load_prompts_json(prompts_path)
+        era_anchor_prefix = spec.extra.get("era_anchor_prefix")
+        character_description = spec.extra.get("character_description")
+        mood = spec.extra.get("mood")
+
         images: list[Path] = []
         for i, seg in enumerate(timeline):
             png_path = images_dir / f"beat_{i:03d}.png"
+            beat = (
+                custom_prompts[i]
+                if custom_prompts and i < len(custom_prompts)
+                else None
+            )
+            prompt = _resolve_prompt_for_beat(
+                beat=beat,
+                fallback_text=seg.text,
+                style_prefix=style_prefix,
+                character_description=character_description,
+                era_anchor_prefix=era_anchor_prefix,
+                mood=mood,
+            )
+            # When a beat dict is present, ``_resolve_prompt_for_beat``
+            # used ``build_full_prompt`` which already inlines the style
+            # tokens (legacy ``style_prefix`` OR refined ``style_block``).
+            # Pass ``style_prefix=""`` to ``generate`` so it doesn't
+            # append style a SECOND time at line ~698 of ``images.py``.
+            # When no beat dict, the bare ``Segment.text`` carries no
+            # style yet — pass the configured style so ``generate``
+            # appends it normally. Without this two-mode split the
+            # refiner's ``"Style: X. Mood: Y."`` block was getting a
+            # trailing copy of the legacy style_prefix (rubber-duck
+            # 2026-05-14 finding #2).
+            style_for_generate = "" if beat is not None else style_prefix
             try:
                 _generate_image(
-                    prompt=seg.text,
-                    style_prefix=style_prefix,
+                    prompt=prompt,
+                    style_prefix=style_for_generate,
                     seed=seed_base + i,
                     out_path=png_path,
                     width=spec.output_resolution[0],

@@ -56,21 +56,44 @@ class TtsChunked:
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         provider = spec.voice_provider or "cloudrun_chatterbox"
-        voice_id = spec.voice_id or ""
+        raw_voice_id = spec.voice_id or ""
+        voice_id, resolved_ref_text = self._resolve_voice_for_long_form(raw_voice_id)
         speed = self._effective_speed(spec)
         atempo = self._effective_atempo(spec)
 
+        # ref_audio_text resolution order: explicit spec.tts.ref_text wins
+        # (caller-provided is always intentional), then catalog sidecar
+        # (when a catalog name was used), else None.
+        explicit_ref = self._ref_audio_text(spec)
+        ref_audio_text = explicit_ref or resolved_ref_text
+
         # synth_long_narration writes narration.wav AND chunk_*.wav
         # files alongside, returns (narration_wav, list_of_chunks).
+        #
+        # Kwarg name guard (2026-05-15) — synth_long_narration's signature
+        # uses ``chunk_target_chars`` / ``join_silence_s`` / ``atempo``.
+        # Pre-fix this caller used ``target_chars`` / ``post_atempo`` →
+        # TypeError swallowed by the engine's outer except → every cloud
+        # long-form render failed with::
+        #
+        #     synth_long_narration() got an unexpected keyword argument 'target_chars'
+        #
+        # Same kwarg-drift class as the 2026-05-15 ``forced_lines=`` fix
+        # in ``asr_beats.py``. The Protocol-method test in
+        # tests/render/audio/test_tts_chunked_kwarg_contract.py pins the
+        # caller→callee binding with ``inspect.signature`` so future
+        # signature renames hard-fail at unit-test time, not at the
+        # cloud render boundary.
         narration_wav, chunks = synth_long_narration(
             text=narration_text,
             voice_id=voice_id,
             provider=provider,
             cache_dir=work_dir,
-            target_chars=spec.tts.chunk_target_chars,
+            chunk_target_chars=spec.tts.chunk_target_chars,
             join_silence_s=spec.tts.chunk_join_silence_s,
             speed=speed,
-            post_atempo=atempo,
+            atempo=atempo,
+            ref_audio_text=ref_audio_text,
         )
 
         # Voice fingerprint sidecar — bind the wav to the cfg that
@@ -127,6 +150,74 @@ class TtsChunked:
         if spec.tone and spec.tone in spec.tts.tone_overrides:
             return spec.tts.tone_overrides[spec.tone].get("atempo", spec.tts.post_atempo_default)
         return spec.tts.post_atempo_default
+
+    def _ref_audio_text(self, spec: Any) -> str | None:
+        """Return the spoken transcript of the ref WAV at ``voice_id``.
+
+        Required by ``synth_long_narration`` when provider is in
+        ``("f5_tts", "cloudrun_f5")`` — the F5 model needs the
+        reference audio's text to condition cloning. Pulled from
+        ``spec.tts.ref_text`` when present (the channel YAML's
+        ``long_form.tts_ref_text`` flows through build_spec into
+        the optional TtsConfig field). When the YAML doesn't declare
+        one, return ``None`` and let the underlying function raise
+        a clear RuntimeError if the provider actually needs it.
+        """
+        ref = getattr(spec.tts, "ref_text", None)
+        if ref:
+            return str(ref).strip() or None
+        return None
+
+    def _resolve_voice_for_long_form(self, voice_id: str) -> tuple[str, str | None]:
+        """Resolve ``voice_id`` to (on-disk WAV path, optional transcript).
+
+        Mirrors what :func:`pipeline.audio.synthesize` does for short-form
+        — ``synth_long_narration`` is the legacy long-form TTS shim that
+        opens ``voice_id`` directly as a file path (no dispatcher
+        indirection), so when the wizard sends a bare catalog name like
+        ``sarah`` the long-form path tries to read
+        ``/workspace/pipeline/sarah`` and dies with::
+
+            [Errno 2] No such file or directory: '/workspace/pipeline/sarah'
+
+        Surfaced by job 2585f6ab on 2026-05-15 (CosmosDecoded
+        "How We Knew Universe Expanding" long-form). The short-form
+        engine had this fix wired into ``pipeline.audio.synthesize``
+        on 2026-05-15 (job 215e411b) — same resolver, different
+        call site. This helper extends it to long-form's tts_chunked
+        plugin so EVERY TTS path resolves bare names + catalog names
+        identically.
+
+        Returns a tuple ``(resolved_voice_path, catalog_transcript)``
+        — second element is the catalog's ``ref.txt`` content for
+        the picked voice (so the caller can chain it into the F5
+        ``ref_audio_text`` argument without a second catalog roundtrip).
+        ``None`` for the transcript when no catalog hit (e.g. the
+        caller passed a path-style ``voice_id`` directly).
+
+        Failure mode: any exception in the resolver path is caught
+        and returns the original ``voice_id`` unchanged — the
+        downstream synth call will then raise its own (more specific)
+        error. Best-effort, never blocks the render.
+        """
+        if not voice_id:
+            return voice_id, None
+        try:
+            from pipeline.voice.voice_catalog import resolve_voice as _resolve  # noqa: PLC0415
+            from pathlib import Path as _Path  # noqa: PLC0415
+            project_root = _Path(__file__).resolve().parents[3]
+            wav_path, catalog_transcript = _resolve(voice_id, project_root)
+            if wav_path is not None:
+                return str(wav_path), catalog_transcript
+            return voice_id, catalog_transcript
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            import logging as _logging  # noqa: PLC0415
+            _logging.getLogger(__name__).warning(
+                "long-form voice resolution failed for %r (%s) — "
+                "synth_long_narration will see the unresolved value",
+                voice_id, exc,
+            )
+            return voice_id, None
 
 
 register_plugin("audio", "tts_chunked", TtsChunked())

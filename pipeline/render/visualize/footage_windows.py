@@ -25,6 +25,7 @@ from pipeline.render.contracts import (
     register_plugin,
 )
 from pipeline.render.shared.ffmpeg_helpers import probe_duration, run_ffmpeg
+from pipeline.render.visualize._fallback import _fallback_to_longform_panels
 
 _logger = logging.getLogger(__name__)
 
@@ -82,21 +83,26 @@ class FootageWindows:
     def _fallback_solid_color(
         self, spec: Any, timeline: Timeline, work_dir: Path,
     ) -> VisualTrack:
-        out_path = work_dir / "footage_windows_fallback.mp4"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        duration_s = timeline[-1].end_s if timeline else 1.0
-        w, h = spec.output_resolution
-        run_ffmpeg([
-            "-f", "lavfi", "-t", f"{duration_s:.3f}",
-            "-i", f"color=c=0x0a1626:s={w}x{h}:r={spec.output_fps}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            str(out_path),
-        ])
-        return VisualTrack(
-            video_path=out_path,
-            duration_s=probe_duration(out_path),
-            extras={"source": "footage_windows_fallback"},
+        """Fall back to AI panel slideshow when shotlist is missing.
+
+        Pre-2026-05-15 this returned a solid-color stand-in
+        (``ffmpeg color=c=0x0a1626``) which produced 25 minutes of
+        deep navy on every cloud long-form render of historyrecapped
+        / kathaa channels — same root cause as archival_shotlist's
+        fallback (no shotlist authored by the wizard pipeline).
+
+        Surfaced by job 0ffe6dcd (HistoryRecapped Cuban Missile Crisis
+        long-form) on 2026-05-15. New behaviour matches archival_shotlist:
+        dispatch to ``longform_panels`` (AI panel slideshow) so the
+        viewer sees something. See
+        ``pipeline/render/visualize/_fallback.py`` for the shared helper
+        + recursion guard.
+        """
+        return _fallback_to_longform_panels(
+            spec, timeline, work_dir,
+            sentinel_kwarg="_footage_windows_already_falling_back",
+            color="0x0a1626",
+            label="footage_windows_fallback",
         )
 
 

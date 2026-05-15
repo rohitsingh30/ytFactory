@@ -86,12 +86,36 @@ def resolve_voice(
 ) -> tuple[Path | None, str]:
     """Resolve ``tts_voice`` (name or path) to (absolute path, transcript).
 
-    - Empty string → (None, "") — caller should treat as no-ref-WAV.
-    - Path-style (contains "/" or ends ".wav"): returned as-is, plus
-      a sibling ``ref.txt`` / ``<basename>.txt`` transcript if found.
-    - Name-style: looked up in the catalog.
+    Resolution order:
 
-    Raises ValueError if a name-style value is not in the catalog.
+    1. Empty string → ``(None, "")`` — caller treats as no-ref-WAV (the
+       description-driven providers like indicparler accept this).
+    2. Path-style (contains "/" or ends ".wav"): returned as-is, plus a
+       sibling ``<basename>.txt`` / ``ref.txt`` transcript if found.
+    3. Catalog name (in ``pipeline/voice_refs/catalog.yaml``): full
+       VoiceEntry — most reliable for tested production voices.
+    4. **Bare-name fallback** (added 2026-05-15): the value is treated
+       as a voice id and we probe two on-disk locations under
+       ``pipeline/voice_refs/``:
+
+         - ``<name>.wav``         (legacy single-file layout — sarah,
+                                   michael, theo, sports_male_intense)
+         - ``<name>/ref.wav``     (newer per-voice-folder layout)
+
+       If found, returns the resolved WAV + the matching transcript
+       sidecar (``<name>.txt`` next to the wav, or ``<name>/ref.txt``
+       in the folder layout).
+
+    5. Nothing matched → raises ``ValueError`` listing the catalog
+       entries AND the on-disk voices we discovered, so the operator
+       can see exactly which names are valid.
+
+    The bare-name fallback unblocks the wizard form which sends voice
+    ids like ``"sarah"`` (the basename only — discovered via filesystem
+    listing of ``voice_refs/*.wav``). Pre-2026-05-15, the dispatcher
+    never called this function so the bare name leaked through to
+    ``Path("sarah").read_bytes()`` → FileNotFoundError on every prorevenge
+    render. Surfaced by job 215e411b canary.
     """
     if not name_or_path:
         return None, ""
@@ -109,17 +133,41 @@ def resolve_voice(
                 transcript = c.read_text().strip()
                 break
         return wav.resolve(), transcript
-    # Name-style — catalog lookup.
+    # Name-style — catalog lookup first.
     catalog = _load_catalog(str(project_root))
-    if name_or_path not in catalog:
-        available = ", ".join(sorted(catalog)) or "(empty catalog)"
-        raise ValueError(
-            f"voice {name_or_path!r} not in catalog "
-            f"({project_root / 'pipeline/voice_refs/catalog.yaml'}). "
-            f"Available: {available}"
-        )
-    entry = catalog[name_or_path]
-    return entry.path, entry.transcript
+    if name_or_path in catalog:
+        entry = catalog[name_or_path]
+        return entry.path, entry.transcript
+    # Bare-name fallback: probe voice_refs/<name>.wav and
+    # voice_refs/<name>/ref.wav on disk.
+    voice_refs_dir = project_root / "pipeline" / "voice_refs"
+    flat_wav = voice_refs_dir / f"{name_or_path}.wav"
+    nested_wav = voice_refs_dir / name_or_path / "ref.wav"
+    for wav, tx_candidates in (
+        (flat_wav, [flat_wav.with_suffix(".txt")]),
+        (nested_wav, [nested_wav.with_suffix(".txt"), nested_wav.parent / "ref.txt"]),
+    ):
+        if wav.exists():
+            transcript = ""
+            for tx in tx_candidates:
+                if tx.exists():
+                    transcript = tx.read_text().strip()
+                    break
+            return wav.resolve(), transcript
+    # Nothing matched — give the operator a useful error message.
+    catalog_names = ", ".join(sorted(catalog)) or "(empty catalog)"
+    on_disk_flat = sorted(p.stem for p in voice_refs_dir.glob("*.wav"))
+    on_disk_nested = sorted(
+        p.parent.name for p in voice_refs_dir.glob("*/ref.wav")
+    )
+    on_disk = ", ".join(on_disk_flat + on_disk_nested) or "(none)"
+    raise ValueError(
+        f"voice {name_or_path!r} not found. "
+        f"Catalog entries: {catalog_names}. "
+        f"On-disk voices (no catalog entry): {on_disk}. "
+        f"Either add it to {voice_refs_dir / 'catalog.yaml'} or "
+        f"drop a wav at {voice_refs_dir}/{name_or_path}.wav."
+    )
 
 
 def list_voices(project_root: Path | str) -> list[VoiceEntry]:

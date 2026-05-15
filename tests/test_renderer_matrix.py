@@ -271,3 +271,62 @@ def test_orchestrator_accepts_long_form_dispatch() -> None:
         render_long_form(
             spec=bad_spec, proposal={}, work_dir=Path("/tmp"), job_id="x",
         )
+
+
+# 2026-05-15 — short-form voice-override fallback regression. Pre-fix,
+# a wizard ``voice="ref"`` (or any unresolvable bare id) on a cloud-TTS
+# channel reached the synth dispatcher unchanged because build_spec
+# never ran the apply_handlers chain that long-form already used.
+# Result: cloudrun_indicf5 raised ``requires ref_audio_text`` and the
+# entire render failed. Now build_spec runs apply_handlers, the bad
+# voice gets dropped into ``cfg["_dropped_inputs"]``, and spec.voice_id
+# falls back to the channel YAML's tts_voice.
+def test_short_form_unresolvable_voice_override_falls_back_to_channel_default() -> None:
+    """Wizard sends ``voice='ref'`` (the bare-stem the schema produced
+    from a stale path-style YAML default) → apply_handler drops it →
+    spec.voice_id reads cfg.tts_voice (the channel default the YAML
+    intends).
+
+    Surfaced by job 12275f0f (HindutavaAnimated Krishna leela Short).
+    Pin the fallback in both directions:
+
+    1. ``voice_id`` ends up as the channel YAML's resolved value.
+    2. ``cfg["_dropped_inputs"]`` carries the rejected override (the
+       worker can surface it to Firestore as a job-level warning).
+    """
+    spec = build_spec(
+        {
+            "channel": "hindutavaanimated",
+            "format": "krishna_leela",
+            "channel_overrides": {"voice": "ref"},
+            "length_s": 60,
+        },
+        channel_yaml_path=_channel_yaml("hindutavaanimated"),
+        variant_yaml_path=None,
+    )
+    # voice_id MUST NOT be the dropped 'ref' value.
+    assert spec.voice_id != "ref"
+    # voice_id MUST be the channel YAML's tts_voice (or its resolved
+    # path equivalent — apply handler may rewrite a bare id to a path).
+    assert "hindi-female-storyteller-calm" in str(spec.voice_id)
+
+
+def test_short_form_resolvable_voice_override_wins_over_channel_default() -> None:
+    """When the wizard sends a voice that DOES exist on disk, the
+    override should still win over the channel default — the fallback
+    only kicks in when the value can't be resolved. Sentinel against
+    over-correction."""
+    spec = build_spec(
+        {
+            "channel": "mystoriesanimated",
+            "format": "aita_animated",
+            "channel_overrides": {"voice": "sarah"},  # exists at pipeline/voice_refs/sarah.wav
+            "length_s": 55,
+        },
+        channel_yaml_path=_channel_yaml("mystoriesanimated"),
+        variant_yaml_path=_variant_yaml("mystoriesanimated", "aita_animated"),
+    )
+    # apply_handler rewrites bare 'sarah' to the resolved path; spec
+    # picks up the resolved value (NOT the channel default).
+    assert "sarah" in str(spec.voice_id)
+    assert spec.voice_id != ""

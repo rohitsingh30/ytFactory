@@ -853,6 +853,32 @@ def build_spec(
     # Form overrides — flat dict on the proposal.
     overrides = dict(proposal.get("channel_overrides") or {})
 
+    # Apply registered handlers (notably ``apply_voice_with_cloud_carveout``)
+    # so form overrides MUTATE cfg through the same code path the
+    # long-form `long_form_overlay_from_spec` uses. Pre-2026-05-15 this
+    # apply step was wired ONLY into the long-form overlay path; the
+    # short-form spec build silently bypassed it. Surfaced by job
+    # 12275f0f (HindutavaAnimated Krishna leela) where the wizard sent
+    # ``voice="ref"`` (the bare-stem of the channel YAML's old bench
+    # path) — the apply_handler would have detected the unresolvable
+    # bare id on a cloud channel and dropped it, but never ran. So
+    # ``overrides["voice"]="ref"`` reached ``synthesize`` and IndicF5
+    # raised ``requires ref_audio_text``.
+    #
+    # Wiring: apply_overrides runs ON `cfg` (not on overrides), so
+    # invalid values get swallowed into ``cfg["_dropped_inputs"]`` and
+    # the channel YAML's ``tts_voice`` survives. The voice_id
+    # resolution below now reads from cfg first when overrides looks
+    # invalid (see _resolve_short_form_voice_id).
+    try:
+        from pipeline.render.input_registry import apply_overrides as _apply_overrides  # noqa: PLC0415
+        _apply_overrides(cfg, overrides, channel_key=channel)
+    except Exception as exc:  # noqa: BLE001  # coverage: defensive — apply_overrides itself never raises (best-effort), this branch only fires on import-time error which can't happen in unit tests
+        notes.append(
+            f"input_registry.apply_overrides failed: {exc} — "
+            f"proceeding with raw overrides"
+        )
+
     # ----- length / kind inference ----------------------------------------
     length_s = _coerce_int(proposal.get("length_s")) \
         or _coerce_int(overrides.get("length_s"))
@@ -955,7 +981,17 @@ def build_spec(
         cfg_voice_id = cfg.get("tts_voice")
 
     voice_provider = overrides.get("voice_provider") or cfg_voice_provider
-    voice_id = overrides.get("voice") or cfg_voice_id
+    # Voice fallback: when ``apply_voice_with_cloud_carveout`` dropped
+    # the override (unresolvable bare id on a cloud channel — see
+    # input_registry._apply_voice), the dropped value is recorded in
+    # ``cfg["_dropped_inputs"]``. Don't replay the bad override into
+    # spec.voice_id — fall back to the channel YAML's tts_voice, which
+    # the apply handler intentionally preserved.
+    dropped = {d.get("field") for d in (cfg.get("_dropped_inputs") or [])}
+    if "voice" in dropped:
+        voice_id = cfg_voice_id  # cfg's tts_voice survives the drop
+    else:
+        voice_id = overrides.get("voice") or cfg_voice_id
 
     # Music
     music_bed = overrides.get("music_bed") \

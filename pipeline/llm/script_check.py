@@ -306,6 +306,37 @@ def check_script_text(
     # channels that opt into strict gating via closer_format.
     soft_sev = "error" if is_aita_class else "warning"
 
+    # Language gate (2026-05-15) — every CTA / HOOK / WEDGE pattern in
+    # this module is English-only regex. Forcing it on Hindi / Arabic /
+    # Spanish / Tamil / etc. channels rejects every script after 3
+    # rewrite retries. Surfaced by job cdd90432 (HindutavaAnimated
+    # Krishna leela Short, Hindi narration) which the LLM authored
+    # competently in Devanagari — the validator failed it for "missing
+    # CTA" because none of the English pile-on patterns can possibly
+    # match Devanagari script.
+    #
+    # Skip the four English-only checks (CTA, hook-question, hook-claim,
+    # wedge-number) when the channel's tts_language is set and isn't
+    # English. The structural English checks above (length, empty) still
+    # apply — those work regardless of locale.
+    tts_lang = (channel_cfg or {}).get("tts_language") or "en"
+    is_english = str(tts_lang).strip().lower() in ("", "en", "en-us", "en-gb")
+    if not is_english:
+        # Issue a single low-priority info entry so operators can see
+        # the gate fired (helps debug "why does my Hindi channel never
+        # surface CTA warnings?" later). Nothing escalates from here.
+        issues.append(
+            ScriptIssue(
+                "warning",
+                "non_english_cta_skipped",
+                f"channel tts_language={tts_lang!r} — skipping English-only "
+                f"CTA / hook / wedge checks. Per-language regex sets are "
+                f"the next pass; for now the LLM-authored Hindi/non-EN "
+                f"narration is trusted to land its own close.",
+            )
+        )
+        return issues
+
     # #4 Closing CTA — scan the last 2 sentences combined, not just
     # the literal last sentence. Natural human Shorts narrators end
     # with the question + an invitation ("AITA? Tell me in the

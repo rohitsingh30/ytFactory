@@ -1275,6 +1275,7 @@ class EngineDispatchProgressTests(unittest.TestCase):
                     value = "short"
                 kind = _Kind()
                 channel = "testchannel"
+                extra: dict | None = None
 
             with mock.patch.object(
                 self.ep, "_run_renderer_via_engines",
@@ -1338,6 +1339,7 @@ class EngineDispatchProgressTests(unittest.TestCase):
                     value = "short"
                 kind = _Kind()
                 channel = "testchannel"
+                extra: dict | None = None
 
             def _stub_render(**kw):
                 # Snapshot sys.stdout at the moment the engine is invoked.
@@ -1393,6 +1395,7 @@ class EngineDispatchProgressTests(unittest.TestCase):
                     value = "short"
                 kind = _Kind()
                 channel = "testchannel"
+                extra: dict | None = None
 
             def _stub_render(**kw):
                 observed["stdout_during_call"] = sys.stdout
