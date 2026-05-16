@@ -78,7 +78,20 @@ def _pipe():
     The Dockerfile copies the model into the image at build time
     (`/opt/model/Z-Image-Turbo`), so this reads from the image's
     layered filesystem on the host's local SSD — no GCS Fuse round
-    trip, ~30 s cold load instead of 1-2 hours."""
+    trip, ~30 s cold load instead of 1-2 hours.
+
+    VRAM strategy (2026-05-16 fix): L4 has 22 GiB; ZImagePipeline at
+    bf16 needs transformer (~12 GiB) + text encoder (~8 GiB) + VAE
+    (~1 GiB) ≈ 21 GiB resident if everything's on cuda, leaving
+    < 1 GiB for activations → OOM on the 2nd /generate call. We
+    enable_model_cpu_offload so only the active stage occupies VRAM
+    (text encoder runs first, swaps out, then transformer for
+    sampling, then VAE for decode). Costs ~2-3 s per call from the
+    CPU↔GPU transfer but guarantees ~10 GiB activation headroom
+    for any prompt/size combo within the 22 GiB envelope.
+
+    Also enable VAE slicing + attention slicing — both reduce peak
+    activation memory at no perceptible quality cost."""
     global _PIPE
     if _PIPE is None:
         import torch
@@ -90,14 +103,25 @@ def _pipe():
                 f"built with the model baked in, or WEIGHTS_DIR env is wrong"
             )
         logger.info("loading ZImagePipeline from %s …", WEIGHTS_DIR)
+        # Don't .to("cuda") here — enable_model_cpu_offload manages
+        # device placement itself and conflicts with a manual .to.
         _PIPE = ZImagePipeline.from_pretrained(
             str(WEIGHTS_DIR),
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             local_files_only=True,
-        ).to("cuda")
+        )
+        _PIPE.enable_model_cpu_offload()
+        try:
+            _PIPE.enable_vae_slicing()
+        except Exception:
+            pass
+        try:
+            _PIPE.enable_attention_slicing()
+        except Exception:
+            pass
         logger.info(
-            "ZImagePipeline loaded in %.2fs (boot+%.2fs)",
+            "ZImagePipeline loaded in %.2fs (boot+%.2fs) with model_cpu_offload",
             time.monotonic() - t0,
             time.monotonic() - _BOOT_T0,
         )
@@ -172,6 +196,7 @@ def generate(req: GenerateIn) -> JSONResponse:
     cold = _PIPE is None
     pipe = _pipe()
     import torch
+    import gc
     generator = (
         torch.Generator(device="cuda").manual_seed(req.seed)
         if req.seed is not None else None
@@ -179,19 +204,34 @@ def generate(req: GenerateIn) -> JSONResponse:
 
     t0 = time.monotonic()
     try:
-        result = pipe(
-            prompt=req.prompt,
-            height=h, width=w,
-            guidance_scale=req.guidance_scale,
-            num_inference_steps=req.steps,
-            generator=generator,
-        )
+        with torch.inference_mode():
+            result = pipe(
+                prompt=req.prompt,
+                height=h, width=w,
+                guidance_scale=req.guidance_scale,
+                num_inference_steps=req.steps,
+                generator=generator,
+            )
     except Exception as e:
         logger.exception("z-image-turbo generate failed")
+        # If OOM, free what we can so the NEXT call has a chance.
+        try:
+            torch.cuda.empty_cache()
+            gc.collect()
+        except Exception:
+            pass
         raise HTTPException(500, f"generate error: {e}")
     wall_s = time.monotonic() - t0
 
     image = result.images[0]
+    # Free intermediate tensors before encoding the PNG — PIL.save
+    # is a pure-CPU op and we want VRAM back for the next call.
+    del result
+    try:
+        torch.cuda.empty_cache()
+        gc.collect()
+    except Exception:
+        pass
     buf = io.BytesIO()
     image.save(buf, format="PNG", optimize=False)
     png = buf.getvalue()

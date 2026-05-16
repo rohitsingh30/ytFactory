@@ -53,27 +53,56 @@ steps:
   # Step 2 — docker build. Context is scoped to cloud/image-z-image-turbo/
   # so the daemon only sees that subdir + the staged _weights/ tree
   # (NOT the rest of the repo). Faster context send, smaller layer.
+  #
+  # --cache-from + DOCKER_BUILDKIT make subsequent builds nearly
+  # instant when only the app source (server.py, requirements.txt)
+  # changes: BuildKit reuses the 33 GiB weights layer + the
+  # pip-install layer from the previously-pushed image. First-ever
+  # build (when ${_CACHE_FROM} doesn't exist yet) just no-ops the
+  # cache pull and proceeds normally.
   - id: build
     name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
+    entrypoint: bash
     args:
-      - build
-      - -t
-      - ${_IMAGE}
-      - -f
-      - cloud/image-z-image-turbo/Dockerfile
-      - cloud/image-z-image-turbo/
+      - -ceu
+      - |
+        # Best-effort cache pull — first ever build won't have one.
+        docker pull "${_CACHE_FROM}" 2>/dev/null || \
+          echo "(no cache image — full rebuild)"
+        docker build \
+          --cache-from "${_CACHE_FROM}" \
+          --build-arg BUILDKIT_INLINE_CACHE=1 \
+          -t "${_IMAGE}" \
+          -f cloud/image-z-image-turbo/Dockerfile \
+          cloud/image-z-image-turbo/
 
-  # Step 3 — push to Artifact Registry. The 35 GiB push is the slow part;
-  # same-region asia-southeast1 → Artifact Registry typically 8-12 min.
+  # Step 3 — push to Artifact Registry. The 35 GiB push is the slow part
+  # ONLY on the very first build. With BuildKit cache-from + inline-cache
+  # tags on the previous push, layers that didn't change are skipped
+  # ("Layer already exists"). Also push :latest as a floating tag so
+  # subsequent builds find a cache source.
   - id: push
     name: gcr.io/cloud-builders/docker
+    entrypoint: bash
     args:
-      - push
-      - ${_IMAGE}
+      - -ceu
+      - |
+        docker push "${_IMAGE}"
+        # Tag the same digest as :latest and push that too.
+        # Floating :latest is the canonical cache-from source.
+        LATEST="${_CACHE_FROM}"
+        docker tag "${_IMAGE}" "$${LATEST}"
+        docker push "$${LATEST}"
 
 substitutions:
   _IMAGE: required-but-overridden-by-deploy.sh
   _WEIGHTS_BUCKET: ytfactory-prod-v3-model-weights
+  # _CACHE_FROM is the most recent successful image tag — used by the
+  # build step's BuildKit cache. deploy.sh sets it to the floating
+  # `:latest` tag we publish on every successful build.
+  _CACHE_FROM: asia-southeast1-docker.pkg.dev/ytfactory-prod-v3/ytfactory-tts/ytfactory-image-z-image-turbo:latest
 
 images:
   - ${_IMAGE}

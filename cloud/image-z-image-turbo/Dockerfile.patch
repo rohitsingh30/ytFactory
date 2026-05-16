@@ -1,0 +1,11 @@
+# Minimal patch image: reuses the previously-published image (which
+# has the 33 GiB Z-Image-Turbo weights baked in) and only swaps the
+# server.py. Built/pushed in ~30 s vs the 46 min full rebuild.
+#
+# Use when ONLY app source (server.py, requirements.txt) changed
+# AND not requirements.txt (which would invalidate the pip-install
+# layer, requiring a full rebuild via cloudbuild.yaml). For weights
+# or dependency changes, use cloudbuild.yaml (full pipeline).
+FROM asia-southeast1-docker.pkg.dev/ytfactory-prod-v3/ytfactory-tts/ytfactory-image-z-image-turbo:latest
+
+COPY server.py /app/server.py

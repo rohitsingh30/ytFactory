@@ -1,0 +1,24 @@
+# Tiny patch build: FROM the existing :latest, COPY new server.py, push.
+# Used when only application code changed. Full image rebuild (with
+# weights re-bake) lives in cloudbuild.yaml.
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_IMAGE}
+      - -f
+      - Dockerfile.patch
+      - .
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: [push, "${_IMAGE}"]
+substitutions:
+  _IMAGE: required-overridden-by-deploy
+images:
+  - ${_IMAGE}
+options:
+  diskSizeGb: 100
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1800s
