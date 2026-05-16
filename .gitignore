@@ -28,6 +28,11 @@ node_modules/
 *.bin
 *.safetensors
 
+# Pre-staged weights for Cloud Build (auto-staged inside Cloud Build
+# in cloud/image-z-image-turbo/cloudbuild.yaml; never present locally,
+# but list them so a stray local copy never sneaks in).
+cloud/image-z-image-turbo/_weights/
+
 # Cross-channel runtime data (kept under data/)
 data/_jobs/
 data/telemetry/
@@ -133,3 +138,5 @@ docs/screenshots/
 scripts/loop/
 data/critiques/
 data/loop/
+audit_data/
+audit_report.html

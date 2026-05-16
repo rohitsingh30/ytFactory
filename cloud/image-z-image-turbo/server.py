@@ -6,7 +6,7 @@ checkpoint we ship today via mflux on the laptop, so the
 `force_positive` prompting trick + style range transfer byte-stably
 between the two paths.
 
-Loads weights from `gs://ytfactory-model-weights-v2/flat/Tongyi-MAI/
+Loads weights from `gs://ytfactory-prod-v3-model-weights/flat/Tongyi-MAI/
 Z-Image-Turbo/` mounted at `/models/hf/flat/...` via GCS Fuse.
 
 API: POST /generate {prompt, ...} → JSON with PNG inline-base64
@@ -73,8 +73,12 @@ _BOOT_T0 = time.monotonic()
 
 
 def _pipe():
-    """Lazy-load the ZImagePipeline. ~60-120 s on cold start (read
-    32.9 GB from GCS Fuse, materialize bf16, push 12 GB to CUDA)."""
+    """Lazy-load the ZImagePipeline from baked-in image weights.
+
+    The Dockerfile copies the model into the image at build time
+    (`/opt/model/Z-Image-Turbo`), so this reads from the image's
+    layered filesystem on the host's local SSD — no GCS Fuse round
+    trip, ~30 s cold load instead of 1-2 hours."""
     global _PIPE
     if _PIPE is None:
         import torch
@@ -82,20 +86,10 @@ def _pipe():
         t0 = time.monotonic()
         if not WEIGHTS_DIR.exists():
             raise RuntimeError(
-                f"weights dir {WEIGHTS_DIR} not found — bucket mount "
-                f"misconfigured? Expected GCS Fuse to mount "
-                f"gs://ytfactory-model-weights-v2 at /models/hf"
+                f"weights dir {WEIGHTS_DIR} not found — image was not "
+                f"built with the model baked in, or WEIGHTS_DIR env is wrong"
             )
         logger.info("loading ZImagePipeline from %s …", WEIGHTS_DIR)
-        # low_cpu_mem_usage=True: stream each tensor's bytes from disk
-        # directly to GPU instead of materializing the full state dict
-        # in CPU RAM first. The Tongyi model card recommends
-        # low_cpu_mem_usage=False but that needs ~32 GB CPU RAM (the
-        # whole safetensor footprint) before .to("cuda") even runs;
-        # Cloud Run gen2 caps us at 32 GB total. With True, peak CPU
-        # RAM stays bounded by the largest single tensor (~hundreds of
-        # MB), and the trade-off is a slower load (~2-3× wall) which
-        # we hide behind /readyz warmup from the laptop.
         _PIPE = ZImagePipeline.from_pretrained(
             str(WEIGHTS_DIR),
             torch_dtype=torch.bfloat16,

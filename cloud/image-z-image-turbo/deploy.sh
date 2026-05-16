@@ -18,27 +18,52 @@ source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 SERVICE="${1:-ytfactory-image-z-image-turbo}"
 TAG="${2:-$(date +%Y%m%d-%H%M%S)}"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE}:${TAG}"
-BUCKET="ytfactory-model-weights-v2"
 
-cd "$(dirname "$0")"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$REPO_ROOT"
 
+# Inline async-submit + poll. We can't use submit_build.sh — it hardcodes
+# --tag which conflicts with --config=cloudbuild.yaml. The cloudbuild.yaml
+# is what stages the 33 GiB weights in a step that has ADC, then COPYs
+# them into the image; a plain --tag build can't do that (Docker RUN
+# steps have no metadata-server access).
 echo "==> Building + pushing ${IMAGE}"
-gcloud builds submit . \
-  --tag="${IMAGE}" \
+echo "    (build context = ${REPO_ROOT}, config = cloud/image-z-image-turbo/cloudbuild.yaml)"
+BUILD_ID=$(gcloud builds submit . \
+  --config=cloud/image-z-image-turbo/cloudbuild.yaml \
+  --substitutions="_IMAGE=${IMAGE}" \
   --project="${PROJECT}" \
-  --timeout=5400s
+  --timeout=5400s \
+  --async \
+  --format="value(id)" 2>/dev/null)
+if [ -z "${BUILD_ID}" ] || ! echo "${BUILD_ID}" | grep -qE '^[a-f0-9-]{20,}$'; then
+  echo "ERROR: failed to submit build (got '${BUILD_ID}')" >&2
+  exit 1
+fi
+echo "==> Build ID: ${BUILD_ID}"
+echo "==> Poll URL: https://console.cloud.google.com/cloud-build/builds/${BUILD_ID}?project=${PROJECT}"
+DEADLINE=$((SECONDS + 5700))
+while [ $SECONDS -lt $DEADLINE ]; do
+  STATUS=$(gcloud builds describe "${BUILD_ID}" --project="${PROJECT}" --format="value(status)" 2>/dev/null || echo "?")
+  case "${STATUS}" in
+    SUCCESS) echo "==> Build SUCCESS"; break ;;
+    FAILURE|CANCELLED|TIMEOUT|EXPIRED|INTERNAL_ERROR) echo "==> Build ${STATUS}" >&2; exit 1 ;;
+    *) echo "    ...status=${STATUS} (${SECONDS}s elapsed)"; sleep 30 ;;
+  esac
+done
 
 echo "==> Deploying ${SERVICE} to Cloud Run (L4 GPU, ${REGION})"
-# Same shape as cloud/tts-chatterbox/deploy.sh — proven on the L4
-# fleet. Concurrency=1 (one /generate per container at a time);
-# max-instances=2 caps total GPU spend across the service.
-# --add-volume mounts the persistent weights bucket at HF_HOME,
-# so the server can `from_pretrained("/models/hf/flat/<repo>",
-# local_files_only=True)`.
+# 32Gi mem + 8 CPU kept INTACT — we know this fits the load with
+# low_cpu_mem_usage=True (multiple successful loads in prior logs).
+# Shrinking to 16Gi/4CPU risks OOM on model load; that's the explicit
+# constraint from the operator. concurrency=1, max-instances=1 to cap GPU
+# spend; min-instances=0 since weights load fast from local SSD now.
+#
+# No more --add-volume gcsfuse mount — weights are baked into the image.
 gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --project="${PROJECT}" \
@@ -52,14 +77,14 @@ gcloud run deploy "${SERVICE}" \
   --cpu=8 \
   --cpu-boost \
   --concurrency=1 \
-  --max-instances=2 \
+  --max-instances=1 \
   --min-instances=0 \
   --timeout=3600 \
   --no-allow-unauthenticated \
   --set-env-vars="GCS_BUCKET=ytfactory-tts-io,LOG_LEVEL=INFO" \
   --execution-environment=gen2 \
-  --add-volume="name=weights,type=cloud-storage,bucket=${BUCKET}" \
-  --add-volume-mount="volume=weights,mount-path=/models/hf,readonly=true"
+  --clear-volume-mounts \
+  --clear-volumes
 
 URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="${PROJECT}" --format="value(status.url)")
 echo ""

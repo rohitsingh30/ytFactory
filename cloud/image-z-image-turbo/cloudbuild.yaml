@@ -1,0 +1,86 @@
+# Cloud Build pipeline for the Z-Image-Turbo Cloud Run image.
+#
+# Why this exists (and why a plain `gcloud builds submit --tag` would fail):
+#   The previous Dockerfile tried to do `gcloud storage cp -r gs://...` inside
+#   a RUN step. That fails because Cloud Build's `docker build` ephemeral RUN
+#   containers do NOT bridge the host's metadata-server credentials — gcloud
+#   inside the RUN container has no ADC and hits 401.
+#
+#   The reliable pattern is: stage weights in a Cloud Build STEP (which DOES
+#   have ADC via metadata), then have the Dockerfile COPY them in.
+#
+# Why bake the 33 GB Z-Image-Turbo weights at all:
+#   At runtime, mounting via GCS Fuse cold-loads the 3 transformer shards in
+#   30-90 minutes on first hit (verified 2026-05-16 logs: 1877 s/it for the
+#   first shard, gcsfuse stalled reads + 1.5 s context-deadline cancels).
+#   Cloud Run kills the inflight request long before the load finishes and
+#   /generate returns "malformed response". Baked-in weights live on the
+#   instance's local SSD via the read-only image layer, so cold-load drops
+#   to ~30 s with predictable behavior.
+#
+# OOM budget:
+#   - Build VM: E2_HIGHCPU_32 = 32 GiB RAM + 32 vCPUs.
+#     `gcloud storage cp` and `docker build` stream to disk, not RAM, so peak
+#     RAM stays well below the 32 GiB cap.
+#   - Disk: 200 GiB. Weights ~33 GiB on /workspace + Docker layer cache
+#     (~40 GiB across base, deps, weights, app) + image manifest assembly
+#     = ~75 GiB worst case. 200 GiB leaves >2x headroom.
+
+steps:
+  # Step 1 — pre-stage the 33 GiB Z-Image-Turbo weights to the shared
+  # /workspace volume. The cloud-sdk image carries gcloud, which inherits
+  # the build SA's ADC from Cloud Build's metadata server.
+  - id: stage-weights
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        echo "==> staging Z-Image-Turbo weights from gs://${_WEIGHTS_BUCKET}"
+        TARGET=/workspace/cloud/image-z-image-turbo/_weights
+        mkdir -p "$${TARGET}"
+        # gcloud storage cp does parallel/multipart transfers by default;
+        # no flags needed. Same-region GCS → Cloud Build worker is fast
+        # (typically 5-8 min for 33 GiB).
+        gcloud storage cp -r \
+          "gs://${_WEIGHTS_BUCKET}/flat/Tongyi-MAI/Z-Image-Turbo" \
+          "$${TARGET}/"
+        echo "==> weights staged:"
+        du -sh "$${TARGET}/Z-Image-Turbo"
+        ls -la "$${TARGET}/Z-Image-Turbo" | head -20
+        df -h /workspace | tail -2
+
+  # Step 2 — docker build. Context is scoped to cloud/image-z-image-turbo/
+  # so the daemon only sees that subdir + the staged _weights/ tree
+  # (NOT the rest of the repo). Faster context send, smaller layer.
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_IMAGE}
+      - -f
+      - cloud/image-z-image-turbo/Dockerfile
+      - cloud/image-z-image-turbo/
+
+  # Step 3 — push to Artifact Registry. The 35 GiB push is the slow part;
+  # same-region asia-southeast1 → Artifact Registry typically 8-12 min.
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_IMAGE}
+
+substitutions:
+  _IMAGE: required-but-overridden-by-deploy.sh
+  _WEIGHTS_BUCKET: ytfactory-prod-v3-model-weights
+
+images:
+  - ${_IMAGE}
+
+options:
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 200
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 5400s
