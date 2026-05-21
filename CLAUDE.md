@@ -108,3 +108,33 @@ is `cli`.
 - When you make a fix that future agents need to know about, write a
   test that fails when the bug returns. A failing test is durable;
   prose claiming a fix is not.
+
+## Cost guardrails (read before changing any `deploy.sh`)
+
+Five non-negotiable rules — all five have a corresponding line item on
+a real GCP bill that bit us. Full background in
+`docs/cost_optimized_deploy.md` (Iron Rules) and
+`docs/optimization_checklist.md` (sections 3.4, 5.6, 5.7).
+
+1. **`min-instances=0`** on every GPU service. Idle = ₹0.
+2. **`max-instances=1`** on every GPU service. The render pipeline
+   calls each provider serially per chunk; `concurrency=2` already
+   covers in-instance pipelining. A second instance just doubles the
+   L4 spend.
+3. **`--region=asia-southeast1`** on every `gcloud builds submit`.
+   Without it, the build runs in the global pool (US Iowa) and the
+   image push to `asia-southeast1` AR crosses the Pacific — that's
+   the "Artifact Registry Inter Region Egress Intercontinental" SKU.
+4. **Double-checked `threading.Lock()` around `_model()` / `_pipe()`**
+   in every GPU service. A naked `if _MODEL is None:` races on
+   cold-start `/readyz` + first inference call, double-loads into
+   VRAM, and OOMs the L4.
+5. **Don't bake huge weights into Docker images.** z-image-turbo
+   is the exception (justified by the gcsfuse cold-load latency); for
+   every other model use the GCS Fuse mount. Bigger image = more
+   push egress (rule #3) and more AR storage.
+
+If you change a `deploy.sh` and any of rules 1-3 is violated, the
+weekly audit in `cost_optimized_deploy.md` will catch it — but only
+on the next audit. Better to not regress in the first place.
+
