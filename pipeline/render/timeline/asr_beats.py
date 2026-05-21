@@ -23,6 +23,7 @@ Output Segments have ``kind="beat"`` and ``anchor_id="beat_<i>"``
 from __future__ import annotations
 
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -56,17 +57,63 @@ class AsrBeats:
         script: dict[str, Any],
         audio: AudioResult,
     ) -> Timeline:
-        # Cloud path first.
+        # Cloud path first — call in mode="words" so we get per-word
+        # timings, then group into beats locally with the word-level
+        # data preserved on each Segment. Pre-2026-05-17 we called
+        # mode="beats" which returned only beat-level segments (text +
+        # start_s + end_s — no word timings). That broke the
+        # word_caption_pngs overlay producer, which fell back to
+        # rendering the whole beat sentence in one tiny pill instead
+        # of TikTok-style one-word-at-a-time captions.
         try:
             from pipeline.asr_cloudrun import align_via_cloud  # noqa: PLC0415
-            segments = align_via_cloud(
+            from pipeline.beats import (  # noqa: PLC0415
+                Word, split_into_beats,
+            )
+            word_segments = align_via_cloud(
                 audio.narration_path,
-                mode="beats",
+                mode="words",
                 language=self._language_hint(spec),
             )
-            if segments:
-                _logger.info("asr_beats: cloud whisper returned %d beats", len(segments))
-                return segments
+            if word_segments:
+                _logger.info(
+                    "asr_beats: cloud whisper returned %d word-segments",
+                    len(word_segments),
+                )
+                # Convert word-segments → Word objects → grouped Beats
+                # → Segments with .words preserved.
+                words_list = [
+                    Word(text=ws.text, start=ws.start_s, end=ws.end_s)
+                    for ws in word_segments
+                ]
+                # Per-channel beat duration cap — falls back to 2.8s.
+                max_s = float(getattr(spec, "beat_max_s", None) or 2.8)
+                # 2026-05-19 — pin the beat count to the authored
+                # script's shot/beat list so it matches what the
+                # prompts-authoring stage produced. Without forced
+                # boundaries the cloud path splits purely by audio
+                # timing (variable count); ai_beat_slideshow then
+                # refuses to render with "prompts.json has N entries
+                # but timeline has M segments". Local fallback already
+                # used forced boundaries (line below in _local_fallback);
+                # this brings the cloud path back to parity.
+                forced_lines = self._forced_beat_texts(script)
+                beats = split_into_beats(
+                    words_list,
+                    max_s=max_s,
+                    forced_narration_lines=forced_lines or None,
+                )
+                return [
+                    Segment(
+                        start_s=float(b.start),
+                        end_s=float(b.end),
+                        text=b.text,
+                        anchor_id=f"beat_{i:03d}",
+                        kind="beat",
+                        words=list(b.words),
+                    )
+                    for i, b in enumerate(beats)
+                ]
         except Exception as exc:  # noqa: BLE001
             if os.environ.get("CLOUDRUN_ASR_DISABLE_FALLBACK") == "1":
                 raise
@@ -90,15 +137,50 @@ class AsrBeats:
             return []
 
         result = transcribe(audio.narration_path)
-        # Flatten word-level timestamps.
+        # Flatten word-level timestamps. Whisper occasionally emits
+        # word entries with start/end set to None (e.g. on speech
+        # detected but timing model couldn't anchor it), or with the
+        # word text missing. Skip those rather than crashing the
+        # timeline build on a NoneType float coercion — losing a few
+        # word-anchors degrades caption accuracy slightly; crashing
+        # loses the whole render.
         words: list[dict] = []
         for seg in result.get("segments", []):
             for w in seg.get("words", []) or []:
-                words.append({
-                    "text": (w.get("word") or w.get("text") or "").strip(),
-                    "start": float(w.get("start", 0)),
-                    "end": float(w.get("end", 0)),
-                })
+                text = (w.get("word") or w.get("text") or "").strip()
+                if not text:
+                    continue
+                start = w.get("start")
+                end = w.get("end")
+                if start is None or end is None:
+                    continue
+                try:
+                    start_f = float(start)
+                    end_f = float(end)
+                except (TypeError, ValueError):
+                    continue
+                if not (math.isfinite(start_f) and math.isfinite(end_f)):
+                    continue
+                if end_f < start_f:
+                    end_f = start_f
+                words.append({"text": text, "start": start_f, "end": end_f})
+
+        # Defensive empty-alignment guard. Whisper can return zero word
+        # alignments on near-silent audio, very short clips, or non-
+        # speech (music intros). Falling through with words=[] silently
+        # builds an empty beat timeline → captions stay blank, image
+        # plugin emits no panels → unwatchable render. Better to fail
+        # loud here so the caller can route to a different timeline
+        # plugin (e.g. ``asr_anchors`` or ``forced_lines``-only path).
+        if not words:
+            _logger.error(
+                "asr_beats: Whisper produced zero usable word alignments "
+                "from %s — refusing to build an empty timeline. The "
+                "engine should fall back to a non-ASR timeline plugin "
+                "(forced_lines / asr_anchors).",
+                audio.narration_path,
+            )
+            return []
 
         forced_lines = self._forced_beat_texts(script)
         try:
@@ -138,6 +220,12 @@ class AsrBeats:
                 text=b.text,
                 anchor_id=f"beat_{i:03d}",
                 kind="beat",
+                # Thread word-level timings (post-2026-05-17) so the
+                # word_caption_pngs overlay producer can do TRUE one-
+                # word-at-a-time captions with per-word enable windows.
+                # Pre-fix the plugin squashed the whole beat text into
+                # a single PNG → tiny illegible captions.
+                words=list(b.words) if getattr(b, "words", None) else None,
             )
             for i, b in enumerate(beats)
         ]

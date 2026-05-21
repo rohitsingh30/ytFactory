@@ -136,6 +136,43 @@ async def render(
                 f"the Tier 2 fix to bring it back."
             ),
         )
+    # (channel, niche) pair compatibility — reject the dangerous case:
+    # a niche key explicitly registered to a DIFFERENT channel (e.g.
+    # ``channel=sportsrecapped, format=aita``). That combination crashes
+    # the worker downstream when the wrong-channel variant overlay is
+    # missing required keys (character_description / opening_image_
+    # directives / niche-tonal lexicon, etc).
+    # Note: the wizard's ``format`` default is the literal "animated"
+    # which is a UI marker, NOT a niche key — fall through unless the
+    # value actually appears as a niche under a different channel.
+    fmt = (req.format or "").strip()
+    if fmt:
+        from pipeline.channels import niche_channel_map  # noqa: PLC0415
+        niche_map = niche_channel_map()
+        owning = niche_map.get(fmt)
+        if owning and owning[0] != req.channel:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"niche/format {fmt!r} belongs to channel "
+                    f"{owning[0]!r}, not {req.channel!r}. Either switch "
+                    f"the channel or pick a different format. Registered "
+                    f"niches for {req.channel!r}: "
+                    f"{sorted(ch.niches.keys()) if ch.niches else '(none — channel uses defaults)'}."
+                ),
+            )
+    # Length sanity range. _clamp_length quietly normalises bad input
+    # to a valid range, but if the user explicitly passes a wildly out-
+    # of-range value (e.g. -10s, 0, 100000) something is wrong upstream
+    # — fail loud so the wizard form can be fixed.
+    if req.length_s <= 0 or req.length_s > 7200:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"length_s={req.length_s} is out of range. "
+                f"Shorts: 20-120s. Long-form: 121-7200s (up to 2hr)."
+            ),
+        )
     rate_limit.check_and_increment(request, "confirm")
 
     proposal = ShortProposal(

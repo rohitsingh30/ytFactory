@@ -367,24 +367,308 @@ def _set_stage(timeline: list[dict], key: str, status: str, msg: str | None = No
                 s["msg"] = msg
     return out
 
+_FIRESTORE_TRANSIENT_EXC_NAMES = frozenset({
+    "DeadlineExceeded", "ServiceUnavailable", "Aborted",
+    "InternalServerError", "Cancelled", "ResourceExhausted", "Unknown",
+})
+
+
 def _update_job(job_id: str, **fields: Any) -> None:
+    """Write a partial update to the job's Firestore doc.
+
+    Retries up to 3 attempts on transient Firestore errors (DeadlineExceeded,
+    ServiceUnavailable, Aborted, …). After that we log a warning and
+    return — losing one progress write isn't fatal because the next
+    write in 5-10s will overwrite with the latest state anyway. The
+    render must NEVER crash because a Firestore blip cost us one
+    progress update. Terminal writes (status=done/failed) are written
+    via the same path; if they're lost the reaper retries.
+    """
     fields["updated_at"] = datetime.now(timezone.utc)
-    _job_ref(job_id).set(fields, merge=True)
+    base_backoff = 0.2
+    for attempt in range(1, 4):
+        try:
+            _job_ref(job_id).set(fields, merge=True)
+            return
+        except Exception as exc:  # noqa: BLE001
+            transient = type(exc).__name__ in _FIRESTORE_TRANSIENT_EXC_NAMES
+            if not transient or attempt == 3:
+                logger.warning(
+                    "_update_job failed for job=%s (attempt %d/3, "
+                    "transient=%s): %s — continuing render",
+                    job_id, attempt, transient, exc,
+                )
+                return
+            backoff = min(5.0, base_backoff * (1.6 ** (attempt - 1)))
+            logger.warning(
+                "_update_job transient %s on attempt %d/3 for job=%s "
+                "(backoff %.2fs): %s",
+                type(exc).__name__, attempt, job_id, backoff, exc,
+            )
+            time.sleep(backoff)
+
+_GCS_TRANSIENT_EXC_NAMES = frozenset({
+    "DeadlineExceeded", "ServiceUnavailable", "InternalServerError",
+    "GatewayTimeout", "BadGateway", "RetryError", "ConnectionError",
+    "ConnectionResetError", "ChunkedEncodingError", "RemoteDisconnected",
+})
+
+
+def _gcs_upload_with_retry(
+    blob, local_path: Path, *, op_label: str,
+    max_attempts: int = 4, base_backoff_s: float = 1.0,
+) -> None:
+    """Upload to GCS with exponential backoff on transient errors.
+
+    Renders that successfully composed an mp4 should NEVER be marked
+    failed because of a transient GCS blip on the final upload. The
+    file is on local disk — retrying is cheap and almost always
+    recovers. Backoff is [1.0, 1.6, 2.56, 4.1]s for ~9s total in the
+    worst case before giving up.
+
+    Non-transient errors (permission denied, bucket missing) bubble
+    immediately — those need operator intervention, not retry.
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            blob.upload_from_filename(str(local_path))
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            transient = (
+                type(exc).__name__ in _GCS_TRANSIENT_EXC_NAMES
+                or "503" in str(exc)
+                or "504" in str(exc)
+                or "timeout" in str(exc).lower()
+            )
+            if not transient or attempt == max_attempts:
+                raise
+            backoff = min(10.0, base_backoff_s * (1.6 ** (attempt - 1)))
+            logger.warning(
+                "%s: transient %s on attempt %d/%d (backoff %.2fs): %s",
+                op_label, type(exc).__name__, attempt, max_attempts, backoff, exc,
+            )
+            time.sleep(backoff)
+    # Unreachable; the loop always returns or raises.
+    raise RuntimeError(  # pragma: no cover
+        f"{op_label} fell through without success ({last_exc})"
+    )
+
 
 def _upload_mp4_to_gcs(local_mp4: Path, job_id: str) -> str:
     blob_path = f"jobs/{job_id}/short.mp4"
     bucket = _storage_client().bucket(_bucket_name())
     blob = bucket.blob(blob_path)
     blob.content_type = "video/mp4"
-    blob.upload_from_filename(str(local_mp4))
+    _gcs_upload_with_retry(
+        blob, local_mp4, op_label=f"upload mp4 job={job_id}",
+    )
     return f"gs://{_bucket_name()}/{blob_path}"
+
+# ---------------------------------------------------------------------------
+# Writeback artifact verification (Task A7, 2026-05-15)
+#
+# Pre-fix: the cloud worker shipped 11.8 KB empty-blob mp4s to GCS and
+# flipped jobs to status=done. A 27-render audit on 2026-05-13 found
+# 3+ such renders in mystoriesanimated batch A alone. The dashboard
+# showed "done" but the artifact was a broken stub — no streams,
+# duration ≈ 0, file size in the low 10 KB. Downstream uploaders
+# happily ran on these.
+#
+# Fix: ffprobe + volumedetect the local mp4 BEFORE upload + Firestore
+# writeback. Any failure → skip upload, write status=failed with a
+# precise reason, return without raising (callers should not see this
+# as a stack trace — the job is correctly marked failed).
+# ---------------------------------------------------------------------------
+
+# Minimum file size threshold — the empty-blob mp4s that prompted this
+# check came in at ~11.8 KB. 100 KB is well below any real ~4s render
+# (which clocks ~250 KB+ even at heavy compression) so this rules out
+# placeholder shapes without false-positiving on short test renders.
+_MIN_VERIFY_FILE_BYTES = 100_000
+
+# Minimum mean_volume dBFS. Audio that loudnorm'd to broadcast level
+# clocks around -23 dB. Silent / muted tracks read as -91 dB. -50 dB
+# is a safe floor that rejects pure-silence renders without rejecting
+# legitimately-quiet narration over a music bed.
+_MIN_VERIFY_MEAN_VOLUME_DB = -50.0
+
+# Minimum width — anything below 540 px is sub-540p (the lowest legit
+# Short resolution we ever ship) and indicates a stub or downscaled
+# placeholder.
+_MIN_VERIFY_VIDEO_WIDTH = 540
+
+# Fraction of duration_target_s we require. 0.8 catches truncated
+# renders (e.g. TTS exited early at 35 s of an intended 60 s Short).
+_VERIFY_DURATION_FRACTION = 0.8
+
+
+def _ffprobe_streams(local_mp4: Path) -> dict:
+    """Run ffprobe -show_format -show_streams -json on a local mp4 and
+    return the parsed dict. Raises ``RuntimeError`` on ffprobe failure
+    so the verify path can route the error into a clean failure write."""
+    proc = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_format", "-show_streams",
+            "-of", "json", str(local_mp4),
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffprobe exit={proc.returncode}: {proc.stderr[:500]}"
+        )
+    return json.loads(proc.stdout or "{}")
+
+
+def _ffprobe_mean_volume_db(local_mp4: Path) -> float | None:
+    """Return the mean_volume (RMS dBFS) reported by ffmpeg's
+    volumedetect filter. ``None`` if the filter didn't emit a reading
+    (no audio stream, ffmpeg failure, or output without the expected
+    ``mean_volume:`` marker).
+
+    Pattern lifted from pipeline/render/shared/long_form_lib.py which
+    uses the same filter for long-form loudness gating.
+    """
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-nostats",
+            "-i", str(local_mp4),
+            "-af", "volumedetect", "-vn", "-f", "null", "-",
+        ],
+        capture_output=True, text=True, timeout=60,
+    )
+    # volumedetect prints to stderr regardless of exit code; an mp4
+    # with no audio stream returns non-zero but we still want to
+    # surface that as None (caller treats it as a failure).
+    out = (proc.stderr or "") + (proc.stdout or "")
+    m = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", out)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _verify_mp4_artifact(
+    local_mp4: Path,
+    duration_target_s: float | int | None,
+) -> tuple[bool, str | None, str]:
+    """Verify the locally-produced mp4 meets shippability gates.
+
+    Returns ``(passed, failure_reason, diagnostic)``:
+      - ``passed`` — True iff every check passed.
+      - ``failure_reason`` — short string with ``which_check (actual_value)``
+        format suitable for the Firestore error field. None when passed.
+      - ``diagnostic`` — full multi-line text dump (ffprobe JSON +
+        mean_volume) for the worker log so debugging doesn't need to
+        re-run ffprobe.
+
+    Checks (any one failing → passed=False):
+      1. File size ≥ 100 KB (catches 11.8 KB stub-shaped placeholders).
+      2. ffprobe duration ≥ 0.8 × duration_target_s (catches truncated
+         renders). Skipped when duration_target_s is falsy.
+      3. At least one h264 video stream with width ≥ 540.
+      4. At least one audio stream.
+      5. mean_volume > -50 dB (catches pure-silence renders).
+    """
+    diag_parts: list[str] = []
+
+    # Check 1: file size.
+    if not local_mp4.exists():
+        return False, f"file_missing ({local_mp4})", f"path={local_mp4}"
+    size = local_mp4.stat().st_size
+    diag_parts.append(f"file_size_bytes={size}")
+    if size < _MIN_VERIFY_FILE_BYTES:
+        return False, f"file_size ({size} bytes)", "\n".join(diag_parts)
+
+    # Check 2 + 3 + 4: ffprobe streams.
+    try:
+        probe = _ffprobe_streams(local_mp4)
+    except (RuntimeError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
+        diag_parts.append(f"ffprobe_error={e}")
+        return False, f"ffprobe_failed ({e})", "\n".join(diag_parts)
+
+    diag_parts.append(f"ffprobe_json={json.dumps(probe)[:2000]}")
+
+    fmt = probe.get("format") or {}
+    streams = probe.get("streams") or []
+
+    # Duration check.
+    if duration_target_s and float(duration_target_s) > 0:
+        try:
+            actual_dur = float(fmt.get("duration") or 0)
+        except (TypeError, ValueError):
+            actual_dur = 0.0
+        min_dur = _VERIFY_DURATION_FRACTION * float(duration_target_s)
+        diag_parts.append(
+            f"duration_s={actual_dur:.3f} min_required={min_dur:.3f} "
+            f"target={duration_target_s}"
+        )
+        if actual_dur < min_dur:
+            return (
+                False,
+                f"duration ({actual_dur:.2f}s < {min_dur:.2f}s required)",
+                "\n".join(diag_parts),
+            )
+
+    # Video stream check.
+    video_streams = [s for s in streams if s.get("codec_type") == "video"]
+    h264_wide = [
+        s for s in video_streams
+        if (s.get("codec_name") == "h264"
+            and int(s.get("width") or 0) >= _MIN_VERIFY_VIDEO_WIDTH)
+    ]
+    if not h264_wide:
+        widths = [s.get("width") for s in video_streams]
+        codecs = [s.get("codec_name") for s in video_streams]
+        diag_parts.append(f"video_widths={widths} video_codecs={codecs}")
+        return (
+            False,
+            f"video_stream (no h264 ≥{_MIN_VERIFY_VIDEO_WIDTH}px; "
+            f"codecs={codecs} widths={widths})",
+            "\n".join(diag_parts),
+        )
+
+    # Audio stream presence.
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+    if not audio_streams:
+        return False, "audio_stream (no audio stream)", "\n".join(diag_parts)
+
+    # Check 5: mean_volume via ffmpeg volumedetect.
+    try:
+        mean_vol = _ffprobe_mean_volume_db(local_mp4)
+    except subprocess.TimeoutExpired as e:
+        diag_parts.append(f"volumedetect_timeout={e}")
+        return False, f"volumedetect_failed ({e})", "\n".join(diag_parts)
+    diag_parts.append(f"mean_volume_db={mean_vol}")
+    if mean_vol is None:
+        return (
+            False,
+            "mean_volume (volumedetect emitted no reading)",
+            "\n".join(diag_parts),
+        )
+    if mean_vol <= _MIN_VERIFY_MEAN_VOLUME_DB:
+        return (
+            False,
+            f"mean_volume ({mean_vol:.2f} dB ≤ "
+            f"{_MIN_VERIFY_MEAN_VOLUME_DB} dB)",
+            "\n".join(diag_parts),
+        )
+
+    return True, None, "\n".join(diag_parts)
 
 def _upload_thumb_to_gcs(local_thumb: Path, job_id: str) -> str:
     blob_path = f"jobs/{job_id}/thumb.jpg"
     bucket = _storage_client().bucket(_bucket_name())
     blob = bucket.blob(blob_path)
     blob.content_type = "image/jpeg"
-    blob.upload_from_filename(str(local_thumb))
+    _gcs_upload_with_retry(
+        blob, local_thumb, op_label=f"upload thumb job={job_id}",
+    )
     return f"gs://{_bucket_name()}/{blob_path}"
 
 # ---------------------------------------------------------------------------
@@ -392,7 +676,10 @@ def _upload_thumb_to_gcs(local_thumb: Path, job_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _is_stub_mode() -> bool:
-    return os.environ.get("YTFACTORY_RENDER_MODE", "stub").lower() == "stub"
+    mode = os.environ.get("YTFACTORY_RENDER_MODE", "real").lower()
+    is_stub = mode == "stub"
+    logger.info("WORKER MODE: %s%s", mode, " (stub placeholder mp4s)" if is_stub else " (real render)")
+    return is_stub
 
 def _slug_from_topic(topic: str, job_id: str) -> str:
     """Filesystem-safe slug for the script.json + per-render dir."""
@@ -1293,12 +1580,20 @@ def _author_prompts_for_engine(
         fallback, or ``None``
       * ``mood`` — script ``metadata.mood`` if present, else ``None``
 
-    Every failure mode is best-effort: any exception inside this
-    function logs a warning and returns ``{}`` so the engine still
-    runs with bare ``Segment.text`` prompts (zero-regression contract).
-    Per-stage failures (e.g. cast.json missing) still produce a
-    valid prompts.json — only the corresponding spec.extra key is
-    omitted.
+    Failure-handling contract (post-2026-05-16, job 3cd2b3b5):
+
+      * AUXILIARY context failures (cast.json missing/corrupt, channel
+        YAML unreadable, era taxonomy bad) are best-effort — they log a
+        warning, drop the corresponding spec.extra key, and continue.
+        These never produce unshippable mp4 output because the engine
+        falls back to channel-YAML / no-era defaults.
+      * ``author_beat_prompts`` failure is on the CRITICAL PATH —
+        without a usable prompts.json the engine falls through to bare
+        ``Segment.text`` as image prompts and renders unshippable
+        floating-objects mp4. Retried 3x with exponential backoff (2s,
+        4s) then RAISED so the job marks ``stage=images_failed`` in
+        Firestore. The user gets a clear failure signal instead of a
+        successful-looking mp4 of floating ketchup bottles.
 
     Why this lives in the cloud worker not in the engine
     -----------------------------------------------------
@@ -1438,30 +1733,63 @@ def _author_prompts_for_engine(
         # operators reading logs / dashboard see it's prompt-authoring,
         # not actual TTS that's running.
         progress_cb("tts", "[prompts] LLM authoring per-beat image prompts")
-    try:
-        _prompts_mod.author_beat_prompts(
-            narration=script_dict.get("narration", "") or "",
-            beats=beat_list,
-            source_story=script_dict.get("source_story") or script_dict.get("narration") or "",
-            cast_narrator_desc=character_description,
-            cast_default_emotion=default_emotion,
-            style_prefix=style_prefix or "",
-            opening_directives=metadata.get("opening_directives"),
-            out_path=prompts_path,
-            narrator_visual_mode=metadata.get("narrator_visual_mode", "on_screen"),
-            supporting=cast_supporting,
-            ranks=metadata.get("ranks"),
-            era_anchor_prefix=era_anchor_prefix,
-            mood=mood,
-            channel_key=script_dict.get("channel") or metadata.get("channel"),
-        )
-    except Exception as exc:  # noqa: BLE001 — best-effort
-        logger.warning(
-            "prompts authoring: author_beat_prompts failed (%s) — "
-            "engine will use bare Segment.text",
-            exc,
-        )
-        return {}
+    # Retry-or-fail (post-2026-05-16): author_beat_prompts is on the
+    # critical path — without a usable prompts.json the engine falls
+    # through to bare ``Segment.text`` as image prompts, which renders
+    # as floating-objects-on-plain-backgrounds (job 3cd2b3b5, AITA
+    # ketchup-on-stew). The old "best-effort except → return {}"
+    # contract papered over LLM transients with unshippable mp4
+    # output. New contract: retry 3x with exponential backoff
+    # (transient network/Azure 5xx/content-filter recovery is
+    # stochastic) and on persistent failure RAISE so the job marks
+    # ``stage=images_failed`` in Firestore. The user gets a clear
+    # failure signal instead of a successful-looking mp4 of floating
+    # ketchup bottles.
+    import time as _time  # noqa: PLC0415
+    last_exc: BaseException | None = None
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            _prompts_mod.author_beat_prompts(
+                narration=script_dict.get("narration", "") or "",
+                beats=beat_list,
+                source_story=script_dict.get("source_story") or script_dict.get("narration") or "",
+                cast_narrator_desc=character_description,
+                cast_default_emotion=default_emotion,
+                style_prefix=style_prefix or "",
+                opening_directives=metadata.get("opening_directives"),
+                out_path=prompts_path,
+                narrator_visual_mode=metadata.get("narrator_visual_mode", "on_screen"),
+                supporting=cast_supporting,
+                ranks=metadata.get("ranks"),
+                era_anchor_prefix=era_anchor_prefix,
+                mood=mood,
+                channel_key=script_dict.get("channel") or metadata.get("channel"),
+            )
+            last_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < max_attempts:
+                backoff_s = 2 ** attempt  # 2s, 4s
+                logger.warning(
+                    "prompts authoring: author_beat_prompts attempt %d/%d "
+                    "failed (%s) — retrying in %ds",
+                    attempt, max_attempts, exc, backoff_s,
+                )
+                _time.sleep(backoff_s)
+            else:
+                logger.error(
+                    "prompts authoring: author_beat_prompts FAILED after "
+                    "%d attempts (last error: %s) — failing the render "
+                    "rather than producing a floating-objects mp4",
+                    max_attempts, exc,
+                )
+    if last_exc is not None:
+        raise RuntimeError(
+            f"author_beat_prompts failed after {max_attempts} attempts: "
+            f"{last_exc}"
+        ) from last_exc
 
     out["prompts_path"] = str(prompts_path)
     if era_anchor_prefix:
@@ -2443,6 +2771,35 @@ def _main_from_firestore(job_id: str) -> int:
         if not local_mp4.exists():
             raise RuntimeError(f"render finished but mp4 not found at {local_mp4}")
 
+        # Writeback verification gate (Task A7, 2026-05-15). Stub mode
+        # intentionally produces tiny 4-second placeholder mp4s, so the
+        # verify gate fires only in real mode — failing stub renders
+        # would defeat the wiring-test purpose of stub mode.
+        if mode == "real":
+            duration_target = (
+                spec_obj.duration_target_s if spec_obj is not None else None
+            )
+            verify_ok, fail_reason, diag = _verify_mp4_artifact(
+                local_mp4, duration_target
+            )
+            if not verify_ok:
+                logger.error(
+                    "writeback verification FAILED for job=%s mp4=%s: %s\n%s",
+                    job_id, local_mp4, fail_reason, diag,
+                )
+                _update_job(
+                    job_id,
+                    status="failed",
+                    stage="writeback_verify",
+                    error=f"artifact failed verification: {fail_reason}",
+                    timeline=timeline,
+                )
+                return 1
+            logger.info(
+                "writeback verification passed for job=%s: %s",
+                job_id, diag,
+            )
+
         mp4_uri = _upload_mp4_to_gcs(local_mp4, job_id)
         thumb_uri = (
             _upload_thumb_to_gcs(local_thumb, job_id)
@@ -2479,8 +2836,28 @@ def _main_from_firestore(job_id: str) -> int:
             ),
             "axes": None,
         }
-        _update_job(
-            job_id,
+
+        # OPTIONAL CPU-only QA pass (non-fatal). VBench's three named
+        # axes (subject_consistency / temporal_flickering /
+        # imaging_quality) catch cast drift + frozen frames + gibberish
+        # text — exactly the bug classes the laptop-only LLM critic
+        # exists to catch, but at near-zero cost on every cloud render.
+        # We RECORD scores but do NOT gate ship on them yet — that's
+        # the A13 follow-up. Skip silently if the `vbench` package
+        # isn't bundled into the worker (its CLIP/DINO deps are too
+        # heavy to default-install; ops opts in per channel).
+        vbench_scores: dict[str, float] | None = None
+        try:
+            from pipeline.render.qa.vbench_adapter import (  # noqa: PLC0415
+                score_video_vbench,
+            )
+            vbench_scores = score_video_vbench(local_mp4)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "vbench scoring failed (non-fatal): %s", exc,
+            )
+
+        update_kwargs: dict[str, Any] = dict(
             status="done",
             stage="done",
             short_uri=mp4_uri,
@@ -2488,19 +2865,101 @@ def _main_from_firestore(job_id: str) -> int:
             timeline=timeline,
             critique=critique_field,
         )
+        if vbench_scores is not None:
+            update_kwargs["vbench_scores"] = vbench_scores
+
+        _update_job(job_id, **update_kwargs)
         logger.info("render complete: job=%s mp4=%s mode=%s", job_id, mp4_uri, mode)
         return 0
     except Exception as e:  # noqa: BLE001
         tb = traceback.format_exc()
         logger.error("render failed: %s\n%s", e, tb)
+        # Friendly classification — surface a clean wizard-facing message
+        # for known Azure / LLM / quota failure classes so the dashboard
+        # doesn't dump a raw traceback to the user. Raw tb is still in
+        # the worker logs for debugging.
+        friendly = _classify_render_exception(e, tb)
         _update_job(
             job_id,
             status="failed",
             stage=job.get("stage", "unknown"),
-            error=f"{e}\n{tb}"[:8000],
+            error=friendly,
             timeline=timeline,
         )
         return 1
+
+
+def _classify_render_exception(e: BaseException, tb: str) -> str:
+    """Map a render-failing exception to a user-facing error string.
+
+    Goals:
+      * Strip the raw stack from the wizard view for known transient /
+        policy classes (content filter, rate limit, quota exhausted).
+        Operators read worker logs for the trace; users just want to
+        know whether to retry or change their input.
+      * Keep the full traceback for truly unknown failures so we don't
+        regress debuggability on net-new crash modes.
+      * Bound the field to 8000 chars (Firestore field limits + UI
+        rendering speed).
+    """
+    msg = str(e)
+    lower = msg.lower()
+
+    # Azure / Anthropic content-filter rejection. Caller's prompt
+    # tripped the safety filter — retry won't help, the user must
+    # rephrase. We already retry inside rewrite_long_form with
+    # sanitized notes (1 retry); this surfaces when even the
+    # sanitized version is rejected.
+    if (
+        "content_filter" in lower
+        or "ContentFilterError" in type(e).__name__
+        or "content filter" in lower
+    ):
+        return (
+            "Render failed: the source content was flagged by Azure's "
+            "content moderation filter. Try rephrasing the topic / source "
+            "to remove sensitive material (explicit content, real-name "
+            "medical / criminal references, etc.), then re-submit."
+        )
+
+    # Azure quota / rate limit. Transient — wait and retry.
+    if (
+        "rate_limit" in lower or "rate limit" in lower
+        or "429" in msg or "quota" in lower or "throttle" in lower
+        or "tokens per minute" in lower or "RateLimitError" in type(e).__name__
+    ):
+        return (
+            "Render failed: Azure OpenAI quota / rate limit exhausted. "
+            "Wait a few minutes and re-submit. If this persists, the "
+            "deployment's per-minute token budget needs to be raised."
+        )
+
+    # Long-form content contract violations that survived auto-repair.
+    # These are intentionally hard-fail because shipping the resulting
+    # video would be off-genre / off-source. Surface the contract
+    # message directly — it already explains what to do.
+    if "LongFormContractError" in type(e).__name__ or "long-form contract failed" in lower:
+        return (
+            f"Render failed: long-form content contract violation. "
+            f"{msg[:1500]}"
+        )
+
+    # Network / GCS / Firestore transient. Encourage retry.
+    if (
+        "timeout" in lower or "503" in msg or "504" in msg
+        or "ServiceUnavailable" in type(e).__name__
+        or "DeadlineExceeded" in type(e).__name__
+        or "ConnectionError" in type(e).__name__
+        or "Temporary failure" in msg
+    ):
+        return (
+            f"Render failed: transient infrastructure error "
+            f"({type(e).__name__}: {msg[:300]}). Re-submit the same "
+            f"render in a minute — the worker normally recovers on retry."
+        )
+
+    # Fall through — unknown class, keep the traceback for debugging.
+    return f"{e}\n{tb}"[:8000]
 
 # ---------------------------------------------------------------------------
 # GCS spec.json entry point — for the website's /api/jobs/from_script flow

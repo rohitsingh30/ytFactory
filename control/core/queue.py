@@ -8,15 +8,80 @@ Selection via `YTFACTORY_QUEUE_BACKEND={memory,firestore}` (default firestore).
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Iterable, Protocol
+from typing import Any, Callable, Iterable, Protocol, TypeVar
 
 from control.core.schema import HEAVY_KINDS, TaskEnvelope, TaskKind, TaskStatus
 
+_logger = logging.getLogger(__name__)
 _TASKS = "tasks"
+
+
+# ---------------------------------------------------------------------------
+# Firestore retry helper — shared by FirestoreQueue + _FirestoreJobs.
+# ---------------------------------------------------------------------------
+
+_T = TypeVar("_T")
+# Transient Firestore error class names. Match by name string so we don't
+# need google.api_core as a hard import at module load — keeps the
+# in-memory test path GCP-free.
+_FIRESTORE_TRANSIENT_EXC_NAMES = frozenset({
+    "DeadlineExceeded",       # gRPC timeout
+    "ServiceUnavailable",     # 503
+    "Aborted",                # transactional contention (most common)
+    "InternalServerError",    # 500
+    "Cancelled",              # client-side cancellation
+    "ResourceExhausted",      # quota burst
+    "Unknown",                # gRPC unknown
+})
+
+
+def _is_firestore_transient(exc: BaseException) -> bool:
+    return type(exc).__name__ in _FIRESTORE_TRANSIENT_EXC_NAMES
+
+
+def firestore_retry(
+    fn: Callable[[], _T],
+    *,
+    op_label: str,
+    max_attempts: int = 4,
+    base_backoff_s: float = 0.2,
+) -> _T:
+    """Run ``fn`` with retry-on-transient-Firestore-error.
+
+    Backoff is exponential with a 1.6× growth and 5s cap, so 4 attempts
+    sit in [0.2, 0.32, 0.51, 0.82]s for a max ~1.85s of added latency on
+    the worst case before raising. Non-transient errors (Permission
+    denied, NotFound, InvalidArgument) bubble immediately.
+
+    The op_label is used in the log line so production tail can grep for
+    a specific operation (e.g. ``firestore_retry: enqueue retry 2/4``).
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            if not _is_firestore_transient(exc) or attempt == max_attempts:
+                raise
+            last_exc = exc
+            backoff = min(5.0, base_backoff_s * (1.6 ** (attempt - 1)))
+            _logger.warning(
+                "firestore_retry: %s transient %s on attempt %d/%d "
+                "(backoff %.2fs): %s",
+                op_label, type(exc).__name__, attempt, max_attempts, backoff, exc,
+            )
+            time.sleep(backoff)
+    # Unreachable — the loop always either returns or raises — but keep
+    # mypy / pyright happy.
+    raise RuntimeError(  # pragma: no cover
+        f"firestore_retry: {op_label} fell through without returning ({last_exc})"
+    )
 
 
 def _utcnow() -> datetime:
@@ -120,7 +185,11 @@ class FirestoreQueue:
         self._col = self._db.collection(_TASKS)
 
     def enqueue(self, task: TaskEnvelope) -> None:
-        self._col.document(task.task_id).set(task.model_dump(mode="json"))
+        payload = task.model_dump(mode="json")
+        firestore_retry(
+            lambda: self._col.document(task.task_id).set(payload),
+            op_label=f"enqueue task={task.task_id}",
+        )
 
     def get(self, task_id: str) -> TaskEnvelope | None:
         snap = self._col.document(task_id).get()

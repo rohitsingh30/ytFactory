@@ -225,44 +225,50 @@ def test_section_body_failure_falls_back_to_brief():
                 if start >= 0 and end > start:
                     section_id = line[start + 1:end]
                 break
-        # Fail every call for sec-2 (1 try + 1 retry = 2 fails)
+        # Fail every call for sec-2.
+        # Post-2026-05-20 retry budget: 1 initial + 2 retries = 3 in
+        # the parallel fan-out, then the auto-repair pass re-calls
+        # short sections up to 2 more times (since sec-2 fell back to
+        # brief and is therefore under min_words). Total: 5 calls.
         if section_id == "sec-2":
             call_state["sec-2_count"] += 1
             raise RuntimeError("simulated section-body failure")
         return _make_section_body(words=450)
 
     with patch.object(_rlf._llm, "call_claude_cli", side_effect=_mock):
-        # The aggregator may produce too-few words to pass the
-        # validator. Either path is acceptable — what we're verifying
-        # is that the ENGINE doesn't crash on a single section
-        # failure. (Hard contract failure → LongFormContractError;
-        # success → env returned with sec-2 falling back to brief.)
-        # No niche → niche-tonal validator skipped (pure mechanics test).
-        try:
-            env = _rlf.rewrite_long_form(
-                raw_story, channel_cfg={},
-                target_duration_s=600,
-            )
-            # If we got an env, sec-2 must have fallen back to brief.
-            sec2 = next((s for s in env.long_form.sections if s.id == "sec-2"), None)
-            assert sec2 is not None
-            assert "establishes 2" in sec2.narration  # the brief content
-        except LongFormContractError:
-            pass  # also acceptable
+        # The validator now downgrades length-only hard violations to
+        # soft after the auto-repair pass, so rewrite_long_form should
+        # ALWAYS return an envelope — never raise — when only length
+        # is the issue. sec-2 falls back to its brief content.
+        env = _rlf.rewrite_long_form(
+            raw_story, channel_cfg={},
+            target_duration_s=600,
+        )
+        sec2 = next((s for s in env.long_form.sections if s.id == "sec-2"), None)
+        assert sec2 is not None
+        assert "establishes 2" in sec2.narration  # the brief content
 
-    # sec-2 should have been retried once after the initial failure.
-    assert call_state["sec-2_count"] == 2
+    # sec-2 hit: 3 in the parallel fan-out (1 initial + 2 retries) +
+    # 2 in the auto-repair pass = 5 total calls before giving up.
+    assert call_state["sec-2_count"] == 5
 
 
 def test_section_body_content_filter_does_not_retry():
     """When a section body trips Azure content_filter, retrying with
     the same prompt won't help — content_filter is deterministic per
-    prompt. The fan-out must skip retry and fall back to brief immediately.
+    prompt. Each PASS (initial fan-out, auto-repair) must skip retry
+    within itself on content_filter and fall back to brief immediately.
+
+    Post-2026-05-20 behavior: 1 call in the initial fan-out + 1 call
+    in the auto-repair pass = 2 total. The repair-pass call uses a
+    different prompt (the emphasis block is filled in), so it's
+    legitimately worth trying once. What this test guards is the
+    within-pass content-filter retry skip — 1 call per pass, not 2-3.
 
     Telemetry: TEL-FS-26 / TEL-EXEC-05 — 3 r/nosleep section bodies
     tripped this on 2026-05-13 and the renders aborted because each
     section burned 2 LLM calls (initial + retry, both rejected) instead
-    of 1.
+    of 1. That bug stays fixed.
     """
     raw_story = {"slug": "x", "title": "T", "body": "Source"}
     outline = _make_outline(n_sections=4)
@@ -300,9 +306,13 @@ def test_section_body_content_filter_does_not_retry():
         except LongFormContractError:
             pass  # acceptable when too few sections delivered
 
-    # CRITICAL: only ONE call to sec-1 (no retry on content_filter).
-    assert call_state["sec-1_count"] == 1, (
-        f"content_filter must NOT trigger retry; got {call_state['sec-1_count']} calls"
+    # CRITICAL: each pass made exactly 1 call to sec-1 (no within-pass
+    # retry on content_filter). Initial fan-out = 1, auto-repair = 1.
+    # The 2026-05-13 regression (burning N retries on a deterministic
+    # rejection within a single pass) stays fixed.
+    assert call_state["sec-1_count"] == 2, (
+        f"content_filter must NOT trigger within-pass retry; "
+        f"expected 2 (1 fan-out + 1 repair); got {call_state['sec-1_count']}"
     )
 
 
@@ -490,3 +500,151 @@ def test_planned_panels_floor_at_8_for_short_long_form():
     """1-min target → floor of 8 panels (minimum density)."""
     out = _rlf._planned_sections_and_panels(60)
     assert out[6] == 8
+
+
+# ---------- Auto-repair pass (regression for failed render) -----------
+#
+# Anchor: job a734babbd3674599bbe7369b5f3e256c failed 2026-05-20 with
+#   `section 7 contains 51 words; mean section is 363 words — that's
+#    14% of mean. The LLM degraded mid-rewrite (tired-by-the-end
+#    pattern). Re-rewrite with explicit per-section minimum.`
+# The render aborted with LongFormContractError. After the auto-repair
+# pass landed, the user-facing contract is: ANY combination of inputs
+# must produce a renderable envelope; length issues become soft warnings.
+
+
+def test_short_section_triggers_section_too_short_error():
+    """The section-body LLM call MUST raise SectionTooShortError when
+    the returned narration is below the per-section min_words floor.
+    This is what the retry-with-emphasis loop catches."""
+    section = {
+        "id": "sec-0", "title": "T", "brief": "B",
+        "target_words": 450, "visual_brief": "V",
+    }
+    outline = _make_outline(n_sections=1)
+    with patch.object(_rlf._llm, "call_claude_cli") as mocked:
+        # min_words for target=450 is 0.70 * 450 = 315. Return 50 words.
+        mocked.return_value = {
+            "narration": "word " * 50,
+            "sentences": ["word word."],
+        }
+        with pytest.raises(_rlf.SectionTooShortError) as exc_info:
+            _rlf._call_section_body_llm(
+                channel_context="ctx", topic="topic", thesis="thesis",
+                outline=outline, notes="notes", section=section,
+                section_words_target=450, section_words_floor=315,
+            )
+    assert exc_info.value.word_count == 50
+    assert exc_info.value.min_words == 315
+    assert "sec-0" in str(exc_info.value)
+
+
+def test_section_too_short_retry_uses_emphasis_block_in_prompt():
+    """The retry layer must pass prev_short_word_count to the section-body
+    call, which fires the emphasis block in the prompt template."""
+    raw_story = {"slug": "x", "title": "T", "body": "Source body about scrolling " * 50}
+    outline = _make_outline(n_sections=3)
+
+    captured_prompts: list[str] = []
+    call_count = {"n": 0}
+
+    def _mock(prompt, **kwargs):
+        if kwargs.get("stage") == "rewrite_long_form_outline":
+            return outline
+        captured_prompts.append(prompt)
+        call_count["n"] += 1
+        # First call returns a short body (50 words); subsequent calls
+        # return a healthy 450-word body so the retry succeeds.
+        if call_count["n"] == 1:
+            return {"narration": "word " * 50, "sentences": ["word."]}
+        return _make_section_body(words=450)
+
+    with patch.object(_rlf._llm, "call_claude_cli", side_effect=_mock):
+        env = _rlf.rewrite_long_form(
+            raw_story, channel_cfg={}, target_duration_s=600,
+        )
+
+    # At least one prompt must contain the RETRY NOTICE emphasis block.
+    retry_prompts = [p for p in captured_prompts if "RETRY NOTICE" in p]
+    assert retry_prompts, "expected at least one retry prompt with emphasis block"
+    # The emphasis block must cite the previous short word count.
+    assert any("50 words" in p for p in retry_prompts), (
+        "retry emphasis must cite the previous short word count"
+    )
+    # And the envelope must come back fully populated.
+    assert env is not None
+    assert len(env.long_form.sections) == 3
+
+
+def test_short_section_does_not_raise_length_contract_error():
+    """The exact failure pattern from job a734babb…: section under-delivery
+    that previously raised LongFormContractError must now ship the
+    envelope (length violations downgraded to soft after auto-repair)."""
+    raw_story = {"slug": "x", "title": "T", "body": "Source body content."}
+    outline = _make_outline(n_sections=8)
+
+    # Sec-7 always returns a tiny body (51 words, matching the original
+    # failure). Every other section returns a healthy 450-word body.
+    def _mock(prompt, **kwargs):
+        if kwargs.get("stage") == "rewrite_long_form_outline":
+            return outline
+        section_id = "?"
+        for line in prompt.split("\n"):
+            if "← THIS SECTION" in line:
+                start = line.find("[")
+                end = line.find("]")
+                if start >= 0 and end > start:
+                    section_id = line[start + 1:end]
+                break
+        if section_id == "sec-7":
+            return {
+                "narration": "word " * 51,
+                "sentences": ["word."],
+            }
+        return _make_section_body(words=450)
+
+    with patch.object(_rlf._llm, "call_claude_cli", side_effect=_mock):
+        # MUST NOT raise — the auto-repair pass + downgrade-to-soft
+        # logic must let the render proceed even when one section
+        # is structurally unable to hit the floor.
+        env = _rlf.rewrite_long_form(
+            raw_story, channel_cfg={}, target_duration_s=1800,
+        )
+
+    assert env is not None
+    # All 8 sections must be present (sec-7 keeps its short body —
+    # better short narration than the brief fallback).
+    assert len(env.long_form.sections) == 8
+    sec7 = next(s for s in env.long_form.sections if s.id == "sec-7")
+    assert sec7.narration  # non-empty
+
+
+def test_auto_repair_skips_when_all_sections_meet_floor():
+    """When the initial fan-out hits every section's floor, the
+    auto-repair pass MUST be a no-op (no extra LLM calls beyond outline
+    + 1-per-section).
+    """
+    raw_story = {"slug": "x", "title": "T", "body": "Source body."}
+    outline = _make_outline(n_sections=4)
+
+    call_count = {"outline": 0, "section": 0}
+
+    def _mock(prompt, **kwargs):
+        stage = kwargs.get("stage")
+        if stage == "rewrite_long_form_outline":
+            call_count["outline"] += 1
+            return outline
+        call_count["section"] += 1
+        return _make_section_body(words=450)
+
+    with patch.object(_rlf._llm, "call_claude_cli", side_effect=_mock):
+        env = _rlf.rewrite_long_form(
+            raw_story, channel_cfg={}, target_duration_s=600,
+        )
+
+    assert env is not None
+    assert call_count["outline"] == 1
+    # Exactly 4 section calls — no repair triggered.
+    assert call_count["section"] == 4, (
+        f"healthy sections should not trigger repair; got {call_count['section']} calls"
+    )

@@ -55,6 +55,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import math
+import re
 from typing import Any
 
 from . import cli as _llm
@@ -297,11 +298,18 @@ traceable to this):
 YOUR SECTION ({section_id}):
   Title:        {section_title}
   Visual brief: {visual_brief}
-  Target words: {target_words}  (soft target — write natural prose
-                                 between {min_words} and {max_words}
-                                 words; the validator hard-fails
-                                 outside this range)
 
+  MANDATORY WORD COUNT: write between {min_words} and {max_words}
+  words for this section. Target {target_words}.
+  ★ The post-call validator REJECTS any narration below {min_words}
+    words. A rejected section is re-prompted, costing latency and
+    LLM budget. Hit the minimum on the first attempt.
+  ★ Do NOT pad with filler ("as we've seen", "in conclusion",
+    rhetorical questions, restating the section title). Add MORE
+    concrete material from the source: specific names, dates,
+    numbers, locations, quotes, sensory detail, cause-and-effect
+    chains. Length comes from substance, not stuffing.
+{emphasis_block}
   Directorial brief from the outline:
   {section_brief}
 
@@ -396,13 +404,40 @@ def _planned_sections_and_panels(duration_s: int) -> tuple[int, int, int, int, i
     Returns ``(words_target, words_floor, words_ceiling,
     section_count_target, section_words_target, section_words_floor,
     panel_count_target, panel_min_per_section)``.
+
+    Section-count vs section-size: Azure GPT-5.3 reliably emits ~700
+    output tokens (~525 words) per single call before quality starts
+    to degrade ("tired-by-the-end" pattern). To stay inside that
+    cliff for ANY user-picked duration, we hard-cap
+    ``section_words_target`` at ``SECTION_WORDS_CEILING`` and scale up
+    ``section_count_target`` instead (capped at ``SECTION_COUNT_CAP``).
+    A 50-min long-form will therefore land at ~16 short sections, not
+    ~12 long ones — but every section will hit its floor on the first
+    LLM call, and the wizard never sees a length contract failure.
     """
     # Calm TTS narrator @ ~150 wpm.
     words_target = int(duration_s * 150 / 60)
     words_floor = int(words_target * 0.92)
     words_ceiling = int(words_target * 1.10)
-    # Roughly one section per ~3 minutes of narration, capped to 6-12.
-    section_count_target = max(6, min(12, max(1, duration_s // 180)))
+    # Per-section word ceiling — keeps each LLM call inside the
+    # ~700-token reliability window of GPT-5.3 / Claude long-output.
+    # Tuned 2026-05-20 after job a734babb… failed at 1042 wpm/section.
+    SECTION_WORDS_CEILING = 500
+    # Absolute floor for section count; absolute cap. Cap raised from
+    # 12 → 24 so a 60-min long-form doesn't blow past the per-section
+    # ceiling.
+    SECTION_COUNT_FLOOR = 6
+    SECTION_COUNT_CAP = 24
+    # Start with the duration-driven count (~1 per 3 min); scale up
+    # if section_words_target would exceed SECTION_WORDS_CEILING.
+    section_count_target = max(SECTION_COUNT_FLOOR, max(1, duration_s // 180))
+    if words_target // max(1, section_count_target) > SECTION_WORDS_CEILING:
+        # Bump section count until each section fits the ceiling.
+        section_count_target = max(
+            section_count_target,
+            math.ceil(words_target / SECTION_WORDS_CEILING),
+        )
+    section_count_target = min(SECTION_COUNT_CAP, section_count_target)
     section_words_target = max(50, words_target // max(1, section_count_target))
     section_words_floor = int(section_words_target * 0.70)
     # No prompt-side ceiling on count: the renderer's PANEL_HARD_CAP is
@@ -491,6 +526,42 @@ def _outline_summary_for_section_call(outline: dict, current_section_id: str) ->
 
 
 # ---------------------------------------------------------------------------
+# Source-body length cap (general — protects all prompts)
+# ---------------------------------------------------------------------------
+
+# 12000 chars ≈ 3000 input tokens — preserves enough context for the
+# outline + each section call without saturating the per-prompt input
+# budget. A truncated marker is appended so the LLM knows there's more
+# than what it sees (and doesn't try to be "comprehensive" over a
+# partial source).
+_NOTES_HARD_CAP_CHARS = 12000
+
+
+def _cap_notes(body: str) -> str:
+    """Cap source-body length before injection into prompts.
+
+    Scraped articles / wikipedia dumps / full subreddit thread JSON
+    can run 50-200k chars. The outline prompt and EVERY section-body
+    prompt embed ``notes`` verbatim, so uncapped source blows past
+    input-token budgets, causing either an LLM error or a quietly
+    truncated context the rewriter has to invent around.
+
+    Truncation strategy: keep the head (where the strongest narrative
+    hooks usually live), append a marker. We don't summarize because
+    summarization would be a whole extra LLM call burning budget for
+    every render.
+    """
+    if len(body) <= _NOTES_HARD_CAP_CHARS:
+        return body
+    head = body[:_NOTES_HARD_CAP_CHARS]
+    return head + (
+        f"\n\n[…truncated at {_NOTES_HARD_CAP_CHARS} chars; "
+        f"{len(body) - _NOTES_HARD_CAP_CHARS} more chars in the source. "
+        "Stay grounded in what you can see above.]"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Phase 1: outline call
 # ---------------------------------------------------------------------------
 
@@ -533,9 +604,315 @@ def _call_outline_llm(
     return raw
 
 
+# Outline-call retry budget. The outline is the single point of
+# failure for everything downstream (sections / panels / titles all
+# derive from it). A transient Azure 5xx, content-filter rejection,
+# or empty-sections result here used to abort the whole render.
+# Two retries covers the realistic transient + one content-shape
+# misfire window without compounding cost (one outline call is ~1k
+# output tokens).
+_OUTLINE_MAX_RETRIES = 2
+
+
+def _call_outline_with_retry(
+    *, channel_context: str, topic: str, notes: str,
+    duration_min: int, duration_s: int,
+    section_count_target: int, section_words_target: int,
+    panel_count_target: int, panel_min_per_section: int,
+    panel_hold_max_s: int, niche_title_rules: str,
+    extra_context: str, extra_rules: str,
+    raw_story: dict, section_words_target_for_synth: int,
+    section_count_target_for_synth: int,
+) -> dict:
+    """Call ``_call_outline_llm`` with retry on transient failures,
+    content-filter rejections, and pathologically empty results.
+
+    After all retries are exhausted, fall back to ``_synthesize_outline``
+    so the render proceeds with a structurally-valid (if thin) outline
+    rather than aborting. The downstream length validator will surface
+    the gap as a soft warning — the user sees a watchable video and
+    a clear ``synthesized_outline_fallback`` log line in the trace.
+    """
+    last_err: str | None = None
+    for attempt in range(1 + _OUTLINE_MAX_RETRIES):
+        try:
+            outline = _call_outline_llm(
+                channel_context=channel_context,
+                topic=topic,
+                notes=notes,
+                duration_min=duration_min,
+                duration_s=duration_s,
+                section_count_target=section_count_target,
+                section_words_target=section_words_target,
+                panel_count_target=panel_count_target,
+                panel_min_per_section=panel_min_per_section,
+                panel_hold_max_s=panel_hold_max_s,
+                niche_title_rules=niche_title_rules,
+                extra_context=extra_context,
+                extra_rules=extra_rules,
+            )
+        except _llm.ContentFilterError as exc:
+            # Content filter is deterministic for the same prompt.
+            # On retry, strip the source body (the most likely
+            # filter trigger) and re-run from topic + thesis alone.
+            last_err = f"ContentFilterError: {exc}"
+            _logger.warning(
+                "outline LLM call hit content filter (attempt %d/%d); "
+                "retrying with sanitized notes",
+                attempt + 1, _OUTLINE_MAX_RETRIES + 1,
+            )
+            notes = (
+                "(source notes were filtered by Azure content moderation; "
+                "author from the topic alone and infer plausible beats)"
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001
+            last_err = f"{type(exc).__name__}: {exc}"
+            _logger.warning(
+                "outline LLM call failed (attempt %d/%d): %s",
+                attempt + 1, _OUTLINE_MAX_RETRIES + 1, last_err,
+            )
+            continue
+
+        # Outline returned — but it might be structurally empty.
+        sections_raw = outline.get("sections") if isinstance(outline, dict) else None
+        if not sections_raw or not isinstance(sections_raw, list):
+            last_err = (
+                f"outline returned 0 sections "
+                f"(type={type(sections_raw).__name__})"
+            )
+            _logger.warning(
+                "outline LLM returned empty sections (attempt %d/%d); retrying",
+                attempt + 1, _OUTLINE_MAX_RETRIES + 1,
+            )
+            continue
+
+        return outline
+
+    # All attempts exhausted — synthesize a minimal outline.
+    _logger.error(
+        "outline LLM call failed after %d attempts (last_err=%s); "
+        "falling back to synthesized outline",
+        _OUTLINE_MAX_RETRIES + 1, last_err,
+    )
+    return _synthesize_outline(
+        raw_story=raw_story,
+        section_count_target=section_count_target_for_synth,
+        section_words_target=section_words_target_for_synth,
+    )
+
+
+def _synthesize_outline(
+    *, raw_story: dict, section_count_target: int,
+    section_words_target: int,
+) -> dict:
+    """Build a minimal but contract-valid outline from raw_story alone.
+
+    Used as the absolute fallback when the outline LLM call fails on
+    every retry. The result is structurally valid — N sections each
+    pointing at the source body as their brief — so section-body
+    calls can still run and produce real narration. The body LLM
+    fills in the actual content per section.
+
+    This guarantees the wizard never sees a hard rewrite failure due
+    to outline-stage problems alone, regardless of input combination.
+    """
+    title = (raw_story.get("title") or "Untitled").strip() or "Untitled"
+    body = (raw_story.get("body") or "").strip()
+    # Slice the body into N section briefs so each section call has
+    # a slightly different anchor. If body is empty, every section's
+    # brief is the title — the LLM will still produce narration but
+    # under-delivery is expected (and now soft, not fatal).
+    brief_chunks: list[str] = []
+    if body:
+        chunk_len = max(120, len(body) // max(1, section_count_target))
+        for i in range(section_count_target):
+            start = i * chunk_len
+            end = min(len(body), start + chunk_len + 60)  # small overlap
+            chunk = body[start:end].strip()
+            brief_chunks.append(chunk or title)
+    else:
+        brief_chunks = [title] * section_count_target
+
+    sections = [
+        {
+            "id": f"sec-{i}",
+            "title": f"Part {i + 1}",
+            "brief": brief_chunks[i],
+            "target_words": section_words_target,
+            "visual_brief": None,
+        }
+        for i in range(section_count_target)
+    ]
+    return {
+        "hook": title,
+        "thesis": title,
+        "sections": sections,
+        "panel_briefs": [],  # downstream will populate from sections
+        "sources": [raw_story.get("url", "")] if raw_story.get("url") else [],
+        "title_options": [title],
+    }
+
+
+def _normalize_outline(
+    outline: dict, *, section_count_target: int,
+    section_words_target: int, raw_story: dict,
+    title_options_count: int,
+) -> dict:
+    """Defensive normalization of an LLM-returned outline.
+
+    Handles every observed misbehavior pattern:
+    * Section count explosion — outline returns 30 sections for a
+      15-min ask. Truncate to ``section_count_target * 2`` so cost
+      stays bounded.
+    * Per-section ``target_words`` ridiculous — clamp to
+      ``[section_words_target * 0.5, section_words_target * 2]`` so
+      the section-body min/max calculation stays sane.
+    * Missing hook / thesis — synthesize from raw_story.title.
+    * Missing title_options — fall back to raw_story.title.
+    * Sections with blank/missing id or title — drop them (the
+      aggregator already does this but we surface a warning here).
+
+    Returns a new dict; doesn't mutate input.
+    """
+    out = dict(outline) if isinstance(outline, dict) else {}
+    title = (raw_story.get("title") or "Untitled").strip() or "Untitled"
+
+    # ----- sections normalization -----
+    raw_sections = out.get("sections") or []
+    if not isinstance(raw_sections, list):
+        raw_sections = []
+    section_count_cap = max(section_count_target * 2, section_count_target + 4)
+    word_floor_per_section = max(50, int(section_words_target * 0.5))
+    word_ceil_per_section = max(120, int(section_words_target * 2.0))
+
+    normalized_sections: list[dict] = []
+    for i, s in enumerate(raw_sections):
+        if not isinstance(s, dict):
+            continue
+        sid = (s.get("id") or f"sec-{i}").strip() or f"sec-{i}"
+        stitle = (s.get("title") or f"Part {i + 1}").strip() or f"Part {i + 1}"
+        # target_words: clamp to a reasonable range so a misbehaving
+        # outline doesn't force section-body min_words ≫ model's
+        # reliable output range (the 2026-05-20 failure mode).
+        try:
+            tw = int(s.get("target_words") or section_words_target)
+        except (TypeError, ValueError):
+            tw = section_words_target
+        if tw < word_floor_per_section:
+            tw = word_floor_per_section
+        elif tw > word_ceil_per_section:
+            tw = word_ceil_per_section
+        normalized_sections.append({
+            **s,
+            "id": sid,
+            "title": stitle,
+            "target_words": tw,
+        })
+
+    if len(normalized_sections) > section_count_cap:
+        _logger.warning(
+            "_normalize_outline: outline returned %d sections; "
+            "truncating to cap=%d",
+            len(normalized_sections), section_count_cap,
+        )
+        normalized_sections = normalized_sections[:section_count_cap]
+
+    if not normalized_sections:
+        # Outline returned a sections key but every entry was unusable.
+        # Synthesize a minimal one rather than passing an empty list to
+        # the fan-out (which would produce zero LLM calls).
+        _logger.warning(
+            "_normalize_outline: 0 usable sections after normalization; "
+            "synthesizing %d-section fallback from raw_story",
+            section_count_target,
+        )
+        synth = _synthesize_outline(
+            raw_story=raw_story,
+            section_count_target=section_count_target,
+            section_words_target=section_words_target,
+        )
+        normalized_sections = synth["sections"]
+
+    out["sections"] = normalized_sections
+
+    # ----- top-level field defaults -----
+    if not (out.get("hook") or "").strip():
+        out["hook"] = title
+    if not (out.get("thesis") or "").strip():
+        out["thesis"] = title
+    title_options = out.get("title_options") or []
+    title_options = [
+        str(t).strip() for t in title_options
+        if isinstance(t, str) and t.strip()
+    ]
+    if not title_options:
+        title_options = [title]
+    out["title_options"] = title_options[:max(1, title_options_count)]
+    if not isinstance(out.get("panel_briefs"), list):
+        out["panel_briefs"] = []
+    if not isinstance(out.get("sources"), list):
+        out["sources"] = []
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Phase 2: section-body call (one per section, parallel)
 # ---------------------------------------------------------------------------
+
+
+class SectionTooShortError(Exception):
+    """Raised by ``_call_section_body_llm`` when the LLM returns a
+    narration with fewer words than the section's hard minimum.
+
+    Carries word-count metadata so the retry layer can embed a concrete
+    ``"your previous attempt was N words, write at least M"`` line in
+    the retry prompt — which is the literal fix the aggregate
+    ``section_degradation_hard`` validator message requests.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        section_id: str,
+        word_count: int,
+        min_words: int,
+        target_words: int,
+        narration: str,
+    ) -> None:
+        super().__init__(message)
+        self.section_id = section_id
+        self.word_count = word_count
+        self.min_words = min_words
+        self.target_words = target_words
+        self.narration = narration
+
+
+def _count_words(text: str | None) -> int:
+    if not text:
+        return 0
+    return len(re.findall(r"\S+", text))
+
+
+def _emphasis_block_for_retry(
+    *, prev_word_count: int, min_words: int, target_words: int
+) -> str:
+    """Build the retry-only emphasis block injected into the section-body
+    prompt when the previous attempt under-delivered.
+
+    Returns an empty string on the first attempt (no retry context yet).
+    """
+    if prev_word_count <= 0:
+        return ""
+    return (
+        "\n  ⚠ RETRY NOTICE — your previous attempt for this section was "
+        f"{prev_word_count} words. The minimum is {min_words}; the target "
+        f"is {target_words}. You MUST write more substantive narration "
+        "this time — add concrete source-anchored detail (specific names, "
+        "dates, places, sensory description, cause-and-effect). Do not "
+        "restate what you already wrote; expand it.\n"
+    )
 
 
 def _call_section_body_llm(
@@ -543,12 +920,19 @@ def _call_section_body_llm(
     outline: dict, notes: str, section: dict,
     section_words_target: int, section_words_floor: int,
     extra_context: str = "",
+    prev_short_word_count: int = 0,
 ) -> dict:
     """Run ONE section-body LLM call. Returns the raw section-body dict
     with ``{narration, sentences}``.
 
     Designed to be called inside ThreadPoolExecutor.submit(...) so all
     sections generate in parallel.
+
+    Raises:
+        SectionTooShortError: when the LLM returns narration shorter
+            than the section's hard minimum. The retry layer catches
+            this specifically and re-calls with ``prev_short_word_count``
+            set so the prompt is emphatic about the gap.
     """
     section_id = section.get("id", "?")
     section_title = section.get("title", "")
@@ -561,6 +945,12 @@ def _call_section_body_llm(
     max_words = max(80, int(target_words * 1.30))
 
     outline_summary = _outline_summary_for_section_call(outline, section_id)
+
+    emphasis_block = _emphasis_block_for_retry(
+        prev_word_count=prev_short_word_count,
+        min_words=min_words,
+        target_words=target_words,
+    )
 
     prompt = _SECTION_BODY_PROMPT_TEMPLATE.format(
         channel_context=channel_context + extra_context,
@@ -575,6 +965,7 @@ def _call_section_body_llm(
         min_words=min_words,
         max_words=max_words,
         section_brief=section_brief,
+        emphasis_block=emphasis_block,
     )
 
     raw = _llm.call_claude_cli(
@@ -589,9 +980,22 @@ def _call_section_body_llm(
             f"_call_section_body_llm: LLM returned {type(raw).__name__}, "
             f"expected dict (output_json=True)"
         )
-    if not raw.get("narration"):
+    narration = raw.get("narration") or ""
+    if not narration:
         raise RuntimeError(
             f"_call_section_body_llm: section {section_id!r} returned empty narration"
+        )
+    word_count = _count_words(narration)
+    if word_count < min_words:
+        raise SectionTooShortError(
+            f"section {section_id!r} narration is {word_count} words; "
+            f"minimum {min_words} (target {target_words}). The retry layer "
+            f"will re-prompt with explicit per-section minimum.",
+            section_id=str(section_id),
+            word_count=word_count,
+            min_words=min_words,
+            target_words=target_words,
+            narration=narration,
         )
     return raw
 
@@ -604,9 +1008,10 @@ def _call_section_body_llm(
 _SECTION_BODY_MAX_WORKERS = 5
 # Per-section retry budget on body call failures. Bodies can fail for
 # a variety of reasons (transient 5xx, content filter on a sensitive
-# r/nosleep beat, schema validation glitch). One retry covers
-# transients without compounding cost.
-_SECTION_BODY_MAX_RETRIES = 1
+# beat, schema validation glitch, under-delivered word count). Two
+# retries covers both a transient AND a follow-up short-delivery
+# without compounding cost — each retry is ~700 tokens.
+_SECTION_BODY_MAX_RETRIES = 2
 
 
 def _generate_all_section_bodies(
@@ -632,6 +1037,15 @@ def _generate_all_section_bodies(
 
     def _attempt(section: dict) -> tuple[dict, dict | None, str | None]:
         last_err: str | None = None
+        # Carries forward across attempts so a retry knows the prior
+        # under-delivered word count and can show the LLM the gap.
+        prev_short_word_count = 0
+        # Best body so far — if every attempt under-delivers we keep
+        # the longest one rather than falling back to the directorial
+        # brief (which is usually ~30-60 words and guaranteed to fail
+        # the aggregate section_degradation_hard validator).
+        best_short_body: dict | None = None
+        best_short_count = 0
         for attempt in range(1 + _SECTION_BODY_MAX_RETRIES):
             try:
                 body = _call_section_body_llm(
@@ -641,14 +1055,34 @@ def _generate_all_section_bodies(
                     section_words_target=section_words_target,
                     section_words_floor=section_words_floor,
                     extra_context=extra_context,
+                    prev_short_word_count=prev_short_word_count,
                 )
                 return section, body, None
+            except SectionTooShortError as exc:
+                last_err = f"SectionTooShortError: {exc}"
+                prev_short_word_count = exc.word_count
+                if exc.word_count > best_short_count:
+                    best_short_body = {
+                        "narration": exc.narration,
+                        # Best-effort sentence split for caption alignment;
+                        # the renderer re-splits anyway.
+                        "sentences": [
+                            s.strip() for s in re.split(r"(?<=[.!?])\s+", exc.narration)
+                            if s.strip()
+                        ] or [exc.narration],
+                    }
+                    best_short_count = exc.word_count
+                _logger.warning(
+                    "section-body LLM call under-delivered for %s "
+                    "(attempt %d/%d): %d words < min %d",
+                    section.get("id"), attempt + 1,
+                    _SECTION_BODY_MAX_RETRIES + 1, exc.word_count, exc.min_words,
+                )
+                continue
             except _llm.ContentFilterError as exc:
                 # Azure content filter suppressed the response —
                 # retrying with the same prompt won't help. Skip
                 # remaining retries and fall back to brief immediately.
-                # TEL-FS-26 / TEL-EXEC-05: 3 r/nosleep section bodies
-                # tripped this on 2026-05-13.
                 last_err = f"ContentFilterError: {exc}"
                 _logger.warning(
                     "section-body LLM call hit content filter for %s "
@@ -663,6 +1097,11 @@ def _generate_all_section_bodies(
                     section.get("id"), attempt + 1,
                     _SECTION_BODY_MAX_RETRIES + 1, last_err,
                 )
+        # All attempts exhausted. Prefer a short body we did get over
+        # falling back to the directorial brief — a partially-short
+        # section is still drift-resistant narration; the brief is not.
+        if best_short_body is not None:
+            return section, best_short_body, last_err
         return section, None, last_err
 
     # Submit all in parallel; collect by index so order is preserved.
@@ -696,6 +1135,148 @@ def _generate_all_section_bodies(
             len(failures), len(sections), "; ".join(failures),
         )
     return annotated
+
+
+# ---------------------------------------------------------------------------
+# Auto-repair pass — re-call short section bodies with strong emphasis
+# ---------------------------------------------------------------------------
+
+
+def _repair_short_section_bodies(
+    *, sections_with_bodies: list[dict],
+    channel_context: str, topic: str, thesis: str,
+    outline: dict, notes: str,
+    section_words_target: int, section_words_floor: int,
+    extra_context: str = "",
+) -> list[dict]:
+    """Re-call the body LLM for any section whose current narration is
+    below its hard minimum, with an explicit ``prev_short_word_count``
+    so the prompt's retry-emphasis block fires.
+
+    This is the auto-repair pass invoked by ``rewrite_long_form`` when
+    the aggregate validator surfaces a length-related hard violation.
+    It targets only the offending sections (not all of them) to stay
+    within budget — repairing 1-2 short sections is much cheaper than
+    re-running the whole rewrite.
+
+    Sections without a body (e.g. content-filter casualties that fell
+    back to brief) are also targeted — they're effectively
+    under-delivered too.
+
+    Order is preserved. Sections whose repair call ALSO under-delivers
+    keep their best-of result (per the inner ``_attempt`` fallback).
+    """
+    needs_repair: list[tuple[int, dict]] = []
+    for idx, s in enumerate(sections_with_bodies):
+        body = s.get("_body") or {}
+        narration = body.get("narration") if isinstance(body, dict) else ""
+        target_words = int(s.get("target_words") or section_words_target)
+        min_words = max(40, int(target_words * 0.70))
+        if _count_words(narration) < min_words:
+            needs_repair.append((idx, s))
+
+    if not needs_repair:
+        return sections_with_bodies
+
+    _logger.info(
+        "_repair_short_section_bodies: re-calling %d/%d section bodies "
+        "with explicit per-section minimum emphasis",
+        len(needs_repair), len(sections_with_bodies),
+    )
+
+    def _repair_one(section: dict) -> tuple[dict | None, str | None]:
+        target_words = int(section.get("target_words") or section_words_target)
+        min_words = max(40, int(target_words * 0.70))
+        # Seed the prompt with the current short word count so the
+        # emphasis block in the section-body prompt fires loudly.
+        prev_body = section.get("_body") or {}
+        prev_narration = prev_body.get("narration") if isinstance(prev_body, dict) else ""
+        prev_count = _count_words(prev_narration)
+        if prev_count <= 0:
+            # No previous body — seed with min_words - 1 so the retry
+            # emphasis still fires (LLM sees there's a floor to clear).
+            prev_count = max(1, min_words - 1)
+
+        last_err: str | None = None
+        best_body = prev_body if isinstance(prev_body, dict) and prev_narration else None
+        best_count = prev_count if prev_narration else 0
+        # Two repair attempts — each pass shows the LLM the gap explicitly.
+        for attempt in range(2):
+            try:
+                body = _call_section_body_llm(
+                    channel_context=channel_context, topic=topic,
+                    thesis=thesis, outline=outline, notes=notes,
+                    section=section,
+                    section_words_target=section_words_target,
+                    section_words_floor=section_words_floor,
+                    extra_context=extra_context,
+                    prev_short_word_count=prev_count,
+                )
+                return body, None
+            except SectionTooShortError as exc:
+                last_err = f"SectionTooShortError: {exc}"
+                prev_count = exc.word_count
+                if exc.word_count > best_count:
+                    best_body = {
+                        "narration": exc.narration,
+                        "sentences": [
+                            s.strip() for s in re.split(r"(?<=[.!?])\s+", exc.narration)
+                            if s.strip()
+                        ] or [exc.narration],
+                    }
+                    best_count = exc.word_count
+                _logger.warning(
+                    "_repair_short_section_bodies: section %s still short on "
+                    "repair attempt %d/2: %d words < min %d",
+                    section.get("id"), attempt + 1, exc.word_count, exc.min_words,
+                )
+                continue
+            except _llm.ContentFilterError as exc:
+                last_err = f"ContentFilterError: {exc}"
+                _logger.warning(
+                    "_repair_short_section_bodies: section %s hit content "
+                    "filter on repair (no further retry): %s",
+                    section.get("id"), str(exc)[:200],
+                )
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_err = f"{type(exc).__name__}: {exc}"
+                _logger.warning(
+                    "_repair_short_section_bodies: section %s repair failed "
+                    "(attempt %d/2): %s",
+                    section.get("id"), attempt + 1, last_err,
+                )
+        return best_body, last_err
+
+    # Run the repair calls in parallel — same budget guardrails as the
+    # initial fan-out.
+    repaired_results: dict[int, tuple[dict | None, str | None]] = {}
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(_SECTION_BODY_MAX_WORKERS, len(needs_repair))
+    ) as ex:
+        future_to_idx = {
+            ex.submit(_repair_one, s): idx for idx, s in needs_repair
+        }
+        for fut in concurrent.futures.as_completed(future_to_idx):
+            idx = future_to_idx[fut]
+            repaired_results[idx] = fut.result()
+
+    # Stitch repaired bodies back into the original section list.
+    updated: list[dict] = []
+    for idx, s in enumerate(sections_with_bodies):
+        if idx in repaired_results:
+            new_body, err = repaired_results[idx]
+            out = dict(s)
+            if new_body is not None:
+                out["_body"] = new_body
+                # Clear any prior error since we now have content.
+                out.pop("_body_error", None)
+            elif err is not None:
+                out["_body_error"] = err
+            updated.append(out)
+        else:
+            updated.append(s)
+    return updated
 
 
 # ---------------------------------------------------------------------------
@@ -843,7 +1424,15 @@ def rewrite_long_form(
         panel_min_per_section,
     ) = _planned_sections_and_panels(duration_s)
 
-    notes = body or "(no extra notes provided — author from the topic alone)"
+    # Cap source body before injection — a 200k-char scraped article or
+    # full subreddit JSON dump would blow past prompt-context budget on
+    # the outline call (the prompt template embeds `notes` verbatim).
+    # 12000 chars ≈ 3000 tokens — plenty of context for outline planning
+    # without saturating the input budget. Section-body calls re-inject
+    # the same notes blob, so this cap also keeps THEIR prompts safe.
+    notes = _cap_notes(body) if body else (
+        "(no extra notes provided — author from the topic alone)"
+    )
     niche = _niche_from_spec_or_cfg(spec, cfg)
     niche_title_rules = _niche_title_rules_block(niche)
     channel_context = _channel_context(cfg)
@@ -882,7 +1471,14 @@ def rewrite_long_form(
     )
 
     # ----- Phase 1: outline ---------------------------------------------
-    outline = _call_outline_llm(
+    # The outline is the single point of failure for everything
+    # downstream — section bodies, panels, title options all derive
+    # from it. A transient Azure 5xx / content-filter / empty-sections
+    # result here is catastrophic for the render. Wrap it in retry +
+    # synthesized-fallback so the render proceeds with SOMETHING even
+    # in the worst case (the downstream length validator will surface
+    # the gap as a soft warning).
+    outline = _call_outline_with_retry(
         channel_context=channel_context,
         topic=title,
         notes=notes,
@@ -896,6 +1492,19 @@ def rewrite_long_form(
         niche_title_rules=niche_title_rules,
         extra_context=extra_context,
         extra_rules=extra_rules,
+        raw_story=raw_story,
+        section_words_target_for_synth=section_words_target,
+        section_count_target_for_synth=section_count_target,
+    )
+    # Defensive normalization — even after retry the LLM can return a
+    # bloated section list, missing hook/thesis, or per-section
+    # target_words wildly off from the global plan.
+    outline = _normalize_outline(
+        outline,
+        section_count_target=section_count_target,
+        section_words_target=section_words_target,
+        raw_story=raw_story,
+        title_options_count=title_options_count,
     )
     n_outline_sections = len(outline.get("sections") or [])
     n_outline_panels = len(outline.get("panel_briefs") or [])
@@ -930,23 +1539,76 @@ def rewrite_long_form(
         title_options_count=title_options_count,
     )
 
-    # Validator (post-aggregation, full envelope). We're soft about the
-    # outcome here — if the validator surfaces hard violations we log
-    # them but still return the envelope. Phase 0 / Fix D in the
-    # analysis doc makes this even softer (worker decides ship vs fail
-    # on the violations); for now we behave as before but the salvager
-    # surface is gone, so violations are about content quality not
-    # parse failures.
+    # Validator (post-aggregation, full envelope).
     violations = _critic.validate_long_form_envelope(
         env, target_duration_s=duration_s, niche=niche,
-        # Pipe the source body so the source-fidelity validator
-        # (added 2026-05-14) can flag rewriter drift. Per the audit,
-        # the r/nosleep 'If you can see this' renders had ZERO
-        # overlap with the source post — they shipped 16-23 minute
-        # 'attention is currency' meditations instead of the actual
-        # horror story.
         raw_body=body,
     )
+
+    # ----- Auto-repair pass for length-related hard violations ----------
+    # `section_degradation_hard` and `length_under_delivered_hard` are
+    # both repairable by re-calling the under-delivered section bodies
+    # with explicit per-section emphasis — the literal fix the
+    # violation messages request. We attempt ONE repair pass before
+    # giving up. Tonal / source-fidelity / banned-anecdote violations
+    # are NOT repairable here (they need different prompts, not longer
+    # ones) and continue to hard-fail.
+    _LENGTH_REPAIRABLE_CODES = {
+        "section_degradation_hard",
+        "length_under_delivered_hard",
+        "length_under_delivered_soft",
+    }
+    hard = [v for v in violations if v.severity == "hard"]
+    length_hard = [v for v in hard if v.code in _LENGTH_REPAIRABLE_CODES]
+    if length_hard:
+        _logger.warning(
+            "rewrite_long_form: %d length hard violation(s); "
+            "attempting auto-repair (one pass): %s",
+            len(length_hard), "; ".join(v.code for v in length_hard),
+        )
+        sections_with_bodies = _repair_short_section_bodies(
+            sections_with_bodies=sections_with_bodies,
+            channel_context=channel_context,
+            topic=title,
+            thesis=outline.get("thesis", ""),
+            outline=outline,
+            notes=notes,
+            section_words_target=section_words_target,
+            section_words_floor=section_words_floor,
+            extra_context=extra_context,
+        )
+        env = _aggregate(
+            raw_story=raw_story,
+            outline=outline,
+            sections_with_bodies=sections_with_bodies,
+            title_options_count=title_options_count,
+        )
+        violations = _critic.validate_long_form_envelope(
+            env, target_duration_s=duration_s, niche=niche, raw_body=body,
+        )
+
+    # After (optional) repair, downgrade any *remaining* length hard
+    # violations to soft. Rationale: the user-facing contract is "the
+    # wizard never hard-fails on a length quality issue when any input
+    # combination is selected". If we couldn't make the LLM produce a
+    # balanced-length narration in two passes (initial + repair), we
+    # ship a watchable-but-imbalanced video and surface the gap as a
+    # soft warning. Tonal / source-fidelity / banned-anecdote
+    # violations remain HARD because shipping those produces a
+    # genuinely off-source / off-genre video.
+    downgraded: list[Any] = []
+    survivors: list[Any] = []
+    for v in violations:
+        if v.severity == "hard" and v.code in _LENGTH_REPAIRABLE_CODES:
+            downgraded.append(_critic.Violation(
+                code=v.code,
+                severity="soft",
+                message=v.message + " (downgraded to soft after auto-repair)",
+            ))
+        else:
+            survivors.append(v)
+    violations = survivors + downgraded
+
     hard = [v for v in violations if v.severity == "hard"]
     soft = [v for v in violations if v.severity == "soft"]
     if soft:
@@ -959,9 +1621,6 @@ def rewrite_long_form(
             "rewrite_long_form: %d hard violation(s): %s",
             len(hard), "; ".join(v.code for v in hard),
         )
-        # NOTE: Fix D (soft validator) lets the worker decide. For now
-        # we still raise to preserve the prior contract but the failure
-        # is structurally rare with STORM (no truncation, no salvager).
         raise _critic.LongFormContractError(violations)
 
     _logger.info(

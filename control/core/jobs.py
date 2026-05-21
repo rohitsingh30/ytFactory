@@ -98,6 +98,7 @@ class _FirestoreJobs:
         return self._db.collection(_JOBS).document(job_id)
 
     def create(self, job_id: str, **fields: Any) -> dict[str, Any]:
+        from control.core.queue import firestore_retry  # noqa: PLC0415
         now = _utcnow()
         doc = {
             "job_id": job_id,
@@ -106,12 +107,19 @@ class _FirestoreJobs:
             "updated_at": now,
             **fields,
         }
-        self._ref(job_id).set(doc)
+        firestore_retry(
+            lambda: self._ref(job_id).set(doc),
+            op_label=f"jobs.create job={job_id}",
+        )
         return doc
 
     def update(self, job_id: str, **fields: Any) -> None:
+        from control.core.queue import firestore_retry  # noqa: PLC0415
         fields["updated_at"] = _utcnow()
-        self._ref(job_id).set(fields, merge=True)
+        firestore_retry(
+            lambda: self._ref(job_id).set(fields, merge=True),
+            op_label=f"jobs.update job={job_id}",
+        )
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         snap = self._ref(job_id).get()

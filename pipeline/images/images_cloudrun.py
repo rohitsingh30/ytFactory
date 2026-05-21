@@ -75,21 +75,12 @@ def _service_url(model: str) -> str:
 
     Each image model lives in its own Cloud Run service (separate
     container, separate dep tree, separate quota slot), so we route
-    per-model:
-
-    * flux2_klein     → CLOUDRUN_IMAGE_FLUX2_KLEIN_URL
-    * z_image_turbo   → CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL
-    * (future) qwen_image, hidream
+    per-model. Post-2026-05-16 cost-optimization cleanup: only
+    z_image_turbo remains. flux2_klein / flux2_dev / qwen_image /
+    hidream were removed (see docs/cost_optimized_deploy.md).
     """
     per_model = {
-        "flux2_klein":   "CLOUDRUN_IMAGE_FLUX2_KLEIN_URL",
         "z_image_turbo": "CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL",
-        # qwen_image's canonical env is the longer form which mirrors
-        # the model name verbatim. The shorter ``CLOUDRUN_IMAGE_QWEN_URL``
-        # is accepted as a fallback for compatibility with any old
-        # .env still using it.
-        "qwen_image":    "CLOUDRUN_IMAGE_QWEN_IMAGE_URL",
-        "hidream":       "CLOUDRUN_IMAGE_HIDREAM_URL",
     }
     if model not in per_model:
         raise ValueError(
@@ -98,9 +89,6 @@ def _service_url(model: str) -> str:
         )
     env_var = per_model[model]
     url = os.environ.get(env_var, "").strip().rstrip("/")
-    # Back-compat fallbacks: the older shorter env var names still work.
-    if not url and model == "qwen_image":
-        url = os.environ.get("CLOUDRUN_IMAGE_QWEN_URL", "").strip().rstrip("/")
     if not url:
         raise CloudRunUnavailable(
             f"cloudrun_{model} requires {env_var} to be set in .env. "
@@ -111,13 +99,12 @@ def _service_url(model: str) -> str:
 
 
 def _timeout_s() -> int:
-    """Default 900s (15 min). The FLUX.2 klein cold-load measured
-    7-8 min on Cloud Run L4 from GCS Fuse + an actual 4-step inference
-    runs ~3 s, so 900s gives a comfortable 6-7 min margin even on cold
-    instances. Render entry points should ALSO call
-    `pipeline.images.images.warmup("cloudrun_flux2_klein")` early so the first
-    real /generate hits a warm container — see canary 2026-05-07
-    where the default 600s tripped exactly at the cold-load envelope."""
+    """Default 900s (15 min). Cold-load on Cloud Run L4 from GCS Fuse
+    is 7-8 min for z_image_turbo; an actual 8-step inference runs ~3 s,
+    so 900s gives a comfortable margin even on cold instances. Render
+    entry points should ALSO call
+    `pipeline.images.images.warmup("cloudrun_z_image_turbo")` early so the
+    first real /generate hits a warm container."""
     try:
         return int(os.environ.get("CLOUDRUN_IMAGE_TIMEOUT", "900"))
     except ValueError:
@@ -225,9 +212,13 @@ def _post_generate(url: str, payload: dict) -> dict:
     # 2026-05-11 alongside the per-render fan-out in
     # ``pipeline.render.shorts._render_one_beat``; see
     # ``docs/parallel_per_beat_fanout.md`` for the dispatcher recipe).
-    # The whole retry window is bounded at ~30s so we don't masquerade
-    # a real outage as a long timeout.
-    backoff_s = [1, 2, 4, 8]
+    # 2026-05-15: bumped backoff from [1,2,4,8] (15s total) to
+    # [5,15,30,60] (110s total). With 32B / 20B image models doing
+    # sequential_cpu_offload, cold-load is 60-90s; a single 429 wave
+    # while the instance is loading would otherwise burn all 5
+    # attempts in 15s and surface as "Refusing to ship" via the A5
+    # post-loop gate. Longer backoff lets the cold-load complete.
+    backoff_s = [5, 15, 30, 60]
     for attempt in (1, 2, 3, 4, 5):
         sess = requests.Session()
         try:
@@ -307,10 +298,27 @@ def _materialise_png(resp: dict, out_path: Path) -> Path:
             f"output_gcs: keys={list(resp)!r}"
         )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["gcloud", "storage", "cp", gcs_uri, str(out_path)],
-        check=True, capture_output=True,
-    )
+    # Wrap gcloud cp in try/except so a transient failure (auth expired,
+    # network blip, bucket permission glitch) raises the caller-
+    # recognized ``CloudRunUnavailable`` (triggers fallback to a
+    # different image provider) instead of crashing the render with a
+    # raw CalledProcessError stack.
+    try:
+        subprocess.run(
+            ["gcloud", "storage", "cp", gcs_uri, str(out_path)],
+            check=True, capture_output=True, timeout=120,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        stderr_tail = ""
+        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+            try:
+                stderr_tail = exc.stderr.decode("utf-8", errors="replace")[-400:]
+            except Exception:  # noqa: BLE001
+                stderr_tail = "(stderr decode failed)"
+        raise CloudRunUnavailable(
+            f"gcloud storage cp failed for {gcs_uri}: "
+            f"{type(exc).__name__}: {exc}{(' / stderr=' + stderr_tail) if stderr_tail else ''}"
+        ) from exc
     return out_path
 
 
@@ -384,66 +392,56 @@ def _generate_cloudrun(
 # ``image.anti_text_suffix: ""`` to disable (e.g. for a "screenshot
 # of a tweet" channel where text IS the content).
 
-ANTI_TEXT_SUFFIX = (
-    "(no readable text in image, no signs, no captions, no banners, "
-    "no inscribed words, no jersey lettering, no sponsor logos, "
-    "no street signs, no readable book covers, no name tags, "
-    "plain backgrounds, no watermark)"
+# 2026-05-15 — POSITIVE-FRAMING PREFIX for FLUX.2 klein.
+#
+# FLUX.2 klein is guidance-distilled (CFG=1) and left-weighted — earlier
+# tokens get more attention. Negations ("no readable text") are linguistic-
+# only on distilled models and lose to training-data attractors when placed
+# at the SUFFIX (lowest cross-attention weight). Per fal.ai's official klein
+# prompting guide + BFL docs, use POSITIVE surface framing at the FRONT.
+#
+# Audit evidence (2026-05-15): suffix-position negations failed across 17
+# baghdad-mongols Shorts (book pages stamped "RSOHB MONGCOLAN ENTRR H BAGDOAL"),
+# 16 mystoriesanimated AITA Shorts (speech bubbles "Friednd lisa, fctumlty"),
+# and 15 sportsrecapped Shorts (jerseys "LADAL GMERIN").
+#
+# Sources: docs.bfl.ml/guides/prompting_guide_flux2, fal.ai/learn/devs/flux-2-klein-prompt-guide
+
+ANTI_TEXT_PREFIX = (
+    "Clean surface, unmarked, blank jersey, smooth fabric, plain backgrounds, "
+    "unmarked book covers, unlabeled bottles, no signage, no banners, "
+    "no watermark, no logo, no caption, no street signs."
 )
+
+# Backward-compat alias — some callers still import the old name.
+ANTI_TEXT_SUFFIX = ANTI_TEXT_PREFIX
 
 
 def _append_anti_text_suffix(prompt: str, *, model: str) -> str:
-    """Append the anti-text suffix to a prompt unless already present.
+    """Apply the positive-framing anti-text directive to a prompt.
 
-    Idempotent: if the prompt already contains the suffix substring,
-    returns unchanged (so callers that pre-attach it for testing or
-    customization don't get a double-suffix).
+    For guidance-distilled / left-weighted models (FLUX.2 klein,
+    z_image_turbo, qwen_image, hidream), this PREPENDS the positive
+    framing because suffix position has near-zero cross-attention
+    weight on these models (see ANTI_TEXT_PREFIX comment for the
+    audit evidence + 2026 BFL/fal.ai sources).
 
-    Per-model carve-outs:
+    Function name kept for backward-compat with callers like
+    ``_generate_cloudrun_flux2_klein`` at line 340. The behaviour
+    is now "prepend positive framing", not "append negation".
 
-    - ``flux2_klein`` / ``z_image_turbo`` / ``qwen_image`` / ``hidream``:
-      append the suffix in parentheses at the end. Distilled models
-      respect parenthesized in-prompt negation; non-distilled models
-      treat it as a soft hint that aligns with their own negative-prompt
-      behaviour.
-    - Any future model: same suffix unless an opt-out is added here.
-
-    The model parameter is currently unused for branching but kept in
-    the signature so per-model overrides can land without changing
-    callers (e.g. an "image_legible" model variant might want to
-    suppress the suffix entirely).
+    Idempotent: if the prefix substring is already present anywhere
+    in the prompt, returns unchanged.
     """
     if not prompt:
         return prompt
-    if "no readable text in image" in prompt.lower():
+    if "Clean surface, unmarked" in prompt or "no readable text in image" in prompt.lower():
+        # Already applied OR already carries the legacy negation phrasing.
         return prompt
-    return f"{prompt.rstrip(' .,;')}. {ANTI_TEXT_SUFFIX}"
+    return f"{ANTI_TEXT_PREFIX} {prompt.lstrip()}"
 
 
 # ------------------------------------------------------- per-model wrappers
-
-
-def _generate_cloudrun_flux2_klein(
-    *,
-    prompt: str,
-    seed: int,
-    out_path: Path,
-    width: int,
-    height: int,
-    steps: int,
-) -> Path:
-    """FLUX.2 [klein] 4B via Cloud Run.
-
-    Local fallback removed 2026-05-09 (laptop nuclear cleanup). On
-    cloud failure this raises ``CloudRunUnavailable`` and the renderer
-    must surface the failure (the render-level circuit breaker also
-    no longer trips since there's no second path to switch to).
-    """
-    return _generate_cloudrun(
-        model="flux2_klein", prompt=prompt, seed=seed,
-        out_path=out_path, width=width, height=height,
-        steps=_clamp_steps(steps, lo=2, hi=8, default=4),
-    )
 
 
 def _generate_cloudrun_z_image_turbo(
@@ -457,46 +455,15 @@ def _generate_cloudrun_z_image_turbo(
 ) -> Path:
     """Z-Image-Turbo 6B via Cloud Run.
 
-    Local fallback removed 2026-05-09 (laptop nuclear cleanup).
+    Local fallback removed 2026-05-09 (laptop nuclear cleanup). Other
+    cloud image models (flux2_klein, flux2_dev, qwen_image, hidream)
+    removed 2026-05-16 in the cost-optimization sweep — see
+    docs/cost_optimized_deploy.md.
     """
     return _generate_cloudrun(
         model="z_image_turbo", prompt=prompt, seed=seed,
         out_path=out_path, width=width, height=height,
         steps=_clamp_steps(steps, lo=4, hi=12, default=9),
-    )
-
-
-def _generate_cloudrun_qwen_image(
-    *,
-    prompt: str,
-    seed: int,
-    out_path: Path,
-    width: int,
-    height: int,
-    steps: int,
-) -> Path:
-    """Qwen VL image model via Cloud Run (future / bench lane)."""
-    return _generate_cloudrun(
-        model="qwen_image", prompt=prompt, seed=seed,
-        out_path=out_path, width=width, height=height,
-        steps=_clamp_steps(steps, lo=1, hi=50, default=20),
-    )
-
-
-def _generate_cloudrun_hidream(
-    *,
-    prompt: str,
-    seed: int,
-    out_path: Path,
-    width: int,
-    height: int,
-    steps: int,
-) -> Path:
-    """HiDream image model via Cloud Run (future / bench lane)."""
-    return _generate_cloudrun(
-        model="hidream", prompt=prompt, seed=seed,
-        out_path=out_path, width=width, height=height,
-        steps=_clamp_steps(steps, lo=1, hi=50, default=25),
     )
 
 

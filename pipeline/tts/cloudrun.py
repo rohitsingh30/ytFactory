@@ -43,6 +43,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -74,25 +75,19 @@ from pipeline import telemetry as _tlm  # noqa: E402
 def _service_url(*, model: str | None = None) -> str:
     """Return the Cloud Run service URL for a given model.
 
-    Each model lives in its own Cloud Run service (separate container,
-    separate dep tree, separate quota slot), so we route per-model:
+    Each model lives in its own Cloud Run service. Post 2026-05-16
+    cost-optimization sweep only chatterbox + indicf5 remain (see
+    docs/cost_optimized_deploy.md). f5 / higgs / cosyvoice / indicparler
+    were removed; restore from git history if revival is needed.
 
-    * f5          → CLOUDRUN_TTS_F5_URL (or legacy CLOUDRUN_TTS_URL)
-    * higgs       → CLOUDRUN_TTS_HIGGS_URL
-    * cosyvoice   → CLOUDRUN_TTS_COSYVOICE_URL
     * chatterbox  → CLOUDRUN_TTS_CHATTERBOX_URL
-    * indicparler → CLOUDRUN_TTS_INDICPARLER_URL
     * indicf5     → CLOUDRUN_TTS_INDICF5_URL
 
     Each service-specific env falls back to CLOUDRUN_TTS_URL if unset
     so a one-service deployment still works.
     """
     per_model = {
-        "f5":          "CLOUDRUN_TTS_F5_URL",
-        "higgs":       "CLOUDRUN_TTS_HIGGS_URL",
-        "cosyvoice":   "CLOUDRUN_TTS_COSYVOICE_URL",
         "chatterbox":  "CLOUDRUN_TTS_CHATTERBOX_URL",
-        "indicparler": "CLOUDRUN_TTS_INDICPARLER_URL",
         "indicf5":     "CLOUDRUN_TTS_INDICF5_URL",
     }
     if model in per_model:
@@ -101,9 +96,9 @@ def _service_url(*, model: str | None = None) -> str:
             return specific
     url = os.environ.get("CLOUDRUN_TTS_URL", "").strip().rstrip("/")
     if not url:
-        env_hint = per_model.get(model or "f5", "CLOUDRUN_TTS_URL")
+        env_hint = per_model.get(model or "chatterbox", "CLOUDRUN_TTS_URL")
         raise CloudRunUnavailable(
-            f"cloudrun_{model or 'f5'} provider requires {env_hint} (or "
+            f"cloudrun_{model or 'chatterbox'} provider requires {env_hint} (or "
             f"CLOUDRUN_TTS_URL as fallback) to be set. "
             f"Add it to .env and re-source, or `unset` to force fall back "
             f"to local TTS providers."
@@ -399,11 +394,28 @@ def _materialise_wav(resp: dict, out_path: Path) -> Path:
             f"output_gcs: keys={list(resp)!r}"
         )
     # Streaming GCS download via gcloud (no extra dep on the laptop).
+    # Wrap subprocess in try/except so a transient gcloud failure (auth
+    # expired, network blip, bucket permission glitch) raises the
+    # caller-recognized ``CloudRunUnavailable`` (which triggers fallback
+    # to the local TTS provider) instead of crashing the whole render
+    # with a raw CalledProcessError stack.
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["gcloud", "storage", "cp", gcs_uri, str(out_path)],
-        check=True, capture_output=True,
-    )
+    try:
+        subprocess.run(
+            ["gcloud", "storage", "cp", gcs_uri, str(out_path)],
+            check=True, capture_output=True, timeout=120,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        stderr_tail = ""
+        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+            try:
+                stderr_tail = exc.stderr.decode("utf-8", errors="replace")[-400:]
+            except Exception:  # noqa: BLE001
+                stderr_tail = "(stderr decode failed)"
+        raise CloudRunUnavailable(
+            f"gcloud storage cp failed for {gcs_uri}: "
+            f"{type(exc).__name__}: {exc}{(' / stderr=' + stderr_tail) if stderr_tail else ''}"
+        ) from exc
     return out_path
 
 
@@ -492,7 +504,22 @@ def _synth_cloudrun(
 # description-driven, not clone-driven, so it stays on the original
 # (empty) ref for every chunk. Higgs is left out for the same reason
 # — it's prompt-driven not clone-anchored.
-_VOICE_CLONE_CAPABLE = {"f5", "indicf5", "chatterbox", "cosyvoice"}
+_VOICE_CLONE_CAPABLE = {"indicf5", "chatterbox"}
+
+# Per-model safe-envelope for one /synth call. Exceeding this empirically
+# collapses the model into "voice-timbre-preserving but linguistically
+# garbled" output (F5-TTS#1196). Audit evidence 2026-05-15: mahabharat
+# Short pushed 43.77s single-pass through IndicF5; Whisper transcribed
+# back as non-Hindi syllables, zero topic vocabulary. Chunking to ≤200
+# chars per call + concat (the same _synth_cloudrun_chunked path the
+# other providers already use) fixes the class-of-bug.
+#
+# Sources: huggingface.co/ai4bharat/IndicF5/discussions/16,
+# github.com/SWivid/F5-TTS/issues/1196
+_CHUNK_MAX_CHARS = {
+    "indicf5": 200,    # AI4Bharat IndicF5 — F5 family, conservative cap
+    "chatterbox":  400,
+}
 
 
 def _split_for_chunked_synth(text: str, max_chars: int = 350) -> list[str]:
@@ -619,16 +646,32 @@ def _seed_from_text(text: str) -> int:
 
 
 def _make_silence_wav(duration_s: float, out_path: Path) -> Path:
-    """Generate a mono 24kHz silence WAV via ffmpeg anullsrc."""
+    """Generate a mono 24kHz silence WAV via ffmpeg anullsrc.
+
+    Clamps duration to [0.0, 10.0] — silence longer than 10s between
+    chunks is always a bug (and a NaN/inf slipping through would freeze
+    ffmpeg). Subprocess wrapped in try/except so a transient ffmpeg
+    failure raises ``CloudRunUnavailable`` for the caller's fallback
+    path instead of crashing the render with a raw stack.
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    if not math.isfinite(duration_s) or duration_s < 0:
+        duration_s = 0.0
+    duration_s = min(10.0, duration_s)
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-f", "lavfi",
-        "-i", f"anullsrc=channel_layout=mono:sample_rate=24000",
-        "-t", f"{max(0.0, duration_s):.3f}",
+        "-i", "anullsrc=channel_layout=mono:sample_rate=24000",
+        "-t", f"{duration_s:.3f}",
         str(out_path),
     ]
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        raise CloudRunUnavailable(
+            f"ffmpeg silence-wav generation failed (duration={duration_s:.3f}s): "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     return out_path
 
 
@@ -661,7 +704,18 @@ def _concat_wavs(parts: list[Path], out_path: Path) -> Path:
         "-c", "copy",
         str(out_path),
     ]
-    subprocess.run(cmd, check=True)
+    # Wrap concat in try/except so a transient ffmpeg failure (one
+    # chunk WAV malformed, /tmp out of space, ffmpeg binary missing)
+    # raises ``CloudRunUnavailable`` for the caller's fallback path.
+    # Pre-fix: subprocess.CalledProcessError propagated, crashing the
+    # render with an uninformative stack instead of degrading to local.
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        raise CloudRunUnavailable(
+            f"ffmpeg concat failed across {len(parts)} chunks: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     return out_path
 
 
@@ -699,7 +753,7 @@ def _synth_cloudrun_chunked(
       * a deterministic seed is derived from the input text when
         ``seed=None`` so re-renders of the same script are stable.
     """
-    chunks = _split_for_chunked_synth(text)
+    chunks = _split_for_chunked_synth(text, max_chars=_CHUNK_MAX_CHARS.get(model, 350))
     if not chunks:
         raise ValueError("nothing to synthesise — text is empty/whitespace")
 
@@ -754,176 +808,6 @@ def _synth_cloudrun_chunked(
                 parts.append(sil_path)
 
     return _concat_wavs(parts, out_path)
-
-
-def _synth_cloudrun_f5(
-    text: str,
-    ref_audio_path: str,
-    ref_audio_text: str,
-    out_path: Path,
-    speed: float,
-    seed: int | None = None,
-) -> Path:
-    """F5-TTS via Cloud Run. Falls back to local F5-MLX on cloud
-    failure unless ``CLOUDRUN_TTS_DISABLE_FALLBACK=1``.
-
-    Output WAV is byte-different from the local MLX path (different
-    inference runtime), but voice character should be perceptually
-    identical because the cloud uses the same checkpoint
-    (F5TTS_Base) and same flow-matching params (ode_method=rk4,
-    nfe_step=8, cfg_strength=2.0, sway_sampling_coef=-1.0).
-    """
-    try:
-        return _synth_cloudrun(
-            model="f5", text=text, ref_audio_path=ref_audio_path,
-            ref_audio_text=ref_audio_text, out_path=out_path,
-            speed=speed, seed=seed,
-        )
-    except CloudRunUnavailable as e:
-        logger.warning(
-            "cloudrun_f5 unavailable (%s); falling back to local f5_tts", e,
-        )
-        def _fb():
-            from pipeline.tts.f5 import _synth_f5_tts  # noqa: PLC0415
-            return _synth_f5_tts(
-                text=text, ref_audio_path=ref_audio_path,
-                ref_audio_text=ref_audio_text, out_path=out_path, speed=speed,
-            )
-        return _local_fallback_or_raise(e, "cloudrun_f5", _fb)
-
-
-def _synth_cloudrun_higgs(
-    text: str,
-    ref_audio_path: str,
-    ref_audio_text: str | None,
-    out_path: Path,
-    speed: float,
-    seed: int | None = None,
-) -> Path:
-    """Higgs Audio v2 via Cloud Run.
-
-    On cloud failure, fall back to **local F5-TTS** (per laptop-fallback
-    policy 2026-05-06: "F5 for all on laptop"). Higgs has no realistic
-    local equivalent (PyTorch-only, ~20× real-time on M2 Max MPS),
-    so F5 is the practical degradation path.
-    """
-    try:
-        return _synth_cloudrun(
-            model="higgs", text=text, ref_audio_path=ref_audio_path,
-            ref_audio_text=ref_audio_text, out_path=out_path,
-            speed=speed, seed=seed,
-        )
-    except CloudRunUnavailable as e:
-        logger.warning(
-            "cloudrun_higgs unavailable (%s); falling back to local F5-TTS "
-            "(per laptop-fallback policy 2026-05-06)", e,
-        )
-        def _fb():
-            from pipeline.tts.f5 import _synth_f5_tts  # noqa: PLC0415
-            return _synth_f5_tts(
-                text=text, ref_audio_path=ref_audio_path,
-                ref_audio_text=ref_audio_text, out_path=out_path, speed=speed,
-            )
-        return _local_fallback_or_raise(e, "cloudrun_higgs", _fb)
-
-
-def _synth_cloudrun_cosyvoice(
-    text: str,
-    ref_audio_path: str,
-    ref_audio_text: str,
-    out_path: Path,
-    speed: float,
-    seed: int | None = None,
-) -> Path:
-    """CosyVoice 2 via Cloud Run.
-
-    On cloud failure, fall back to **local F5-TTS** (per laptop-fallback
-    policy 2026-05-06). CosyVoice isn't installed in the laptop venv
-    (deepspeed/torch dep tree fights), so F5 is the only viable local
-    path.
-
-    NOTE: CosyVoice 2 0.5B does NOT speak Hindi (proven 2026-05-05).
-    Use cloudrun_indicparler / kokoro hf_alpha for Hindi instead.
-    """
-    if not ref_audio_text:
-        raise ValueError(
-            "cloudrun_cosyvoice requires ref_audio_text "
-            "(transcript of the ref WAV)"
-        )
-    try:
-        return _synth_cloudrun(
-            model="cosyvoice", text=text, ref_audio_path=ref_audio_path,
-            ref_audio_text=ref_audio_text, out_path=out_path,
-            speed=speed, seed=seed,
-        )
-    except CloudRunUnavailable as e:
-        logger.warning(
-            "cloudrun_cosyvoice unavailable (%s); falling back to local F5-TTS "
-            "(per laptop-fallback policy 2026-05-06)", e,
-        )
-        def _fb():
-            from pipeline.tts.f5 import _synth_f5_tts  # noqa: PLC0415
-            return _synth_f5_tts(
-                text=text, ref_audio_path=ref_audio_path,
-                ref_audio_text=ref_audio_text, out_path=out_path, speed=speed,
-            )
-        return _local_fallback_or_raise(e, "cloudrun_cosyvoice", _fb)
-
-
-def _synth_cloudrun_indicparler(
-    text: str,
-    ref_audio_path: str | None,
-    ref_audio_text: str | None,
-    out_path: Path,
-    speed: float,
-    seed: int | None = None,
-    description: str | None = None,
-    narration_prosody: list[dict] | None = None,
-) -> Path:
-    """Indic Parler-TTS via Cloud Run.
-
-    On cloud failure, fall back to **local Kokoro hf_alpha** (per
-    laptop-fallback policy 2026-05-06: "kokoro for hindutava-animated").
-    Hindi has no F5 local equivalent — Kokoro is the only Hindi TTS
-    that runs on the laptop.
-
-    Uses ``description`` (natural-language voice spec) instead of
-    ``ref_audio_path``. Indic Parler is description-driven.
-
-    Long-form text is chunked through ``_synth_cloudrun_chunked`` so
-    paragraph-aware prosody + post-pause silence can be honoured per
-    ``narration_prosody``.
-    """
-    payload_text = text
-    payload_desc = description or (
-        "A clear, expressive Indian female voice with moderate pace. "
-        "Recording is high quality."
-    )
-    try:
-        return _synth_cloudrun_chunked(
-            model="indicparler", text=payload_text,
-            ref_audio_path=ref_audio_path or "",  # not used by indicparler
-            # Audit Q2.17 — pass the voice description through the
-            # dedicated `description` channel; the server reads
-            # req.description, so the pre-fix piggyback in ref_text
-            # was silently ignored and every Hindi render fell back
-            # to the hardcoded "calm devotional Indian female" default.
-            ref_audio_text=None,
-            out_path=out_path, speed=speed, seed=seed,
-            narration_prosody=narration_prosody,
-            description=payload_desc,
-        )
-    except CloudRunUnavailable as e:
-        logger.warning(
-            "cloudrun_indicparler unavailable (%s); falling back to local "
-            "Kokoro hf_alpha (per laptop-fallback policy 2026-05-06)", e,
-        )
-        def _fb():
-            from pipeline.tts.kokoro import _synth_kokoro  # noqa: PLC0415
-            return _synth_kokoro(
-                text=text, voice="hf_alpha", out_path=out_path, speed=speed,
-            )
-        return _local_fallback_or_raise(e, "cloudrun_indicparler", _fb)
 
 
 def _synth_cloudrun_indicf5(
