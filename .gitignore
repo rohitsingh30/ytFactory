@@ -140,3 +140,24 @@ data/critiques/
 data/loop/
 audit_data/
 audit_report.html
+
+# Demo / scratch render outputs at repo root — regenerable from
+# narrations + footage source. Heavy (mp4 + wav + per-beat PNGs).
+out/
+
+# Per-channel render artifacts at repo root — stay local per
+# convention (regenerable from the channel YAML + scheduler).
+# Add new channel slugs here as channels come online.
+mystoriesanimated/
+historyrecapped/
+hindutavaanimated/
+cosmosdecoded/
+sportsrecapped/
+rhymetimejunction/
+scrollpulse/
+
+# Per-channel critique artifacts — the cloud-critic daemon writes
+# critique.md + score.json under <channel>/critiques/. Regenerable;
+# we keep the SHIP/FIX verdict on the job doc in Firestore as the
+# durable record.
+**/critiques/
