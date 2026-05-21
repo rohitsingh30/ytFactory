@@ -83,22 +83,49 @@ tts_language: hi
 tts_speed: 1.0       # Per-sentence modulation in audio.py drives final pacing.
 
 # ---- Image gen — Amar Chitra Katha aesthetic --------------------------
-image_provider: cloudrun_flux2_klein
+image_provider: cloudrun_z_image_turbo
+# Style rewritten 2026-05-17 to pass the channel-richness gate in
+# pipeline/llm/prompts.py. Preserves the Amar Chitra Katha aesthetic
+# while explicitly listing palette, technique, and anti-text token
+# classes — the gate requires all three, and Z-Image-Turbo needs the
+# anti-text positive-presence anchors so banners, scrolls, and palm-
+# leaf manuscripts don't render with gibberish fake-Devanagari.
 image_style_prefix: |
   Amar Chitra Katha Indian comic-book illustration style. Bold black
-  ink outlines, flat saturated colors — deep sindoor red, peacock blue,
-  marigold yellow, emerald green, antique gold. Slightly stylized
-  expressive Indian faces with large dark eyes and defined eyebrows.
-  Decorative temple-mural background motifs. Composition centered and
-  iconographic, like a single comic-book panel. No modern objects.
+  ink outlines with varying weight — thick contour strokes, lighter
+  interior detail. Flat saturated cel fills painted with hand-drawn
+  technique, never vector. Traditional ACK palette: deep sindoor red,
+  peacock blue, marigold yellow, emerald green, antique gold, ivory,
+  and warm sandstone tones. Stylized expressive Indian faces with
+  large dark almond eyes and visible pupils, defined eyebrows that
+  articulate emotion per beat, slightly pursed or open mouth, and
+  warm cheek shading. Decorative temple-mural background motifs —
+  carved sandstone arches, lotus-petal halos, banyan leaf canopies,
+  river-bank tilework. Soft directional warm light from above, gentle
+  shadow falloff on the right side of figures. Composition centered
+  and iconographic, like a single comic-book panel. No modern objects.
+  Every banner, scroll, palm-leaf manuscript, conch shell, and metal
+  vessel is plain and unmarked — surfaces are smooth, no Devanagari
+  text, no Latin text, no inscriptions, no symbols other than the
+  blank background motif. ZERO printed text or numerals in the
+  rendered frame; the caption overlay is added by post-processing.
 
 # Per-story character lock (cast.json overrides). The fallback below
 # only applies when a story has no cast.json yet.
 character_description: |
-  Mahabharat-era Indian warrior. Fair-skinned, dark wavy hair tied
-  back, expressive dark eyes, gold earrings, warrior tunic with gold
-  trim, dhoti. Bold black ink outline, flat saturated colors. Always
-  the same character across all images.
+  Mahabharat-era Indian warrior in his late twenties. Fair-skinned
+  with a soft golden undertone; dark wavy hair tied back in a knot
+  at the crown, a few loose strands framing the temples. Expressive
+  large dark almond eyes with visible pupils and short lashes.
+  Defined dark eyebrows that articulate emotion per beat — arched
+  in resolve, furrowed in conflict, level at rest. Small straight
+  nose with soft cheek-shadow on the right. Articulated mouth that
+  shifts shape with the spoken beat — set in determination,
+  slightly parted when in dialogue, downturned in grief. Bold black
+  ink outline. Wears a saffron warrior tunic with gold trim at the
+  neck and hem, an ivory dhoti, a gold armlet on the right bicep,
+  small gold ear-stud earrings. Same locked appearance across every
+  beat.
 
 opening_image_directives:
   required_concrete_tokens: 2
@@ -108,7 +135,7 @@ opening_image_directives:
 
 # Locked seed for character consistency across beats.
 image_seed: 108  # auspicious in Hindu tradition
-image_steps: 4
+image_steps: 9  # Z-Image-Turbo spec sweet spot (was 4 — stale laptop carryover).
 image_width: 768
 image_height: 1344
 
@@ -204,7 +231,7 @@ upload:
 # narration authoring side.
 long_form:
   render_mode: image_panels
-  tts_provider: cloudrun_indicparler
+  tts_provider: cloudrun_indicf5
   tts_voice: hf_alpha
   tts_speed: 0.92
   tts_post_atempo: 0.95
@@ -219,7 +246,7 @@ long_form:
   output_fps: 30
   captions_enabled: true                # Devanagari subtitles for accessibility
   panel_max_count: 60  # bumped 2026-05-13 — cloudrun_flux2_klein has no Metal watchdog (see mystoriesanimated.yaml)
-  image_provider: cloudrun_flux2_klein
+  image_provider: cloudrun_z_image_turbo
   image_seed: 1008
   image_steps: 4
   image_width: 1344

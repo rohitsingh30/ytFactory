@@ -12,13 +12,23 @@ tts_speed: 1.05
 # (canary 2026-05-07). Falls back to local z_image_turbo (mflux) on
 # cloud failure via render-level circuit breaker. For pre-cloudrun
 # parity, set image_provider: z_image_turbo.
-image_provider: cloudrun_flux2_klein
+image_provider: cloudrun_z_image_turbo
 image_style_prefix: |
-  simple flat 2D doodle illustration, hand-drawn ink line, scribbly
-  cartoon style, cute children's-book aesthetic, minimal pastel colors,
-  no shading, plain pale background
+  Hand-drawn doodle illustration in the style of modern indie
+  webcomics, intentionally simpler than the animated AITA variants
+  to leave room for the Reddit-card overlay. Confident ink line
+  work with varying weight, watercolor wash fills with visible
+  paper grain and soft brush texture. Warm pastel palette: dusty
+  pink, soft beige, mustard yellow, warm brown, sage green; never
+  saturated. Plain pale parchment background, soft falloff lighting,
+  one main subject mid-frame with airy negative space around it.
+  Every object in frame is unmarked and unbranded — cups plain
+  ceramic, bottles smooth glass without labels, packaging without
+  logos, walls without signs, screens blank. ZERO printed text or
+  numbers anywhere in the rendered frame. (The Reddit-card overlay
+  is composed post-diffusion and is the only text element.)
 image_seed: 42
-image_steps: 4  # FLUX.2 klein is distilled to 4 inference steps
+image_steps: 9  # Z-Image-Turbo spec sweet spot (was 4 — stale FLUX.2 carryover).
 
 # Beat shape
 beat_target_s: 2.0

@@ -1,20 +1,17 @@
 """Tests for the cloud-run TTS provider — laptop-side glue.
 
-Two layers (mirrors tests/test_audio_tts_providers.py):
+Two layers:
 
-1. **Dispatcher + fallback** — fast, no network. Verifies the
-   `cloudrun_f5` route through `synthesize()` and that
-   CloudRunUnavailable falls back to local f5_tts unless the
-   DISABLE_FALLBACK env var is set.
+1. **Dispatcher** — fast, no network. Verifies the surviving cloud
+   providers (cloudrun_chatterbox, cloudrun_indicf5) route through
+   ``audio.synthesize()``. Post 2026-05-16 cost-optimization sweep
+   the f5/higgs/cosyvoice/indicparler/all-azure routes were dropped;
+   restore from git history if revival is needed.
 
-2. **Live cloud smoke** — actually hits the Cloud Run service and
-   confirms a real WAV comes back. Slow (~3 s warm, ~45 s cold).
-   Auto-skipped unless ``CLOUDRUN_TTS_LIVE=1`` AND
-   ``CLOUDRUN_TTS_URL`` is set::
-
-       export CLOUDRUN_TTS_URL=https://ytfactory-tts-...run.app
-       CLOUDRUN_TTS_LIVE=1 .venv/bin/python -m unittest \\
-           tests.test_cloudrun_tts_provider
+2. **Live cloud smoke** — actually hits the Cloud Run chatterbox
+   service and confirms a real WAV comes back. Slow (~3 s warm,
+   ~45 s cold). Auto-skipped unless ``CLOUDRUN_TTS_LIVE=1`` AND
+   ``CLOUDRUN_TTS_CHATTERBOX_URL`` is set.
 """
 from __future__ import annotations
 
@@ -38,30 +35,34 @@ REF_TXT = PROJECT_ROOT / "pipeline" / "voice_refs" / "sarah.txt"
 class TestCloudRunDispatch(unittest.TestCase):
     """Pure dispatcher — no network, no model loads."""
 
-    def test_synthesize_routes_cloudrun_f5(self) -> None:
-        """provider='cloudrun_f5' must dispatch to the cloud synth fn."""
+    def test_synthesize_routes_cloudrun_chatterbox(self) -> None:
         out = Path(tempfile.gettempdir()) / "dispatch-test.wav"
-        with patch.object(audio, "_synth_cloudrun_f5") as mock_synth:
+        with patch.object(audio, "_synth_cloudrun_chatterbox") as mock_synth:
             mock_synth.return_value = out
             audio.synthesize(
                 "Hello world.",
                 voice=str(REF_WAV),
                 out_path=out,
-                provider="cloudrun_f5",
-                ref_audio_text="Reference transcript.",
+                provider="cloudrun_chatterbox",
             )
             mock_synth.assert_called_once()
             kwargs = mock_synth.call_args.kwargs
-            # Must forward the same fields as the local f5 route.
             self.assertEqual(kwargs["ref_audio_path"], str(REF_WAV))
-            self.assertEqual(kwargs["ref_audio_text"], "Reference transcript.")
 
-    def test_cloudrun_f5_requires_ref_text(self) -> None:
-        """Missing ref_audio_text must raise the same error as f5_tts."""
-        # sports_male_intense.wav has no .txt sidecar so the 2026-05-15
-        # voice resolver returns an empty transcript; the dispatcher's
-        # ref_audio_text check still fires. Using sarah.wav (which DOES
-        # have a sidecar) would silently auto-fill ref_audio_text.
+    def test_synthesize_routes_cloudrun_indicf5(self) -> None:
+        out = Path(tempfile.gettempdir()) / "dispatch-test-if5.wav"
+        with patch.object(audio, "_synth_cloudrun_indicf5") as mock_synth:
+            mock_synth.return_value = out
+            audio.synthesize(
+                "नमस्कार",
+                voice=str(REF_WAV),
+                out_path=out,
+                provider="cloudrun_indicf5",
+                ref_audio_text="Reference transcript.",
+            )
+            mock_synth.assert_called_once()
+
+    def test_cloudrun_indicf5_requires_ref_text(self) -> None:
         no_sidecar_wav = (
             PROJECT_ROOT / "pipeline" / "voice_refs" / "sports_male_intense.wav"
         )
@@ -70,58 +71,42 @@ class TestCloudRunDispatch(unittest.TestCase):
                 "Hello world.",
                 voice=str(no_sidecar_wav),
                 out_path=Path("/tmp/never.wav"),
-                provider="cloudrun_f5",
+                provider="cloudrun_indicf5",
                 ref_audio_text=None,
             )
         self.assertIn("ref_audio_text", str(ctx.exception))
 
-    def test_unknown_provider_lists_cloudrun_f5(self) -> None:
-        """Error message for unknown provider must enumerate cloudrun_f5."""
+    def test_unknown_provider_lists_surviving_providers(self) -> None:
+        """Error message must enumerate the surviving providers."""
         with self.assertRaises(ValueError) as ctx:
             audio.synthesize(
                 "x", voice="v", out_path=Path("/tmp/never.wav"),
                 provider="not_real",
             )
-        self.assertIn("cloudrun_f5", str(ctx.exception))
+        self.assertIn("cloudrun_chatterbox", str(ctx.exception))
+        self.assertIn("cloudrun_indicf5", str(ctx.exception))
 
 
 # ----------------------------------------------------------------- fallback
 
 
 class TestCloudRunFallback(unittest.TestCase):
-    """As of 2026-05-09 (laptop nuclear cleanup) there is **no** local
-    fallback. Cloud failures must surface ``CloudRunUnavailable``."""
+    """Cloud failures must surface ``CloudRunUnavailable``.
+
+    As of 2026-05-09 (laptop nuclear cleanup) there is no local
+    fallback for the cloud TTS path."""
 
     def test_5xx_re_raises_cloud_unavailable(self) -> None:
-        # Cloud failure → CloudRunUnavailable bubbles up.
         with patch("pipeline.tts.cloudrun._post_synth") as mock_post:
             mock_post.side_effect = CloudRunUnavailable("503 simulated")
-            from pipeline.tts.cloudrun import _synth_cloudrun_f5
+            from pipeline.tts.cloudrun import _synth_cloudrun_chatterbox
 
             with self.assertRaises(CloudRunUnavailable):
-                _synth_cloudrun_f5(
+                _synth_cloudrun_chatterbox(
                     text="hello",
                     ref_audio_path=str(REF_WAV),
                     ref_audio_text="ref",
                     out_path=Path("/tmp/fallback-test.wav"),
-                    speed=1.0,
-                )
-
-    def test_disable_fallback_env_var_is_now_a_noop(self) -> None:
-        """``CLOUDRUN_TTS_DISABLE_FALLBACK=1`` used to flip on the
-        re-raise behaviour; with no fallback path left it's a no-op
-        but the env var is still tolerated for back-compat."""
-        with patch.dict(os.environ, {"CLOUDRUN_TTS_DISABLE_FALLBACK": "1"}), \
-             patch("pipeline.tts.cloudrun._post_synth") as mock_post:
-            mock_post.side_effect = CloudRunUnavailable("503 simulated")
-            from pipeline.tts.cloudrun import _synth_cloudrun_f5
-
-            with self.assertRaises(CloudRunUnavailable):
-                _synth_cloudrun_f5(
-                    text="hello",
-                    ref_audio_path=str(REF_WAV),
-                    ref_audio_text="ref",
-                    out_path=Path("/tmp/nope.wav"),
                     speed=1.0,
                 )
 
@@ -130,39 +115,31 @@ class TestCloudRunFallback(unittest.TestCase):
 
 
 class TestCloudRunLiveSmoke(unittest.TestCase):
-    """Live hit against the real Cloud Run service. Opt-in only."""
+    """Live hit against the real Cloud Run chatterbox service. Opt-in only."""
 
     @classmethod
     def setUpClass(cls) -> None:
         if os.environ.get("CLOUDRUN_TTS_LIVE", "") != "1":
             raise unittest.SkipTest(
-                "set CLOUDRUN_TTS_LIVE=1 (and CLOUDRUN_TTS_URL) to enable"
+                "set CLOUDRUN_TTS_LIVE=1 (and CLOUDRUN_TTS_CHATTERBOX_URL) to enable"
             )
-        if not os.environ.get("CLOUDRUN_TTS_URL", "").strip():
-            raise unittest.SkipTest("CLOUDRUN_TTS_URL not set")
+        if not os.environ.get("CLOUDRUN_TTS_CHATTERBOX_URL", "").strip():
+            raise unittest.SkipTest("CLOUDRUN_TTS_CHATTERBOX_URL not set")
         if not REF_WAV.exists():
             raise unittest.SkipTest(f"missing ref WAV: {REF_WAV}")
 
     def test_short_synth_round_trip(self) -> None:
-        """Render a 2-3s clip via the real cloud service. Confirms:
-        - Auth flow works (gcloud ID token accepted)
-        - Cloud writes a valid WAV
-        - We materialise it correctly to disk
-        - Output is non-trivial (has audio bytes)
-        """
         out = Path(tempfile.gettempdir()) / "cloudrun-smoke-live.wav"
         out.unlink(missing_ok=True)
         audio.synthesize(
             "Cloud Run smoke test, one two three.",
             voice=str(REF_WAV),
             out_path=out,
-            provider="cloudrun_f5",
-            ref_audio_text=REF_TXT.read_text().strip(),
+            provider="cloudrun_chatterbox",
         )
         self.assertTrue(out.exists(), "cloud /synth produced no file")
         size = out.stat().st_size
         self.assertGreater(size, 50_000, f"cloud WAV suspiciously small: {size}")
-        # First 4 bytes should be RIFF header.
         with open(out, "rb") as f:
             self.assertEqual(f.read(4), b"RIFF")
 

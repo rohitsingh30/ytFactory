@@ -17,7 +17,7 @@ REPO="ytfactory-tts"
 SERVICE="ytfactory-weights-staging"
 TAG="${1:-$(date +%Y%m%d-%H%M%S)}"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE}:${TAG}"
-BUCKET="ytfactory-model-weights-v2"
+BUCKET="ytfactory-prod-v3-model-weights"
 
 cd "$(dirname "$0")"
 
@@ -27,7 +27,8 @@ cd "$(dirname "$0")"
 HF_TOKEN_VAL="$(cat ~/.cache/huggingface/token 2>/dev/null || echo)"
 
 echo "==> Building + pushing ${IMAGE}"
-gcloud builds submit . --tag="${IMAGE}" --project="${PROJECT}" --timeout=900s
+# --region pins build to asia-southeast1 (2026-05-17 cost-audit rule 3).
+gcloud builds submit . --region="${REGION}" --tag="${IMAGE}" --project="${PROJECT}" --timeout=900s
 
 echo "==> Creating/updating Cloud Run Job ${SERVICE}"
 # `jobs deploy` creates if missing, updates if present.

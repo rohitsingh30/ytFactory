@@ -89,7 +89,7 @@ tts_speed: 1.0
 # DO NOT switch to motion_provider — channel design is illustrated
 # stills between archival cut-ins; AnimateDiff is rejected for this
 # channel for the same reason as sports.
-image_provider: cloudrun_flux2_klein
+image_provider: cloudrun_z_image_turbo
 #
 # CLASS-OF-BUG note (channel bring-up): the bare phrase "war scene"
 # pushes diffusion toward generic medieval/fantasy battles or video-game
@@ -107,14 +107,27 @@ image_provider: cloudrun_flux2_klein
 # blood". To suppress imagery we describe what we WANT (formation
 # silhouette, wide landscape, equipment close-up).
 image_style_prefix: |
-  vintage illustrated military history book plate, ink hatching with
-  watercolor wash, muted military palette of khaki olive sepia
-  charcoal and dust-red, dramatic chiaroscuro lighting, period-accurate
-  uniforms and equipment, wide compositional framing, single subject
-  focus, no text, sober documentary tone (never video-game screenshot,
-  never fantasy battle, never modern operator)
+  Vintage illustrated military-history book plate in the style of
+  19th-century campaign histories and 20th-century Osprey
+  Publishing plates. Ink-line hatching technique with delicate
+  cross-hatching for shadow, layered watercolor washes for tone,
+  visible cotton-rag paper grain. Muted military palette: khaki,
+  olive drab, sepia, charcoal, dust-red, oxidized brass, weathered
+  white. Dramatic chiaroscuro lighting with low warm key from
+  upper-left and deep blue-grey shadow falloff into the
+  background. Period-accurate uniforms, weapons, and equipment
+  rendered with engraver's precision — visible fabric folds,
+  leather strap creases, buckle and button geometry. Wide
+  compositional framing with one main subject in clear focus,
+  supporting context softened. Sober documentary tone — never
+  video-game screenshot, never fantasy battle, never modern
+  operator aesthetic. Every regimental banner, dispatch paper,
+  map, recruiting poster, ammunition box, and field manual is
+  blank and unmarked — surfaces show no readable insignia, no
+  print, no numerals, no signage. ZERO text or numerals visible
+  in the rendered frame.
 image_seed: 1944  # year of D-Day, Battle of the Bulge, Iwo Jima — locks character look
-image_steps: 4    # M2 Max compile-disabled path; matches sports + today_in_history
+image_steps: 9    # Z-Image-Turbo spec sweet spot (was 4 — stale laptop carryover).
 # Z-Image-Turbo caps at 1344 per dim; compose upscales to the
 # 1080x1920 output_resolution in the final render.
 image_width: 768
@@ -331,7 +344,7 @@ long_form:
     framing with small human figures in period dress, atmospheric depth via
     foreground silhouette frame (cave mouth or tree silhouette or rock arch),
     no text, no captions on image, no modern objects, no logo
-  image_provider: cloudrun_flux2_klein
+  image_provider: cloudrun_z_image_turbo
   image_seed: 1944       # locks character/scene look across an episode
   image_steps: 4
   image_width: 1344      # Z-Image-Turbo cap; compose upscales to 1920x1080

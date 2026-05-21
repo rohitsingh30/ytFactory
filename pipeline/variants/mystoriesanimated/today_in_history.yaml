@@ -12,13 +12,25 @@ tts_speed: 1.0
 # Image gen — Z-Image-Turbo 6B via mflux (MLX-native).
 # Replaced sd_turbo (May 2026) — see wiki_oddities.yaml or
 # images.validate_provider_config for the why.
-image_provider: cloudrun_flux2_klein
+image_provider: cloudrun_z_image_turbo
 image_style_prefix: |
-  classic history-book illustration, muted oil-painting style, warm
-  amber palette, cinematic lighting, a single key historical scene,
-  detailed but uncluttered, no text or captions
+  Classic history-book illustration in muted oil-painting style,
+  evoking 19th-century narrative paintings. Hand-painted technique
+  with visible brush strokes, subtle canvas texture, and layered
+  glazes. Warm amber palette dominated by sepia, burnt sienna,
+  faded olive, dusty rose, slate grey, and aged-parchment cream;
+  never saturated. Cinematic chiaroscuro lighting with soft warm
+  key from upper-left and deep falling shadows in the background.
+  A single key historical scene mid-frame, detailed but
+  uncluttered, with one or two grounding props placed in the
+  foreground for spatial anchor. Every prop is plain and
+  unmarked — books are closed with blank covers, banners hang
+  blank, parchment scrolls are blurred, walls bear no signage,
+  battle standards show no insignia legible to the eye. ZERO
+  printed text, numerals, dates, or captions visible in the
+  rendered frame.
 image_seed: 1923
-image_steps: 4  # See aita_animated.yaml comment. M2 Max compile-disabled path.
+image_steps: 9  # Z-Image-Turbo spec sweet spot (was 4 — stale laptop carryover).
 
 # Beat shape
 beat_target_s: 2.2

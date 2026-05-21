@@ -50,7 +50,7 @@ source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 echo "==> Verifying web-runner IAM bindings (preflight)"
 "$(cd "$(dirname "$0")" && pwd)/../iam/verify_web_runner.sh"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
 SERVICE="ytfactory-web"
@@ -61,7 +61,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 echo "==> Building + pushing ${IMAGE}"
+# --region pins build to asia-southeast1 (2026-05-17 cost-audit rule 3).
 gcloud builds submit . \
+  --region="${REGION}" \
   --config=cloud/web-server/cloudbuild.yaml \
   --ignore-file=cloud/web-server/.gcloudignore \
   --substitutions="_IMAGE=${IMAGE}" \
@@ -102,7 +104,7 @@ gcloud run deploy "${SERVICE}" \
   --port=8080 \
   --allow-unauthenticated \
   --set-secrets="^|^AZURE_OPENAI_API_KEY=azure-openai-key:latest|YTFACTORY_CLIENT_SECRET=ytfactory-oauth-client:latest|YTFACTORY_WEB_OAUTH_CLIENT=ytfactory-web-oauth-client:latest|YTFACTORY_SESSION_SECRET=ytfactory-session-secret:latest|YTFACTORY_AGENT_TOKEN=ytfactory-agent-token:latest|YOUTUBE_API_KEY=youtube-api-key:latest|/secrets/youtube-channel-ids/value=youtube-channel-ids:latest" \
-  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=ytfactory-prod-v2-artifacts|YTFACTORY_STATE_BUCKET=ytfactory-prod-v2-state|YTFACTORY_QUEUE_BACKEND=firestore|YTFACTORY_SIM_WORKER=0|YTFACTORY_RENDER_BACKEND=cloudrun|YTFACTORY_CLOUDRUN_JOB=ytfactory-render-worker-v2|YTFACTORY_CLOUDRUN_REGION=${REGION}|YTFACTORY_COOKIE_SECURE=1|YTFACTORY_ADMIN_DOMAINS=docx.co.in|YTFACTORY_PUBLIC_FRONTEND_URL=https://ytfactory-web-next-7hwnzw7lya-as.a.run.app|YTFACTORY_AUTH_REDIRECT_URI=https://ytfactory-web-next-7hwnzw7lya-as.a.run.app/api/auth/google/callback|CLOUDRUN_TTS_CHATTERBOX_URL=https://ytfactory-tts-chatterbox-283470729204.${REGION}.run.app|CLOUDRUN_TTS_INDICF5_URL=https://ytfactory-tts-indicf5-283470729204.${REGION}.run.app|CLOUDRUN_IMAGE_FLUX2_KLEIN_URL=https://ytfactory-image-flux2-klein-283470729204.${REGION}.run.app|AZURE_OPENAI_ENDPOINT=https://testshoffer.openai.azure.com|AZURE_OPENAI_API_VERSION=2025-04-01-preview|AZURE_OPENAI_MODEL=gpt-5.3-chat|AZURE_OPENAI_TOKEN_PARAM=max_completion_tokens"
+  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=${PROJECT}-artifacts|YTFACTORY_STATE_BUCKET=${PROJECT}-state|YTFACTORY_QUEUE_BACKEND=firestore|YTFACTORY_SIM_WORKER=0|YTFACTORY_RENDER_BACKEND=cloudrun|YTFACTORY_CLOUDRUN_JOB=ytfactory-render-worker-v2|YTFACTORY_CLOUDRUN_REGION=${REGION}|YTFACTORY_COOKIE_SECURE=1|YTFACTORY_ADMIN_DOMAINS=docx.co.in|YTFACTORY_ADMIN_EMAILS=sanimated219@gmail.com|YTFACTORY_PUBLIC_FRONTEND_URL=https://ytfactory-web-next-e67vyhiy6a-as.a.run.app|YTFACTORY_AUTH_REDIRECT_URI=https://ytfactory-web-next-e67vyhiy6a-as.a.run.app/api/auth/google/callback|CLOUDRUN_TTS_CHATTERBOX_URL=https://tts-chatterbox-639721195500.${REGION}.run.app|CLOUDRUN_TTS_INDICF5_URL=https://ytfactory-tts-indicf5-639721195500.${REGION}.run.app|CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL=https://ytfactory-image-z-image-turbo-639721195500.${REGION}.run.app|CLOUDRUN_ASR_URL=https://ytfactory-asr-whisper-639721195500.${REGION}.run.app|AZURE_OPENAI_ENDPOINT=https://testshoffer.openai.azure.com|AZURE_OPENAI_API_VERSION=2025-04-01-preview|AZURE_OPENAI_MODEL=gpt-5.3-chat|AZURE_OPENAI_TOKEN_PARAM=max_completion_tokens"
 # AZURE_OPENAI_ENDPOINT/API_VERSION/MODEL are non-secret triplet
 # REQUIRED for chat_service.py and niche_specs_routes.py to talk to
 # Azure (control/chat_service.py:96-105 + control/routes/niche_specs_routes.py:148-151

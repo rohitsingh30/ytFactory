@@ -227,11 +227,13 @@ class AuthorPromptsForEngineTest(unittest.TestCase):
 
     # ----- failure modes -------------------------------------------------
 
-    def test_author_beat_prompts_raises_returns_empty_dict(self):
-        # When the LLM author itself raises (network down, schema
-        # mismatch, anything), the engine MUST get {} so it falls back
-        # to bare Segment.text — never crash the whole render because
-        # prompt authoring failed.
+    def test_author_beat_prompts_persistent_failure_raises(self):
+        # POST-2026-05-16 contract: when author_beat_prompts fails on
+        # every retry, the helper MUST raise rather than return {}.
+        # Pre-fix this swallowed the exception → engine fell back to
+        # bare Segment.text → unshippable floating-objects mp4 (job
+        # 3cd2b3b5, AITA ketchup-on-stew). The render must FAIL LOUD so
+        # the user sees stage=images_failed in Firestore.
         script = {
             "slug": "boom",
             "narration": "x",
@@ -240,14 +242,50 @@ class AuthorPromptsForEngineTest(unittest.TestCase):
         with patch(
             "pipeline.llm.prompts.author_beat_prompts",
             side_effect=RuntimeError("LLM network down"),
-        ):
+        ), patch("time.sleep"):  # collapse the 2s+4s backoff for test speed
+            with self.assertRaises(RuntimeError) as ctx:
+                _ep._author_prompts_for_engine(
+                    script_dict=script,
+                    channel_yaml_path=self.channel_yaml,
+                    work_dir=self.work_dir,
+                    style_prefix="",
+                )
+        self.assertIn("author_beat_prompts failed after 3 attempts",
+                      str(ctx.exception))
+
+    def test_author_beat_prompts_succeeds_on_retry(self):
+        # Transient failure on attempt 1+2, success on attempt 3 →
+        # helper completes normally and returns the prompts_path dict.
+        script = {
+            "slug": "retry-success",
+            "narration": "x",
+            "beats": [{"text": "first", "start": 0.0, "end": 1.5}],
+        }
+        n_calls = {"count": 0}
+
+        def _flaky_author(*, out_path, **_):
+            n_calls["count"] += 1
+            if n_calls["count"] < 3:
+                raise RuntimeError(f"transient azure 503 attempt {n_calls['count']}")
+            out_path.write_text(json.dumps([
+                {"key_visual": "medium shot of the character first",
+                 "scene": "at a wooden table, warm pendant light overhead",
+                 "narration_line": "first"},
+            ]))
+            return []
+
+        with patch(
+            "pipeline.llm.prompts.author_beat_prompts",
+            side_effect=_flaky_author,
+        ), patch("time.sleep"):
             out = _ep._author_prompts_for_engine(
                 script_dict=script,
                 channel_yaml_path=self.channel_yaml,
                 work_dir=self.work_dir,
                 style_prefix="",
             )
-        self.assertEqual(out, {})
+        self.assertEqual(n_calls["count"], 3, "should retry until success")
+        self.assertIn("prompts_path", out)
 
     def test_no_beats_in_script_returns_empty_dict(self):
         # Pre-2026-05-15: "no beats" was the failure mode that made the

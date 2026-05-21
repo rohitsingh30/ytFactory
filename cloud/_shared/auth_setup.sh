@@ -75,6 +75,19 @@ if [[ $- == *i* ]] || [[ -n "${PS1:-}" ]]; then
   fi
 fi
 
+# Audit 2026-05-16 — opt-out for the cost-optimization re-bootstrap.
+# Setting CLOUDSDK_AUTH_ACCESS_TOKEN strips the ADC quota_project_id
+# context, which Cloud Build needs to resolve the source-upload bucket
+# `<project>_cloudbuild`. On a fresh project (where impersonation may
+# not have propagated yet) this manifests as:
+#   "The user is forbidden from accessing the bucket [<project>_cloudbuild]"
+# Set YTFACTORY_SKIP_AUTH_SETUP=1 to skip the token mint and let gcloud
+# use plain ADC with its quota_project_id intact.
+if [[ "${YTFACTORY_SKIP_AUTH_SETUP:-}" == "1" ]]; then
+  echo "==> auth: skipped (YTFACTORY_SKIP_AUTH_SETUP=1; using plain ADC)" >&2
+  return 0 2>/dev/null || exit 0
+fi
+
 # Resolve SA email for impersonation. Default project comes from the caller's
 # GCP_PROJECT (every cloud/<svc>/deploy.sh sets that). Caller can override
 # with YTFACTORY_DEPLOY_SA / YTFACTORY_DEPLOY_SA_PROJECT.

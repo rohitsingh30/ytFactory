@@ -2,7 +2,7 @@
 
 Architecture (after 2026-05-06 GCS-Fuse-write thrash):
   download → /tmp/hf-stage (in-memory tmpfs, fast, no Fuse latency)
-  upload   → gs://ytfactory-model-weights-v2 via google-cloud-storage SDK
+  upload   → gs://ytfactory-prod-v3-model-weights via google-cloud-storage SDK
              (transfer_manager parallel workers, multipart-friendly)
   free /tmp between repos so Qwen-Image (20 GB) fits in 32 GiB Job memory
 
@@ -27,6 +27,16 @@ import shutil
 import sys
 import time
 from pathlib import Path
+
+# Default-disable HF's XET (deduplicated storage) layer for snapshot_download.
+# 2026-05-15: enabled-XET path retry-loops the xet-read-token validation
+# indefinitely without ever transferring file bytes (xet-bridge returns 200 OK
+# on the token endpoint but the S3 presigned URL it issues never streams).
+# Forcing the legacy CDN resolve path (`resolve/main/<file>.safetensors`) via
+# this env var gets clean HTTP 206 Partial Content responses with actual data.
+# cloud/image-z-image-turbo/Dockerfile already does this; we mirror it here so
+# laptop-side staging stops hitting the same wall.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 from huggingface_hub import snapshot_download
 from google.cloud import storage
@@ -66,10 +76,13 @@ DEFAULT_REPOS = [
 FLAT_LAYOUT_REPOS: set[str] = {
     "Tongyi-MAI/Z-Image-Turbo",
     "black-forest-labs/FLUX.2-klein-4B",
+    # FLUX.2-dev added 2026-05-15 for the 4-way image-model bake-off.
+    # Non-commercial license — see cloud/image-flux2-dev/server.py header.
+    "black-forest-labs/FLUX.2-dev",
 }
 
 STAGE_ROOT = Path(os.environ.get("STAGE_ROOT", "/tmp/hf-stage"))
-BUCKET_NAME = os.environ.get("BUCKET_NAME", "ytfactory-model-weights-v2")
+BUCKET_NAME = os.environ.get("BUCKET_NAME", "ytfactory-prod-v3-model-weights")
 UPLOAD_WORKERS = int(os.environ.get("UPLOAD_WORKERS", "16"))
 
 
@@ -287,11 +300,23 @@ def _stage_one_flat(repo: str, token: str | None, client: storage.Client) -> boo
         sizes = {}
     files.sort(key=lambda f: -(sizes.get(f, 0)))
 
+    # 2026-05-15 — switched from hf_hub_download (writes to disk) to a
+    # streaming HTTP pipe. FLUX.2-dev's flux2-dev.safetensors is 64 GB,
+    # which exceeds Cloud Run JOB's 32 GiB memory/tmpfs cap. Even with
+    # the per-file delete-after-upload, the single-file peak is bounded
+    # by the largest file's size. Streaming bounds it by the HTTP
+    # response buffer (~8 MB chunk) instead.
+    import requests
+    from huggingface_hub.utils import build_hf_headers
+
     n = len(files)
     total_bytes = 0
     skipped = 0
     uploaded = 0
     failed_files: list[str] = []
+
+    session = requests.Session()
+    hf_headers = build_hf_headers(token=token)
 
     for i, rel in enumerate(files, 1):
         blob_name = f"flat/{repo}/{rel}"
@@ -305,45 +330,59 @@ def _stage_one_flat(repo: str, token: str | None, client: storage.Client) -> boo
                 skipped += 1
                 continue
 
-        # Download just this file
-        t_dl = time.time()
+        # Streaming HF → GCS: HEAD the resolve URL to follow redirects to
+        # the actual CDN URL (HF returns 302 to cas-bridge or other CDN),
+        # then GET with stream=True and pipe response.raw into
+        # blob.upload_from_file() with a chunked resumable upload.
+        # No file ever materializes on local disk — peak memory is the
+        # urllib3 chunk buffer (~64 KB default).
+        #
+        # 2026-05-15 OOM fix — DO NOT pass `size=` to upload_from_file.
+        # When `size` is set, google-cloud-storage uses MULTIPART upload
+        # (single PUT), which BUFFERS THE ENTIRE FILE IN MEMORY before
+        # sending. A 24-64 GB transformer file blows past Cloud Run JOB's
+        # 32 GiB cap → SIGKILL with "Container terminated on signal 9"
+        # (~20 min into the upload, no log line because the OOM kills
+        # the process before _stage_one_flat's final log fires).
+        # Without `size`, GCS uses RESUMABLE upload which streams in
+        # 8 MB chunks (peak memory = chunk_size). Pre-fix attempt
+        # 2026-05-15 16:19 → 16:38 stuck silently ~20 min on first file.
+        resolve_url = f"https://huggingface.co/{repo}/resolve/main/{rel}"
+        t_total = time.time()
         try:
-            local_path = hf_hub_download(
-                repo_id=repo, filename=rel,
-                local_dir=str(flat_dir), token=token,
-            )
+            with session.get(resolve_url, headers=hf_headers, stream=True,
+                             allow_redirects=True, timeout=60) as r:
+                r.raise_for_status()
+                # raw.decode_content=True so any transport-level encoding
+                # (e.g. Content-Encoding: gzip) is transparently decoded
+                # before bytes hit GCS.
+                r.raw.decode_content = True
+                # Chunk size must be a multiple of 256 KiB for GCS
+                # resumable uploads. 8 MiB is the sweet spot for throughput.
+                blob.chunk_size = 8 * 1024 * 1024
+                # Always use RESUMABLE (omit size). content_type is the
+                # only kwarg; upload_from_file streams chunk-by-chunk
+                # rather than buffering the whole file. Verified on
+                # FLUX.2-dev 24 GB transformer 2026-05-15.
+                blob.upload_from_file(
+                    r.raw,
+                    content_type="application/octet-stream",
+                )
         except Exception as e:
-            log.warning("[%d/%d] download FAILED %s: %s", i, n, rel, e)
+            log.warning("[%d/%d] stream FAILED %s: %s", i, n, rel, e)
             failed_files.append(rel)
             continue
-        dl_s = time.time() - t_dl
+        wall = time.time() - t_total
 
-        # Upload
-        t_up = time.time()
-        try:
-            blob.upload_from_filename(local_path, timeout=1200)
-        except Exception as e:
-            log.warning("[%d/%d] upload FAILED %s: %s", i, n, rel, e)
-            failed_files.append(rel)
-            # delete local on failure too — don't leak disk
-            try:
-                Path(local_path).unlink()
-            except Exception:
-                pass
-            continue
-        up_s = time.time() - t_up
-
-        # Delete local immediately so peak disk stays bounded
-        local_size = Path(local_path).stat().st_size
-        try:
-            Path(local_path).unlink()
-        except Exception as e:
-            log.warning("could not delete %s: %s", local_path, e)
-        total_bytes += local_size
+        # GCS now knows the size — read it back if we didn't know.
+        if not sz:
+            blob.reload()
+            sz = blob.size or 0
+        total_bytes += sz
         uploaded += 1
         log.info(
-            "[%d/%d] %s (%.2f GB) dl=%.1fs up=%.1fs",
-            i, n, rel, local_size / 1e9, dl_s, up_s,
+            "[%d/%d] %s (%.2f GB) streamed in %.1fs",
+            i, n, rel, sz / 1e9, wall,
         )
 
     log.info(

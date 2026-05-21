@@ -63,7 +63,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../_shared/auth_setup.sh"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 WEB_RUNTIME_SA="${WEB_RUNTIME_SA:-web-runner@${PROJECT}.iam.gserviceaccount.com}"
 MEMBER="serviceAccount:${WEB_RUNTIME_SA}"
 
@@ -83,6 +83,8 @@ fi
 PROJECT_ROLES=(
   roles/datastore.user                  # Firestore: auth_users, oauth_tokens, jobs/*, scheduler
   roles/run.invoker                     # invoke render-worker-v2 Cloud Run JOB + sibling cloud services
+  roles/run.developer                   # run.jobs.runWithOverrides for SDK trigger_render_job() — invoker alone is NOT enough (2026-05-18 v3 e2e smoke caught this)
+  roles/monitoring.metricWriter         # OTel exporter creates custom metric descriptors (workload.googleapis.com/http.server.*) on first request; without this, every request logs a 403 from monitoring.metricDescriptors.create
 )
 
 # (b) Self-binding (web-runner@ acts on itself, for IAM signBlob path
@@ -95,8 +97,8 @@ SELF_BINDING_ROLES=(
 #     not project-wide — least-privilege, matches the rule from the
 #     S1.21 motivation).
 declare -a BUCKET_BINDINGS=(
-  "ytfactory-prod-v2-state|roles/storage.objectAdmin"      # YTFACTORY_STATE_BUCKET
-  "ytfactory-prod-v2-artifacts|roles/storage.objectAdmin"  # YTFACTORY_BUCKET (job artifacts, signed URLs)
+  "${PROJECT}-state|roles/storage.objectAdmin"      # YTFACTORY_STATE_BUCKET
+  "${PROJECT}-artifacts|roles/storage.objectAdmin"  # YTFACTORY_BUCKET (job artifacts, signed URLs)
 )
 
 # (d) Per-secret accessor (the 7 secrets cloud/web-server/deploy.sh
@@ -116,15 +118,9 @@ ACCESSOR_SECRETS=(
 #     list from cloud/iam/grant_token_writeback.sh — see ACCOUNTS array
 #     there. Keep this list in sync with that one.
 WRITEBACK_ACCOUNTS=(
-  mystoriesanimated
-  cosmosdecoded
-  historyrecapped
-  hindutavaanimated
-  sportsrecapped
-  scrollpulse
-  rhymetimejunction
-  afddfdf
-  zgsbhqszdheo
+  # v3 (2026-05-18) — per-channel YouTube upload intentionally skipped.
+  # No youtube-token-<channel> secrets exist; loop no-ops.
+  # Re-populate this list once upload is enabled per channel.
 )
 
 # ----------------------------------------------------------------------------
@@ -197,7 +193,7 @@ for secret in "${ACCESSOR_SECRETS[@]}"; do
 done
 
 # (e) per-secret writeback
-for acct in "${WRITEBACK_ACCOUNTS[@]}"; do
+for acct in "${WRITEBACK_ACCOUNTS[@]+"${WRITEBACK_ACCOUNTS[@]}"}"; do
   secret="youtube-token-${acct}"
   echo "==> secret ${secret} <- roles/secretmanager.secretVersionAdder"
   if ! _run gcloud secrets add-iam-policy-binding "${secret}" \

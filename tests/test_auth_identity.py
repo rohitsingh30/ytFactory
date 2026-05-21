@@ -219,6 +219,35 @@ class TestIsAdminEmail(unittest.TestCase):
         from pipeline.auth.identity import is_admin_email
         self.assertFalse(is_admin_email("notanemail"))
 
+    def test_explicit_email_allowlist(self):
+        from pipeline.auth.identity import is_admin_email
+        with patch.dict(os.environ, {
+            "YTFACTORY_ADMIN_DOMAINS": "docx.co.in",
+            "YTFACTORY_ADMIN_EMAILS": "sanimated219@gmail.com, OTHER@gmail.com",
+        }):
+            self.assertTrue(is_admin_email("sanimated219@gmail.com"))
+            self.assertTrue(is_admin_email("other@gmail.com"))
+            self.assertFalse(is_admin_email("randomuser@gmail.com"))
+            self.assertTrue(is_admin_email("user@docx.co.in"))
+
+    def test_explicit_email_case_insensitive(self):
+        from pipeline.auth.identity import is_admin_email
+        with patch.dict(os.environ, {
+            "YTFACTORY_ADMIN_DOMAINS": "docx.co.in",
+            "YTFACTORY_ADMIN_EMAILS": "Sanimated219@Gmail.com",
+        }):
+            self.assertTrue(is_admin_email("sanimated219@gmail.com"))
+            self.assertTrue(is_admin_email("SANIMATED219@GMAIL.COM"))
+
+    def test_explicit_email_empty_does_not_widen_domains(self):
+        """Empty YTFACTORY_ADMIN_EMAILS must not auto-admin all gmail users."""
+        from pipeline.auth.identity import is_admin_email
+        with patch.dict(os.environ, {
+            "YTFACTORY_ADMIN_DOMAINS": "docx.co.in",
+            "YTFACTORY_ADMIN_EMAILS": "",
+        }):
+            self.assertFalse(is_admin_email("anyone@gmail.com"))
+
 
 # ---------------------------------------------------------------------------
 # oauth_url

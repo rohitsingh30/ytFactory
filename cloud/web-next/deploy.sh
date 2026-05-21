@@ -20,7 +20,7 @@ set -euo pipefail
 # file feedback_gcloud_reauth_use_adc_bypass.md for the full why.
 source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
 SERVICE="ytfactory-web-next"
@@ -79,9 +79,9 @@ echo "==> Pre-building .next/ on host"
 # 2026-05-11 via `firebase apps:create WEB ytfactory-web-next` after
 # `firebase projects:addfirebase ytfactory-prod-v2`. Override via env
 # if you ever rotate the keys.
-export NEXT_PUBLIC_FIREBASE_API_KEY="${NEXT_PUBLIC_FIREBASE_API_KEY:-AIzaSyCF7aODvy0_ZsY9GTuucfKPq-6MyCmz9YU}"
-export NEXT_PUBLIC_FIREBASE_PROJECT_ID="${NEXT_PUBLIC_FIREBASE_PROJECT_ID:-ytfactory-prod-v2}"
-export NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN="${NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN:-ytfactory-prod-v2.firebaseapp.com}"
+export NEXT_PUBLIC_FIREBASE_API_KEY="${NEXT_PUBLIC_FIREBASE_API_KEY:-PLACEHOLDER}"
+export NEXT_PUBLIC_FIREBASE_PROJECT_ID="${NEXT_PUBLIC_FIREBASE_PROJECT_ID:-ytfactory-prod-v3}"
+export NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN="${NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN:-ytfactory-prod-v3.firebaseapp.com}"
 (cd web-next && npm run build >/dev/null)
 
 # Sanity check: the home page prerender must include <!DOCTYPE html>.
@@ -92,7 +92,9 @@ if ! head -c 64 web-next/.next/server/app/index.html | grep -q "<!DOCTYPE html>"
 fi
 
 echo "==> Building + pushing ${IMAGE}"
+# --region pins build to asia-southeast1 (2026-05-17 cost-audit rule 3).
 gcloud builds submit . \
+  --region="${REGION}" \
   --config=cloud/web-next/cloudbuild.yaml \
   --substitutions="_IMAGE=${IMAGE}" \
   --project="${PROJECT}" \
@@ -118,6 +120,7 @@ gcloud run deploy "${SERVICE}" \
   --timeout=60 \
   --port=8080 \
   --allow-unauthenticated \
+  --set-secrets="YTFACTORY_SESSION_SECRET=ytfactory-session-secret:latest" \
   --set-env-vars="^|^YTFACTORY_API_BASE=${API_BASE}|NEXT_TELEMETRY_DISABLED=1|YT_AUTH_ENABLED=1${CANONICAL_ENV}"
 
 URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="${PROJECT}" --format='value(status.url)')

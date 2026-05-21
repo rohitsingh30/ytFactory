@@ -2,7 +2,7 @@
 
 Walks every script in mystoriesanimated/<niche>/scripts/ and renders
 each one with the appropriate variant YAML. Runs N renders in
-parallel (default 2 = cloudrun_flux2_klein --max-instances). Skips
+parallel (default 2 = cloudrun_z_image_turbo --max-instances). Skips
 scripts that already have an mp4. Tolerates per-render failures and
 keeps going.
 
@@ -139,7 +139,7 @@ def main() -> int:
                          "(N → animated, M → text). Default 30:30.")
     ap.add_argument("--parallel", type=int, default=2,
                     help="Concurrent renders (default 2 = "
-                         "cloudrun_flux2_klein --max-instances).")
+                         "cloudrun_z_image_turbo --max-instances).")
     ap.add_argument("--log", default="/tmp/bulk_render.log",
                     help="Output log path (per-render stdout appended)")
     ap.add_argument("--dry-run", action="store_true",

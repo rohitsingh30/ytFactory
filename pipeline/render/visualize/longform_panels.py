@@ -44,10 +44,14 @@ class LongformPanels:
             from pipeline.render.shared.long_form_lib import (  # noqa: PLC0415
                 build_image_panels_video,
             )
-        except ImportError:
-            # Helper not available — emit a solid-color stand-in so the
-            # engine still produces a video. Bigbang PR makes this hard-required.
-            return self._fallback_solid_color(spec, timeline, work_dir)
+        except ImportError as _imp_exc:
+            # Helper not available — defer to _fallback_solid_color which
+            # raises RenderFailedError by default (2026-05-15 fail-loud).
+            # Set YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1 to opt back into
+            # the legacy stand-in.
+            return self._fallback_solid_color(
+                spec, timeline, work_dir, cause=_imp_exc,
+            )
 
         out_path = work_dir / "panels_video.mp4"
 
@@ -77,9 +81,14 @@ class LongformPanels:
         # produced video to our requested out_path below.
         panels = self._panels_from_timeline(timeline)
         if not panels:
-            return self._fallback_solid_color(spec, timeline, work_dir)
+            return self._fallback_solid_color(
+                spec, timeline, work_dir,
+                cause=RuntimeError(
+                    "longform_panels: timeline produced 0 panels"
+                ),
+            )
 
-        provider = (spec.extra or {}).get("image_provider", "cloudrun_flux2_klein")
+        provider = (spec.extra or {}).get("image_provider", "cloudrun_z_image_turbo")
         style_prefix = (spec.extra or {}).get("image_style_prefix", "")
         seed_base = int((spec.extra or {}).get("image_seed", 42))
         steps = int((spec.extra or {}).get("image_steps", 4))
@@ -128,17 +137,18 @@ class LongformPanels:
                 out_h=spec.output_resolution[1],
                 fps=spec.output_fps,
             )
-        except Exception as exc:  # noqa: BLE001 — last-resort fallback MUST not crash
+        except Exception as exc:  # noqa: BLE001 — wrap and re-raise via _fallback_solid_color
             import logging as _logging  # noqa: PLC0415
             _logging.getLogger(__name__).warning(
                 "longform_panels: build_image_panels_video failed (%s) — "
-                "falling back to solid color. Helper signature may have "
-                "drifted again; see tests/render/visualize/"
+                "deferring to solid color (will raise unless "
+                "YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1). Helper signature "
+                "may have drifted again; see tests/render/visualize/"
                 "test_long_form_fallback.py::LongformPanelsBuildKwargContractTest "
                 "for the contract pin.",
                 exc,
             )
-            return self._fallback_solid_color(spec, timeline, work_dir)
+            return self._fallback_solid_color(spec, timeline, work_dir, cause=exc)
 
         # Move the helper's output to our requested out_path so the
         # engine's mux step finds it where it expects.
@@ -195,8 +205,41 @@ class LongformPanels:
 
     def _fallback_solid_color(
         self, spec: Any, timeline: Timeline, work_dir: Path,
+        cause: BaseException | None = None,
     ) -> VisualTrack:
+        """Last-resort solid-color stand-in for longform_panels.
+
+        2026-05-15 fail-loud audit
+        --------------------------
+
+        Pre-audit this silently produced a #141414 stand-in when
+        ``build_image_panels_video`` failed (image-gen API down, helper
+        kwarg drift, empty timeline). That was the LAST link in the
+        chain ``archival_shotlist → longform_panels → solid color``
+        that made every cosmosdecoded / historyrecapped long-form
+        render ship as 26 min of black even after the upstream
+        fallbacks dispatched here.
+
+        Now: raises :class:`RenderFailedError` unless
+        ``YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1`` is set in the env.
+        See ``docs/post-audit-2026-05-15.md`` for the audit summary.
+        """
         from pipeline.render.shared.ffmpeg_helpers import run_ffmpeg  # noqa: PLC0415
+        from pipeline.render.visualize._fallback import (  # noqa: PLC0415
+            _solid_color_override_enabled,
+        )
+        from pipeline.render.contracts import RenderFailedError  # noqa: PLC0415
+
+        if not _solid_color_override_enabled():
+            raise RenderFailedError(
+                f"longform_panels: refusing to return solid-color "
+                f"stand-in — set YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1 "
+                f"for emergency renders. "
+                f"site=pipeline/render/visualize/longform_panels.py:"
+                f"LongformPanels._fallback_solid_color. "
+                f"Original cause: {cause!r}"
+            ) from cause
+
         out_path = work_dir / "panels_fallback.mp4"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         duration_s = timeline[-1].end_s if timeline else 1.0

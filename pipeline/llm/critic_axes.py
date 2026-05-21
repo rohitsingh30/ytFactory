@@ -112,10 +112,43 @@ AXES: tuple[tuple[str, str], ...] = (
             "spoken closing question as overlay = high."
         ),
     ),
+    (
+        "vbench_score",
+        (
+            "Automated VBench QA score (1-10, rounded from raw VBench "
+            "0-100 / 10). Aggregates three CPU-cheap signals from the "
+            "rendered mp4: subject_consistency (DINO feature similarity "
+            "across frames — catches cast drift), temporal_flickering "
+            "(frame-MSE in static regions — catches frozen frames + "
+            "jittery transitions), and imaging_quality (MUSIQ predictor "
+            "— catches gibberish on-image text + diffusion artifacts). "
+            "Populated by pipeline.render.qa.vbench_adapter when the "
+            "vbench package is installed; the LLM does NOT score this "
+            "axis (it is derived from the actual mp4 frames, not from "
+            "the LLM's vision pass). When VBench is unavailable, the "
+            "axis MUST be omitted (treated as missing by "
+            ":func:`derive_verdict`), not faked as a 7 — silent passes "
+            "would defeat the purpose of the gate."
+        ),
+    ),
 )
 
 
 AXIS_NAMES: tuple[str, ...] = tuple(name for name, _ in AXES)
+
+# Subset of axes that may legitimately be absent from the critic
+# payload (i.e. their absence does NOT force ``derive_verdict`` to
+# return ``"FIX"``). Today this contains only ``vbench_score``,
+# which is populated by the CPU-side adapter at
+# :mod:`pipeline.render.qa.vbench_adapter` and is unavailable when
+# the ``vbench`` PyPI package is not installed (e.g. on the slim
+# cloud worker container). When PRESENT, the axis is gated exactly
+# like the others (≤3 → BLOCK, <7 → FIX, ≥7 → SHIP).
+OPTIONAL_AXES: frozenset[str] = frozenset({"vbench_score"})
+
+REQUIRED_AXIS_NAMES: tuple[str, ...] = tuple(
+    name for name in AXIS_NAMES if name not in OPTIONAL_AXES
+)
 
 
 # Thresholds. Pinned conservative — see module docstring for why.
@@ -138,10 +171,15 @@ def derive_verdict(axes: Mapping[str, int] | None) -> str:
       1. ``axes`` missing or not a Mapping → ``"FIX"`` (the LLM didn't
          emit axes — treat as a soft failure that the runner can
          re-prompt for; better than silently shipping).
-      2. Any required axis missing → ``"FIX"`` for the same reason.
-      3. Any axis ≤ ``BLOCK_MAX`` (3) → ``"BLOCK"``.
-      4. Any axis < ``SHIP_MIN`` (7) → ``"FIX"``.
-      5. All axes ≥ ``SHIP_MIN`` → ``"SHIP"``.
+      2. Any REQUIRED axis missing → ``"FIX"`` for the same reason.
+         (See :data:`OPTIONAL_AXES` — axes in this set may legitimately
+         be absent. Today: ``vbench_score`` when the ``vbench`` package
+         isn't installed.)
+      3. Any axis (required or optional, when PRESENT) ≤ ``BLOCK_MAX``
+         (3) → ``"BLOCK"``.
+      4. Any axis (required or optional, when PRESENT) < ``SHIP_MIN``
+         (7) → ``"FIX"``.
+      5. All present axes ≥ ``SHIP_MIN`` → ``"SHIP"``.
 
     Non-integer axis values (the LLM hallucinated a string or float)
     are treated as missing → ``"FIX"``. We do NOT silently coerce —
@@ -153,15 +191,28 @@ def derive_verdict(axes: Mapping[str, int] | None) -> str:
     if not isinstance(axes, Mapping):
         return "FIX"
 
-    # Pass 1: every named axis must be present and an int.
+    # Pass 1: every required axis must be present and an int; optional
+    # axes are checked only when present.
     parsed: dict[str, int] = {}
-    for name in AXIS_NAMES:
+    for name in REQUIRED_AXIS_NAMES:
         if name not in axes:
             return "FIX"
         v = axes[name]
         # bool is a subclass of int in Python; reject explicitly so
         # ``axes={"hook_strength": True}`` doesn't get treated as 1.
         if isinstance(v, bool) or not isinstance(v, int):
+            return "FIX"
+        parsed[name] = v
+
+    for name in OPTIONAL_AXES:
+        if name not in axes:
+            continue
+        v = axes[name]
+        if isinstance(v, bool) or not isinstance(v, int):
+            # Present-but-malformed optional axis ≠ missing optional
+            # axis. The pipeline emitted SOMETHING for vbench_score
+            # but it's the wrong type — that's a programming error
+            # worth a FIX so we notice the regression.
             return "FIX"
         parsed[name] = v
 
@@ -188,10 +239,20 @@ def weakest_axis(axes: Mapping[str, int] | None) -> tuple[str, int] | None:
     if not isinstance(axes, Mapping):
         return None
     parsed: list[tuple[str, int]] = []
-    for name in AXIS_NAMES:
+    for name in REQUIRED_AXIS_NAMES:
         v = axes.get(name)
         if isinstance(v, bool) or not isinstance(v, int):
             return None
+        parsed.append((name, v))
+    # Optional axes participate in "weakest" calculation only when
+    # they're present and well-typed; missing/malformed optional axes
+    # are silently skipped (consistent with derive_verdict).
+    for name in OPTIONAL_AXES:
+        v = axes.get(name)
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, int):
+            continue
         parsed.append((name, v))
     if not parsed:
         return None
@@ -223,9 +284,18 @@ def render_axes_block(indent: str = "  ") -> str:
     ``critic_contract.py::build_prompt`` so the prompt phrasing stays
     in sync. Indent is configurable so the caller can nest under
     "Score these 1-10:" headings of varying depth.
+
+    Optional axes (e.g. ``vbench_score`` — populated by the CPU
+    adapter, not the LLM) are excluded from the LLM-facing prompt
+    block so the model doesn't hallucinate a score for a measurement
+    it can't make. The optional axes still flow through the verdict
+    gate via :func:`derive_verdict`; the adapter writes them straight
+    into the axes dict post-critic.
     """
     lines: list[str] = []
     for name, desc in AXES:
+        if name in OPTIONAL_AXES:
+            continue
         lines.append(f"{indent}- **{name}** (1-10) — {desc}")
     return "\n".join(lines)
 
@@ -241,9 +311,15 @@ def axes_json_schema() -> dict:
     ``"axes"`` as required at the parent level so the LLM cannot
     omit it.
     """
+    # Only REQUIRED axes are listed in ``"required"`` — optional axes
+    # like ``vbench_score`` are populated by the CPU adapter, not the
+    # LLM, and forcing the LLM to emit them would either (a) make it
+    # hallucinate a number it can't measure, or (b) make every critic
+    # call fail schema-validation when VBench is unavailable. Both
+    # are worse than just not asking the LLM for them.
     return {
         "type": "object",
-        "required": list(AXIS_NAMES),
+        "required": list(REQUIRED_AXIS_NAMES),
         "additionalProperties": False,
         "properties": {
             name: {"type": "integer", "minimum": 1, "maximum": 10}

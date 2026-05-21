@@ -57,17 +57,49 @@ def _find_font(size: int, text: str = "") -> ImageFont.ImageFont:
     Pass ``text`` whenever you have it so font selection matches the
     actual content. Callers that don't pass it default to Latin
     candidates (back-compat).
+
+    2026-05-18 (round 6) Linux fallback fix. Pre-fix this helper ONLY
+    listed macOS ``/System/Library/Fonts/...`` paths. On the Cloud Run
+    Linux Docker image NONE of those paths exist, so the final return
+    fell through to ``ImageFont.load_default()`` — a tiny built-in 12px
+    bitmap font that IGNORES the requested ``size``. Symptom on render
+    41f77152: the ASS auto-shrink loop in ``word_caption_pngs`` called
+    ``_find_font(260, ...).getbbox("deglazing")`` and got back a width
+    of ~80px (12px bitmap font), well under the 778px budget, so n_shrunk=0
+    fired and libass rendered "deglazing" at the actual font_size=260
+    with DejaVu Sans Bold (its fontconfig fallback) → clipped both
+    frame edges. The Pillow measurement and libass rendering must read
+    from the SAME font family to produce a consistent budget decision.
+    Adding DejaVu paths (and Noto/Liberation as further fallbacks) is
+    the smallest, lowest-risk fix.
     """
     devanagari_candidates = [
         "/System/Library/Fonts/Supplemental/Devanagari Sangam MN.ttc",
         "/System/Library/Fonts/Supplemental/DevanagariMT.ttc",
         "/System/Library/Fonts/Supplemental/ITFDevanagari.ttc",
+        # Linux Docker fallbacks (Devanagari coverage)
+        "/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
     ]
     latin_candidates = [
+        # macOS preferred order — the laptop path is unchanged so any
+        # author-time cached PNG widths remain reproducible.
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "/System/Library/Fonts/Supplemental/Impact.ttf",
         "/System/Library/Fonts/HelveticaNeue.ttc",
         "/System/Library/Fonts/Helvetica.ttc",
+        # Linux Docker fallbacks — match what fontconfig picks for
+        # libass at runtime so width measurement and rendering agree.
+        # DejaVu Sans Bold is the de-facto default on slim Debian images
+        # (also what the deployed cloud/render-worker-v2 Docker bakes in
+        # via the `fonts-dejavu` apt package). Liberation Sans Bold is
+        # the Red Hat / Fedora analogue. Both have ~identical metrics
+        # so the auto-shrink budget translates correctly.
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
     candidates = (
         devanagari_candidates + latin_candidates
@@ -211,14 +243,42 @@ def render_word_caption(
     word_text = (word_text or "").strip()
     if not word_text:
         word_text = " "
-    font = _find_font(font_size, text=word_text)
+
+    # Auto-shrink font when the rendered word would overflow the canvas.
+    # Without this, a 260pt "KETCHUP" produces a 1362×300 PNG; the
+    # compose stage overlays at ``x=(W-w)/2 = (1080-1362)/2 = -141``
+    # — ffmpeg accepts negative x but the visible window crops both
+    # ends of the word. Worse: with the Ken Burns mp4 path (post
+    # 2026-05-17) the overlay can sit ENTIRELY off-screen for
+    # long words at large font sizes, which is what produced the
+    # "where are my captions?" symptom on cloud renders. Scale the
+    # font down so the rendered word fits inside canvas_w minus a
+    # 40px safe margin on each side; this preserves the big-Shorts
+    # feel for short words while keeping long words readable.
+    max_text_w = max(200, canvas_w - 80)  # 40px safe margin per side
+    fitted_font_size = font_size
+    font = _find_font(fitted_font_size, text=word_text)
     bbox = font.getbbox(word_text)
     text_w = bbox[2] - bbox[0]
+    while text_w > max_text_w and fitted_font_size > 60:
+        fitted_font_size = int(fitted_font_size * 0.9)
+        font = _find_font(fitted_font_size, text=word_text)
+        bbox = font.getbbox(word_text)
+        text_w = bbox[2] - bbox[0]
+    # Track the resolved size so callers can debug-log if a word
+    # had to shrink dramatically. (See word_caption_pngs.produce
+    # for the first-beat debug log.)
+    font_size = fitted_font_size
     text_h = bbox[3] - bbox[1]
+
     # Size canvas to fit text + stroke + shadow + padding so the PNG
     # is small (cheap to overlay) but the word is never clipped.
-    cw = max(text_w + stroke_width * 2 + abs(shadow_offset[0]) + padding * 2,
-             font_size * 4)  # min width so very short words don't render tiny
+    # CRITICAL: never exceed canvas_w — overlay math depends on it.
+    cw = min(
+        canvas_w,
+        max(text_w + stroke_width * 2 + abs(shadow_offset[0]) + padding * 2,
+            font_size * 4),
+    )
     ch = max(text_h + stroke_width * 2 + abs(shadow_offset[1]) + padding,
              font_size + padding)
     img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))

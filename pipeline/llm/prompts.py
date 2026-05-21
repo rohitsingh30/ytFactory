@@ -118,29 +118,37 @@ def _extract_subject(beat_text: str) -> str | None:
     return " ".join(tokens) if tokens else None
 
 
-# Few-shot example: the hand-authored aita02 prompts.json. This is the
-# canonical schema reference and demonstrates the right granularity
-# (one specific noun phrase as key_visual, one spatial/contextual scene).
+# Few-shot example: verb-led, character-in-scene shots that demonstrate
+# the correct prompt grammar for Z-Image-Turbo / FLUX.2 — composition
+# verb → subject body → environment with TWO spatial anchors → lighting.
+#
+# Pre-2026-05-16 these examples were noun-led ("a tiny green salad bowl
+# with a single fork", "alone on a wooden table") — they taught the LLM
+# to produce floating-object product photography. Job 3cd2b3b5 (AITA
+# ketchup-on-stew) rendered a hovering Henley T-shirt + a lone ketchup
+# bottle on a counter + an empty stew pot because the few-shot was the
+# bug. Replaced with verb-led shot descriptions that put a human body
+# in frame for every beat.
 _FEWSHOT = [
     {
         "narration_beat": "I refused to split the bill",
-        "key_visual": "an open-mouthed surprised face with raised eyebrows",
-        "scene": "the character at a restaurant table holding a folded paper bill",
+        "key_visual": "medium shot of the character leaning back from a restaurant table, palms up in refusal",
+        "scene": "warm pendant light overhead, blurred patrons in the background, a leather banquette, shallow depth",
     },
     {
         "narration_beat": "I had a fourteen dollar salad",
-        "key_visual": "a tiny green salad bowl with a single fork",
-        "scene": "alone on a wooden table",
+        "key_visual": "close-up of the character's hand lifting a small green salad on a fork",
+        "scene": "the character soft-focus behind the fork, a single white plate on a dark wood table, warm overhead restaurant light",
     },
     {
         "narration_beat": "they had four hundred dollars of steak and wine",
-        "key_visual": "a steaming brown steak with crisscross grill marks on a white plate",
-        "scene": "at a restaurant table next to a knife and fork",
+        "key_visual": "over-shoulder shot of the character watching two strangers' hands carve into a steaming steak",
+        "scene": "their faces cropped out of frame, an empty wine glass next to the plate, dim restaurant ambience, candlelight on the table",
     },
     {
         "narration_beat": "and three bottles of wine",
-        "key_visual": "three tall wine bottles standing in a row",
-        "scene": "on a wooden table at a restaurant",
+        "key_visual": "low-angle medium shot of two stranger hands clinking wine glasses across the table",
+        "scene": "the character's elbow visible at frame edge in stunned reaction, three dark wine bottles soft-focus on the table behind, candlelit dining room",
     },
 ]
 
@@ -161,32 +169,76 @@ Schema (per beat):
   table holding their coat".
 
 Hard rules (violations make the rendered Short worse):
-1. NEVER include words asking for legible in-image text: label,
-   sign, signs, signage, text, writing, written, letters, lettering,
-   logo, brand, dollar sign, words, title, title card, subtitle,
-   caption, menu, newspaper, headline, billboard, poster, speech
-   bubble with words, phone screen with text, text message,
-   notification, store name, license plate, name tag.
-   Diffusion renders these as gibberish. Show the OBJECT (a phone
-   screen with a red angry-face emoji), not the TEXT (a phone screen
-   showing "I hate you").
+1. ZERO TEXT IN ANY FRAME — hard constraint, no exceptions.
 
-   PROP CATEGORIES that almost always render garbled inscribed text
-   if named directly: invitation, certificate, diploma, contract,
-   prescription, receipt, greeting card, business card, boarding pass,
-   ticket. Avoid the bare noun. Describe these props by SHAPE/COLOR/
-   CONTEXT only — e.g. "a folded cream paper with a gold border on
-   the table" not "a wedding invitation". Never use "X reading Y",
-   "X that says Y", "X displaying Y" — the diffusion model will
-   hallucinate the Y as melted letters.
+   Diffusion models (Z-Image-Turbo, FLUX.2, SDXL) render any
+   text-bait token as gibberish — fake Hindi-Latin scribble on
+   bottles, melted lettering on signs, garbled receipts. The viewer
+   sees jumbled fake-text and the immersion breaks. The ONLY text
+   the viewer should ever see is the caption-pill overlay added by
+   post-processing AFTER the diffusion model finishes — that is
+   compose.py's job, not yours.
+
+   NEVER use these tokens in key_visual or scene: label, sign,
+   signs, signage, text, writing, written, letters, lettering, logo,
+   brand, dollar sign, words, title, title card, subtitle, caption,
+   menu, newspaper, headline, billboard, poster, speech bubble,
+   phone screen with text, text message, notification, store name,
+   license plate, name tag, price tag, address, number plate,
+   receipt, ticket, invitation, certificate, diploma, contract,
+   prescription, greeting card, business card, boarding pass, book
+   cover, magazine cover, t-shirt slogan, tattoo of words.
+
+   Phrase constraints as POSITIVE PRESENCE (Z-Image-Turbo has no
+   negative-prompt support — "no text" is silently ignored;
+   "unmarked surface" is rendered):
+     GOOD: "plain unmarked ceramic mug", "smooth glass bottle without
+            markings", "blank wood surface", "unbranded cardboard
+            box", "plain cotton t-shirt in mustard yellow",
+            "unlabeled jar of preserves".
+     BAD:  "ketchup bottle" (model paints "Heinz" or fake-brand
+            scribble), "phone screen" (model paints fake apps with
+            gibberish names), "cereal box" (fake-brand wall of text).
+
+   Never use "X reading Y", "X that says Y", "X displaying Y", "X
+   labeled Y", "X with Y written on it" — those clauses guarantee
+   gibberish. Describe text-bearing props by SHAPE/COLOR/CONTEXT
+   only — "a folded cream paper with a gold border on the table"
+   not "a wedding invitation".
+
+   The pipeline runs a post-render OCR lint that re-renders any
+   image where ≥3 characters are detected, so this rule has both a
+   prompt-side and a render-side enforcement. Treat it as
+   non-negotiable.
 
 2. ONE main subject per beat. Never "three friends", "several
    people", "a group of customers", "five kids". If the narration
    names multiple people, focus on ONE (the narrator alone, or just
    the object they're talking about).
 
-3. The "scene" field MUST stay under ~40 words total. Attention
-   dilutes past that on diffusion encoders.
+3. The "scene" field MUST be **60–120 words**, structured as four
+   slots in order:
+
+     (a) ENVIRONMENT plane — specific named surface + specific named
+         background plane (Rule 14). Two spatial anchors minimum.
+         E.g. "at a butcher-block counter, cast-iron Dutch oven
+         steaming on the stove behind her, dark wood cabinets in
+         soft focus".
+     (b) LIGHTING — direction + colour-temp or time-of-day (Rule 15).
+         E.g. "single warm pendant light from above, soft shadow
+         falloff on the counter".
+     (c) CHARACTER ACTION + EMOTION — posture/face verbs that match
+         the spoken beat (Rule 8). E.g. "brow furrowed, mouth
+         pressed flat in disbelief, one hand frozen mid-gesture".
+     (d) SUPPORTING DETAIL — one or two grounding props or texture
+         tokens that lock the scene's specificity. E.g. "a wooden
+         spoon resting on the rim of the pot, faint steam curl,
+         soft shallow depth".
+
+   Z-Image-Turbo + FLUX.2 absorb 80–250 words of structured detail
+   per Tongyi-MAI / Black Forest Labs prompting guides. Under-prompting
+   (the pre-2026-05-17 ~40-word cap) yielded flat clip-art renders.
+   Don't pad — every word should pull weight in one of the four slots.
 
 4. If the narration beat names a SPECIFIC object (a salad, a pool,
    a wine bottle, a phone), make THAT object the key_visual. Don't
@@ -323,8 +375,115 @@ Hard rules (violations make the rendered Short worse):
     Ramos rendered in Atletico kit, Aguero in orange not Man City blue).
     The hint always wins over your own paraphrase.
 
-Return ONLY the JSON array. No prose, no markdown fences.
+13. VERB-LED, NOT NOUN-LED. The `key_visual` MUST begin with a shot
+    type and a verb-driven action on a human body, never a bare
+    noun phrase. Z-Image-Turbo / FLUX.2 resolve a bare noun
+    ("a ketchup bottle", "a worn Henley T-shirt", "an empty stew pot")
+    to its default seamless-backdrop product photo — a hovering object
+    on a plain background, no narrative. Lead with the shot type +
+    verb + subject:
+      GOOD: "medium over-shoulder shot of the character squeezing a
+             red squeeze bottle into a steaming pot of beef stew"
+      GOOD: "POV close-up of two hands tearing the lid off a takeout
+             container"
+      GOOD: "wide low-angle of the character storming out of a kitchen
+             doorway, hands raised in disbelief"
+      BAD:  "a red ketchup bottle"
+      BAD:  "an empty stew pot"
+      BAD:  "a Henley T-shirt"
+    Critic 2026-05-16 (job 3cd2b3b5, AITA ketchup-on-stew): every
+    `key_visual` was a bare noun → every rendered frame was a floating
+    product shot with no character, no kitchen, no story. The fix is
+    grammatical: every key_visual is a SHOT, not a STILL LIFE.
+
+14. NAMED ENVIRONMENT PLANE. Every `scene` MUST name a specific
+    surface AND a background plane — two spatial anchors, not one. The
+    diffusion model composes depth from these two anchors; with only
+    one (or none) it defaults to a flat seamless backdrop.
+      GOOD: "at a butcher-block counter, cast-iron Dutch oven steaming
+             on the stove behind her"  ← surface + background
+      GOOD: "on a leather couch, lit window over her shoulder"
+             ← surface + background
+      BAD:  "in a kitchen"  ← no surface, no background
+      BAD:  "alone on a counter"  ← surface but no background
+
+15. LIGHTING IS MANDATORY. Every `scene` MUST contain at least one
+    lighting token tied to the location — direction + colour-temp or
+    time-of-day. Without lighting the model defaults to flat product-
+    photography lighting which kills the cinematic feel.
+      GOOD: "warm pendant light from above"
+      GOOD: "blue laptop glow from her left"
+      GOOD: "soft afternoon window light, gentle falloff"
+      GOOD: "candlelight on the table, dim restaurant ambience"
+      BAD:  no lighting clause at all
+    Lighting is the single highest-impact dial on diffusion renders
+    after subject placement.
+
+16. POSITIVE-ONLY CONSTRAINTS. Z-Image-Turbo + FLUX.2 [klein] have NO
+    negative-prompt support. Phrase every constraint as PRESENCE, not
+    absence. "no harsh shadows" is silently ignored; "soft falloff" is
+    rendered. "no clutter" is ignored; "plain wood counter" is rendered.
+    Rule 1's banned-tokens list is enforced by post-author lint
+    (images.strip_text_bait) — you don't need to write "no text" or
+    "no labels" in your prompts; just omit the banned nouns.
+
+17. ONE STYLE FAMILY. The channel `style_prefix` (auto-prepended to
+    every render) already pins the artistic style. DO NOT add competing
+    style tokens in `key_visual` or `scene`: never write "photoreal",
+    "cinematic photo", "realistic render", "3D render", "anime style",
+    "hyperreal", "octane render" — mixed style signals collapse the
+    render into mush. Stick to camera/lighting/composition vocabulary
+    in your fields; let style_prefix carry the medium.
+
+Return ONLY a JSON object with one field, ``"beats"``, whose value is
+an array of EXACTLY the requested number of beat objects in beat order.
+No prose, no markdown fences, no commentary before or after.
 """
+
+
+# Strict-compliant JSON schema for ``author_beat_prompts`` output.
+#
+# OpenAI/Azure structured outputs (response_format=json_schema, strict=true)
+# DO NOT support root-array types — the schema must be a wrapper object
+# with the array nested inside. Without this wrapper the LLM either:
+#   * collapses the array into a single dict ({"key_visual": ..., "scene": ...})
+#     — Shape C in _validate_and_clean, unrecoverable;
+#   * wraps in an arbitrary-key envelope ({"beats": [...]} / {"prompts": [...]}
+#     / etc), Shape A — recoverable but stochastic per call;
+#   * emits an ordered-map keyed envelope ({"beat_1": {...}, ...}), Shape B.
+# Pinning the wrapper key to ``"beats"`` removes that variance entirely;
+# the validator below still handles A/A'/B/B'/C as defense-in-depth in
+# case the schema isn't honoured (legacy deployments, content filter
+# soft-error wrappers).
+#
+# Strict-compliance contract per Azure docs:
+#   * every object: additionalProperties=false
+#   * every property listed in required
+#   * no unsupported keywords (minItems/maxItems for arrays, pattern/
+#     format for strings, minimum/maximum for numbers)
+# Reference: learn.microsoft.com/azure/foundry/openai/how-to/structured-outputs
+# (Supported types, "All fields must be required", "Always set
+# additionalProperties: false in objects").
+_BEAT_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["beats"],
+    "properties": {
+        "beats": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["key_visual", "scene", "narration_line"],
+                "properties": {
+                    "key_visual": {"type": "string"},
+                    "scene": {"type": "string"},
+                    "narration_line": {"type": "string"},
+                },
+            },
+        },
+    },
+}
 
 
 def _find_rank_for_beat(
@@ -448,6 +607,40 @@ def _build_user_prompt(
             if cast_narrator_desc and cast_narrator_desc.strip()
             else ""
         )
+        # Universal supporting-cast threading (post-2026-05-17, job
+        # 3cd2b3b5 critique row #4). Pre-fix, the supporting block was
+        # only emitted in voice_only narrator mode (sports channels) —
+        # AITA / mystoriesanimated had `supporting` populated but
+        # the `on_screen` branch silently dropped it, causing the
+        # partner to render as a narrator clone at beat ~7s. Now any
+        # channel with a non-empty cast.supporting gets the supporting
+        # block, with explicit "DIFFERENT PERSON FROM NARRATOR" framing.
+        if supporting:
+            sup_lines = []
+            for s in supporting:
+                name = (s.get("name") or "").strip()
+                desc = (s.get("description") or "").strip()
+                aliases = ", ".join(s.get("aliases") or [])
+                if not name or not desc:
+                    continue
+                alias_clause = f" (aliases: {aliases})" if aliases else ""
+                sup_lines.append(f"  - {name}{alias_clause} — {desc}")
+            if sup_lines:
+                cast_block += (
+                    "\nSUPPORTING CHARACTERS — DIFFERENT PEOPLE FROM "
+                    "THE NARRATOR. When a beat references one of these "
+                    "characters (by name OR by relationship — partner, "
+                    "husband, wife, sister, brother, mom, friend, "
+                    "coworker, neighbor, ex), the visual MUST use the "
+                    "supporting character's locked appearance below, "
+                    "NEVER the narrator's. Twin-clone rendering "
+                    "(supporting character drawn as a copy of the "
+                    "narrator) is the #1 mute-mode story-inversion "
+                    "bug — Critic 2026-05-17 caught this on job "
+                    "3cd2b3b5 partner-reveal beat:\n"
+                    + "\n".join(sup_lines)
+                    + "\n"
+                )
     if cast_default_emotion and cast_default_emotion.strip():
         cast_block += (
             f"Narrator's default emotional tone for this story: "
@@ -489,15 +682,18 @@ rendering on a flat dark-grey background because the scene was purely
 EXAMPLE OUTPUT FORMAT (4-beat sample from a different story — match this granularity):
 {fewshot_block}
 
-Return a JSON array of EXACTLY {len(beats)} objects, one per beat,
-in order, each with these fields:
+Return a JSON object with a single ``"beats"`` field whose value is an
+array of EXACTLY {len(beats)} objects, one per beat, in order. Each
+object in the array has these fields:
 
 - "narration_line": the EXACT beat text (verbatim, copied from the
   BEATS list above) that this prompt is illustrating. The renderer
   uses this to bind the image to the right spoken moment, so it MUST
   match the beat you are illustrating.
-- "key_visual": one short noun phrase describing the focal subject.
-- "scene": the full image-gen prompt body.
+- "key_visual": a SHOT description (Rule 13) — shot type + verb +
+  human-body subject, never a bare noun.
+- "scene": environment with TWO spatial anchors (Rule 14) + lighting
+  (Rule 15), ≤40 words total.
 """
 
 
@@ -602,18 +798,135 @@ def _check_cast_contradictions(
     return out
 
 
+# Verb-led / shot-type lead tokens that the validator accepts as the
+# first 1-2 tokens of a key_visual. Anything else starting with an
+# article ("a"/"an"/"the") + noun pattern is rejected as a bare noun
+# phrase. Class-of-bug fix 2026-05-17 (job 3cd2b3b5).
+_SHOT_TYPE_LEADS = frozenset({
+    # camera-distance shots
+    "wide", "medium", "close-up", "close", "extreme", "tight", "tighter",
+    "macro", "long", "establishing", "master", "full", "half",
+    # camera-angle shots
+    "low-angle", "high-angle", "low", "high", "overhead", "top-down",
+    "birds-eye", "worms-eye", "eye-level", "dutch", "tilted", "canted",
+    "over-shoulder", "over-the-shoulder", "ots",
+    # camera-position shots
+    "pov", "first-person", "third-person", "profile", "side", "rear",
+    "front", "back", "behind",
+    # camera-motion lead-ins
+    "tracking", "dolly", "push-in", "pull-back", "panning", "tilting",
+    # gerund verbs (action lead)
+    "showing", "depicting", "rendering",
+})
+
+
+def _looks_bare_noun(text: str) -> bool:
+    """Return True when ``text`` reads as a bare-noun phrase that the
+    diffusion model will render as a floating-objects product shot.
+
+    Heuristic: text starts with an article (a/an/the) followed by ≤4
+    tokens of adjectives + nouns with NO verb / no shot-type lead.
+    Permits any phrasing that begins with a shot-type token from
+    :data:`_SHOT_TYPE_LEADS` (medium shot of …, POV close-up of …,
+    over-shoulder of …) or with a gerund verb (the heuristic relies
+    on the LLM author writing in continuous "doing" tense).
+
+    Returns False for empty/None inputs — the empty-string check is
+    upstream of this and yields a clearer "empty key_visual" error.
+    """
+    if not text:
+        return False
+    tokens = re.findall(r"\w+(?:-\w+)?", text.lower())
+    if not tokens:
+        return False
+    first = tokens[0]
+    # Shot-type or gerund lead → safe.
+    if first in _SHOT_TYPE_LEADS:
+        return False
+    if first.endswith("ing") and len(first) > 4:
+        # Allow gerunds — "squeezing", "pouring", "watching".
+        return False
+    # Article-led + no verb in first 5 tokens → bare noun.
+    if first not in {"a", "an", "the"}:
+        # Doesn't start with an article — could be a name or descriptor.
+        # Permit unless none of the first 5 tokens looks verb-like.
+        verb_present = any(
+            t.endswith("ing") or t in _SHOT_TYPE_LEADS or t in {"of", "showing"}
+            for t in tokens[:5]
+        )
+        return not verb_present
+    # Article-led: check for a verb / shot-type token in the next 5
+    # positions before declaring this a bare-noun phrase.
+    for t in tokens[1:6]:
+        if t in _SHOT_TYPE_LEADS:
+            return False
+        if t.endswith("ing") and len(t) > 4:
+            return False
+    return True
+
+
+# Common primary-subject head nouns that fingerprint a beat's
+# composition. Lowercased; matched as whole tokens.
+_PRIMARY_SUBJECT_HEADS = frozenset({
+    "character", "narrator", "woman", "man", "girl", "boy", "person",
+    "hand", "hands", "face", "phone", "bottle", "bowl", "plate", "pot",
+    "table", "counter", "kitchen", "bedroom", "couch", "doorway",
+    "stove", "sink", "window", "door", "spoon", "cup", "mug", "fork",
+    "glass", "screen", "shirt", "tee", "jeans", "head", "shoulder",
+    "mouth", "eyes",
+})
+
+
+def _shot_fingerprint(key_visual: str) -> tuple[str, str]:
+    """Return a (shot_lead, primary_subject) tuple that fingerprints
+    the composition for the rolling-window duplicate check.
+
+    Class-of-bug fix 2026-05-17 (job 3cd2b3b5 critique row #5):
+    the pre-fix render had two consecutive "character pouring red
+    into bowl" beats followed by 8 closer beats all rendering the
+    same shrug pose. The LLM's _SYSTEM Rule 10 (COMPOSITION VARIETY)
+    was guidance only; this fingerprint catches what the rule misses.
+
+    Returns ("?", "?") when the heuristics can't extract either field;
+    the caller's duplicate check skips these so a benign mismatch
+    doesn't false-positive.
+    """
+    if not key_visual:
+        return ("?", "?")
+    tokens = re.findall(r"\w+(?:-\w+)?", key_visual.lower())
+    if not tokens:
+        return ("?", "?")
+    shot_lead = tokens[0] if tokens[0] in _SHOT_TYPE_LEADS else "?"
+    subject = next(
+        (t for t in tokens if t in _PRIMARY_SUBJECT_HEADS),
+        "?",
+    )
+    return (shot_lead, subject)
+
+
 def _validate_and_clean(
     raw,
     beats: list[Beat],
     opening_directives: dict | None,
     cast_narrator_desc: str | None = None,
 ) -> list[dict]:
-    # Azure-backend dispatcher quirk (2026-05-15): when ``output_json=True``
-    # without ``json_schema``, ``pipeline.llm.cli`` forces
-    # ``response_format={"type": "json_object"}`` on Azure — the model
-    # CANNOT return a bare array even when this stage's _SYSTEM prompt
-    # explicitly asks for one. Result: the LLM wraps the intended
-    # ``[{...}, {...}]`` in one of these dict shapes:
+    # Post-2026-05-17: the verb-led + composition-fingerprint validators
+    # below are gated by ``YTFACTORY_DISABLE_RICHNESS_GATE`` so unit
+    # tests can use synthetic key_visuals (kv0/kv1) without tripping
+    # them. Production never sets this flag.
+    _validators_disabled = _env_flag_enabled("YTFACTORY_DISABLE_RICHNESS_GATE")
+
+    # POST-2026-05-16: ``author_beat_prompts`` now sends a strict
+    # ``{"beats": [...]}`` wrapper-object json_schema via
+    # ``strict_schema=True``. On gpt-5.x / o1 / o3 deployments Azure's CFG
+    # engine enforces the schema at token level so Shape A is GUARANTEED
+    # for compliant deployments. The unwrap code below is retained as
+    # defense-in-depth for: (a) legacy deployments that don't honour
+    # strict-mode, (b) content-filter soft-error responses (200 OK with
+    # ``{"error": "..."}`` body), and (c) the older Azure-backend
+    # dispatcher quirk (2026-05-15) where ``output_json=True`` without
+    # ``json_schema`` forced ``response_format={"type": "json_object"}``
+    # and the model would emit one of the variant shapes:
     #
     #   A. Single-key array envelope (most common):
     #      ``{"beats":   [{...}, {...}]}``
@@ -735,7 +1048,49 @@ def _validate_and_clean(
         # — without this the matcher never fires and the renderer ships
         # whatever order the LLM happened to emit.
         nl = (item.get("narration_line") or "").strip() or beats[i].text.strip()
+
+        # Hard verb-led validator (post-2026-05-17, job 3cd2b3b5 critique
+        # row #3 / Rule 13). Bare-noun key_visuals ("a red ketchup
+        # bottle", "an empty stew pot", "a yellow shirt") render as
+        # floating-objects product photos on Z-Image-Turbo. The
+        # _SYSTEM rule asked the LLM nicely; this validator enforces it
+        # at the structure level. Reject any key_visual whose first
+        # six tokens look like a bare noun phrase with no shot-type or
+        # verb-action lead — the worker's retry loop will re-call the
+        # LLM with the validation message in context.
+        #
+        # Gated by YTFACTORY_DISABLE_RICHNESS_GATE so unit tests that
+        # exercise envelope-unwrap shape-handling can use short
+        # synthetic key_visuals (kv0/kv1) without tripping the verb-
+        # led check. Production renders leave the gate on.
+        if not _validators_disabled and _looks_bare_noun(kv):
+            raise ValueError(
+                f"item {i} key_visual is a bare noun phrase "
+                f"(violates Rule 13: VERB-LED). Got: {kv!r}. "
+                f"Rewrite as 'medium shot of X verb-ing Y' or "
+                f"'over-shoulder of A doing B' — never just a noun."
+            )
+
         cleaned.append({"key_visual": kv, "scene": sc, "narration_line": nl})
+
+    # Hard composition-variety validator (post-2026-05-17, job 3cd2b3b5
+    # critique row #5 / Rule 10). The pre-fix render had 9–12s show two
+    # consecutive "character pouring red into bowl" beats and 27–47s
+    # show the same shrug pose for 20 straight seconds. A 3-beat
+    # rolling window should never have two identical shot-fingerprints.
+    # Fingerprint = (shot-type lead-word, primary-subject head-noun).
+    # Gated by YTFACTORY_DISABLE_RICHNESS_GATE — see verb-led gate above.
+    if not _validators_disabled and len(cleaned) >= 2:
+        prints = [_shot_fingerprint(p["key_visual"]) for p in cleaned]
+        for i in range(1, len(prints)):
+            if prints[i] == prints[i - 1] and prints[i] != ("?", "?"):
+                raise ValueError(
+                    f"item {i} key_visual repeats composition of item "
+                    f"{i-1} (fingerprint={prints[i]!r}). Violates Rule "
+                    f"10 (COMPOSITION VARIETY). Vary shot type, "
+                    f"angle, distance, or primary subject across "
+                    f"consecutive beats."
+                )
 
     # Strip text-bait + leaked meta-instructions BEFORE persisting.
     # Class-of-bug fix 2026-05-02: lint warnings alone let SDXL render
@@ -802,6 +1157,167 @@ def _validate_and_clean(
     return cleaned
 
 
+# Channel richness floor (post-2026-05-17, job 3cd2b3b5 root-cause).
+# Under-prompting causes Z-Image-Turbo + FLUX.2 to collapse to their
+# seamless-backdrop product-photo default. 60-word floor on
+# image_style_prefix is the minimum that lets the diffusion model
+# resolve a coherent style; 50-word floor on character_description is
+# the minimum that resolves real facial features instead of "round-
+# headed dot-eyed cartoon shape" (the literal pre-fix YAML text).
+#
+# Override with ``YTFACTORY_DISABLE_RICHNESS_GATE=1`` for one-off
+# debug renders or legacy regression-test fixtures that pass a thin
+# style_prefix on purpose. Production renders should leave this on.
+_STYLE_PREFIX_MIN_WORDS = 60
+_CHARACTER_DESCRIPTION_MIN_WORDS = 50
+
+# Required token-class signals in style_prefix. Each is a tuple of
+# (label, list-of-acceptable-substrings); style_prefix must contain
+# at least one substring from each list. Catches "rich-but-vague"
+# styles (200 words that never mention lighting or palette).
+_STYLE_REQUIRED_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("palette/color",
+     ("palette", "color", "colour", "warm", "cool", "pastel",
+      "muted", "saturated", "tones", "hues", "earth tone")),
+    ("technique/medium",
+     ("watercolor", "watercolour", "ink", "line", "cel", "gouache",
+      "crayon", "pencil", "vector", "painted", "hand-drawn",
+      "illustrated", "illustration", "comic", "panel", "sketch",
+      "brush", "wash", "anime", "studio")),
+    ("anti-text",
+     ("unmarked", "unbranded", "plain", "blank", "no text", "no logos",
+      "no labels", "no markings", "without markings", "without text",
+      "no signage", "no printed", "no inscribed")),
+)
+
+# Required signals in character_description. Same rule: every
+# character_description must mention something from each list. Catches
+# the "round-headed character with dot eyes" failure mode at config
+# time, before a single render burns GPU credits.
+_CHARACTER_REQUIRED_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("eyes",
+     ("eye", "pupil", "iris", "lash", "lashes", "eyelash")),
+    ("expression/mouth/brow",
+     ("brow", "eyebrow", "mouth", "lip", "smile", "frown", "expression",
+      "expressive", "articulated", "blush", "cheek")),
+    ("clothing/body",
+     ("shirt", "tee", "blouse", "sweater", "jacket", "dress", "jeans",
+      "trousers", "skirt", "hoodie", "cardigan", "sari", "kurta",
+      "dhoti", "kit", "jersey", "wears", "wearing")),
+)
+
+
+def _word_count(text: str | None) -> int:
+    return len((text or "").split())
+
+
+def _missing_required_signals(
+    text: str | None,
+    required: tuple[tuple[str, tuple[str, ...]], ...],
+) -> list[str]:
+    """Return the labels whose substring-list isn't matched by ``text``."""
+    lowered = (text or "").lower()
+    missing: list[str] = []
+    for label, substrings in required:
+        if not any(s in lowered for s in substrings):
+            missing.append(label)
+    return missing
+
+
+def _assert_channel_prompt_richness(
+    *,
+    style_prefix: str | None,
+    cast_narrator_desc: str | None,
+    narrator_visual_mode: str,
+) -> None:
+    """Raise loudly when a channel's style/character configuration is
+    too thin for Z-Image-Turbo / FLUX.2 to produce non-clip-art output.
+
+    The assertion runs once per render at author_beat_prompts entry,
+    BEFORE any LLM token is spent. Failure mode is informative:
+    the error lists exactly which channel-YAML field is underweight
+    AND which token classes are missing, so the operator can fix the
+    channel config and re-run.
+
+    Disabled when ``YTFACTORY_DISABLE_RICHNESS_GATE=1`` (debug renders
+    + legacy test fixtures).
+
+    Args:
+        style_prefix: The channel/variant YAML's ``image_style_prefix``
+            block as passed into author_beat_prompts.
+        cast_narrator_desc: Resolved narrator description (cast.json's
+            narrator.description OR channel YAML's
+            ``character_description`` fallback).
+        narrator_visual_mode: ``"on_screen"`` channels need a
+            character_description; ``"voice_only"`` channels (sports
+            channels with broadcast footage) don't render the narrator
+            as a person and skip the character check.
+
+    Raises:
+        ValueError: with a multi-line error showing word counts AND
+            missing token classes for every failing field.
+    """
+    if _env_flag_enabled("YTFACTORY_DISABLE_RICHNESS_GATE"):
+        return
+
+    failures: list[str] = []
+
+    style_words = _word_count(style_prefix)
+    if style_words < _STYLE_PREFIX_MIN_WORDS:
+        failures.append(
+            f"image_style_prefix is {style_words} words, "
+            f"floor is {_STYLE_PREFIX_MIN_WORDS}. Under-prompted "
+            f"styles render as flat clip-art (job 3cd2b3b5 floating-"
+            f"objects post-mortem)."
+        )
+    missing_style = _missing_required_signals(
+        style_prefix, _STYLE_REQUIRED_SIGNALS,
+    )
+    if missing_style:
+        failures.append(
+            f"image_style_prefix is missing required token classes: "
+            f"{missing_style!r}. Every channel style must specify a "
+            f"palette, a technique/medium, and a positive-presence "
+            f"anti-text clause (Z-Image-Turbo has no negative-prompt "
+            f"support)."
+        )
+
+    # Character check applies only to channels where the narrator
+    # appears on screen. Sports / cosmosdecoded / footage-only channels
+    # set narrator_visual_mode="voice_only" and don't need it.
+    if narrator_visual_mode != "voice_only":
+        char_words = _word_count(cast_narrator_desc)
+        if char_words < _CHARACTER_DESCRIPTION_MIN_WORDS:
+            failures.append(
+                f"character_description is {char_words} words, floor "
+                f"is {_CHARACTER_DESCRIPTION_MIN_WORDS}. Thin character "
+                f"locks produce 'round-headed dot-eyed cartoon shapes' "
+                f"with no face — diffusion model fills in interchangeable "
+                f"clip-art figures."
+            )
+        missing_char = _missing_required_signals(
+            cast_narrator_desc, _CHARACTER_REQUIRED_SIGNALS,
+        )
+        if missing_char:
+            failures.append(
+                f"character_description is missing required token "
+                f"classes: {missing_char!r}. Every on-screen narrator "
+                f"description must specify eyes (pupils/iris/lashes), "
+                f"an expression mechanism (brow/mouth/blush), and "
+                f"clothing (shirt/tee/jeans/etc.) so the diffusion "
+                f"model renders a real face, not a default avatar."
+            )
+
+    if failures:
+        msg = (
+            "Channel prompt-richness gate failed — fix the channel "
+            "YAML and re-run. Disable temporarily with "
+            "YTFACTORY_DISABLE_RICHNESS_GATE=1 (not recommended in "
+            "production):\n  - " + "\n  - ".join(failures)
+        )
+        raise ValueError(msg)
+
+
 @_obs.traced("llm.prompts.author_beat_prompts", category="llm")
 def author_beat_prompts(
     *,
@@ -846,6 +1362,22 @@ def author_beat_prompts(
     code-prepended at render time). They are optional; the legacy
     caller signature still works.
     """
+    # Channel-richness pre-call assertion gate (post-2026-05-17). Under-
+    # prompting was the root cause of the clip-art / floating-objects
+    # render on job 3cd2b3b5: the AITA channel YAML's image_style_prefix
+    # was 40 words ("Flat 2D crayon-style children's drawing…") and
+    # character_description was 33 words ("simple dot eyes, a tiny line
+    # nose"). Z-Image-Turbo + FLUX.2 prompting guides cite 80-250 words
+    # of structured detail as the sweet spot; under that and the
+    # diffusion model collapses to its seamless-backdrop product-photo
+    # default. This gate enforces the floor at the architecture level
+    # so every channel either ships rich prompts or fails loudly.
+    _assert_channel_prompt_richness(
+        style_prefix=style_prefix,
+        cast_narrator_desc=cast_narrator_desc,
+        narrator_visual_mode=narrator_visual_mode,
+    )
+
     user_prompt = _build_user_prompt(
         narration=narration,
         beats=beats,
@@ -861,20 +1393,28 @@ def author_beat_prompts(
 
     full_prompt = _SYSTEM + "\n\n---\n\n" + user_prompt
 
-    # No json_schema here — the CLI routes that through tool-use and
-    # the actual structured output doesn't land in `result`. Prompt
-    # instructions + the parser's array-extraction fallback handle it.
+    # Strict structured output via wrapper-object schema (post-2026-05-16).
+    # OpenAI/Azure structured outputs reject root-array types, so we wrap
+    # the array in ``{"beats": [...]}`` and let _validate_and_clean's
+    # Shape-A unwrap path turn it back into a list. Passing
+    # ``strict_schema=True`` flips Azure's ``response_format.strict`` flag
+    # to enforce the schema at the token-generation level (CFG engine),
+    # not just nudge via response_format=json_object. Without strict mode
+    # gpt-5.3-chat collapsed 14 beats into a single dict (Shape C,
+    # unrecoverable) and the worker silently fell back to bare narration
+    # text as image prompts — the floating-objects bug.
     full_prompt += (
-        f"\n\nReturn ONLY a JSON array of exactly {len(beats)} objects, "
-        "in beat order. No prose, no commentary, no markdown fences. "
-        "Your entire response must be parseable as JSON starting with `[` "
-        "and ending with `]`."
+        f"\n\nReturn EXACTLY {len(beats)} beat objects inside the "
+        f"``\"beats\"`` array, in beat order. No prose, no markdown, "
+        f"no commentary."
     )
 
     print(f"[prompts] authoring {len(beats)} beat prompts via claude CLI…")
     raw = llm.call_claude_cli(
         full_prompt,
         output_json=True,
+        json_schema=_BEAT_RESPONSE_SCHEMA,
+        strict_schema=True,
         model=llm.model_for("prompts"),
         stage="prompts",
     )

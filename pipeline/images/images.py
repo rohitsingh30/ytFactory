@@ -1,12 +1,11 @@
-"""Stage 6 — image generation (cloud-only post nuclear-cleanup 2026-05-09).
+"""Stage 6 — image generation (cloud-only, single-provider post 2026-05-16).
 
-All image generation runs on Cloud Run NVIDIA L4 (or Azure AKS A10).
-Local providers (sdxl_lightning, mflux Flux Schnell, mflux Z-Image-Turbo,
-fal.ai hosted Z-Image-Turbo) were removed 2026-05-09 — every channel's
-production stack has been on ``cloudrun_flux2_klein`` since 2026-05-07.
-The render-worker (``cloud/render-worker-v2/``) doesn't have torch /
-diffusers / mflux installed; this module dispatches HTTP requests to
-the cloud GPU services only.
+All image generation runs on Cloud Run NVIDIA L4 via Z-Image-Turbo.
+Other providers (FLUX.2 klein, FLUX.2 dev, Qwen-Image, HiDream, all
+azure_* mirrors) were removed 2026-05-16 in the cost-optimization
+sweep — see docs/cost_optimized_deploy.md. Local providers were
+removed earlier (2026-05-09 nuclear cleanup). Restore from git
+history if revival of any path is needed.
 
 Principles enforced (DESIGN.md §14):
 
@@ -17,7 +16,7 @@ Principles enforced (DESIGN.md §14):
 * **#12 Multi-subject warning** — ``lint_prompt()`` flags plural-subject
   patterns ("three friends", "several characters").
 * **#13 Key-visual weighting** — emitted as plain leading text on the
-  cloud guidance-distilled providers (FLUX.2 klein, Z-Image-Turbo).
+  cloud guidance-distilled provider (Z-Image-Turbo).
 * **#14 IP-Adapter character lock** — was wired only on the SDXL
   laptop path, which is gone. Multi-reference editing in FLUX.2 klein
   is the cloud-side replacement (not yet wired into ``generate()``).
@@ -402,87 +401,18 @@ def build_full_prompt(
 #                        False for 1:1-only models like SD-Turbo
 #   description      — one-line summary surfaced in error messages
 _PROVIDER_CAPABILITIES: dict[str, dict] = {
-    "cloudrun_flux2_klein": {
-        "native_dim": (1024, 1024),
-        "max_dim": (1664, 1664),
-        "step_range": (2, 8),
-        "vertical_9_16_safe": True,
-        "description": (
-            "FLUX.2 [klein] 4B (Apache 2.0, BFL Jan 2026) on our "
-            "Cloud Run NVIDIA L4 in asia-southeast1. Distilled to 4 "
-            "inference steps, ~3-4 s warm /generate at 768x1344. "
-            "T2I + multi-reference editing in one model. The new "
-            "default per docs/research/image_gen_2026.md. Falls back "
-            "to local z_image_turbo (mflux) on cloud failure via "
-            "render-level circuit breaker."
-        ),
-    },
     "cloudrun_z_image_turbo": {
         "native_dim": (1024, 1024),
         "max_dim": (1344, 1344),
         "step_range": (4, 12),
         "vertical_9_16_safe": True,
         "description": (
-            "Z-Image-Turbo 6B via Cloud Run (Apache 2.0). Same "
-            "checkpoint as the local z_image_turbo (mflux) path, "
-            "diffusers runtime on NVIDIA L4. Parity / risk-insurance "
-            "lane next to FLUX.2 klein. Falls back to local mflux on "
-            "cloud failure. NOTE 2026-05-07: cold-load reliability "
-            "still WIP — see P3.5 todo."
-        ),
-    },
-    # ---- Azure AKS GPU mirrors (australiaeast) -------------------------
-    # Same dims/step ranges as cloudrun_*; opt-in via image_provider=azure_*.
-    # On AzureImageUnavailable the wrapper in pipeline.images.images_azure falls
-    # through to cloudrun_<model> which itself falls through to local mflux.
-    "azure_flux2_klein": {
-        "native_dim": (1024, 1024),
-        "max_dim": (1664, 1664),
-        "step_range": (2, 8),
-        "vertical_9_16_safe": True,
-        "description": (
-            "FLUX.2 [klein] 4B on Azure AKS NVIDIA A10 in australiaeast. "
-            "Mirror of cloudrun_flux2_klein; falls through to GCP then "
-            "local mflux on Azure outage. Render-level circuit breaker."
-        ),
-    },
-    "azure_z_image_turbo": {
-        "native_dim": (1024, 1024),
-        "max_dim": (1344, 1344),
-        "step_range": (4, 12),
-        "vertical_9_16_safe": True,
-        "description": (
-            "Z-Image-Turbo 6B on Azure AKS NVIDIA A10. Mirror of "
-            "cloudrun_z_image_turbo; same cold-load WIP caveat."
-        ),
-    },
-    # Audit Q2.66 — pipeline/images/images_cloudrun.py ships per-model
-    # wrappers _generate_cloudrun_qwen_image + _generate_cloudrun_hidream
-    # but they were missing from this capabilities table, so
-    # validate_provider_config returned "unknown image_provider" → the
-    # wrappers were unreachable from the dispatcher. Add them here so
-    # operators can opt in via image_provider=cloudrun_qwen_image /
-    # cloudrun_hidream in their channel YAML.
-    "cloudrun_qwen_image": {
-        "native_dim": (1024, 1024),
-        "max_dim": (1664, 1664),
-        "step_range": (1, 50),
-        "vertical_9_16_safe": True,
-        "description": (
-            "Qwen VL image model via Cloud Run (future / bench lane). "
-            "Generally exploratory — not on the production path. See "
-            "cloud/image-qwen/server.py for the runtime."
-        ),
-    },
-    "cloudrun_hidream": {
-        "native_dim": (1024, 1024),
-        "max_dim": (1536, 1536),
-        "step_range": (1, 50),
-        "vertical_9_16_safe": True,
-        "description": (
-            "HiDream image model via Cloud Run (future / bench lane). "
-            "Generally exploratory — not on the production path. See "
-            "cloud/image-hidream/server.py for the runtime."
+            "Z-Image-Turbo 6B via Cloud Run (Apache 2.0). diffusers "
+            "runtime on NVIDIA L4 in asia-southeast1. The sole image "
+            "provider post 2026-05-16 cost-optimization sweep — see "
+            "docs/cost_optimized_deploy.md. Other providers "
+            "(flux2_klein, flux2_dev, qwen_image, hidream, all azure_*) "
+            "were removed; restore from git history if revival needed."
         ),
     },
 }
@@ -588,19 +518,13 @@ def warmup(
     """
     t0 = _time.time()
     try:
-        if provider in ("cloudrun_flux2_klein", "cloudrun_z_image_turbo"):
+        if provider == "cloudrun_z_image_turbo":
             from pipeline.images.images_cloudrun import warmup as _cloud_warmup
             model = provider.removeprefix("cloudrun_")
             t = _cloud_warmup(model)
             print(f"[warmup] {provider} /readyz fired on background thread")
             return t
-        if provider in ("azure_flux2_klein", "azure_z_image_turbo"):
-            from pipeline.images.images_azure import warmup as _azure_warmup
-            model = provider.removeprefix("azure_")
-            t = _azure_warmup(model)
-            print(f"[warmup] {provider} /readyz fired on background thread")
-            return t
-        print(f"[warmup] unknown provider {provider!r}; skipping (only cloudrun_*/azure_* are supported post 2026-05-09)")
+        print(f"[warmup] unknown provider {provider!r}; skipping (only cloudrun_z_image_turbo is supported post 2026-05-16)")
         return None
     except Exception as e:  # pragma: no cover — defensive
         print(f"[warmup] {provider} preload failed (will lazy-load on first generate): {e}")
@@ -619,7 +543,7 @@ def generate(
     height: int = 1344,
     steps: int = 4,
     *,
-    provider: str = "cloudrun_flux2_klein",
+    provider: str = "cloudrun_z_image_turbo",
     ip_adapter_image: Path | None = None,
     ip_adapter_scale: float = 0.6,
     extra_negative: str | list[str] | None = None,
@@ -674,7 +598,7 @@ def _generate_impl(
     height: int = 1344,
     steps: int = 4,
     *,
-    provider: str = "cloudrun_flux2_klein",
+    provider: str = "cloudrun_z_image_turbo",
     ip_adapter_image: Path | None = None,  # accepted for back-compat; ignored
     ip_adapter_scale: float = 0.6,         # accepted for back-compat; ignored
     extra_negative: str | list[str] | None = None,  # accepted; cloud providers ignore neg
@@ -682,10 +606,14 @@ def _generate_impl(
 ) -> Path:
     """Generate one image. Dispatches on ``provider``.
 
-    All providers are cloud GPU services as of 2026-05-09 (laptop
-    nuclear cleanup). Local providers (sdxl_lightning, mflux,
-    z_image_turbo, z_image_turbo_fal) were removed — restore from
-    git history if revival is needed.
+    Single-provider as of 2026-05-16 cost-optimization sweep —
+    cloudrun_z_image_turbo only. flux2_klein, flux2_dev, qwen_image,
+    hidream and all azure_* mirrors were removed; restore from git
+    history if revival of any path is needed.
+
+    Local providers (sdxl_lightning, mflux, z_image_turbo,
+    z_image_turbo_fal) were removed earlier (2026-05-09 nuclear
+    cleanup).
 
     ``ip_adapter_image`` / ``ip_adapter_scale`` / ``extra_negative``
     are accepted for back-compat with old call sites but ignored —
@@ -701,14 +629,11 @@ def _generate_impl(
         else prompt.strip()
     )
 
-    # Cloud guidance-distilled providers (FLUX.2 klein at gs=1.0,
-    # Z-Image-Turbo at gs=0.0) ignore negative prompts. Channel YAML
-    # opts in via ``force_positive`` to assert what SHOULD be in frame
-    # (the only knob that actually shifts cloud diffusion output).
-    if provider in (
-        "cloudrun_flux2_klein", "cloudrun_z_image_turbo",
-        "azure_flux2_klein", "azure_z_image_turbo",
-    ):
+    # Cloud guidance-distilled provider (Z-Image-Turbo at gs=0.0)
+    # ignores negative prompts. Channel YAML opts in via
+    # ``force_positive`` to assert what SHOULD be in frame (the only
+    # knob that actually shifts cloud diffusion output).
+    if provider == "cloudrun_z_image_turbo":
         force_pos_str = ""
         if force_positive:
             if isinstance(force_positive, list):
@@ -725,39 +650,20 @@ def _generate_impl(
     # know if it's warm without an extra round-trip, so always tag as
     # warm. Cold-loads on the cloud side surface in the per-call
     # response's ``cold_loaded`` field, logged separately by the
-    # cloudrun/azure modules.
+    # cloudrun module.
     t0 = _time.time()
 
-    if provider == "cloudrun_flux2_klein":
-        from pipeline.images.images_cloudrun import _generate_cloudrun_flux2_klein
-        result = _generate_cloudrun_flux2_klein(
-            prompt=final_prompt, seed=seed, out_path=out_path,
-            width=width, height=height, steps=steps,
-        )
-    elif provider == "cloudrun_z_image_turbo":
+    if provider == "cloudrun_z_image_turbo":
         from pipeline.images.images_cloudrun import _generate_cloudrun_z_image_turbo
         result = _generate_cloudrun_z_image_turbo(
-            prompt=final_prompt, seed=seed, out_path=out_path,
-            width=width, height=height, steps=steps,
-        )
-    elif provider == "azure_flux2_klein":
-        from pipeline.images.images_azure import _generate_azure_flux2_klein
-        result = _generate_azure_flux2_klein(
-            prompt=final_prompt, seed=seed, out_path=out_path,
-            width=width, height=height, steps=steps,
-        )
-    elif provider == "azure_z_image_turbo":
-        from pipeline.images.images_azure import _generate_azure_z_image_turbo
-        result = _generate_azure_z_image_turbo(
             prompt=final_prompt, seed=seed, out_path=out_path,
             width=width, height=height, steps=steps,
         )
     else:
         raise ValueError(
             f"unknown image_provider: {provider!r} "
-            "(choices: cloudrun_flux2_klein, cloudrun_z_image_turbo, "
-            "azure_flux2_klein, azure_z_image_turbo). Local providers "
-            "were removed 2026-05-09; see pipeline/images.py."
+            "(only choice post 2026-05-16 cost-optimization sweep: "
+            "cloudrun_z_image_turbo). See docs/cost_optimized_deploy.md."
         )
 
     dt = _time.time() - t0

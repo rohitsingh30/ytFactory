@@ -57,7 +57,10 @@ AZURE_OPENAI_API_VERSION="${AZURE_OPENAI_API_VERSION:-2025-04-01-preview}"
 AZURE_OPENAI_MODEL="${AZURE_OPENAI_MODEL:-gpt-4o-mini}"
 
 echo "==> Building + pushing ${IMAGE}"
+# --region pins build to asia-southeast1 to colocate with AR — see
+# docs/cost_guardrails section in CLAUDE.md (2026-05-17 cost audit).
 gcloud builds submit . \
+  --region="${REGION}" \
   --tag="${IMAGE}" \
   --project="${PROJECT}" \
   --timeout=1200s

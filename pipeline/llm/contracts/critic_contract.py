@@ -59,14 +59,17 @@ class CriticContract:
                 name="axes_field",
                 severity="error",
                 description=(
-                    "Output MUST include an 'axes' object with all 6 "
-                    "required axes scored 1-10: "
-                    + ", ".join(critic_axes.AXIS_NAMES) + ". "
+                    "Output MUST include an 'axes' object with all "
+                    f"{len(critic_axes.REQUIRED_AXIS_NAMES)} required "
+                    "axes scored 1-10: "
+                    + ", ".join(critic_axes.REQUIRED_AXIS_NAMES) + ". "
                     "The pipeline DERIVES the SHIP/FIX/BLOCK verdict "
                     "from these axes — score honestly. Any axis ≤ 3 "
                     "auto-BLOCKs; any axis < 7 auto-FIXes; all ≥ 7 "
                     "ships. Sandbagging a 4 to a 7 will silently break "
-                    "downstream regen."
+                    "downstream regen. (Optional axes like vbench_score "
+                    "are populated by the CPU adapter — do NOT score "
+                    "them; the pipeline gates on them when present.)"
                 ),
                 examples_good=(
                     '{"axes": {"hook_strength": 8, "caption_legibility": 9, '
@@ -166,10 +169,11 @@ class CriticContract:
             f"Previous output:\n{prev_output!r}\n\n"
             f"{diag}\n"
             f"Return ONLY a JSON object with the correct shape:\n"
-            f'  {{"axes": {{ {", ".join(f"{n!r}: <int 1-10>" for n in critic_axes.AXIS_NAMES)} }}, '
+            f'  {{"axes": {{ {", ".join(f"{n!r}: <int 1-10>" for n in critic_axes.REQUIRED_AXIS_NAMES)} }}, '
             f'"verdict": "SHIP|FIX|BLOCK", "fixes": [...]}}\n'
-            f"All 6 axes are required; missing or non-int axes will trigger "
-            f"another regen. The pipeline derives the verdict from axes."
+            f"All {len(critic_axes.REQUIRED_AXIS_NAMES)} axes are required; "
+            f"missing or non-int axes will trigger another regen. The "
+            f"pipeline derives the verdict from axes."
         )
 
     # ------------------------------------------------------------------
@@ -209,8 +213,10 @@ class CriticContract:
             output["verdict"] = "FIX"
             return fixes
 
-        # Check every required axis is an int.
-        for name in critic_axes.AXIS_NAMES:
+        # Check every required axis is an int. Optional axes (e.g.
+        # vbench_score, populated by the CPU adapter post-LLM) are
+        # validated only when present — see critic_axes.OPTIONAL_AXES.
+        for name in critic_axes.REQUIRED_AXIS_NAMES:
             v = axes.get(name)
             if isinstance(v, bool) or not isinstance(v, int):
                 fixes.append(Fix(
@@ -218,6 +224,23 @@ class CriticContract:
                     reason=(
                         f"axis {name!r} missing or not an int (got {v!r}); "
                         f"pipeline cannot derive verdict"
+                    ),
+                    target_stage=self.name,
+                    target_path=f"critic.axes.{name}",
+                    source_judge="critic_contract",
+                ))
+        # Present-but-malformed optional axes are also FIX-worthy
+        # (someone wired the adapter wrong and emitted a string).
+        for name in critic_axes.OPTIONAL_AXES:
+            if name not in axes:
+                continue
+            v = axes[name]
+            if isinstance(v, bool) or not isinstance(v, int):
+                fixes.append(Fix(
+                    constraint="axes_field",
+                    reason=(
+                        f"optional axis {name!r} present but not an int "
+                        f"(got {v!r}); adapter emitted wrong type"
                     ),
                     target_stage=self.name,
                     target_path=f"critic.axes.{name}",

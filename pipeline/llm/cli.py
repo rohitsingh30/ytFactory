@@ -526,6 +526,7 @@ def call_claude_cli(
     *,
     output_json: bool = True,
     json_schema: dict | None = None,
+    strict_schema: bool = False,
     add_dirs: list[Path] | None = None,
     allowed_tools: list[str] | None = None,
     model: str = "haiku",
@@ -594,6 +595,7 @@ def call_claude_cli(
             prompt,
             output_json=output_json,
             json_schema=json_schema,
+            strict_schema=strict_schema,
             model=model,
             timeout_s=timeout_s,
             stage=resolved_stage,
@@ -1070,6 +1072,7 @@ def _call_azure_openai(
     *,
     output_json: bool,
     json_schema: dict | None,
+    strict_schema: bool = False,
     model: str,
     timeout_s: int,
     stage: str | None = None,
@@ -1141,12 +1144,32 @@ def _call_azure_openai(
             kwargs["reasoning_effort"] = re_value
     if output_json:
         if json_schema is not None:
+            # ``strict=True`` enables Azure's Context-Free Grammar (CFG)
+            # engine — schema is enforced at the token-generation level,
+            # not just nudged via response_format=json_object. This is
+            # the production default for data-extraction stages where
+            # we need an exact wrapper-object shape (e.g.
+            # ``author_beat_prompts`` passing the ``{"beats": [...]}``
+            # wrapper, since OpenAI/Azure structured outputs don't
+            # accept root-array types — see the 2026-05-16 floating-
+            # objects post-mortem).
+            #
+            # Requires the json_schema to be strict-compliant per Azure
+            # docs:
+            #   * every object has ``additionalProperties: false``
+            #   * every property listed in ``required``
+            #   * unsupported keywords absent (minItems/maxItems,
+            #     pattern, format, etc — see
+            #     learn.microsoft.com/.../structured-outputs)
+            # Callers that haven't migrated their schema to be strict-
+            # compliant pass ``strict_schema=False`` (the default) — the
+            # schema is still sent but only validated client-side.
             kwargs["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
                     "name": stage or "response",
                     "schema": json_schema,
-                    "strict": False,
+                    "strict": bool(strict_schema),
                 },
             }
         else:

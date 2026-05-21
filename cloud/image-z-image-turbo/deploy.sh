@@ -33,7 +33,12 @@ cd "$REPO_ROOT"
 # steps have no metadata-server access).
 echo "==> Building + pushing ${IMAGE}"
 echo "    (build context = ${REPO_ROOT}, config = cloud/image-z-image-turbo/cloudbuild.yaml)"
+# --region pins build to asia-southeast1 to colocate with AR. Without
+# this the 33 GiB image push goes US→APAC and racks up ~₹400/build of
+# intercontinental egress (caught 2026-05-17 cost audit). See
+# docs/cost_guardrails.md.
 BUILD_ID=$(gcloud builds submit . \
+  --region="${REGION}" \
   --config=cloud/image-z-image-turbo/cloudbuild.yaml \
   --substitutions="_IMAGE=${IMAGE}" \
   --project="${PROJECT}" \
@@ -45,10 +50,10 @@ if [ -z "${BUILD_ID}" ] || ! echo "${BUILD_ID}" | grep -qE '^[a-f0-9-]{20,}$'; t
   exit 1
 fi
 echo "==> Build ID: ${BUILD_ID}"
-echo "==> Poll URL: https://console.cloud.google.com/cloud-build/builds/${BUILD_ID}?project=${PROJECT}"
+echo "==> Poll URL: https://console.cloud.google.com/cloud-build/builds/${BUILD_ID}?project=${PROJECT}&region=${REGION}"
 DEADLINE=$((SECONDS + 5700))
 while [ $SECONDS -lt $DEADLINE ]; do
-  STATUS=$(gcloud builds describe "${BUILD_ID}" --project="${PROJECT}" --format="value(status)" 2>/dev/null || echo "?")
+  STATUS=$(gcloud builds describe "${BUILD_ID}" --region="${REGION}" --project="${PROJECT}" --format="value(status)" 2>/dev/null || echo "?")
   case "${STATUS}" in
     SUCCESS) echo "==> Build SUCCESS"; break ;;
     FAILURE|CANCELLED|TIMEOUT|EXPIRED|INTERNAL_ERROR) echo "==> Build ${STATUS}" >&2; exit 1 ;;

@@ -41,7 +41,7 @@ class TestGenerateSpan(_Base):
     def test_generate_emits_image_gen_span(self) -> None:
         # Patch the cloud provider implementation to avoid network I/O.
         with patch(
-            "pipeline.images.images_cloudrun._generate_cloudrun_flux2_klein",
+            "pipeline.images.images_cloudrun._generate_cloudrun_z_image_turbo",
             side_effect=lambda **kw: kw["out_path"],
         ):
             out = Path("/tmp/img.png")
@@ -52,7 +52,7 @@ class TestGenerateSpan(_Base):
                 seed=42,
                 out_path=out,
                 width=768, height=1344, steps=4,
-                provider="cloudrun_flux2_klein",
+                provider="cloudrun_z_image_turbo",
             )
 
         spans = self._spans()
@@ -60,7 +60,7 @@ class TestGenerateSpan(_Base):
         self.assertIn("image_gen", names)
         s = next(s for s in spans if s.name == "image_gen")
         self.assertEqual(s.attributes["ytfactory.meta.provider"],
-                         "cloudrun_flux2_klein")
+                         "cloudrun_z_image_turbo")
         self.assertEqual(s.attributes["ytfactory.meta.width"], 768)
         self.assertEqual(s.attributes["ytfactory.meta.height"], 1344)
         self.assertEqual(s.attributes["ytfactory.meta.steps"], 4)

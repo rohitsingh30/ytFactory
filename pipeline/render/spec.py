@@ -304,9 +304,15 @@ class CaptionStyleConfig:
     block.
     """
     font_size: int = 38
-    font_size_minimal: int = 130
-    font_size_standard: int = 110
-    font_size_dense: int = 90
+    # Word-level Shorts captions need to be BIG — typical viral Shorts
+    # show single words at ~15-25% of frame height (290-480px on a 1920-
+    # tall canvas). Pre-2026-05-17 these were 90/110/130 which read as
+    # tiny pills viewers can't scan in 0.3s. New defaults sized so even
+    # "dense" mode produces words a viewer can read at arm's length on
+    # a phone screen.
+    font_size_minimal: int = 320   # was 130 — single word fills ~17% frame height
+    font_size_standard: int = 260  # was 110 — TikTok-default scan size
+    font_size_dense: int = 200     # was 90  — minimum legible single-word
     text_rgba: tuple[int, int, int, int] = (255, 217, 61, 255)  # warm yellow
     italic: bool = True
     play_res_x: int = 1920

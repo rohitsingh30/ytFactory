@@ -6,7 +6,7 @@ Two failure modes the Claude Skills loader rejects on session start:
 
 1. YAML parse failure — most commonly because the `description:` field
    contains an unquoted `key: value` substring (e.g.
-   `image_provider: cloudrun_flux2_klein`) which the YAML parser
+   `image_provider: cloudrun_z_image_turbo`) which the YAML parser
    interprets as a nested mapping. Fix: switch to folded block scalar
    form (`description: >-` on its own line, body indented).
 
@@ -101,7 +101,7 @@ def _check_one(path: Path) -> List[str]:
         errors.append(
             f"YAML parse failure: {exc}\n"
             f"  → If the description contains a `key: value` substring "
-            f"(e.g. `image_provider: cloudrun_flux2_klein`), switch to "
+            f"(e.g. `image_provider: cloudrun_z_image_turbo`), switch to "
             f"folded block scalar form:\n"
             f"      description: >-\n"
             f"        <body indented 2 spaces>\n"

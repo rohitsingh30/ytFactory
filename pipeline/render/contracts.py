@@ -104,9 +104,54 @@ __all__ = [
     "get_plugin",
     "list_plugins",
     "PluginNotFound",
+    # Exceptions (2026-05-15 fail-loud audit)
+    "RenderFailedError",
     # Convenience
     "PluginSlot",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Fail-loud exception (2026-05-15 silent-fallback audit)
+# ---------------------------------------------------------------------------
+
+
+class RenderFailedError(RuntimeError):
+    """Raised when a plugin would otherwise silently degrade to a
+    visibly-broken artifact (solid-color visual, captions-less mp4,
+    >10% per-beat image-gen failures, …).
+
+    Established 2026-05-15 after the silent-fallback audit found:
+
+    - cosmosdecoded shipped 26-min black mp4s because
+      ``archival_shotlist`` → ``longform_panels`` → ``_solid_color``
+      ran silently when no shotlist was authored;
+    - 8/10 mystoriesanimated shorts shipped with ZERO captions because
+      a ``from pipeline.captions import render_word_caption`` ImportError
+      was caught + logged at WARNING level + returned ``[]``;
+    - sportsrecapped renders shipped with frozen-frame tails because
+      ``ai_beat_slideshow`` per-beat image-gen failures (40–60% of beats
+      failing during cloud incidents) were swallowed with ``continue``
+      and ``compose`` padded the missing frames with the last image.
+
+    The fix: each of those sites now raises ``RenderFailedError``
+    (subclass of ``RuntimeError``) instead of returning a broken
+    artifact. The single env override
+    ``YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1`` re-enables the legacy
+    silent-degrade path for emergency renders only.
+
+    Error messages MUST include:
+
+    - the originating file:line (or function name) so the operator can
+      locate the failing site without grepping;
+    - the original cause's ``repr()`` chained via ``raise … from exc``
+      so the traceback shows the underlying ImportError /
+      ``CloudRunUnavailable`` / etc.
+
+    See ``docs/post-audit-2026-05-15.md`` (companion doc to the
+    2026-05-14 audit) for the full list of touched sites + the test
+    matrix in ``tests/render/test_fail_loud_fallbacks.py``.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +236,22 @@ class Segment:
 
     kind: str = "beat"
     """Discriminator: ``beat`` | ``section`` | ``chapter`` | ``custom``."""
+
+    words: list[Any] | None = None
+    """Optional word-level timings inside this segment, in narration
+    order. Each entry is a ``pipeline.beats.Word`` (or a duck-typed
+    object with ``.text``, ``.start``, ``.end``).
+
+    Populated by ASR-derived timeline builders (short engine's
+    ``asr_beats``) so word-level overlay producers (TikTok-style
+    one-word-at-a-time captions) can iterate words with their own
+    enable windows instead of squashing the whole beat text into a
+    single PNG.
+
+    None for non-ASR segments (authored sections, chapter cards,
+    fixture-driven timelines) where word-level timing isn't
+    available. Word-level caption plugins fall back to single PNG
+    per beat when ``words is None`` — pre-2026-05-17 behaviour."""
 
 
 # Type alias for clarity at call sites.

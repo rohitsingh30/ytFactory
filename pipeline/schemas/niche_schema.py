@@ -343,7 +343,7 @@ NICHE_REGISTRY: dict[str, dict[str, Any]] = {
             "aspect": "9:16",
             "tts_provider": "cloudrun_indicf5",
             "tts_voice": "hindutava",
-            "image_provider": "cloudrun_flux2_klein",
+            "image_provider": "cloudrun_z_image_turbo",
         },
         "default_validation": {
             "banned_phrases": ["AITA", "WIBTA"],
@@ -356,7 +356,7 @@ NICHE_REGISTRY: dict[str, dict[str, Any]] = {
             "aspect": "16:9",
             "tts_provider": "cloudrun_indicf5",
             "tts_voice": "hindi-female-iitm-anchor",
-            "image_provider": "cloudrun_flux2_klein",
+            "image_provider": "cloudrun_z_image_turbo",
         },
         "default_validation": {},
     },
@@ -377,7 +377,7 @@ NICHE_REGISTRY: dict[str, dict[str, Any]] = {
             "aspect": "9:16",
             "tts_provider": "cloudrun_chatterbox",
             "tts_voice": "sarah.wav",
-            "image_provider": "cloudrun_flux2_klein",
+            "image_provider": "cloudrun_z_image_turbo",
         },
         "default_validation": {
             "closer_literal_options": [
@@ -420,7 +420,7 @@ NICHE_REGISTRY: dict[str, dict[str, Any]] = {
             "aspect": "9:16",
             "tts_provider": "cloudrun_chatterbox",
             "tts_voice": "sarah.wav",
-            "image_provider": "cloudrun_flux2_klein",
+            "image_provider": "cloudrun_z_image_turbo",
         },
         "default_validation": {
             "banned_phrases": ["AITA", "YTA", "NTA"],

@@ -42,9 +42,25 @@ class BeatSlideshowMux:
     ) -> Path:
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Build the input list. Overlays are sorted by (layer, start_s)
-        # so the ffmpeg overlay chain stacks them in the expected order.
-        sorted_overlays = sorted(overlays, key=lambda o: (o.layer, o.start_s))
+        # 2026-05-17 split overlays by format. ASS overlays burn via
+        # ffmpeg's ``subtitles=`` filter (single pass, scales to
+        # thousands of events). Image overlays use the ffmpeg
+        # ``overlay=`` filter chain (one per element).
+        #
+        # Why the split: the WordCaptionPngs producer (post-fix)
+        # returns ONE ASS OverlayElement for 100+ word events instead
+        # of 100+ PNG OverlayElements. Pre-fix the 114-overlay chain
+        # silently failed past ~50 overlays (render 75ac2667 — 37min
+        # compose, ZERO captions in output).
+        ass_overlays = [
+            o for o in overlays
+            if (o.extras or {}).get("format") == "ass"
+        ]
+        image_overlays = [
+            o for o in overlays
+            if (o.extras or {}).get("format") != "ass"
+        ]
+        sorted_overlays = sorted(image_overlays, key=lambda o: (o.layer, o.start_s))
 
         cmd: list[str] = [
             "-i", str(visuals.video_path),
@@ -79,25 +95,46 @@ class BeatSlideshowMux:
             )
             cur_label = out_label
 
-        # Final video pad — add fps + format.
-        # 2026-05-15 — pad visual to audio.duration_s so the video stream
-        # doesn't end early when visual_track.duration_s < audio.duration_s.
-        # Pre-fix the AITA Short (job d3d5b40b) had visual=26s + audio=40.5s →
-        # 14.5s of audio with no video. ffmpeg cannot extend a video past
-        # its source duration without an explicit pad filter; ``-t {audio.duration_s}``
-        # CAPS the output to that length but doesn't EXTEND visuals.
-        # ``tpad=stop_mode=clone:stop_duration=N`` clones the last frame
-        # for the audio overrun (cleaner than a black hold). Computed
-        # delta is max(0, audio - visual); when visual >= audio,
-        # stop_duration=0 is a no-op.
+        # Final video pad — fit visual track to audio.duration_s.
+        #
+        # 2026-05-15 — pre-fix the AITA Short (job d3d5b40b) had
+        # visual=26s + audio=40.5s → 14.5s of audio with no video.
+        # First fix: tpad=stop_mode=clone froze the last frame for the
+        # overrun (cleaner than a black hold, but still a static tail).
+        #
+        # 2026-05-18 (round 7) — replaced tpad-clone with setpts stretch.
+        # After the image_to_kenburns_clip frame-cap fix in compose.py,
+        # the AI beat slideshow is now exactly ``sum(beat_durations) +
+        # XFADE_per_beat`` ≈ 27s for a 13-preliminary-beat AITA Short.
+        # Audio is 41s. tpad-clone would freeze 14s of the last image
+        # (beat_012 static tail) — viewer registers it as a frozen-frame
+        # bug. setpts smoothly stretches the slideshow PTS so all 13
+        # Ken-Burns'd beats spread across the entire audio duration. Ken
+        # Burns motion plays ~1.5× slower but stays continuous; no
+        # frozen tail.
+        #
+        # When visual_dur >= audio.duration_s (longer authored scripts
+        # or post-ASR re-stitch), stretch_factor=1.0 and setpts is a
+        # no-op — final -t cap trims any visual overrun.
+        #
+        # 2026-05-17 ASS subtitle burn — after the scale/fps/setpts
+        # chain, append ``subtitles=<path>`` for each ASS overlay so
+        # libass renders the word-by-word captions in a single pass on
+        # top of all image overlays + Ken Burns motion. Up to thousands
+        # of events; no filter_complex blowup.
         w, h = spec.output_resolution
         visual_dur = max(0.001, visuals.duration_s)
-        pad_seconds = max(0.0, audio.duration_s - visual_dur)
-        filter_parts.append(
-            f"[{cur_label}]scale={w}:{h}:flags=lanczos,fps={spec.output_fps},"
-            f"tpad=stop_mode=clone:stop_duration={pad_seconds:.3f},"
-            f"format=yuv420p[vout]"
+        stretch_factor = max(1.0, audio.duration_s / visual_dur)
+        post_chain = (
+            f"setpts=PTS*{stretch_factor:.6f},"
+            f"scale={w}:{h}:flags=lanczos,fps={spec.output_fps}"
         )
+        for ov in ass_overlays:
+            # ASS path must be ffmpeg-filter-safe (escape colons + backslashes).
+            ass_path = str(ov.asset_path).replace("\\", "\\\\").replace(":", "\\:")
+            post_chain += f",subtitles='{ass_path}'"
+        post_chain += ",format=yuv420p"
+        filter_parts.append(f"[{cur_label}]{post_chain}[vout]")
 
         cmd.extend([
             "-filter_complex", ";".join(filter_parts),

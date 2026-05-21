@@ -32,16 +32,33 @@ tts_speed: 0.90
 
 # Image gen — Z-Image-Turbo 6B via mflux. See aita_animated.yaml for the
 # full rationale; same knobs apply.
-image_provider: cloudrun_flux2_klein
+image_provider: cloudrun_z_image_turbo
 image_style_prefix: |
-  Flat 2D crayon-style children's drawing with thick black outlines and
-  soft pastel fill colors (warm beige, dusty pink, mustard yellow,
-  light blue). Round-headed simple cartoon shapes.
+  Warm hand-drawn 2D illustration in the style of modern indie
+  webcomics. Confident ink line work with varying weight, watercolor
+  and colored-pencil fills with visible paper grain and soft brush
+  texture; never flat vector. Warm narrative palette: dusty pink,
+  sage green, mustard yellow, warm brown, soft beige, slate blue.
+  Two-tone cel shading with soft cast shadows. Compositions stay
+  readable on phone screens — three-quarter view of characters,
+  mid-frame subject, soft blurred background. Every object is
+  unmarked and unbranded — cups plain ceramic, bottles smooth glass
+  without labels, packaging without logos, walls without signs,
+  screens blank. ZERO printed text or numbers anywhere in the
+  rendered frame.
 
 character_description: |
-  A small round-headed character with shoulder-length brown hair, simple
-  dot eyes, a tiny line nose, and a neutral expression. Wears a yellow
-  t-shirt and blue jeans. Always the same character across all images.
+  A 29-year-old woman with shoulder-length wavy brown hair rendered
+  in visible strand groups. Almond-shaped eyes with visible dark
+  pupils and short eyelashes. Soft expressive eyebrows that
+  articulate emotion per beat — arched in surprise, furrowed in
+  frustration, level when neutral. Small defined nose with a faint
+  shadow on the right side. Articulated mouth that changes shape
+  with the spoken line — small open when speaking, pressed flat
+  when resigned, downturned when frustrated. Soft pink blush marks
+  on cheekbones when emotionally activated. Wears a fitted mustard-
+  yellow cotton t-shirt with visible fabric folds, faded blue jeans.
+  Same locked appearance across every beat.
 
 opening_image_directives:
   required_concrete_tokens: 2
@@ -49,7 +66,7 @@ opening_image_directives:
                    "leaning forward", "hand on hip", "wooden door"]
 
 image_seed: 42
-image_steps: 4
+image_steps: 9  # Z-Image-Turbo spec sweet spot (was 4 — stale laptop-perf compromise).
 image_width: 768
 image_height: 1344
 

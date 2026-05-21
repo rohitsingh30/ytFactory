@@ -36,11 +36,11 @@ def _axes(**overrides):
 class DeriveVerdictTest(unittest.TestCase):
 
     def test_all_axes_at_ship_min_yields_ship(self):
-        axes = _axes(**{name: 7 for name in critic_axes.AXIS_NAMES})
+        axes = _axes(**{name: 7 for name in critic_axes.REQUIRED_AXIS_NAMES})
         self.assertEqual(critic_axes.derive_verdict(axes), "SHIP")
 
     def test_all_axes_at_ten_yields_ship(self):
-        axes = _axes(**{name: 10 for name in critic_axes.AXIS_NAMES})
+        axes = _axes(**{name: 10 for name in critic_axes.REQUIRED_AXIS_NAMES})
         self.assertEqual(critic_axes.derive_verdict(axes), "SHIP")
 
     def test_one_axis_at_six_yields_fix(self):
@@ -119,32 +119,35 @@ class WeakestAxisTest(unittest.TestCase):
         self.assertIsNone(critic_axes.weakest_axis({}))
 
     def test_partial_axes_returns_none(self):
-        # If we can't score every axis, no single one is the
+        # If we can't score every REQUIRED axis, no single one is the
         # "weakest" — caller decides what to do.
-        partial = {name: 7 for name in critic_axes.AXIS_NAMES[:3]}
+        partial = {name: 7 for name in critic_axes.REQUIRED_AXIS_NAMES[:3]}
         self.assertIsNone(critic_axes.weakest_axis(partial))
 
     def test_empty_axis_names_yields_none(self):
-        # Defensive: if the AXIS_NAMES tuple were ever empty, the
-        # parsed list would be empty and we'd reach the "if not parsed"
-        # branch. Simulate by patching the module's AXIS_NAMES.
-        original = critic_axes.AXIS_NAMES
+        # Defensive: if the REQUIRED_AXIS_NAMES tuple were ever empty,
+        # the parsed list would be empty and we'd reach the
+        # "if not parsed" branch. Simulate by patching the module.
+        original_req = critic_axes.REQUIRED_AXIS_NAMES
+        original_opt = critic_axes.OPTIONAL_AXES
         try:
-            critic_axes.AXIS_NAMES = ()  # type: ignore[misc]
+            critic_axes.REQUIRED_AXIS_NAMES = ()  # type: ignore[misc]
+            critic_axes.OPTIONAL_AXES = frozenset()  # type: ignore[misc]
             self.assertIsNone(critic_axes.weakest_axis({"any": 7}))
         finally:
-            critic_axes.AXIS_NAMES = original  # type: ignore[misc]
+            critic_axes.REQUIRED_AXIS_NAMES = original_req  # type: ignore[misc]
+            critic_axes.OPTIONAL_AXES = original_opt  # type: ignore[misc]
 
 
 class AxesSummaryTest(unittest.TestCase):
 
     def test_summary_lists_all_axes_in_order(self):
         s = critic_axes.axes_summary(_FULL_AXES_GOOD)
-        for name in critic_axes.AXIS_NAMES:
+        for name in critic_axes.REQUIRED_AXIS_NAMES:
             self.assertIn(f"{name}=", s)
-        # First axis listed comes first in the string.
-        first = critic_axes.AXIS_NAMES[0]
-        last = critic_axes.AXIS_NAMES[-1]
+        # First REQUIRED axis listed comes first in the string.
+        first = critic_axes.REQUIRED_AXIS_NAMES[0]
+        last = critic_axes.REQUIRED_AXIS_NAMES[-1]
         self.assertLess(s.index(first), s.index(last))
 
     def test_missing_returns_no_axes_sentinel(self):
@@ -152,7 +155,7 @@ class AxesSummaryTest(unittest.TestCase):
         self.assertEqual(critic_axes.axes_summary("nope"), "<no axes>")
 
     def test_missing_individual_axis_marked_question(self):
-        partial = {name: 7 for name in critic_axes.AXIS_NAMES[:3]}
+        partial = {name: 7 for name in critic_axes.REQUIRED_AXIS_NAMES[:3]}
         s = critic_axes.axes_summary(partial)
         # Missing axes are marked with "=?".
         self.assertIn("=?", s)
@@ -160,13 +163,24 @@ class AxesSummaryTest(unittest.TestCase):
 
 class JsonSchemaTest(unittest.TestCase):
 
-    def test_schema_requires_every_axis(self):
+    def test_schema_requires_every_required_axis(self):
         sch = critic_axes.axes_json_schema()
         self.assertEqual(sch["type"], "object")
+        # Only REQUIRED axes are LLM-facing required keys; optional
+        # axes (e.g. vbench_score) are populated by the CPU adapter.
         self.assertSetEqual(
-            set(sch["required"]), set(critic_axes.AXIS_NAMES),
-            "every axis must be required at the schema level",
+            set(sch["required"]), set(critic_axes.REQUIRED_AXIS_NAMES),
+            "every required axis must be required at the schema level",
         )
+
+    def test_schema_exposes_optional_axes_as_properties_not_required(self):
+        sch = critic_axes.axes_json_schema()
+        for opt in critic_axes.OPTIONAL_AXES:
+            # Property is still defined — the schema accepts a value
+            # there when the adapter writes one — but it's NOT in
+            # ``required`` so an LLM response that omits it validates.
+            self.assertIn(opt, sch["properties"])
+            self.assertNotIn(opt, sch["required"])
 
     def test_schema_constrains_axis_range_1_to_10(self):
         sch = critic_axes.axes_json_schema()
@@ -178,21 +192,35 @@ class JsonSchemaTest(unittest.TestCase):
 
     def test_schema_blocks_extra_keys(self):
         # additionalProperties: false — LLM can't smuggle in a
-        # 7th axis to game the gate.
+        # surprise axis to game the gate.
         sch = critic_axes.axes_json_schema()
         self.assertFalse(sch["additionalProperties"])
 
 
 class RenderAxesBlockTest(unittest.TestCase):
 
-    def test_block_lists_every_axis_with_description(self):
+    def test_block_lists_every_required_axis_with_description(self):
         block = critic_axes.render_axes_block()
         for name, desc in critic_axes.AXES:
+            if name in critic_axes.OPTIONAL_AXES:
+                continue
             self.assertIn(name, block,
                           f"axis name {name!r} missing from prompt block")
             # First sentence of description should appear.
             first_sentence = desc.split(".")[0][:40]
             self.assertIn(first_sentence, block)
+
+    def test_block_excludes_optional_axes(self):
+        # Optional axes are populated by the CPU adapter, not the LLM,
+        # and asking the LLM to score them would either hallucinate
+        # a number or break every critic call when the adapter is
+        # unavailable.
+        block = critic_axes.render_axes_block()
+        for opt in critic_axes.OPTIONAL_AXES:
+            self.assertNotIn(
+                opt, block,
+                f"optional axis {opt!r} leaked into LLM prompt block",
+            )
 
     def test_block_uses_default_indent(self):
         block = critic_axes.render_axes_block()
@@ -208,6 +236,64 @@ class RenderAxesBlockTest(unittest.TestCase):
             line for line in block.splitlines() if line.strip().startswith("- ")
         )
         self.assertTrue(first.startswith("    - "))
+
+
+class OptionalAxisVbenchTest(unittest.TestCase):
+    """Pins the contract that ``vbench_score`` is an OPTIONAL axis —
+    its absence does not block ship, but its presence is gated like
+    any other axis. Added 2026-05-15 with the VBench adapter."""
+
+    def test_vbench_score_is_optional_axis(self):
+        self.assertIn("vbench_score", critic_axes.OPTIONAL_AXES)
+        self.assertNotIn("vbench_score", critic_axes.REQUIRED_AXIS_NAMES)
+        # AXIS_NAMES is the union — vbench_score still appears there.
+        self.assertIn("vbench_score", critic_axes.AXIS_NAMES)
+
+    def test_missing_vbench_does_not_block_ship(self):
+        # Cloud worker without vbench installed → adapter writes no
+        # axis. The other 6 axes must still be able to SHIP.
+        axes = _axes()  # no vbench_score
+        self.assertEqual(critic_axes.derive_verdict(axes), "SHIP")
+
+    def test_low_vbench_score_acts_as_fix_gate(self):
+        # VBench raw < 70 (i.e. 1-10 axis < 7) → FIX.
+        axes = _axes(vbench_score=6)
+        self.assertEqual(critic_axes.derive_verdict(axes), "FIX")
+
+    def test_very_low_vbench_score_acts_as_block_gate(self):
+        # VBench raw < 40 (i.e. 1-10 axis ≤ 3) → BLOCK.
+        axes = _axes(vbench_score=3)
+        self.assertEqual(critic_axes.derive_verdict(axes), "BLOCK")
+
+    def test_high_vbench_score_ships(self):
+        axes = _axes(vbench_score=9)
+        self.assertEqual(critic_axes.derive_verdict(axes), "SHIP")
+
+    def test_malformed_vbench_score_when_present_yields_fix(self):
+        # Adapter mis-emitted a string → FIX so we notice the
+        # regression rather than silently shipping.
+        axes = _axes(vbench_score="high")  # type: ignore[arg-type]
+        self.assertEqual(critic_axes.derive_verdict(axes), "FIX")
+
+    def test_bool_vbench_score_when_present_yields_fix(self):
+        # Same bool-is-int rejection as the required axes.
+        axes = _axes(vbench_score=True)  # type: ignore[arg-type]
+        self.assertEqual(critic_axes.derive_verdict(axes), "FIX")
+
+    def test_weakest_axis_returns_vbench_when_present_and_lowest(self):
+        axes = _axes(vbench_score=4)
+        self.assertEqual(
+            critic_axes.weakest_axis(axes),
+            ("vbench_score", 4),
+        )
+
+    def test_weakest_axis_skips_missing_optional_axis(self):
+        # All required axes ≥ 7, vbench absent → weakest is the
+        # lowest of the required axes, NOT None and NOT vbench_score.
+        axes = _axes(mute_mode_score=7)  # forced lowest
+        result = critic_axes.weakest_axis(axes)
+        assert result is not None
+        self.assertIn(result[0], critic_axes.REQUIRED_AXIS_NAMES)
 
 
 if __name__ == "__main__":

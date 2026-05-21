@@ -3,30 +3,33 @@
 When a long-form visualize plugin (``archival_shotlist`` /
 ``footage_windows``) can't produce its primary output (no shotlist
 authored, helper module missing, network failure during clip
-download, …), it MUST still return a viewable ``VisualTrack`` —
-solid-color stand-ins shipped in production for years (2026-05-15
-audit found 26-min black mp4s on every cosmosdecoded long-form
-render) and that's a P0 viewer experience bug.
+download, …), it dispatches to the ``longform_panels`` plugin (Flux
+AI panel slideshow) which works on any timeline shape.
 
-This helper dispatches the failed plugin to the ``longform_panels``
-plugin (Flux AI panel slideshow) which works on any timeline shape.
-``longform_panels`` itself can fail (image-gen API down, signature
-mismatch with the legacy helper) — when that happens, fall through
-to the OLD solid-color stand-in so the engine still produces a
-video file (better than crashing the render). The recursion guard
-prevents A → B → A loops.
+2026-05-15 fail-loud audit
+--------------------------
 
-Sentinel pattern: callers pass a unique ``sentinel_kwarg`` name so
-the recursion check is per-plugin (one plugin failing back to
-another doesn't trip the guard for the second plugin).
+Pre-audit, when EVEN ``longform_panels`` failed, this helper fell
+through to a solid-color ffmpeg ``lavfi`` stand-in — that produced
+26-min black mp4s on every cosmosdecoded / historyrecapped long-form
+render (jobs ce309c80, 0ffe6dcd). Post-audit the solid-color fall-
+through RAISES :class:`RenderFailedError` by default; emergency
+renders can opt back in with
+``YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1``.
+
+The recursion guard sentinel still applies — when the helper is
+already in a fallback chain, we go straight to the (now opt-in)
+solid color path rather than ping-ponging A → B → A.
 """
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
 from pipeline.render.contracts import (
+    RenderFailedError,
     Timeline,
     VisualTrack,
     get_plugin,
@@ -34,6 +37,21 @@ from pipeline.render.contracts import (
 from pipeline.render.shared.ffmpeg_helpers import probe_duration, run_ffmpeg
 
 _logger = logging.getLogger(__name__)
+
+
+def _solid_color_override_enabled() -> bool:
+    """True iff the operator opted in to the legacy solid-color
+    fallback path via env (``YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1``).
+
+    Default off — see :class:`RenderFailedError`'s docstring for the
+    2026-05-15 audit rationale. This single env flag is shared across
+    every fail-loud site (``_fallback._solid_color``, plus the
+    ``archival_shotlist`` / ``footage_windows`` direct fall-throughs)
+    so emergency renders flip ONE variable to ship.
+    """
+    return os.environ.get(
+        "YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _fallback_to_longform_panels(
@@ -71,10 +89,15 @@ def _fallback_to_longform_panels(
     if extra.get(sentinel_kwarg):
         _logger.warning(
             "[fallback] %s already in fallback path (sentinel=%s) — "
-            "going to solid-color stand-in (%s) to break recursion",
+            "deferring to solid-color stand-in (%s) to break recursion "
+            "(will raise unless YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1)",
             label, sentinel_kwarg, color,
         )
-        return _solid_color(spec, timeline, work_dir, color=color, label=label)
+        # 2026-05-15 fail-loud — _solid_color raises by default; only
+        # the env override path returns a visual track.
+        return _solid_color(
+            spec, timeline, work_dir, color=color, label=label, cause=None,
+        )
 
     extra[sentinel_kwarg] = True
     try:
@@ -94,13 +117,23 @@ def _fallback_to_longform_panels(
             label, track.video_path.name, track.duration_s,
         )
         return track
-    except Exception as exc:  # noqa: BLE001 — last-resort fallback MUST not raise
+    except RenderFailedError:
+        # Already a fail-loud raise from deeper inside the chain
+        # (e.g. longform_panels' own _solid_color call refused).
+        # Don't wrap — let the operator see the original site.
+        raise
+    except Exception as exc:  # noqa: BLE001 — distinguish from RenderFailedError above
         _logger.warning(
             "[fallback] %s → longform_panels also failed (%s) — "
-            "returning solid-color stand-in (%s)",
-            label, exc, color,
+            "deferring to solid-color stand-in (will raise unless "
+            "YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1 is set)",
+            label, exc,
         )
-        return _solid_color(spec, timeline, work_dir, color=color, label=label)
+        # 2026-05-15 fail-loud — _solid_color raises by default; only
+        # the env override path returns a visual track.
+        return _solid_color(
+            spec, timeline, work_dir, color=color, label=label, cause=exc,
+        )
 
 
 def _solid_color(
@@ -110,11 +143,43 @@ def _solid_color(
     *,
     color: str,
     label: str,
+    cause: BaseException | None = None,
 ) -> VisualTrack:
-    """Last-resort ffmpeg lavfi color stand-in. Same shape as the
-    pre-2026-05-15 inline impl in each plugin — preserved here so
-    a hard image-gen outage still produces a video file (rather than
-    crashing the render entirely)."""
+    """Last-resort ffmpeg lavfi color stand-in.
+
+    2026-05-15 fail-loud contract
+    -----------------------------
+
+    By default this RAISES :class:`RenderFailedError` — never produces
+    a solid-color stand-in. The legacy behaviour (26-min black mp4s)
+    is only re-enabled when ``YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1``
+    is set in the env (operator opt-in for emergency renders).
+
+    Args:
+        spec: RenderSpec — used for output resolution + fps.
+        timeline: Aligned Timeline — used to size the lavfi color clip.
+        work_dir: Per-render scratch directory.
+        color: ffmpeg ``color=c=`` hex used in the override path.
+        label: ``VisualTrack.extras['source']`` tag for the override path.
+        cause: Original exception that triggered this fallback (if any).
+            Surfaced via ``raise … from cause`` so the traceback shows
+            the underlying ImportError / CloudRunUnavailable / etc.
+
+    Raises:
+        RenderFailedError: by default (no env flag set). Pre-fix this
+            returned a solid-color mp4 silently — see ``contracts.py``
+            ``RenderFailedError`` docstring + ``docs/post-audit-
+            2026-05-15.md`` for the audit findings.
+    """
+    if not _solid_color_override_enabled():
+        raise RenderFailedError(
+            f"visualize fallback to solid color refused — see traceback "
+            f"(label={label!r}, color={color!r}, "
+            f"site=pipeline/render/visualize/_fallback.py:_solid_color). "
+            f"Set YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1 to override "
+            f"for emergency renders. Original cause: {cause!r}"
+        ) from cause
+
     out_path = work_dir / f"{label}.mp4"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     duration_s = timeline[-1].end_s if timeline else 1.0
@@ -133,4 +198,4 @@ def _solid_color(
     )
 
 
-__all__ = ["_fallback_to_longform_panels"]
+__all__ = ["_fallback_to_longform_panels", "_solid_color_override_enabled"]

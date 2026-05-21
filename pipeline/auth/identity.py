@@ -26,6 +26,11 @@ Env vars:
   rotation = change this env var. Auto-generated dev fallback if unset.
 * ``YTFACTORY_ADMIN_DOMAINS`` — comma-separated. Default
   ``docx.co.in``.
+* ``YTFACTORY_ADMIN_EMAILS`` — comma-separated explicit-email allowlist
+  (case-insensitive). Empty by default. Use when admins live on a
+  shared-tenant domain (e.g. ``gmail.com``) where the domain-match
+  rule would over-grant. Either match (domain OR explicit email)
+  grants admin.
 * ``YTFACTORY_AUTH_REDIRECT_URI`` — the canonical redirect URI used
   in the OAuth flow. Must match one entry in the OAuth client's
   ``redirect_uris``. Default
@@ -146,11 +151,29 @@ def _admin_domains() -> tuple[str, ...]:
     return tuple(d.strip().lower() for d in raw.split(",") if d.strip())
 
 
+def _admin_emails() -> frozenset[str]:
+    """Explicit per-email admin allowlist (case-insensitive). Empty by
+    default. Combined with ``_admin_domains()`` via OR.
+    """
+    raw = (os.environ.get("YTFACTORY_ADMIN_EMAILS") or "").strip()
+    if not raw:
+        return frozenset()
+    return frozenset(
+        e.strip().lower() for e in raw.split(",") if e.strip()
+    )
+
+
 def is_admin_email(email: str) -> bool:
-    """Implicit admin = email domain in ``YTFACTORY_ADMIN_DOMAINS``."""
+    """Implicit admin via either:
+      - email domain in ``YTFACTORY_ADMIN_DOMAINS``, OR
+      - explicit email in ``YTFACTORY_ADMIN_EMAILS``.
+    """
     if "@" not in email:
         return False
-    domain = email.split("@", 1)[1].lower()
+    email_l = email.lower()
+    if email_l in _admin_emails():
+        return True
+    domain = email_l.split("@", 1)[1]
     return domain in _admin_domains()
 
 

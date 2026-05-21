@@ -45,23 +45,38 @@ _ARG_RE = re.compile(r"^\s*ARG\s+([A-Z_][A-Z0-9_]*)\b", re.MULTILINE)
 
 class TestWeightsMountIsReadonly(unittest.TestCase):
     """Q2.65 — every cloud/<svc>/deploy.sh that mounts the weights
-    bucket via GCS Fuse must declare ``readonly=true`` on the mount.
-    Without it a compromised or misbehaving worker container could
-    corrupt the canonical model weights for every other service that
-    shares the bucket."""
+    bucket via GCS Fuse must declare ``readonly=true``. Without it
+    a compromised or misbehaving worker container could corrupt the
+    canonical model weights for every other service that shares the
+    bucket.
+
+    The flag can live on either the volume DEFINITION line
+    (``--add-volume="...,readonly=true"``) or the mount line
+    (``--add-volume-mount="...,readonly=true"``). gcloud accepted both
+    historically, but newer Cloud Run validators reject readonly on
+    the mount line — see audit 2026-05-16. Either placement satisfies
+    this test as long as the bucket is read-only at runtime."""
 
     def test_every_weights_mount_is_readonly(self) -> None:
         deploy_files = sorted(CLOUD_DIR.glob("*/deploy.sh"))
-        # Filter to only ones that actually mount weights.
         offenders: list[str] = []
         checked = 0
+        # Volume DEFINITION line — readonly here applies to the whole volume.
+        volume_re = re.compile(
+            r'--add-volume="name=weights,type=cloud-storage,bucket=[^"]*?(readonly=true)?[^"]*"'
+        )
         for f in deploy_files:
             text = f.read_text()
             for m in WEIGHTS_MOUNT_RE.finditer(text):
                 checked += 1
                 trail = m.group(1)
-                if "readonly=true" not in trail:
-                    offenders.append(f"{f.relative_to(REPO_ROOT)}: missing readonly=true")
+                # Allow readonly on the mount line OR on the matching volume line.
+                if "readonly=true" in trail:
+                    continue
+                vm = volume_re.search(text)
+                if vm and "readonly=true" in vm.group(0):
+                    continue
+                offenders.append(f"{f.relative_to(REPO_ROOT)}: missing readonly=true")
         self.assertGreaterEqual(
             checked, 1, "expected at least one weights mount in cloud/*/deploy.sh",
         )
@@ -256,16 +271,13 @@ class TestOtelCopyLandsBeforeCmd(unittest.TestCase):
 # docs/iam_per_service.md for the full rationale + role grants.
 EXPECTED_RUNTIME_SA = {
     # service-dir-name (relative to cloud/) -> per-service SA prefix
+    # Post 2026-05-16 cost-optimization sweep — see
+    # docs/cost_optimized_deploy.md. Dropped service mappings preserved
+    # in git history.
     "tts-chatterbox":      "tts-runner",
-    "tts-cosyvoice":       "tts-runner",
-    "tts-f5":              "tts-runner",
-    "tts-higgs":           "tts-runner",
     "tts-indicf5":         "tts-runner",
-    "tts-indicparler":     "tts-runner",
-    "image-flux2-klein":   "image-runner",
-    "image-hidream":       "image-runner",
-    "image-qwen":          "image-runner",
     "image-z-image-turbo": "image-runner",
+    "asr-whisper":         "render-runner",
     "render-worker-v2":    "render-runner",
     "editing-agent":       "render-runner",
     "web-server":          "web-runner",

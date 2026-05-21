@@ -28,7 +28,9 @@ cd "$REPO_ROOT"
 
 echo "==> Building + pushing ${IMAGE}"
 echo "    (build context = ${REPO_ROOT})"
+# --region pins build to asia-southeast1 (2026-05-17 cost-audit rule 3).
 gcloud builds submit . \
+  --region="${REGION}" \
   --config=cloud/editing-agent/cloudbuild.yaml \
   --substitutions="_IMAGE=${IMAGE}" \
   --project="${PROJECT}" \

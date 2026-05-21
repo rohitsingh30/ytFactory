@@ -45,15 +45,9 @@ fi
 # service — encode them here so the orchestrator stays stupid-simple.
 declare -a SERVICES=(
     "tts-chatterbox|./deploy.sh ytfactory-tts-chatterbox"
-    "tts-cosyvoice|./deploy.sh ytfactory-tts-cosyvoice"
-    "tts-f5|./deploy.sh"
-    "tts-higgs|./deploy.sh ytfactory-tts-higgs"
     "tts-indicf5|./deploy.sh"
-    "tts-indicparler|./deploy.sh ytfactory-tts-indicparler"
-    "image-flux2-klein|./deploy.sh"
     "image-z-image-turbo|./deploy.sh"
-    "image-qwen|./deploy.sh ytfactory-image-qwen"
-    "image-hidream|./deploy.sh ytfactory-image-hidream"
+    "asr-whisper|./deploy.sh"
     "editing-agent|./deploy.sh"
     "clone-video-worker|./deploy.sh"
     "render-worker-v2|./deploy.sh"

@@ -26,8 +26,21 @@ motion_provider: animatediff_lcm
 # show the narrator), so scene beats can describe the thing being
 # narrated rather than the narrator's outfit.
 image_style_prefix: |
-  hand-drawn anime illustration, expressive faces, soft lighting,
-  single subject focus, simple composition
+  Hand-drawn anime illustration in modern indie-anime cel style.
+  Confident ink line work with varying weight — thick contour
+  outlines, lighter interior strokes. Two-tone cel shading with
+  soft cast shadows. Soft warm-key lighting with directional
+  falloff. Warm palette: dusty pink, sage green, mustard yellow,
+  warm brown, soft beige, slate blue. Expressive faces with
+  visible pupils, articulated eyebrows, defined mouth shapes that
+  change per beat. Three-quarter view of single subject mid-frame,
+  soft blurred background. Every object in frame is unmarked and
+  unbranded — cups plain ceramic, bottles smooth glass without
+  labels, packaging without logos, walls without signs, screens
+  blank. ZERO printed text or numbers anywhere in the rendered
+  frame. (SD1.5 CLIP cap: this prompt is heavy; pipeline truncates
+  to first 77 tokens at compile time — keep palette + technique
+  + anti-text in the leading clauses.)
 image_seed: 42
 # image_steps: ignored on the motion path; AnimateDiff steps are fixed
 # inside pipeline/animation.py (25 default, 6 for animatediff_lcm).

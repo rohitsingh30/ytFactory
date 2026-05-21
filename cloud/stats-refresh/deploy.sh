@@ -48,7 +48,9 @@ cd "$REPO_ROOT"
 
 if [[ "${1:-}" != "--skip-build" ]]; then
   echo "==> Building + pushing ${IMAGE}"
+  # --region pins build to asia-southeast1 (2026-05-17 cost-audit rule 3).
   gcloud builds submit . \
+    --region="${REGION}" \
     --config=cloud/stats-refresh/cloudbuild.yaml \
     --substitutions="_IMAGE=${IMAGE}" \
     --project="${PROJECT}" \

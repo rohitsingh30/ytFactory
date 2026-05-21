@@ -17,7 +17,7 @@ set -euo pipefail
 # file feedback_gcloud_reauth_use_adc_bypass.md for the full why.
 source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
 JOB="ytfactory-render-worker-v2"
@@ -29,11 +29,47 @@ cd "$REPO_ROOT"
 
 echo "==> Building + pushing ${IMAGE}"
 echo "    (build context = ${REPO_ROOT})"
-gcloud builds submit . \
+# Inline async-submit + poll (can't use submit_build.sh — it hardcodes
+# --tag which conflicts with --config). Same VPC-SC log-streaming
+# avoidance as submit_build.sh.
+#
+# --region pins build to asia-southeast1 to colocate with AR — see
+# docs/cost_guardrails.md (2026-05-17 cost audit).
+#
+# 2026-05-18: do NOT swallow stderr from `gcloud builds submit` with
+# 2>/dev/null. The legacy form hid "project does not exist" errors,
+# leaving the script to fail with the cryptic "got ''" branch below
+# instead of surfacing the actual gcloud reason. Route stderr to a
+# capture file and dump it on failure.
+_GCLOUD_BUILD_ERR=$(mktemp)
+BUILD_ID=$(gcloud builds submit . \
+  --region="${REGION}" \
   --config=cloud/render-worker-v2/cloudbuild.yaml \
   --substitutions="_IMAGE=${IMAGE}" \
   --project="${PROJECT}" \
-  --timeout=3600s
+  --timeout=3600s \
+  --async \
+  --format="value(id)" 2>"${_GCLOUD_BUILD_ERR}")
+if [ -z "${BUILD_ID}" ] || ! echo "${BUILD_ID}" | grep -qE '^[a-f0-9-]{20,}$'; then
+  echo "ERROR: failed to submit build (got '${BUILD_ID}')" >&2
+  echo "---- gcloud stderr ----" >&2
+  cat "${_GCLOUD_BUILD_ERR}" >&2
+  echo "---- end gcloud stderr ----" >&2
+  rm -f "${_GCLOUD_BUILD_ERR}"
+  exit 1
+fi
+rm -f "${_GCLOUD_BUILD_ERR}"
+echo "==> Build ID: ${BUILD_ID}"
+echo "==> Poll URL: https://console.cloud.google.com/cloud-build/builds/${BUILD_ID}?project=${PROJECT}&region=${REGION}"
+DEADLINE=$((SECONDS + 3900))
+while [ $SECONDS -lt $DEADLINE ]; do
+  STATUS=$(gcloud builds describe "${BUILD_ID}" --region="${REGION}" --project="${PROJECT}" --format="value(status)" 2>/dev/null || echo "?")
+  case "${STATUS}" in
+    SUCCESS) echo "==> Build SUCCESS"; break ;;
+    FAILURE|CANCELLED|TIMEOUT|EXPIRED|INTERNAL_ERROR) echo "==> Build ${STATUS}" >&2; exit 1 ;;
+    *) echo "    ...status=${STATUS} (${SECONDS}s elapsed)"; sleep 30 ;;
+  esac
+done
 
 # Azure OpenAI wiring — these MUST be on the JOB or preflight aborts every
 # render at stage=bootstrap with "AZURE_OPENAI_ENDPOINT missing". They were
@@ -67,7 +103,7 @@ gcloud run jobs deploy "${JOB}" \
   --max-retries=0 \
   --task-timeout=3600 \
   --update-secrets="AZURE_OPENAI_API_KEY=azure-openai-key:latest" \
-  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=ytfactory-prod-v2-artifacts|CLOUDRUN_TTS_CHATTERBOX_URL=https://ytfactory-tts-chatterbox-283470729204.${REGION}.run.app|CLOUDRUN_TTS_INDICPARLER_URL=https://ytfactory-tts-indicparler-283470729204.${REGION}.run.app|CLOUDRUN_IMAGE_FLUX2_KLEIN_URL=https://ytfactory-image-flux2-klein-283470729204.${REGION}.run.app|CLOUDRUN_TTS_DISABLE_FALLBACK=1|CLOUDRUN_IMAGE_DISABLE_FALLBACK=1|YTFACTORY_RENDER_MODE=real|YTFACTORY_LLM_BACKEND=azure_openai|AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}|AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}|AZURE_OPENAI_MODEL=${AZURE_OPENAI_MODEL}|AZURE_OPENAI_TOKEN_PARAM=${AZURE_OPENAI_TOKEN_PARAM}|YTFACTORY_ASR_PROVIDER=faster_whisper|LOG_LEVEL=INFO"
+  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=ytfactory-prod-v3-artifacts|CLOUDRUN_TTS_CHATTERBOX_URL=https://tts-chatterbox-e67vyhiy6a-as.a.run.app|CLOUDRUN_TTS_INDICF5_URL=https://ytfactory-tts-indicf5-e67vyhiy6a-as.a.run.app|CLOUDRUN_TTS_INDICPARLER_URL=https://ytfactory-tts-indicparler-e67vyhiy6a-as.a.run.app|CLOUDRUN_IMAGE_FLUX2_KLEIN_URL=https://ytfactory-image-flux2-klein-e67vyhiy6a-as.a.run.app|CLOUDRUN_IMAGE_QWEN_IMAGE_URL=https://ytfactory-image-qwen-e67vyhiy6a-as.a.run.app|CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL=https://ytfactory-image-z-image-turbo-e67vyhiy6a-as.a.run.app|CLOUDRUN_IMAGE_FLUX2_DEV_URL=https://ytfactory-image-flux2-dev-e67vyhiy6a-as.a.run.app|CLOUDRUN_ASR_URL=https://ytfactory-asr-whisper-e67vyhiy6a-as.a.run.app|CLOUDRUN_TTS_DISABLE_FALLBACK=1|CLOUDRUN_IMAGE_DISABLE_FALLBACK=1|YTFACTORY_RENDER_MODE=real|YTFACTORY_LLM_BACKEND=azure_openai|AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}|AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}|AZURE_OPENAI_MODEL=${AZURE_OPENAI_MODEL}|AZURE_OPENAI_TOKEN_PARAM=${AZURE_OPENAI_TOKEN_PARAM}|YTFACTORY_ASR_PROVIDER=faster_whisper|YTFACTORY_PROMPT_REFINER=1|LOG_LEVEL=INFO"
 
 # Audit T1.11 — was --set-secrets="AZURE_OPENAI_API_KEY=...".
 # --set-secrets is REPLACE-not-merge, so any subsequent

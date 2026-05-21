@@ -16,18 +16,35 @@ tts_speed: 0.90
 # the same crayon-with-thick-outline aesthetic carries.
 image_provider: mflux
 image_style_prefix: |
-  Flat 2D crayon-style children's drawing with thick black outlines and
-  soft pastel fill colors (warm beige, dusty pink, mustard yellow,
-  light blue). Round-headed simple cartoon shapes.
+  Warm hand-drawn 2D illustration in the style of modern indie
+  webcomics — gentle, self-deprecating tone matching TIFU's
+  confessional first-person voice. Confident ink line work with
+  varying weight, watercolor and colored-pencil fills with visible
+  paper grain and soft brush texture; never flat vector. Warm
+  narrative palette: dusty pink, sage green, mustard yellow, warm
+  brown, soft beige, slate blue. Two-tone cel shading with soft
+  cast shadows. Three-quarter view of characters mid-frame, soft
+  blurred background. Every object unmarked and unbranded — cups
+  plain ceramic, bottles smooth glass without labels, packaging
+  without logos, walls without signs, screens blank. ZERO printed
+  text or numbers in the rendered frame.
 
 # Per-story narrator authored by pipeline/cast.py — see
 # project_per_story_character.md memory. The fallback below is only
 # used when no cast.json exists for the slug.
 character_description: |
-  A small round-headed character with shoulder-length brown hair, simple
-  dot eyes, a tiny line nose, and a slightly sheepish expression. Wears
-  a yellow t-shirt and blue jeans. Always the same character across
-  all images.
+  A 24-year-old person with shoulder-length wavy brown hair rendered
+  in visible strand groups. Almond-shaped eyes with visible dark
+  pupils and short eyelashes — slightly downcast at rest, matching
+  TIFU's sheepish tone. Soft expressive eyebrows that articulate
+  embarrassment, regret, or wide-eyed realization. Small defined
+  nose with a faint shadow on the right side. Articulated mouth
+  that changes shape with the spoken line — pressed flat in
+  embarrassment, half-open in realization, slight upturn in
+  resigned amusement. Pink blush marks on cheekbones for the
+  "I-can't-believe-I-did-that" beats. Wears a fitted mustard-yellow
+  cotton t-shirt with visible fabric folds, faded blue jeans. Same
+  locked appearance across every beat.
 
 opening_image_directives:
   required_concrete_tokens: 2
@@ -35,7 +52,7 @@ opening_image_directives:
                    "hands on head", "frozen mid-step", "wooden door"]
 
 image_seed: 42
-image_steps: 4
+image_steps: 9  # Z-Image-Turbo spec sweet spot.
 image_width: 768
 image_height: 1344
 

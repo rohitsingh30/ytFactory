@@ -43,6 +43,7 @@ from pipeline.render.spec import (
     AudioMode,
     RenderSpec,
 )
+from pipeline.render.spec_enrich import populate_render_extras
 
 # Eager-import — same reason as short_engine.
 import pipeline.render.audio  # noqa: F401
@@ -76,6 +77,13 @@ def render_long(
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Bridge script-derived render inputs (era_anchor_prefix +
+    # character_description) into ``spec.extra``. ``build_spec`` runs
+    # at job-creation time before the script exists; the visualize +
+    # panels plugins read those keys from ``spec.extra``. Idempotent.
+    # See ``pipeline.render.spec_enrich`` for the full rationale.
+    populate_render_extras(spec, script)
 
     _logger.info(
         "render_long: channel=%s aspect=%s res=%s duration_target=%ss",
@@ -144,9 +152,73 @@ def render_long(
     _emit(progress_cb, "compose", f"Wrote {mp4_path.name}")
 
     if spec.critic_loop is True:
-        _logger.info("render_long: critic_loop opt-in (stub)")
+        _run_critic_loop(spec, mp4_path, work_dir)
 
     return mp4_path
+
+
+def _run_critic_loop(spec: RenderSpec, mp4_path: Path, work_dir: Path) -> None:
+    """Run the vision-bearing critic on a long-form render.
+
+    Same backend gate as the short engine -- only opt in when
+    ``spec.extra.get("_critic_backend") == "laptop"``. Cloud long-form
+    renders are graded post-hoc by
+    :mod:`pipeline.critique.cloud_poller`.
+    """
+    backend = (spec.extra or {}).get("_critic_backend") if spec.extra else None
+    if backend != "laptop":
+        _logger.info(
+            "render_long: critic_loop opt-in but backend=%r != 'laptop' "
+            "- skipping (cloud renders graded post-hoc by "
+            "pipeline.critique.cloud_poller)", backend,
+        )
+        return
+
+    try:
+        from pipeline.llm import critic as _critic_mod  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning(
+            "render_long: critic import failed (%s); skipping", exc,
+        )
+        return
+
+    slug = (spec.extra or {}).get("slug") if spec.extra else None
+    if not slug:
+        slug = mp4_path.stem
+
+    cache_dir = work_dir / "cache"
+    out_dir = work_dir / "critic"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    _logger.info(
+        "render_long: running critic on %s (slug=%s)",
+        mp4_path.name, slug,
+    )
+    try:
+        result = _critic_mod.critique_short(
+            slug=slug,
+            mp4_path=mp4_path,
+            cache_dir=cache_dir,
+            out_dir=out_dir,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning(
+            "render_long: critic raised (%s); upload-gate treats as "
+            "UNGATED", exc,
+        )
+        return
+
+    verdict = result.get("verdict") if isinstance(result, dict) else None
+    score = result.get("score") if isinstance(result, dict) else None
+    if verdict == "SHIP" or (isinstance(score, (int, float)) and score >= 7):
+        _logger.info(
+            "render_long: critic SHIP (score=%s)", score,
+        )
+        return
+    _logger.info(
+        "render_long: critic verdict=%s score=%s - upload gate "
+        "will refuse publish", verdict, score,
+    )
 
 
 def _long_audio_plugin_name(spec: RenderSpec) -> str:

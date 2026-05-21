@@ -1,10 +1,12 @@
-"""Audit Q2.66 — `_PROVIDER_CAPABILITIES` must include every provider
-that has a wrapper in `pipeline/images/images_cloudrun.py`.
+"""Provider-capabilities table coverage.
 
-Pre-fix the table was missing `cloudrun_qwen_image` + `cloudrun_hidream`
-even though the cloudrun client ships per-model wrappers for both.
-``validate_provider_config`` returned "unknown image_provider" for
-those values → the wrappers were unreachable from the dispatcher.
+Audit Q2.66 originally enforced that ``_PROVIDER_CAPABILITIES`` declared
+every provider that had a cloudrun wrapper, so the dispatcher couldn't
+silently reject an opt-in. Post 2026-05-16 cost-optimization sweep
+only ``cloudrun_z_image_turbo`` remains. This file now pins both
+directions of the contract: the surviving provider IS registered, and
+the dropped providers (qwen_image, hidream, flux2_klein, flux2_dev)
+are NOT.
 
 Tests exercise: pipeline/images/images.py
 """
@@ -16,25 +18,26 @@ from pipeline.images.images import _PROVIDER_CAPABILITIES, validate_provider_con
 
 
 class TestProviderCapabilitiesCoverage(unittest.TestCase):
-    def test_qwen_image_provider_registered(self):
-        self.assertIn("cloudrun_qwen_image", _PROVIDER_CAPABILITIES)
+    def test_z_image_turbo_provider_registered(self):
+        self.assertIn("cloudrun_z_image_turbo", _PROVIDER_CAPABILITIES)
 
-    def test_hidream_provider_registered(self):
-        self.assertIn("cloudrun_hidream", _PROVIDER_CAPABILITIES)
-
-    def test_validate_qwen_provider_no_unknown_error(self):
+    def test_validate_z_image_turbo_provider_no_unknown_error(self):
         errs = validate_provider_config(
-            "cloudrun_qwen_image", width=1024, height=1024, steps=20,
+            "cloudrun_z_image_turbo", width=1024, height=1024, steps=8,
         )
         for e in errs:
             self.assertNotIn("unknown image_provider", e.lower())
 
-    def test_validate_hidream_provider_no_unknown_error(self):
-        errs = validate_provider_config(
-            "cloudrun_hidream", width=1024, height=1024, steps=20,
-        )
-        for e in errs:
-            self.assertNotIn("unknown image_provider", e.lower())
+    def test_dropped_providers_not_registered(self):
+        # flux2_klein, flux2_dev, qwen_image, hidream + all azure_* dropped
+        # 2026-05-16 — see docs/cost_optimized_deploy.md.
+        for dropped in (
+            "cloudrun_flux2_klein", "cloudrun_flux2_dev",
+            "cloudrun_qwen_image", "cloudrun_hidream",
+            "azure_flux2_klein", "azure_z_image_turbo",
+        ):
+            with self.subTest(provider=dropped):
+                self.assertNotIn(dropped, _PROVIDER_CAPABILITIES)
 
 
 class TestProviderCapabilitiesShape(unittest.TestCase):

@@ -160,5 +160,102 @@ class AsrBeatsTypeErrorReRaisedTest(unittest.TestCase):
         )
 
 
+class AsrBeatsCloudPathRespectsForcedBoundariesTest(unittest.TestCase):
+    """Pin the parity between cloud and local-fallback paths.
+
+    Bug 2026-05-19 (job 75a795df successor): the cloud path called
+    ``split_into_beats(words, max_s=2.8)`` WITHOUT forced_narration_lines,
+    so beat count came from pure ASR timing — produced 19 segments when
+    the LLM-authored prompts.json had 14 entries. ai_beat_slideshow
+    refused to render with "prompts.json has 14 entries but timeline has
+    19 segments". The local fallback already passed forced_narration_lines
+    via split_with_forced_boundaries; the cloud path now does the same
+    via split_into_beats's own forced_narration_lines kwarg.
+
+    Without this test the cloud path can silently drift back to
+    ASR-timing splits and every short fails late in render.
+    """
+
+    def _build_spec(self):
+        spec = MagicMock()
+        spec.channel = "test"
+        spec.extra = {}
+        spec.beat_max_s = 2.8
+        return spec
+
+    def _build_audio(self, tmp_dir):
+        from pipeline.render.contracts import AudioResult
+        from pathlib import Path
+        wav = Path(tmp_dir) / "narration.wav"
+        wav.write_bytes(b"RIFF" + b"\x00" * 40)
+        return AudioResult(narration_path=wav, duration_s=10.0)
+
+    def test_cloud_path_threads_forced_narration_lines(self):
+        import tempfile
+        from pipeline.render.timeline.asr_beats import AsrBeats
+
+        captured = {}
+
+        def _fake_split(words_list, **kwargs):
+            captured["kwargs"] = kwargs
+            captured["words_n"] = len(words_list)
+            from pipeline.beats import Beat
+            # Return one beat per forced line so the count matches the
+            # script-driven boundary set, mirroring the real splitter.
+            lines = kwargs.get("forced_narration_lines") or []
+            return [
+                Beat(text=l, start=float(i), end=float(i + 1), words=[])
+                for i, l in enumerate(lines)
+            ]
+
+        # Stub the cloud aligner to return some word segments so the
+        # cloud branch is taken (NOT the local fallback).
+        class _WS:
+            def __init__(self, text, start_s, end_s):
+                self.text, self.start_s, self.end_s = text, start_s, end_s
+        word_segments = [
+            _WS("hello", 0.0, 0.5),
+            _WS("there", 0.5, 1.0),
+            _WS("friend", 1.0, 1.5),
+        ]
+
+        with tempfile.TemporaryDirectory() as td:
+            spec = self._build_spec()
+            audio = self._build_audio(td)
+            script = {
+                "shots": [
+                    {"narration_line": "hello there friend"},
+                    {"narration_line": "this is shot two"},
+                    {"narration_line": "and a third"},
+                ],
+            }
+
+            with patch(
+                "pipeline.asr_cloudrun.align_via_cloud",
+                return_value=word_segments,
+            ), patch(
+                "pipeline.beats.split_into_beats",
+                side_effect=_fake_split,
+            ):
+                segments = AsrBeats().build(spec, script, audio)
+
+        # The kwarg must be threaded; otherwise the cloud path defaults
+        # to pure-timing split and the beat count won't match prompts.json.
+        self.assertIn(
+            "forced_narration_lines", captured["kwargs"],
+            "asr_beats cloud path must thread forced_narration_lines into "
+            "split_into_beats so beat count matches the authored script "
+            "(otherwise ai_beat_slideshow refuses to render with "
+            "'prompts.json has N entries but timeline has M segments')",
+        )
+        # Beat count must equal the script's forced-line count, not the
+        # ASR-word count.
+        self.assertEqual(
+            len(segments), 3,
+            f"expected 3 beats (one per shot/forced line) but got "
+            f"{len(segments)} — cloud path is not using forced boundaries",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

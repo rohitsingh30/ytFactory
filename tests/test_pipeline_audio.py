@@ -414,49 +414,11 @@ class TestAudioSynthesizeDispatcher(unittest.TestCase):
 
     _BASE = dict(text="Hello.", voice="ref.wav", out_path=Path("/fake/out.wav"))
 
-    # ---- cloudrun_f5 --------------------------------------------------------
-
-    def test_cloudrun_f5_missing_ref_text_raises(self):
-        with self.assertRaises(ValueError) as ctx:
-            _audio.synthesize(**self._BASE, provider="cloudrun_f5")
-        self.assertIn("ref_audio_text", str(ctx.exception))
-
-    def test_cloudrun_f5_routes(self):
-        with patch.object(_audio, "_synth_cloudrun_f5", _stub_synth("f5")) as m:
-            _audio.synthesize(**self._BASE, provider="cloudrun_f5", ref_audio_text="transcript")
-        m.assert_called_once()
-
-    # ---- cloudrun_higgs -----------------------------------------------------
-
-    def test_cloudrun_higgs_routes(self):
-        with patch.object(_audio, "_synth_cloudrun_higgs", _stub_synth("higgs")) as m:
-            _audio.synthesize(**self._BASE, provider="cloudrun_higgs")
-        m.assert_called_once()
-
-    # ---- cloudrun_cosyvoice -------------------------------------------------
-
-    def test_cloudrun_cosyvoice_missing_ref_text_raises(self):
-        with self.assertRaises(ValueError) as ctx:
-            _audio.synthesize(**self._BASE, provider="cloudrun_cosyvoice")
-        self.assertIn("ref_audio_text", str(ctx.exception))
-
-    def test_cloudrun_cosyvoice_routes(self):
-        with patch.object(_audio, "_synth_cloudrun_cosyvoice", _stub_synth("cv")) as m:
-            _audio.synthesize(**self._BASE, provider="cloudrun_cosyvoice", ref_audio_text="x")
-        m.assert_called_once()
-
     # ---- cloudrun_chatterbox ------------------------------------------------
 
     def test_cloudrun_chatterbox_routes(self):
         with patch.object(_audio, "_synth_cloudrun_chatterbox", _stub_synth("cb")) as m:
             _audio.synthesize(**self._BASE, provider="cloudrun_chatterbox")
-        m.assert_called_once()
-
-    # ---- cloudrun_indicparler -----------------------------------------------
-
-    def test_cloudrun_indicparler_routes(self):
-        with patch.object(_audio, "_synth_cloudrun_indicparler", _stub_synth("ip")) as m:
-            _audio.synthesize(**self._BASE, provider="cloudrun_indicparler")
         m.assert_called_once()
 
     # ---- cloudrun_indicf5 ---------------------------------------------------
@@ -471,80 +433,19 @@ class TestAudioSynthesizeDispatcher(unittest.TestCase):
             _audio.synthesize(**self._BASE, provider="cloudrun_indicf5", ref_audio_text="x")
         m.assert_called_once()
 
-    # ---- azure_f5 -----------------------------------------------------------
+    # ---- dropped providers (post 2026-05-16 cost-optimization sweep) --------
 
-    def test_azure_f5_missing_ref_text_raises(self):
-        with self.assertRaises(ValueError) as ctx:
-            _audio.synthesize(**self._BASE, provider="azure_f5")
-        self.assertIn("ref_audio_text", str(ctx.exception))
-
-    def test_azure_f5_routes(self):
-        with patch.object(_audio, "_synth_azure_f5", _stub_synth("af5")) as m:
-            _audio.synthesize(**self._BASE, provider="azure_f5", ref_audio_text="x")
-        m.assert_called_once()
-
-    # ---- azure_higgs --------------------------------------------------------
-
-    def test_azure_higgs_routes(self):
-        with patch.object(_audio, "_synth_azure_higgs", _stub_synth("ah")) as m:
-            _audio.synthesize(**self._BASE, provider="azure_higgs")
-        m.assert_called_once()
-
-    # ---- azure_cosyvoice ----------------------------------------------------
-
-    def test_azure_cosyvoice_missing_ref_text_raises(self):
-        with self.assertRaises(ValueError) as ctx:
-            _audio.synthesize(**self._BASE, provider="azure_cosyvoice")
-        self.assertIn("ref_audio_text", str(ctx.exception))
-
-    def test_azure_cosyvoice_routes(self):
-        with patch.object(_audio, "_synth_azure_cosyvoice", _stub_synth("acv")) as m:
-            _audio.synthesize(**self._BASE, provider="azure_cosyvoice", ref_audio_text="x")
-        m.assert_called_once()
-
-    # ---- azure_chatterbox ---------------------------------------------------
-
-    def test_azure_chatterbox_routes(self):
-        with patch.object(_audio, "_synth_azure_chatterbox", _stub_synth("acb")) as m:
-            _audio.synthesize(**self._BASE, provider="azure_chatterbox")
-        m.assert_called_once()
-
-    # ---- azure_indicparler --------------------------------------------------
-
-    def test_azure_indicparler_with_prosody_logs_warning(self):
-        with patch.object(_audio, "_synth_azure_indicparler", _stub_synth("aip")):
-            with self.assertLogs("pipeline.audio.audio", level="WARNING") as cm:
-                _audio.synthesize(
-                    **self._BASE, provider="azure_indicparler",
-                    narration_prosody=[{"role": "x"}],
-                )
-        self.assertTrue(any("narration_prosody" in line for line in cm.output))
-
-    def test_azure_indicparler_routes(self):
-        with patch.object(_audio, "_synth_azure_indicparler", _stub_synth("aip")) as m:
-            _audio.synthesize(**self._BASE, provider="azure_indicparler")
-        m.assert_called_once()
-
-    # ---- azure_indicf5 ------------------------------------------------------
-
-    def test_azure_indicf5_missing_ref_text_raises(self):
-        with self.assertRaises(ValueError) as ctx:
-            _audio.synthesize(**self._BASE, provider="azure_indicf5")
-        self.assertIn("ref_audio_text", str(ctx.exception))
-
-    def test_azure_indicf5_with_prosody_logs_warning(self):
-        with patch.object(_audio, "_synth_azure_indicf5", _stub_synth("aif5")):
-            with self.assertLogs("pipeline.audio.audio", level="WARNING") as cm:
-                _audio.synthesize(
-                    **self._BASE, provider="azure_indicf5",
-                    ref_audio_text="x", narration_prosody=[{"role": "x"}],
-                )
-        self.assertTrue(any("narration_prosody" in line for line in cm.output))
-
-    def test_azure_indicf5_routes(self):
-        with patch.object(_audio, "_synth_azure_indicf5", _stub_synth("aif5")) as m:
-            _audio.synthesize(**self._BASE, provider="azure_indicf5", ref_audio_text="x")
-        m.assert_called_once()
+    def test_dropped_cloudrun_providers_rejected(self):
+        # f5, higgs, cosyvoice, indicparler removed; all azure_* removed.
+        for dropped in (
+            "cloudrun_f5", "cloudrun_higgs", "cloudrun_cosyvoice",
+            "cloudrun_indicparler",
+            "azure_f5", "azure_higgs", "azure_cosyvoice",
+            "azure_chatterbox", "azure_indicparler", "azure_indicf5",
+        ):
+            with self.assertRaises(ValueError, msg=f"provider={dropped}") as ctx:
+                _audio.synthesize(**self._BASE, provider=dropped, ref_audio_text="x")
+            self.assertIn("unknown TTS provider", str(ctx.exception))
 
     # ---- unknown provider ---------------------------------------------------
 
@@ -553,15 +454,7 @@ class TestAudioSynthesizeDispatcher(unittest.TestCase):
             _audio.synthesize(**self._BASE, provider="not_a_real_provider")
         self.assertIn("unknown TTS provider", str(ctx.exception))
 
-    # ---- skip_hindi_respellings branch --------------------------------------
-
-    def test_skip_hindi_respellings_for_indic_providers(self):
-        # cloudrun_indicparler → skip_hindi_respellings=True
-        with patch.object(_audio, "_synth_cloudrun_indicparler", _stub_synth("ip")):
-            _audio.synthesize(
-                "नमस्कार", voice="ref.wav", out_path=Path("/fake/out.wav"),
-                provider="cloudrun_indicparler",
-            )
+    # ---- pronunciation_dict passthrough -------------------------------------
 
     def test_pronunciation_dict_passthrough(self):
         with patch.object(_audio, "_synth_cloudrun_chatterbox", _stub_synth("cb")):

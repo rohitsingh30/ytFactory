@@ -21,7 +21,9 @@ IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE}:${TAG}"
 cd "$(dirname "$0")"
 
 echo "==> Building + pushing ${IMAGE}"
+# --region pins build to asia-southeast1 (2026-05-17 cost-audit rule 3).
 gcloud builds submit . \
+  --region="${REGION}" \
   --tag="${IMAGE}" \
   --project="${PROJECT}" \
   --timeout=900s

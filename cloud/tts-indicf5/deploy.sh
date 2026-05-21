@@ -23,12 +23,16 @@ IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/tts-indicf5:${TAG}"
 cd "$(dirname "$0")"
 
 echo "==> Building + pushing ${IMAGE}"
+# --region pins build to asia-southeast1 to colocate with AR — see
+# docs/cost_guardrails.md (2026-05-17 cost audit).
 gcloud builds submit . \
+  --region="${REGION}" \
   --tag="${IMAGE}" \
   --project="${PROJECT}" \
   --timeout=5400s
 
 echo "==> Deploying ${SERVICE} to Cloud Run (L4 GPU, ${REGION})"
+# max-instances=1 (was 2 pre-2026-05-17). See docs/cost_guardrails.md.
 gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --project="${PROJECT}" \
@@ -38,18 +42,15 @@ gcloud run deploy "${SERVICE}" \
   --gpu-type=nvidia-l4 \
   --no-gpu-zonal-redundancy \
   --no-cpu-throttling \
-  --memory=24Gi \
-  --cpu=8 \
-  --concurrency=1 \
-  --max-instances=2 \
+  --memory=16Gi \
+  --cpu=4 \
+  --concurrency=2 \
+  --max-instances=1 \
   --min-instances=0 \
   --timeout=3600 \
   --no-allow-unauthenticated \
-  --set-env-vars="GCS_BUCKET=ytfactory-tts-io,LOG_LEVEL=INFO" \
-  --execution-environment=gen2 \
-  --add-volume="name=weights,type=cloud-storage,bucket=ytfactory-model-weights-v2" \
-  --add-volume-mount="volume=weights,mount-path=/models/hf,readonly=true"
-
+  --set-env-vars="GCS_BUCKET=ytfactory-tts-io,LOG_LEVEL=INFO,HF_HOME=/tmp/hf,TRANSFORMERS_CACHE=/tmp/hf" \
+  --execution-environment=gen2 
 URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="${PROJECT}" --format="value(status.url)")
 echo ""
 echo "==> Deployed: ${URL}"

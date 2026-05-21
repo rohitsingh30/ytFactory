@@ -25,18 +25,52 @@ tts_voice: pipeline/voice_refs/sarah.wav
 tts_speed: 0.90
 
 # ---- Image gen ---------------------------------------------------------
-image_provider: cloudrun_flux2_klein
+image_provider: cloudrun_z_image_turbo
+# Style rewritten 2026-05-17 to match the actual production look of the
+# uploaded MyStoriesAnimated channel (warm hand-drawn watercolor + ink
+# line illustrations with real distinct characters), and to pass the
+# new channel-richness gate in pipeline/llm/prompts.py. Pre-fix this
+# was 40 words of "flat 2D crayon" that resolved on Z-Image-Turbo as
+# headless floating-objects clip-art (job 3cd2b3b5 post-mortem).
 image_style_prefix: |
-  Flat 2D crayon-style children's drawing with thick black outlines and
-  soft pastel fill colors (warm beige, dusty pink, mustard yellow,
-  light blue). Round-headed simple cartoon shapes.
+  Warm hand-drawn 2D illustration in the style of modern indie
+  webcomics. Confident ink line work with varying weight — thick
+  contour outlines, lighter interior strokes. Watercolor and
+  colored-pencil fills with visible paper grain and soft brush
+  texture; never flat vector. Warm narrative palette: dusty pink,
+  sage green, mustard yellow, warm brown, soft beige, slate blue.
+  Two-tone cel shading with soft cast shadows on right side of faces
+  and props. Compositions stay readable on a phone screen: three-
+  quarter view of characters, mid-frame subject, soft blurred
+  background. Every object in frame is unmarked and unbranded — cups
+  are plain ceramic, bottles are smooth glass without labels,
+  packaging shows no logos, walls have no signs, screens are blank.
+  ZERO printed text, ZERO numbers, ZERO brand markings anywhere in
+  the rendered frame — the caption pill overlay is added by post-
+  processing after diffusion.
 
 # Backwards-compat fallback for stories rendered before per-story cast
 # authoring (pipeline/cast.py writes data/intermediate/<channel>/cast/<slug>.json).
+# Rewritten 2026-05-17 with rich face/clothing detail tokens so the
+# channel-richness gate passes and diffusion renders a real character
+# instead of "round-headed dot-eyed cartoon shape" (the literal pre-
+# fix text). Per-story cast.json overrides this for specific
+# narrators (different ages, ethnicities, outfits).
 character_description: |
-  A small round-headed character with shoulder-length brown hair, simple
-  dot eyes, a tiny line nose, and a neutral expression. Wears a yellow
-  t-shirt and blue jeans. Always the same character across all images.
+  A 29-year-old woman with shoulder-length wavy brown hair rendered
+  in visible strand groups (never a solid block). Almond-shaped eyes
+  with visible dark pupils and short eyelashes. Soft expressive
+  eyebrows that articulate emotion per beat — arched in surprise,
+  furrowed in frustration, level when neutral. Small defined nose
+  with a faint shadow on the right side. Articulated mouth that
+  changes shape with the spoken line — small open when speaking,
+  pressed flat when resigned, downturned when frustrated, slight
+  upturn at the corners when amused. Soft pink blush marks on
+  cheekbones when emotionally activated. Wears a fitted mustard-
+  yellow cotton t-shirt with visible fabric folds at the collar and
+  shoulders, faded blue jeans with a visible waistband. Soft warm
+  cel shading on the right cheek and right collar. Same locked
+  appearance across every beat — never re-described, only re-posed.
 
 opening_image_directives:
   required_concrete_tokens: 2
@@ -44,7 +78,12 @@ opening_image_directives:
                    "leaning forward", "hand on hip", "wooden door"]
 
 image_seed: 42
-image_steps: 4
+# image_steps: bumped 4 → 9 on 2026-05-17 — 9 is Z-Image-Turbo's
+# server-spec sweet spot (see cloud/image-z-image-turbo/server.py:149).
+# Pre-fix YAML hard-capped at 4 because the laptop mflux path was
+# slow on M2; cloud GPU has no such constraint, and step=4 produces
+# the under-detailed clip-art look (job 3cd2b3b5 post-mortem).
+image_steps: 9
 image_width: 768
 image_height: 1344
 
@@ -150,7 +189,7 @@ long_form:
   # cloudrun_* providers; this YAML just makes the per-channel
   # ceiling explicit.
   panel_max_count: 60
-  image_provider: cloudrun_flux2_klein
+  image_provider: cloudrun_z_image_turbo
   image_seed: 4242
   image_steps: 4
   image_width: 1344

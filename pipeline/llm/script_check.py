@@ -262,34 +262,77 @@ def check_script_text(
         issues.append(ScriptIssue("error", "empty", "narration is empty"))
         return issues
 
-    # Length warning. Shorts retention craters past ~30s; the rewrite
-    # prompt targets 110–160 words but doesn't enforce it numerically.
-    # Surface a warning so the operator can decide; never BLOCK the
-    # render — even a long narration produces a playable mp4 (YouTube
-    # Shorts allows up to 60s) and ``report(fail_on_error=True)`` would
-    # otherwise abort the whole job for a soft retention nit.
+    # Length gate (post-2026-05-17 hardening, job 3cd2b3b5).
     #
-    # Word→duration estimate: ~0.35s per spoken word for natural
-    # narration (~170 wpm) including modulation gaps. The estimate
-    # over-counts a bit on speedy narrations and under-counts on
-    # heavy-pause closers, so we flag a moderately wide band — anything
-    # past these is at risk of viewer drop-off but might still ship.
+    # Pre-fix this was a soft warning + hard-coded 165-word cap that
+    # ignored the channel's per-render ``duration_target_s``. Result:
+    # a 15s-target AITA proposal got back 145 words (~47s actual),
+    # the renderer held the closer frame static for 20+ seconds, and
+    # retention craters mid-Short. The rewrite-contract retry loop
+    # didn't fire because severity was "warning".
+    #
+    # New behavior: error-severity when narration runs over
+    # ``duration_target_s × 3.5 words`` (~210 wpm spoken at typical
+    # Shorts atempo + brief gaps). Contract retry loop catches it,
+    # asks the LLM to cut, and re-validates. Falls back to the legacy
+    # 165-word cap when channel_cfg doesn't specify a target (e.g.
+    # debug renders, default 22-32s band).
     word_count = len([w for w in re.split(r"\s+", text) if w])
     est_duration = word_count * 0.35
-    LENGTH_TARGET_WORDS = 165
-    LENGTH_TARGET_S = 35.0
-    if word_count > LENGTH_TARGET_WORDS or est_duration > LENGTH_TARGET_S:
-        issues.append(
-            ScriptIssue(
-                "warning",
-                "long_narration",
-                f"narration is {word_count} words (~{est_duration:.0f}s) "
-                f"— above retention target "
-                f"{LENGTH_TARGET_WORDS} words / {LENGTH_TARGET_S:.0f}s. "
-                f"Sweet spot is 110–160 words / ≤30s. Render will still "
-                f"ship; consider a shorter rewrite next pass.",
-            )
+    duration_target_s = None
+    if channel_cfg:
+        # Match the rewrite stage's resolution: duration_max_s wins,
+        # else look for duration_target_s, else None → legacy cap.
+        duration_target_s = (
+            channel_cfg.get("duration_max_s")
+            or channel_cfg.get("duration_target_s")
         )
+        if isinstance(duration_target_s, (list, tuple)) and duration_target_s:
+            duration_target_s = duration_target_s[-1]  # upper bound of band
+    if isinstance(duration_target_s, (int, float)) and duration_target_s > 0:
+        # Per-render duration-scaled cap @ 6.0 words/sec. 15s → 90,
+        # 25s → 150, 30s → 180. Reported as WARNING (not error) so the
+        # rewrite contract retry loop doesn't block on length. The
+        # original framing of this as a hard ERROR (post-2026-05-17)
+        # paid the wrong tax: validator vs LLM tug-of-war exhausted
+        # retries on AITA renders (jobs 113520d1, 7ff0c1e8, a7a3801e)
+        # while the actual image-quality goal sat idle. Length stays
+        # informational; image-quality fixes (verb-led, anti-text,
+        # rich style/character) are the real channel-agnostic levers.
+        target_words = int(round(duration_target_s * 6.0))
+        target_s = float(duration_target_s)
+        if word_count > target_words:
+            issues.append(
+                ScriptIssue(
+                    "warning",
+                    "long_narration",
+                    f"narration is {word_count} words "
+                    f"(~{est_duration:.0f}s) — over the per-render "
+                    f"soft target of {target_words} words for a "
+                    f"{target_s:.0f}s duration. Over-length narration "
+                    f"causes the renderer to hold the closer frame "
+                    f"static for the overflow. Render still ships; "
+                    f"consider a shorter rewrite next pass.",
+                )
+            )
+    else:
+        # Legacy default-band cap (22-32s shorts band, no explicit
+        # duration_target_s in channel_cfg). Soft warning — same
+        # behaviour as pre-fix.
+        LEGACY_LENGTH_TARGET_WORDS = 165
+        LEGACY_LENGTH_TARGET_S = 35.0
+        if word_count > LEGACY_LENGTH_TARGET_WORDS or est_duration > LEGACY_LENGTH_TARGET_S:
+            issues.append(
+                ScriptIssue(
+                    "warning",
+                    "long_narration",
+                    f"narration is {word_count} words "
+                    f"(~{est_duration:.0f}s) — above legacy retention "
+                    f"target {LEGACY_LENGTH_TARGET_WORDS} words / "
+                    f"{LEGACY_LENGTH_TARGET_S:.0f}s. Sweet spot is "
+                    f"110–160 words / ≤30s.",
+                )
+            )
 
     is_aita_class = bool(
         channel_cfg and channel_cfg.get("closer_format")

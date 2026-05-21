@@ -41,7 +41,7 @@
 
 set -euo pipefail
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 WEB_RUNTIME_SA="${WEB_RUNTIME_SA:-web-runner@${PROJECT}.iam.gserviceaccount.com}"
 MEMBER="serviceAccount:${WEB_RUNTIME_SA}"
 
@@ -75,6 +75,8 @@ source "${SCRIPT_DIR}/../_shared/auth_setup.sh" 2>/dev/null || true
 PROJECT_ROLES=(
   roles/datastore.user
   roles/run.invoker
+  roles/run.developer
+  roles/monitoring.metricWriter
 )
 
 SELF_BINDING_ROLES=(
@@ -82,8 +84,8 @@ SELF_BINDING_ROLES=(
 )
 
 declare -a BUCKET_BINDINGS=(
-  "ytfactory-prod-v2-state|roles/storage.objectAdmin"
-  "ytfactory-prod-v2-artifacts|roles/storage.objectAdmin"
+  "${PROJECT}-state|roles/storage.objectAdmin"
+  "${PROJECT}-artifacts|roles/storage.objectAdmin"
 )
 
 # Minimum-set per-secret accessor probe — checking every secret would
@@ -98,9 +100,9 @@ ACCESSOR_SECRETS_PROBE=(
 # Sample one writeback secret — same flakiness rationale. If missing,
 # the full `bash cloud/iam/grant_web_runner.sh` re-applies
 # roles/secretmanager.secretVersionAdder on every youtube-token-*.
-WRITEBACK_SECRETS_PROBE=(
-  youtube-token-mystoriesanimated
-)
+# In v3 (2026-05-18) per-channel YouTube upload is intentionally skipped,
+# so no youtube-token-* secrets exist; probe is empty and the loop no-ops.
+WRITEBACK_SECRETS_PROBE=()
 
 # ----------------------------------------------------------------------------
 MISSING=()
@@ -198,7 +200,7 @@ for role in "${PROJECT_ROLES[@]}";       do _check_project_role  "${role}";  don
 for role in "${SELF_BINDING_ROLES[@]}";  do _check_self_binding   "${role}";  done
 for entry in "${BUCKET_BINDINGS[@]}";    do _check_bucket_role    "${entry%%|*}" "${entry#*|}"; done
 for secret in "${ACCESSOR_SECRETS_PROBE[@]}"; do _check_secret_accessor "${secret}"; done
-for secret in "${WRITEBACK_SECRETS_PROBE[@]}"; do _check_secret_writeback "${secret}"; done
+for secret in "${WRITEBACK_SECRETS_PROBE[@]+"${WRITEBACK_SECRETS_PROBE[@]}"}"; do _check_secret_writeback "${secret}"; done
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
   cat >&2 <<EOF

@@ -215,25 +215,12 @@ from pipeline.tts.song import (  # noqa: E402, F401
 # Re-exported for the same reason as the local providers above —
 # tests/test_audio_tts_providers.py uses patch.object(audio, '_synth_cloudrun_f5')
 # so the dispatcher must look up the name via this module's __dict__.
+# Post 2026-05-16 cost-optimization sweep: only chatterbox + indicf5 remain;
+# f5, higgs, cosyvoice, indicparler were removed (see docs/cost_optimized_deploy.md).
 from pipeline.tts.cloudrun import (  # noqa: E402, F401
     CloudRunUnavailable,
     _synth_cloudrun_chatterbox,
-    _synth_cloudrun_cosyvoice,
-    _synth_cloudrun_f5,
-    _synth_cloudrun_higgs,
     _synth_cloudrun_indicf5,
-    _synth_cloudrun_indicparler,
-)
-
-# ---- Azure AKS GPU providers (preview lane; cloudrun fallback) ------------
-# Re-exported so patch.object(audio, '_synth_azure_*') intercepts.
-from pipeline.tts.azure_aks import (  # noqa: E402, F401
-    _synth_azure_chatterbox,
-    _synth_azure_cosyvoice,
-    _synth_azure_f5,
-    _synth_azure_higgs,
-    _synth_azure_indicf5,
-    _synth_azure_indicparler,
 )
 
 
@@ -483,23 +470,6 @@ def _synthesize_impl(
             out_path=out_path,
             speed=speed,
         )
-    if provider == "cloudrun_f5":
-        return _synth_cloudrun_f5(
-            text, ref_audio_path=voice, ref_audio_text=ref_audio_text,
-            out_path=out_path, speed=speed,
-        )
-    if provider == "cloudrun_higgs":
-        # Higgs Audio v2 — multilingual emotional voice clone.
-        # ref_audio_text optional (Higgs handles either path).
-        return _synth_cloudrun_higgs(
-            text, ref_audio_path=voice, ref_audio_text=ref_audio_text,
-            out_path=out_path, speed=speed,
-        )
-    if provider == "cloudrun_cosyvoice":
-        return _synth_cloudrun_cosyvoice(
-            text, ref_audio_path=voice, ref_audio_text=ref_audio_text,
-            out_path=out_path, speed=speed,
-        )
     if provider == "cloudrun_chatterbox":
         # Chatterbox via cloud — chunked-capable. Pass prosody through
         # only if the underlying signature accepts it (it does, after
@@ -512,19 +482,6 @@ def _synthesize_impl(
         if narration_prosody is not None:
             kwargs["narration_prosody"] = narration_prosody
         return _synth_cloudrun_chatterbox(**kwargs)
-    if provider == "cloudrun_indicparler":
-        # Indic Parler-TTS — Hindi/multi-lingual Indic, description-driven.
-        # `voice` here can be ignored (description is the voice spec); we
-        # pass it through to the cloud client which falls back to a sane
-        # default if no description is supplied.
-        kwargs = {
-            "text": text, "ref_audio_path": voice or None,
-            "ref_audio_text": ref_audio_text,
-            "out_path": out_path, "speed": speed,
-        }
-        if narration_prosody is not None:
-            kwargs["narration_prosody"] = narration_prosody
-        return _synth_cloudrun_indicparler(**kwargs)
     if provider == "cloudrun_indicf5":
         kwargs = {
             "text": text, "ref_audio_path": voice,
@@ -534,42 +491,9 @@ def _synthesize_impl(
         if narration_prosody is not None:
             kwargs["narration_prosody"] = narration_prosody
         return _synth_cloudrun_indicf5(**kwargs)
-    # ---- Azure AKS lane (preview; cloud-run fallback baked in) ------------
-    if provider == "azure_f5":
-        return _synth_azure_f5(
-            text, ref_audio_path=voice, ref_audio_text=ref_audio_text,
-            out_path=out_path, speed=speed,
-        )
-    if provider == "azure_higgs":
-        return _synth_azure_higgs(
-            text, ref_audio_path=voice, ref_audio_text=ref_audio_text,
-            out_path=out_path, speed=speed,
-        )
-    if provider == "azure_chatterbox":
-        return _synth_azure_chatterbox(
-            text, ref_audio_path=voice, ref_audio_text=ref_audio_text,
-            out_path=out_path, speed=speed,
-        )
-    if provider == "azure_cosyvoice":
-        return _synth_azure_cosyvoice(
-            text, ref_audio_path=voice, ref_audio_text=ref_audio_text,
-            out_path=out_path, speed=speed,
-        )
-    if provider == "azure_indicparler":
-        return _synth_azure_indicparler(
-            text, ref_audio_path=voice or None, ref_audio_text=ref_audio_text,
-            out_path=out_path, speed=speed,
-        )
-    if provider == "azure_indicf5":
-        return _synth_azure_indicf5(
-            text, ref_audio_path=voice, ref_audio_text=ref_audio_text,
-            out_path=out_path, speed=speed,
-        )
     raise ValueError(
         f"unknown TTS provider {provider!r} "
-        "(choices: kokoro, f5_tts, chatterbox, styletts2, indic_parler, "
-        "cloudrun_f5, cloudrun_higgs, cloudrun_cosyvoice, "
-        "cloudrun_chatterbox, cloudrun_indicparler, cloudrun_indicf5, "
-        "azure_f5, azure_higgs, azure_chatterbox, azure_cosyvoice, "
-        "azure_indicparler, azure_indicf5)"
+        "(cloud choices post 2026-05-16 sweep: cloudrun_chatterbox, "
+        "cloudrun_indicf5. Local choices: kokoro, f5_tts, chatterbox, "
+        "styletts2, indic_parler. See docs/cost_optimized_deploy.md.)"
     )

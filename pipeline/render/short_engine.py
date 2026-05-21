@@ -63,6 +63,7 @@ from pipeline.render.contracts import (
     MusicComposer,
     OverlayElement,
     OverlayProducer,
+    RenderFailedError,
     Segment,
     Timeline,
     TimelineBuilder,
@@ -75,6 +76,7 @@ from pipeline.render.spec import (
     CaptionsLayout,
     RenderSpec,
 )
+from pipeline.render.spec_enrich import populate_render_extras
 from pipeline.stage_overlap import StageOverlap, gpu_safe_to_overlap
 
 # Eager-import the plugin packages so their register_plugin calls run.
@@ -140,6 +142,14 @@ def render_short(
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Bridge the script-derived render inputs into ``spec.extra`` BEFORE
+    # any plugin reads from it. The visualize plugins (ai_beat_slideshow
+    # et al) read ``era_anchor_prefix`` + ``character_description`` from
+    # ``spec.extra``, but ``build_spec`` runs at job-creation time —
+    # before the script + cast exist. See ``pipeline.render.spec_enrich``
+    # for the full why. Idempotent — pre-populated keys are preserved.
+    populate_render_extras(spec, script)
 
     _logger.info(
         "render_short: channel=%s slug-source=%s aspect=%s res=%s",
@@ -465,26 +475,52 @@ def _collect_overlays(
 
     Active set is determined by spec flags. Producers are independent
     — order doesn't matter; FinalMux sorts by ``(layer, start_s)``.
+
+    2026-05-15 fail-loud audit
+    --------------------------
+
+    Captions are user-enforced: when ``spec.captions_enabled is True``
+    a failed caption producer RAISES :class:`RenderFailedError` rather
+    than silently shipping a captions-less mp4 (pre-fix this was a
+    WARN + skip; 8/10 of the 2026-05-15 canary batch shipped without
+    captions because of a single Pillow ImportError).
+
+    The other three overlays (lower_third / chapter_card /
+    anchored_footage) are OPT-IN flags — the user explicitly set them
+    in the form. We keep warn-and-skip there because the user opted
+    in but didn't enforce, and failing the whole render for a missing
+    chapter card is too aggressive.
     """
     out: list[OverlayElement] = []
 
     # Captions — picked by spec.captions_layout when captions enabled.
+    # 2026-05-15: when captions_enabled is True, RAISE on failure.
     if spec.captions_enabled:
         cap_name = _captions_plugin_for_layout(spec.captions_layout)
         try:
             cap_plugin: OverlayProducer = get_plugin("overlays", cap_name)
             out.extend(cap_plugin.produce(spec, timeline, audio))
+        except RenderFailedError:
+            # Plugin already raised the fail-loud signal — propagate.
+            raise
         except Exception as exc:  # noqa: BLE001
-            _logger.warning("captions overlay (%s) skipped: %s", cap_name, exc)
+            raise RenderFailedError(
+                f"captions overlay ({cap_name!r}) failed but "
+                f"spec.captions_enabled=True — refusing to ship a "
+                f"captions-less render. "
+                f"site=pipeline/render/short_engine.py:_collect_overlays "
+                f"(captions branch). Original cause: {exc!r}"
+            ) from exc
 
-    # Lower-thirds — only if spec.lower_thirds is True.
+    # Lower-thirds — only if spec.lower_thirds is True. Opt-in flag, so
+    # keep warn-and-skip per the 2026-05-15 audit rule.
     if spec.lower_thirds:
         try:
             out.extend(get_plugin("overlays", "lower_third").produce(spec, timeline, audio))
         except Exception as exc:  # noqa: BLE001
             _logger.warning("lower_third overlay skipped: %s", exc)
 
-    # Chapter cards — only if spec.chapter_cards is True.
+    # Chapter cards — only if spec.chapter_cards is True. Opt-in flag.
     if spec.chapter_cards:
         try:
             out.extend(get_plugin("overlays", "chapter_card").produce(spec, timeline, audio))
@@ -492,6 +528,7 @@ def _collect_overlays(
             _logger.warning("chapter_card overlay skipped: %s", exc)
 
     # Anchored foreground footage — sports_doc-style overlay timeline.
+    # Opt-in flag.
     if spec.overlay_timeline:
         try:
             out.extend(get_plugin("overlays", "anchored_footage").produce(spec, timeline, audio))
@@ -509,17 +546,83 @@ def _captions_plugin_for_layout(layout: CaptionsLayout) -> str:
 
 
 def _run_critic_loop(spec: RenderSpec, mp4_path: Path, work_dir: Path) -> None:
-    """Run the critic on the rendered mp4 + log the result.
+    """Run the vision-bearing critic on the rendered mp4 + log the result.
 
-    Today this is a stub — the bigbang PR wires
-    :mod:`pipeline.llm.critic` (or its successor) into the engine.
     Critic remains opt-in via ``spec.critic_loop=True``; the engine
     never silently spends critic budget on a render.
+
+    Backend gate -- the laptop critic at :mod:`pipeline.llm.critic` uses
+    the claude CLI with ``allowed_tools=["Read"]`` + ``add_dirs``,
+    which is laptop-only. On cloud we'd need an SDK-vision wire-up
+    that doesn't exist yet -- so cloud renders skip this stub and rely
+    on the laptop-side daemon
+    (:mod:`pipeline.critique.cloud_poller`) to grade them post-hoc
+    from Firestore.
+
+    Gate: ``spec.extra.get("_critic_backend") == "laptop"`` opts in.
+    Anything else (cloud, tests, unset) returns early so we don't 503
+    against missing CLI auth from inside a Cloud Run container.
+
+    The critic writes :file:`<out_dir>/<slug>.score.json` with the
+    full verdict + axes. This function only logs; the upload-gate
+    elsewhere reads the score.json (or the Firestore critique field
+    for cloud renders) and refuses non-SHIP verdicts.
     """
+    backend = (spec.extra or {}).get("_critic_backend") if spec.extra else None
+    if backend != "laptop":
+        _logger.info(
+            "render_short: critic_loop opt-in but backend=%r != 'laptop' "
+            "- skipping (cloud renders graded post-hoc by "
+            "pipeline.critique.cloud_poller)", backend,
+        )
+        return
+
+    try:
+        from pipeline.llm import critic as _critic_mod  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning(
+            "render_short: critic import failed (%s); skipping", exc,
+        )
+        return
+
+    slug = (spec.extra or {}).get("slug") if spec.extra else None
+    if not slug:
+        slug = mp4_path.stem  # best-effort fallback
+
+    cache_dir = work_dir / "cache"
+    out_dir = work_dir / "critic"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     _logger.info(
-        "render_short: critic_loop opt-in (mp4=%s, channel=%s) — "
-        "stub for now; bigbang PR wires the real critic",
-        mp4_path.name, spec.channel,
+        "render_short: running critic on %s (slug=%s)",
+        mp4_path.name, slug,
+    )
+    try:
+        result = _critic_mod.critique_short(
+            slug=slug,
+            mp4_path=mp4_path,
+            cache_dir=cache_dir,
+            out_dir=out_dir,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning(
+            "render_short: critic raised (%s); upload-gate will treat "
+            "as UNGATED", exc,
+        )
+        return
+
+    verdict = result.get("verdict") if isinstance(result, dict) else None
+    score = result.get("score") if isinstance(result, dict) else None
+    if verdict == "SHIP" or (isinstance(score, (int, float)) and score >= 7):
+        _logger.info(
+            "render_short: critic SHIP (score=%s) - proceed to upload",
+            score,
+        )
+        return
+    _logger.info(
+        "render_short: critic verdict=%s score=%s - upload gate "
+        "will refuse publish (this is the desired behaviour)",
+        verdict, score,
     )
 
 

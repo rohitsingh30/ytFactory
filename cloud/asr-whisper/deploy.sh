@@ -31,7 +31,14 @@ IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE}:${TAG}"
 cd "$(dirname "$0")"
 
 echo "==> Building + pushing ${IMAGE}"
+# --region pins the build to a regional Cloud Build worker pool in the
+# same region as Artifact Registry (asia-southeast1). Without this the
+# build runs in the global pool (US Iowa) and every image push crosses
+# the Pacific to AR, racking up inter-region intercontinental egress
+# (₹400+/day on z-image-turbo's 33 GiB image — caught 2026-05-17 cost
+# audit). Source upload + image push now stay regional.
 gcloud builds submit . \
+  --region="${REGION}" \
   --tag="${IMAGE}" \
   --project="${PROJECT}" \
   --timeout=5400s
@@ -47,14 +54,14 @@ gcloud run deploy "${SERVICE}" \
   --no-gpu-zonal-redundancy \
   --no-cpu-throttling \
   --memory=16Gi \
-  --cpu=8 \
+  --cpu=4 \
   --cpu-boost \
-  --concurrency=1 \
-  --max-instances=2 \
+  --concurrency=2 \
+  --max-instances=1 \
   --min-instances=0 \
   --timeout=900 \
   --no-allow-unauthenticated \
-  --set-env-vars="WHISPER_MODEL=large-v3,WHISPER_DEVICE=cuda,WHISPER_COMPUTE=float16,LOG_LEVEL=INFO" \
+  --set-env-vars="WHISPER_MODEL=large-v3,WHISPER_DEVICE=cuda,WHISPER_COMPUTE=float16,LOG_LEVEL=INFO,HF_HOME=/tmp/hf,TRANSFORMERS_CACHE=/tmp/hf" \
   --execution-environment=gen2
 
 URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="${PROJECT}" --format="value(status.url)")

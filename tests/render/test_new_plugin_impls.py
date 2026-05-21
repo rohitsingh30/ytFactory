@@ -99,15 +99,20 @@ class WordCaptionPngsProtocolTest(unittest.TestCase):
         self.assertEqual(size, spec.caption_style.font_size_standard)
 
     def test_import_failure_logs_warning_and_returns_empty(self):
-        # Pre-2026-05-15 fix: ImportError was caught silently → cloud
-        # renders shipped with ZERO captions and no log line. Now we
-        # WARN so the missing-captions class of regression is at least
-        # surfaced. Pinned by job f1e319a3 canary.
+        # 2026-05-15 fail-loud audit: when captions_enabled=False the
+        # ImportError path still returns [] silently — that's the
+        # user-explicit-opt-out lane. When captions_enabled=True the
+        # plugin raises RenderFailedError (pinned in
+        # tests/render/test_fail_loud_fallbacks.py).
+        #
+        # This test exercises the captions-disabled lane: WARN +
+        # return [], same shape as the pre-fix behaviour minus the
+        # silent-when-enabled regression.
         import logging
         import sys
-        from unittest.mock import patch
-        spec = build_spec({"channel": "x", "channel_overrides": {}},
-                          channel_yaml_path=None, variant_yaml_path=None)
+        spec = build_spec({"channel": "x", "channel_overrides": {
+            "captions_enabled": False,
+        }}, channel_yaml_path=None, variant_yaml_path=None)
         audio = AudioResult(narration_path=Path("/tmp/n.wav"), duration_s=1.0)
         timeline: Timeline = [Segment(start_s=0, end_s=1, text="hi", anchor_id="x")]
 
@@ -191,12 +196,21 @@ class LongformPanelsBehaviorTest(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_empty_timeline_returns_solid_color_fallback(self):
-        # No timeline = no panels = fallback emits a 1s solid-color clip.
+        # 2026-05-15 fail-loud audit: solid-color is now opt-in via
+        # YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1. With the override
+        # set we still pin the legacy "empty timeline = 1s solid color"
+        # behaviour so emergency renders ship.
+        import os
+        from unittest.mock import patch
+
         spec = build_spec(
             {"channel": "x", "channel_overrides": {"length_s": 1800}},  # long
             channel_yaml_path=None, variant_yaml_path=None,
         )
-        result = LongformPanels().produce(spec, timeline=[], work_dir=self.tmp)
+        with patch.dict(
+            os.environ, {"YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK": "1"},
+        ):
+            result = LongformPanels().produce(spec, timeline=[], work_dir=self.tmp)
         self.assertIsInstance(result, VisualTrack)
         self.assertTrue(result.video_path.exists())
         self.assertGreater(result.duration_s, 0)

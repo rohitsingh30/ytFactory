@@ -115,6 +115,33 @@ class ValidateFailureTest(unittest.TestCase):
                 None,
             )
 
+    def test_shape_c_flat_single_beat_dict_raises(self):
+        """Shape C — model collapsed the array into a single dict.
+
+        Surfaced by job 3cd2b3b5 (mystoriesanimated AITA ketchup-on-stew)
+        on 2026-05-16: gpt-5.3-chat returned
+        ``{"narration_line": "...", "key_visual": "...", "scene": "..."}``
+        — keys=['narration_line', 'key_visual', 'scene'], value-types=['str'].
+        The validator MUST raise ValueError so the worker's retry-or-fail
+        loop fires; pre-fix this was uncovered.
+
+        Post-2026-05-16: ``author_beat_prompts`` now sends a strict
+        wrapper-object json_schema (``_BEAT_RESPONSE_SCHEMA``) that
+        Azure's CFG engine enforces, so Shape C shouldn't escape the
+        backend. This test pins the SAFETY GATE: if a legacy / non-
+        strict deployment ever returns Shape C anyway, we still raise
+        and the worker retries.
+        """
+        beats = _beats(14)
+        shape_c = {
+            "narration_line": "Am I wrong for telling my partner...",
+            "key_visual": "a hovering ketchup bottle on a counter",
+            "scene": "an empty stew pot in a generic kitchen",
+        }
+        with self.assertRaises(ValueError) as ctx:
+            _validate_and_clean(shape_c, beats, opening_directives=None)
+        self.assertIn("expected JSON array", str(ctx.exception))
+
 
 class ValidateAzureEnvelopeUnwrapTest(unittest.TestCase):
     """Azure backend forces ``response_format=json_object`` for every
@@ -528,8 +555,20 @@ class ValidateAndAuthorAdditionalTest(unittest.TestCase):
     def test_author_beat_prompts_calls_llm_validates_and_writes(self):
         out = SCRATCH_PROMPTS / "nested" / "prompts.json"
         beats = [FakeBeat("I found the phone.", 0, 1.5)]
-        llm_out = [{"narration_line": "I found the phone.", "key_visual": "phone", "scene": "the character holding a phone"}]
-        with patch.object(pr.llm, "model_for", return_value="opus"), patch.object(pr.llm, "call_claude_cli", return_value=llm_out) as call:
+        # Post-2026-05-17 author_beat_prompts uses a verb-led validator
+        # in _validate_and_clean (key_visual must NOT be a bare noun),
+        # so the test's mock LLM output needs a shot-led key_visual.
+        llm_out = [{
+            "narration_line": "I found the phone.",
+            "key_visual": "medium close-up of the character lifting a phone",
+            "scene": "the character holding a phone, soft afternoon window light, blurred kitchen counter behind, warm palette",
+        }]
+        # Disable the channel-richness gate for this unit test — the
+        # gate is integration-tested separately; here we're pinning the
+        # _validate_and_clean + call-site contract with a thin fixture.
+        with patch.dict("os.environ", {"YTFACTORY_DISABLE_RICHNESS_GATE": "1"}), \
+             patch.object(pr.llm, "model_for", return_value="opus"), \
+             patch.object(pr.llm, "call_claude_cli", return_value=llm_out) as call:
             cleaned = pr.author_beat_prompts(
                 narration="I found the phone.", beats=beats, source_story="source",
                 cast_narrator_desc="brown hair", cast_default_emotion="shocked",
@@ -537,9 +576,27 @@ class ValidateAndAuthorAdditionalTest(unittest.TestCase):
             )
         self.assertEqual(cleaned, llm_out)
         self.assertTrue(out.exists())
-        self.assertIn("Return ONLY a JSON array", call.call_args.args[0])
+        # Post-2026-05-16: wrapper-object schema replaces root-array
+        # output. The instruction now demands a ``{"beats": [...]}``
+        # envelope (root-array isn't accepted by OpenAI/Azure structured
+        # outputs), and the call site passes the strict-compliant
+        # json_schema so Azure's CFG engine enforces the shape.
+        prompt_arg = call.call_args.args[0]
+        self.assertIn('"beats"', prompt_arg)
+        self.assertIn("EXACTLY 1", prompt_arg)
         self.assertEqual(call.call_args.kwargs["model"], "opus")
-        self.assertEqual(json.loads(out.read_text())[0]["key_visual"], "phone")
+        # Strict-schema enforcement is the production default for this
+        # stage — without it the LLM was free to emit Shape-C single
+        # dicts (job 3cd2b3b5 floating-objects post-mortem).
+        self.assertIs(call.call_args.kwargs["strict_schema"], True)
+        self.assertIsNotNone(call.call_args.kwargs["json_schema"])
+        schema = call.call_args.kwargs["json_schema"]
+        self.assertEqual(schema["type"], "object")
+        self.assertIn("beats", schema["properties"])
+        self.assertEqual(
+            json.loads(out.read_text())[0]["key_visual"],
+            "medium close-up of the character lifting a phone",
+        )
 
 
 class EnvFlagEnabledTest(unittest.TestCase):

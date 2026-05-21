@@ -105,7 +105,7 @@ tts_speed: 1.0
 # style prefix is pure positive descriptors — never "no scary faces",
 # "no horror" etc. — those tokens AMPLIFY in z_image_turbo. Express
 # what we WANT: "warm smiling expressions", "bright sunny daylight".
-image_provider: cloudrun_flux2_klein
+image_provider: cloudrun_z_image_turbo
 # Style prefix mirrors aita_animated.yaml — the proven flat-2D crayon
 # look that the AITA family ships consistently. User feedback round 2
 # (2026-05-03 critique): the earlier custom Pingu/Peppa prefix combined
@@ -115,9 +115,24 @@ image_provider: cloudrun_flux2_klein
 # z_image_turbo (slideshow path with Ken Burns) + the AITA crayon style
 # fixes the visual consistency issue for v0.
 image_style_prefix: |
-  Flat 2D crayon-style children's drawing with thick black outlines and
-  soft pastel fill colors (warm beige, dusty pink, mustard yellow,
-  light blue). Round-headed simple cartoon shapes.
+  Warm hand-drawn children's-picture-book illustration in the style
+  of contemporary Indian kids' rhyme videos (ChuChu TV / Infobells /
+  Kids TV India). Confident black ink outlines with varying weight,
+  soft watercolor and colored-pencil fills with visible paper grain,
+  gentle brush texture; never harsh vector edges. Warm cheerful
+  palette: marigold yellow, dusty pink, sky blue, mint green, soft
+  beige, warm brown. Soft directional sunny lighting from upper-
+  left with airy ambient fill, never harsh shadows. Round, friendly,
+  bouncy character shapes — kid-safe, slightly chubby cheeks, big
+  expressive eyes with visible pupils. Three-quarter view of the
+  main subject mid-frame, supporting mascots in soft focus around
+  the edges, airy negative space. Decorative festive motifs at the
+  borders (marigold petals, paisley curls, mehndi swirls). Every
+  prop in frame is plain and unmarked — bowls are blank ceramic,
+  bottles are smooth glass, books are closed with blank covers,
+  toys carry no printed text. ZERO printed text, ZERO numerals,
+  ZERO English or Devanagari signage anywhere in the rendered
+  frame; song-text overlays are added post-diffusion.
 
 # Force-positive lock for the elephant + species + color (per critique
 # 2026-05-03 v3 — render had the elephant drift into a bear with green
@@ -130,7 +145,7 @@ force_positive: |
   warm yellow-tan cartoon elephant with gold crown, brick-red embroidered
   blanket, smiling, kid-friendly, picture-book style
 image_seed: 27          # marigold petals — locks the channel palette
-image_steps: 4          # M2 Max compile-disabled path
+image_steps: 9          # Z-Image-Turbo spec sweet spot (was 4 — stale laptop carryover).
 image_width: 768
 image_height: 1344
 
@@ -308,7 +323,7 @@ long_form:
   output_fps: 30
   captions_enabled: true
   panel_max_count: 60  # bumped 2026-05-13 — cloudrun_flux2_klein has no Metal watchdog (see mystoriesanimated.yaml)
-  image_provider: cloudrun_flux2_klein
+  image_provider: cloudrun_z_image_turbo
   image_seed: 7777
   image_steps: 4
   image_width: 1344

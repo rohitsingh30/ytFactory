@@ -43,12 +43,22 @@ class GatherConstraintsTest(unittest.TestCase):
         self.assertIn("verdict_field", names)
         self.assertIn("fixes_shape", names)
 
-    def test_axes_field_mentions_every_axis(self):
+    def test_axes_field_mentions_every_required_axis(self):
         c = CriticContract()
         constraints = c.gather_constraints(_StubCtx({}))
         axes_con = next(con for con in constraints if con.name == "axes_field")
-        for name in critic_axes.AXIS_NAMES:
+        # Every REQUIRED axis is named so the LLM knows what to score.
+        for name in critic_axes.REQUIRED_AXIS_NAMES:
             self.assertIn(name, axes_con.description)
+        # Optional axes may be mentioned as exclusions (the description
+        # explicitly tells the LLM "do NOT score them"), but the
+        # mandatory-axes count MUST be the required count — not the
+        # union count — so the LLM doesn't try to emit them.
+        self.assertIn(
+            str(len(critic_axes.REQUIRED_AXIS_NAMES)),
+            axes_con.description,
+            "constraint description must name the required-axis count",
+        )
 
     def test_axes_field_mentions_gating_rule(self):
         # The constraint description must spell out the gating rule
@@ -74,7 +84,7 @@ class BuildPromptTest(unittest.TestCase):
             "frame_uris": ["gs://bucket/f0.png", "gs://bucket/f1.png"],
         })
         prompt = c.build_prompt(ctx, c.gather_constraints(ctx))
-        for name in critic_axes.AXIS_NAMES:
+        for name in critic_axes.REQUIRED_AXIS_NAMES:
             self.assertIn(name, prompt,
                           f"axis {name!r} missing from prompt")
 
@@ -107,11 +117,11 @@ class BuildPromptTest(unittest.TestCase):
 
 class RegenPromptTest(unittest.TestCase):
 
-    def test_regen_lists_all_axes(self):
+    def test_regen_lists_all_required_axes(self):
         c = CriticContract()
         ctx = _StubCtx({})
         prompt = c.regen_prompt(ctx, prev_output={"bad": "shape"}, fixes=[])
-        for name in critic_axes.AXIS_NAMES:
+        for name in critic_axes.REQUIRED_AXIS_NAMES:
             self.assertIn(name, prompt)
 
 
