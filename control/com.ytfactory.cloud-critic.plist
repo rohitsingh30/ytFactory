@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Auto-start the cloud-critic daemon on user login.
+
+  WHY this exists: the cloud render-worker (Azure-OpenAI backed) writes
+  `critique.verdict = "UNGATED"` because the vision-bearing critic at
+  pipeline/llm/critic.py requires the claude CLI (add_dirs +
+  allowed_tools=["Read"]) which Azure doesn't support. Without a SHIP
+  verdict the upload gate refuses publish — by 2026-05-15 we had 12
+  days of cloud renders queued unpublished.
+
+  This daemon closes the loop by polling Firestore from the laptop,
+  running the vision-aware critic locally, and writing the verdict
+  back to the same job doc.
+
+  Install (once):
+    cp control/com.ytfactory.cloud-critic.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.ytfactory.cloud-critic.plist
+
+  Verify:
+    launchctl list | grep ytfactory.cloud-critic
+    tail -f ~/Library/Logs/ytfactory/cloud_critic.stdout.log
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.ytfactory.cloud-critic.plist
+    rm ~/Library/LaunchAgents/com.ytfactory.cloud-critic.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ytfactory.cloud-critic</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>mkdir -p /Users/rohit/Library/Logs/ytfactory &amp;&amp; cd /Users/rohit/ytFactory &amp;&amp; PYTHONPATH=. /Users/rohit/ytFactory/.venv/bin/python -u scripts/cloud_critic_loop.py --log-level=INFO</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Restart on crash. The daemon already swallows per-iteration
+         exceptions; a hard SIGSEGV / OOM should bring it back. -->
+    <key>KeepAlive</key>
+    <true/>
+    <!-- Don't thrash if it keeps dying immediately. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/rohit/Library/Logs/ytfactory/cloud_critic.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/rohit/Library/Logs/ytfactory/cloud_critic.stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/rohit</string>
+        <!-- PATH must include node + claude + gcloud + git locations
+             so the critic subprocess can run the claude CLI. -->
+        <key>PATH</key>
+        <string>/Users/rohit/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- ADC config dir for Firestore + GCS auth. -->
+        <key>CLOUDSDK_CONFIG</key>
+        <string>/Users/rohit/.config/gcloud</string>
+        <!-- Default Firestore project (matches the daemon's hardcoded
+             fallback in pipeline/critique/cloud_poller.py). -->
+        <key>GOOGLE_CLOUD_PROJECT</key>
+        <string>ytfactory-prod-v2</string>
+    </dict>
+</dict>
+</plist>
