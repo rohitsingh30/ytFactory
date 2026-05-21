@@ -13,6 +13,7 @@ import hashlib
 import logging
 import os
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -221,19 +222,35 @@ if _OTEL_OK:
 
 
 _MODEL = None
+_MODEL_LOCK = threading.Lock()
 
 
 def _model():
+    """Lazy-load + cache the ChatterboxTTS singleton.
+
+    Thread-safety (2026-05-17, cost-audit fix): wrap the load in
+    _MODEL_LOCK using double-checked locking. Cloud Run sends up to
+    `concurrency` requests in parallel; with concurrency=2 a cold
+    container would otherwise load the model twice (TOCTOU on
+    ``_MODEL is None``) → ~14 GiB allocation on a 22 GiB L4 → OOM.
+    Lock ensures one loader; the fast path skips the lock once the
+    model is published."""
     global _MODEL
-    if _MODEL is None:
+    if _MODEL is not None:
+        return _MODEL
+    with _MODEL_LOCK:
+        if _MODEL is not None:
+            return _MODEL
         _phase("BEGIN _model() → from chatterbox.tts import ChatterboxTTS")
         t_imp = time.monotonic()
         from chatterbox.tts import ChatterboxTTS
         _phase(f"import done ({time.monotonic()-t_imp:.2f}s) → from_pretrained(device=cuda)")
         t_load = time.monotonic()
-        _MODEL = ChatterboxTTS.from_pretrained(device="cuda")
+        model = ChatterboxTTS.from_pretrained(device="cuda")
         _phase(f"from_pretrained done ({time.monotonic()-t_load:.2f}s) → MODEL ready")
-    return _MODEL
+        # Publish LAST so other threads only see a fully-initialised obj.
+        _MODEL = model
+        return _MODEL
 
 
 class SynthIn(BaseModel):

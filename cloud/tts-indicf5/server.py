@@ -20,6 +20,7 @@ import io
 import logging
 import os
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -70,6 +71,7 @@ if _OTEL_OK:
 
 
 _INDICF5_MODEL = None
+_INDICF5_LOCK = threading.Lock()
 
 
 def _model():
@@ -99,9 +101,21 @@ def _model():
     output → DC tone after silence-trim + dBFS normalisation).
 
     Subsequent calls return the cached singleton.
+
+    Thread-safety (2026-05-17, cost-audit fix): double-checked locking
+    via _INDICF5_LOCK. With concurrency=2 a cold container would
+    otherwise load the model twice on a /readyz + /synth race →
+    double VRAM allocation → OOM on the 22 GiB L4. The patched
+    ``torch.compile = lambda …`` monkey-patch + checkpoint rename
+    are NOT idempotent, so serialising the load is mandatory.
     """
     global _INDICF5_MODEL
-    if _INDICF5_MODEL is None:
+    if _INDICF5_MODEL is not None:
+        return _INDICF5_MODEL
+    with _INDICF5_LOCK:
+        # Re-check under the lock.
+        if _INDICF5_MODEL is not None:
+            return _INDICF5_MODEL
         from transformers import AutoModel
         from huggingface_hub import hf_hub_download
         from safetensors.torch import load_file
@@ -120,7 +134,7 @@ def _model():
             logger.info(
                 "loading IndicF5 onto cuda… repo=%s", INDICF5_MODEL_REPO,
             )
-            _INDICF5_MODEL = AutoModel.from_pretrained(
+            model = AutoModel.from_pretrained(
                 INDICF5_MODEL_REPO, trust_remote_code=True,
             )
         finally:
@@ -148,7 +162,7 @@ def _model():
             len(raw_state), len(renamed),
         )
 
-        missing, unexpected = _INDICF5_MODEL.load_state_dict(
+        missing, unexpected = model.load_state_dict(
             renamed, strict=False,
         )
         if missing or unexpected:
@@ -162,11 +176,13 @@ def _model():
             logger.info("load_state_dict: ALL KEYS MATCHED ✅")
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        _INDICF5_MODEL.ema_model.to(device)
-        _INDICF5_MODEL.vocoder.to(device)
+        model.ema_model.to(device)
+        model.vocoder.to(device)
         logger.info("IndicF5 loaded on %s.", device)
 
-    return _INDICF5_MODEL
+        # Publish LAST so a fast-path reader only sees a fully-init obj.
+        _INDICF5_MODEL = model
+        return _INDICF5_MODEL
 
 
 class SynthIn(BaseModel):

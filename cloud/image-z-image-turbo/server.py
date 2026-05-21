@@ -20,6 +20,7 @@ import hashlib
 import io
 import logging
 import os
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -69,6 +70,7 @@ if _OTEL_OK:
 
 
 _PIPE = None
+_PIPE_LOCK = threading.Lock()
 _BOOT_T0 = time.monotonic()
 
 
@@ -91,9 +93,22 @@ def _pipe():
     for any prompt/size combo within the 22 GiB envelope.
 
     Also enable VAE slicing + attention slicing — both reduce peak
-    activation memory at no perceptible quality cost."""
+    activation memory at no perceptible quality cost.
+
+    Thread-safety (2026-05-17, cost-audit fix): wrap the load in
+    _PIPE_LOCK using double-checked locking. With concurrency=1 the
+    race is unlikely, but Cloud Run's startup probe can call /readyz
+    while a user /generate arrives — both would try to load and
+    double-allocate VRAM → OOM. Lock guarantees one loader; readers
+    fast-path past the lock once the pipe is set."""
     global _PIPE
-    if _PIPE is None:
+    if _PIPE is not None:
+        return _PIPE
+    with _PIPE_LOCK:
+        # Re-check under the lock: another thread may have completed
+        # the load while we were waiting.
+        if _PIPE is not None:
+            return _PIPE
         import torch
         from diffusers import ZImagePipeline
         t0 = time.monotonic()
@@ -105,19 +120,19 @@ def _pipe():
         logger.info("loading ZImagePipeline from %s …", WEIGHTS_DIR)
         # Don't .to("cuda") here — enable_model_cpu_offload manages
         # device placement itself and conflicts with a manual .to.
-        _PIPE = ZImagePipeline.from_pretrained(
+        pipe = ZImagePipeline.from_pretrained(
             str(WEIGHTS_DIR),
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             local_files_only=True,
         )
-        _PIPE.enable_model_cpu_offload()
+        pipe.enable_model_cpu_offload()
         try:
-            _PIPE.enable_vae_slicing()
+            pipe.enable_vae_slicing()
         except Exception:
             pass
         try:
-            _PIPE.enable_attention_slicing()
+            pipe.enable_attention_slicing()
         except Exception:
             pass
         logger.info(
@@ -125,7 +140,10 @@ def _pipe():
             time.monotonic() - t0,
             time.monotonic() - _BOOT_T0,
         )
-    return _PIPE
+        # Publish the fully-initialised pipe LAST so other threads
+        # that fast-path past the lock only see a complete object.
+        _PIPE = pipe
+        return _PIPE
 
 
 # Z-Image native dim is 1024². Vertical 9:16 = 768x1344 (multiples of

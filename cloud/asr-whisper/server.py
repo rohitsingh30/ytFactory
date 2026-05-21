@@ -50,6 +50,7 @@ import hashlib
 import logging
 import os
 import tempfile
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -83,20 +84,35 @@ _logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO")))
 # ---------------------------------------------------------------------------
 
 _MODEL = None
+_MODEL_LOCK = threading.Lock()
 _MODEL_NAME = os.environ.get("WHISPER_MODEL", "large-v3")
 _DEVICE = os.environ.get("WHISPER_DEVICE", "cuda")
 _COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE", "float16")
 
 
 def _get_model():
+    """Lazy-load + cache the WhisperModel singleton.
+
+    Thread-safety (2026-05-17, cost-audit fix): double-checked locking
+    via _MODEL_LOCK. Cloud Run runs the lifespan warm-up AND any
+    early request in parallel when concurrency=2; without the lock
+    two WhisperModel(device=cuda) loads race → ~3 GiB × 2 → still
+    safe on the 22 GiB L4, but doubles load time + risks CUDA
+    init races on the same context. Lock makes it deterministic."""
     global _MODEL
-    if _MODEL is None:
+    if _MODEL is not None:
+        return _MODEL
+    with _MODEL_LOCK:
+        if _MODEL is not None:
+            return _MODEL
         from faster_whisper import WhisperModel  # noqa: PLC0415
         _logger.info("loading whisper model=%s device=%s compute=%s",
                      _MODEL_NAME, _DEVICE, _COMPUTE_TYPE)
-        _MODEL = WhisperModel(_MODEL_NAME, device=_DEVICE, compute_type=_COMPUTE_TYPE)
+        model = WhisperModel(_MODEL_NAME, device=_DEVICE, compute_type=_COMPUTE_TYPE)
         _logger.info("whisper model loaded")
-    return _MODEL
+        # Publish LAST so racing readers only see a complete object.
+        _MODEL = model
+        return _MODEL
 
 
 # ---------------------------------------------------------------------------
