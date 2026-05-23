@@ -24,7 +24,7 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -62,6 +62,12 @@ try:
     _OTEL_OK = True
 except Exception:
     _OTEL_OK = False
+
+try:
+    from _tel_track_io import track_io as _tel_track_io
+except Exception:  # noqa: BLE001
+    def _tel_track_io(*_args, **_kwargs) -> None:
+        return None
 
 app = FastAPI(title="ytfactory-image-z-image-turbo", version="1")
 if _OTEL_OK:
@@ -198,9 +204,10 @@ def readyz() -> dict:
 
 
 @app.post("/generate")
-def generate(req: GenerateIn) -> JSONResponse:
+def generate(req: GenerateIn, request: Request) -> JSONResponse:
     if not req.prompt.strip():
         raise HTTPException(400, "empty prompt")
+    traceparent = request.headers.get("traceparent") if request else None
 
     if req.width and req.height:
         w = max(16, (req.width // 16) * 16)
@@ -230,7 +237,30 @@ def generate(req: GenerateIn) -> JSONResponse:
                 generator=generator,
             )
     except Exception as e:
+        wall_s = time.monotonic() - t0
         logger.exception("z-image-turbo generate failed")
+        try:
+            _tel_track_io(
+                "image.server.gen",
+                category="image",
+                success=False,
+                duration_ms=int(wall_s * 1000),
+                input_text=req.prompt,
+                output_text=f"{type(e).__name__}: {e}",
+                input_meta={
+                    "negative_prompt": None,
+                    "seed": req.seed,
+                    "width": w,
+                    "height": h,
+                    "steps": req.steps,
+                    "cfg": req.guidance_scale,
+                    "model": "z-image-turbo",
+                    "traceparent": traceparent,
+                },
+                output_meta={"gpu_seconds": round(wall_s, 3), "bytes": 0},
+            )
+        except Exception:
+            pass
         # If OOM, free what we can so the NEXT call has a chance.
         try:
             torch.cuda.empty_cache()
@@ -268,6 +298,28 @@ def generate(req: GenerateIn) -> JSONResponse:
         "sha256": sha,
         "png_bytes": len(png),
     }
+    try:
+        _tel_track_io(
+            "image.server.gen",
+            category="image",
+            success=True,
+            duration_ms=int(wall_s * 1000),
+            input_text=req.prompt,
+            output_text=None,
+            input_meta={
+                "negative_prompt": None,
+                "seed": req.seed,
+                "width": w,
+                "height": h,
+                "steps": req.steps,
+                "cfg": req.guidance_scale,
+                "model": "z-image-turbo",
+                "traceparent": traceparent,
+            },
+            output_meta={"gpu_seconds": round(wall_s, 3), "bytes": len(png)},
+        )
+    except Exception:
+        pass
     if req.output == "gcs" or len(png) > INLINE_LIMIT_BYTES:
         payload["output_gcs"] = _upload_to_gcs(
             png,

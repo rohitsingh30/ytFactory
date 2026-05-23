@@ -40,6 +40,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -574,6 +575,26 @@ def synth_long_narration(
 
 
 
+def _prompt_sha256(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+def _track_panel_gen(panel_index: int, prompt: str, *, success: bool) -> None:
+    try:
+        obs.track(
+            "image.panel_gen",
+            category="image",
+            success=success,
+            metadata={
+                "panel_index": panel_index,
+                "prompt_sha256": _prompt_sha256(prompt),
+                "success": bool(success),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _generate_panel_stills(
     *,
     panels: list[dict[str, Any]],
@@ -627,6 +648,7 @@ def _generate_panel_stills(
         png = panel_dir / f"panel_{i:03d}.png"
         panel_pngs.append(png)
         if png.exists() and png.stat().st_size >= 4096:
+            _track_panel_gen(i, (p.get("scene") or "").strip(), success=True)
             continue
         scene = (p.get("scene") or "").strip()
         if not scene:
@@ -640,6 +662,7 @@ def _generate_panel_stills(
     is_cloud = image_provider.startswith("cloudrun_")
     n_remaining = len(work)
     n_total = len(panels)
+    job_id = os.environ.get("YTFACTORY_JOB_ID") or None
 
     parallel_workers = 1
     if is_cloud and n_remaining > 1:
@@ -683,24 +706,31 @@ def _generate_panel_stills(
         def _gen_one(item: tuple[int, Path, str, int]) -> int:
             i, png, scene, seed = item
             print(f"[panel] {i+1}/{n_total} gen → {png.name} (seed {seed})")
-            images.generate(
-                prompt=scene,
-                style_prefix=style_prefix,
-                seed=seed,
-                out_path=png,
-                width=int(image_width),
-                height=int(image_height),
-                steps=int(image_steps),
-                provider=image_provider,
-            )
-            # B2 — persist the freshly-generated PNG to GCS so a retry
-            # after a worker SIGKILL doesn't re-pay for this panel.
             try:
-                from pipeline.cloud.cache import persist_artifact  # noqa: PLC0415
-                persist_artifact(png, kind="panels")
-            except Exception as exc:  # noqa: BLE001
-                print(f"[panel] cache.persist failed (non-fatal): {exc}")
-            return i
+                images.generate(
+                    prompt=scene,
+                    style_prefix=style_prefix,
+                    seed=seed,
+                    out_path=png,
+                    width=int(image_width),
+                    height=int(image_height),
+                    steps=int(image_steps),
+                    provider=image_provider,
+                    job_id=job_id,
+                    panel_index=i,
+                )
+                # B2 — persist the freshly-generated PNG to GCS so a retry
+                # after a worker SIGKILL doesn't re-pay for this panel.
+                try:
+                    from pipeline.cloud.cache import persist_artifact  # noqa: PLC0415
+                    persist_artifact(png, kind="panels")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[panel] cache.persist failed (non-fatal): {exc}")
+                _track_panel_gen(i, scene, success=True)
+                return i
+            except Exception:
+                _track_panel_gen(i, scene, success=False)
+                raise
 
         with ThreadPoolExecutor(max_workers=parallel_workers) as pool:
             futures = [pool.submit(_gen_one, item) for item in work]
@@ -713,23 +743,30 @@ def _generate_panel_stills(
     else:
         for i, png, scene, seed in work:
             print(f"[panel] {i+1}/{n_total} gen → {png.name} (seed {seed})")
-            images.generate(
-                prompt=scene,
-                style_prefix=style_prefix,
-                seed=seed,
-                out_path=png,
-                width=int(image_width),
-                height=int(image_height),
-                steps=int(image_steps),
-                provider=image_provider,
-            )
-            # B2 — persist after each panel (serial path mirrors the
-            # parallel path so local-on-cloud renders also cache).
             try:
-                from pipeline.cloud.cache import persist_artifact  # noqa: PLC0415
-                persist_artifact(png, kind="panels")
-            except Exception as exc:  # noqa: BLE001
-                print(f"[panel] cache.persist failed (non-fatal): {exc}")
+                images.generate(
+                    prompt=scene,
+                    style_prefix=style_prefix,
+                    seed=seed,
+                    out_path=png,
+                    width=int(image_width),
+                    height=int(image_height),
+                    steps=int(image_steps),
+                    provider=image_provider,
+                    job_id=job_id,
+                    panel_index=i,
+                )
+                # B2 — persist after each panel (serial path mirrors the
+                # parallel path so local-on-cloud renders also cache).
+                try:
+                    from pipeline.cloud.cache import persist_artifact  # noqa: PLC0415
+                    persist_artifact(png, kind="panels")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[panel] cache.persist failed (non-fatal): {exc}")
+                _track_panel_gen(i, scene, success=True)
+            except Exception:
+                _track_panel_gen(i, scene, success=False)
+                raise
 
     return panel_pngs
 

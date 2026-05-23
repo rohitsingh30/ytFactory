@@ -12,10 +12,12 @@ shape.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
 
+from pipeline import observability as _obs
 from pipeline.render.contracts import (
     Timeline,
     VisualProducer,
@@ -45,6 +47,21 @@ class FootageFiller:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         duration_s = timeline[-1].end_s if timeline else 1.0
         w, h = spec.output_resolution
+        try:
+            original_prompt = "\n".join((getattr(seg, "text", "") or "") for seg in timeline)
+            _obs.track(
+                "image.footage_filler.decision",
+                category="image",
+                metadata={
+                    "reason": "visual_mode=footage_filler",
+                    "panel_index": 0,
+                    "original_prompt_sha256": hashlib.sha256(
+                        original_prompt.encode("utf-8", errors="replace")
+                    ).hexdigest(),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
         # Today: solid-color fallback. Bigbang: real b-roll cycle.
         run_ffmpeg([

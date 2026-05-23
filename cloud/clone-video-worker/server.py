@@ -37,7 +37,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -62,6 +62,12 @@ try:
 except Exception:
     _OTEL_OK = False
 
+try:
+    from _tel_track_io import track_io as _tel_track_io
+except Exception:  # noqa: BLE001
+    def _tel_track_io(*_args, **_kwargs) -> None:
+        return None
+
 app = FastAPI(title="ytfactory-clone-video-worker", version="2")
 
 
@@ -72,6 +78,31 @@ if _OTEL_OK:
 @app.get("/healthz")
 def healthz() -> dict:
     return {"ok": True, "service": "clone-video-worker"}
+
+
+def _track_http_call(
+    *,
+    service: str,
+    url: str,
+    request_body: Any,
+    response_body: Any,
+    status_code: int | None,
+    latency_ms: int,
+    success: bool,
+) -> None:
+    try:
+        _tel_track_io(
+            "http.call",
+            category="http",
+            success=success,
+            duration_ms=latency_ms,
+            input_text=request_body,
+            output_text=response_body,
+            input_meta={"service": service, "method": "POST", "url": url},
+            output_meta={"status_code": status_code, "latency_ms": latency_ms},
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class AnalyzeRequest(BaseModel):
@@ -284,6 +315,13 @@ def _azure_whisper(audio: Path) -> Optional[str]:
     if not endpoint or not api_key:
         return None
 
+    request_body = {
+        "deployment": deployment,
+        "audio_file": audio.name,
+        "audio_bytes": audio.stat().st_size if audio.exists() else None,
+        "response_format": "text",
+    }
+    t0 = time.perf_counter()
     try:
         from openai import AzureOpenAI
 
@@ -294,10 +332,27 @@ def _azure_whisper(audio: Path) -> Optional[str]:
                 file=fh,
                 response_format="text",
             )
-        if isinstance(resp, str):
-            return resp
-        return getattr(resp, "text", None)
+        text = resp if isinstance(resp, str) else getattr(resp, "text", None)
+        _track_http_call(
+            service="azure-openai-whisper",
+            url=endpoint,
+            request_body=request_body,
+            response_body=text,
+            status_code=200,
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+            success=True,
+        )
+        return text
     except Exception as exc:  # noqa: BLE001
+        _track_http_call(
+            service="azure-openai-whisper",
+            url=endpoint,
+            request_body=request_body,
+            response_body=f"{type(exc).__name__}: {exc}",
+            status_code=None,
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+            success=False,
+        )
         logger.warning("Azure Whisper transcription failed: %s", exc)
         return None
 
@@ -364,16 +419,47 @@ def _azure_gpt_analyze(
             "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
         })
 
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": _FINGERPRINT_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        max_completion_tokens=900,
-        response_format={"type": "json_object"},
-    )
+    request_body = {
+        "model": model,
+        "duration_s": duration_s,
+        "notes_chars": len(user_notes or ""),
+        "transcript_chars": len(transcript or ""),
+        "frames_count": len(frames),
+        "max_completion_tokens": 900,
+        "response_format": "json_object",
+    }
+    t0 = time.perf_counter()
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _FINGERPRINT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            max_completion_tokens=900,
+            response_format={"type": "json_object"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        _track_http_call(
+            service="azure-openai-chat",
+            url=endpoint,
+            request_body=request_body,
+            response_body=f"{type(exc).__name__}: {exc}",
+            status_code=None,
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+            success=False,
+        )
+        raise
     text = (resp.choices[0].message.content or "").strip()
+    _track_http_call(
+        service="azure-openai-chat",
+        url=endpoint,
+        request_body=request_body,
+        response_body=text,
+        status_code=200,
+        latency_ms=int((time.perf_counter() - t0) * 1000),
+        success=True,
+    )
     try:
         obj = json.loads(text)
     except Exception as exc:  # noqa: BLE001
