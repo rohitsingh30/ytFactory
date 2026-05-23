@@ -729,12 +729,18 @@ def _align_prompts_to_beats(
     # the caller falls back to heuristic / LLM re-author rather than
     # crashing the whole render.
     if m < n:
+        # 2026-05-23: instead of giving up (was return None → caller's
+        # count-equality gate raised RuntimeError + killed the render),
+        # MONOTONIC-STRETCH the prompts so beat[i] uses raw[i * m // n].
+        # Each prompt covers ~n/m consecutive beats; ordering preserved;
+        # no image-audio drift. Pre-fix: 13 LLM prompts + 24 ASR segments
+        # killed a successful render at compose.
         print(
-            f"[images] cached prompts.json has {m} entries but the "
-            f"current narration produces {n} beats — falling back to "
-            f"re-author (delete prompts.json to silence this warning)"
+            f"[images] prompts.json has {m} entries but narration has "
+            f"{n} beats — monotonic-stretching prompts (each covers "
+            f"~{n/m:.1f} beats) to keep the render shipping."
         )
-        return None
+        return [raw[min(i * m // n, m - 1)] for i in range(n)]
 
     beat_tokens = [_tokenise_for_match(t) for t in beat_texts]
     prompt_tokens = [_tokenise_for_match(p["narration_line"]) for p in raw]

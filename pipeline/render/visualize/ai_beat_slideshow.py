@@ -292,24 +292,28 @@ class AiBeatSlideshow:
                 anchored = _align_prompts_to_beats(
                     custom_prompts, [seg.text for seg in timeline],
                 )
-                # 2026-05-17 bijectivity guard — `_align_prompts_to_beats`
-                # can map multiple segments to the same prompt when the
-                # Jaccard scores are close. Symptom: render 75ac2667 had
-                # all 14 segments collapse to one prompt → entire video
-                # was one image Ken-Burns'd. Detect collapse via unique-
-                # object-id count and fall back to index-zip (the pre-
-                # anchor-matcher behavior, which kept distinct images).
-                if anchored is not None and (
-                    len({id(p) for p in anchored}) < len(anchored)
-                ):
-                    _logger.warning(
-                        "ai_beat_slideshow: anchor matcher collapsed "
-                        "%d prompts to %d unique — falling back to "
-                        "index-zip to preserve scene variety",
-                        len(anchored),
-                        len({id(p) for p in anchored}),
-                    )
-                    anchored = None
+                # 2026-05-17 bijectivity guard, 2026-05-23 loosened —
+                # `_align_prompts_to_beats` legitimately produces many-to-1
+                # mapping when timeline > prompts (ASR splits the wav
+                # into more segments than the LLM authored). Pre-fix this
+                # tripped on ANY reuse (13 prompts → 24 segments naturally
+                # has 13 unique << 24 anchored), forcing the post-rebind
+                # count-equality gate to fire. The catastrophe we're
+                # actually guarding against is render 75ac2667 — all 14
+                # segments collapsed to 1 prompt → entire video was one
+                # image. Threshold: fail-back only when unique count
+                # drops below half of the SMALLER of the two lengths.
+                if anchored is not None:
+                    unique_n = len({id(p) for p in anchored})
+                    floor = max(2, min(len(custom_prompts), len(anchored)) // 2)
+                    if unique_n < floor:
+                        _logger.warning(
+                            "ai_beat_slideshow: anchor matcher collapsed "
+                            "%d prompts to %d unique (floor=%d) — falling "
+                            "back to index-zip to preserve scene variety",
+                            len(anchored), unique_n, floor,
+                        )
+                        anchored = None
                 if anchored is not None:
                     _logger.info(
                         "ai_beat_slideshow: re-bound %d prompts to %d "
