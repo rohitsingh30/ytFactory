@@ -36,7 +36,6 @@ tts_speed: 0.95
 # canonical render path SHOULD pick the split-screen producer. The flat
 # placeholder style is what you get if it falls through.
 visual_mode: split_screen_reddit_gameplay
-image_provider: cloudrun_z_image_turbo
 image_style_prefix: |
   Vertical 9:16 phone-shot composition split horizontally. Upper sixty
   percent shows an authentic Reddit thread card on a dark slate

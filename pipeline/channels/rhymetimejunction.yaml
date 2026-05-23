@@ -105,7 +105,6 @@ tts_speed: 1.0
 # style prefix is pure positive descriptors — never "no scary faces",
 # "no horror" etc. — those tokens AMPLIFY in z_image_turbo. Express
 # what we WANT: "warm smiling expressions", "bright sunny daylight".
-image_provider: cloudrun_z_image_turbo
 # Style prefix mirrors aita_animated.yaml — the proven flat-2D crayon
 # look that the AITA family ships consistently. User feedback round 2
 # (2026-05-03 critique): the earlier custom Pingu/Peppa prefix combined
@@ -326,7 +325,6 @@ long_form:
   # Rhyme channel is 30-60 min; ~25s per panel = ~72-144 panels.
   panel_seconds_target: 25
   panel_max_count: 120
-  image_provider: cloudrun_z_image_turbo
   image_seed: 7777
   image_steps: 9    # Z-Image-Turbo spec sweet spot (was 4 — unified 2026-05-23)
   image_width: 1344

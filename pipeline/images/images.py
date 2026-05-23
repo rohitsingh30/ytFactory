@@ -399,8 +399,18 @@ def build_full_prompt(
 #   vertical_9_16_safe — True if the model produces coherent 9:16 vertical;
 #                        False for 1:1-only models like SD-Turbo
 #   description      — one-line summary surfaced in error messages
+# Single canonical image-generation provider. Every consumer that
+# reads `spec.extra.get("image_provider", ...)` MUST default to this
+# constant (don't repeat the literal "cloudrun_z_image_turbo" in any
+# call site). YAMLs should NOT set image_provider at all — the
+# constant is the source of truth.
+#
+# When (if) we add a second provider, the rename / migration is one
+# place: this constant + _PROVIDER_CAPABILITIES below.
+CANONICAL_IMAGE_PROVIDER = "cloudrun_z_image_turbo"
+
 _PROVIDER_CAPABILITIES: dict[str, dict] = {
-    "cloudrun_z_image_turbo": {
+    CANONICAL_IMAGE_PROVIDER: {
         "native_dim": (1024, 1024),
         "max_dim": (1344, 1344),
         "step_range": (4, 12),

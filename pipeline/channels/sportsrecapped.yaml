@@ -51,7 +51,6 @@ tts_speed: 0.98
 # DO NOT switch to motion_provider here — the channel design is static
 # cartoon imagery between footage cuts, and the AnimateDiff path was
 # explicitly rejected for this channel.
-image_provider: cloudrun_z_image_turbo
 #
 # CLASS-OF-BUG (branding render 2026-05-01): the bare word "football"
 # biases diffusion models toward American football / gridiron — the v1

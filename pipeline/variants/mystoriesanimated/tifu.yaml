@@ -14,7 +14,6 @@ tts_speed: 0.90
 # Image gen — Flux Schnell, same engine and aesthetic as aita_animated.
 # TIFU stories are also character-driven first-person confessionals so
 # the same crayon-with-thick-outline aesthetic carries.
-image_provider: mflux
 image_style_prefix: |
   Warm hand-drawn 2D illustration in the style of modern indie
   webcomics — gentle, self-deprecating tone matching TIFU's

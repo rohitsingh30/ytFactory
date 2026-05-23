@@ -15,7 +15,6 @@ tts_speed: 1.0
 # vertical (768x1344). Z-Image-Turbo handles 9:16 natively, hits the
 # "vintage etching" style with detail instead of blur, and runs at
 # ~half Schnell's RAM. See images.validate_provider_config.
-image_provider: cloudrun_z_image_turbo
 image_style_prefix: |
   Vintage encyclopedia illustration in the style of 19th-century
   hand-engraved book plates. Fine sepia ink lines on aged parchment

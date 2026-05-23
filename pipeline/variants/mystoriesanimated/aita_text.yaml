@@ -12,7 +12,6 @@ tts_speed: 1.05
 # (canary 2026-05-07). Falls back to local z_image_turbo (mflux) on
 # cloud failure via render-level circuit breaker. For pre-cloudrun
 # parity, set image_provider: z_image_turbo.
-image_provider: cloudrun_z_image_turbo
 image_style_prefix: |
   Hand-drawn doodle illustration in the style of modern indie
   webcomics, intentionally simpler than the animated AITA variants

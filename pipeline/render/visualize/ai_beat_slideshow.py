@@ -228,7 +228,8 @@ class AiBeatSlideshow:
         # Generate one image per Segment.
         images_dir = work_dir / "images"
         images_dir.mkdir(parents=True, exist_ok=True)
-        provider = spec.extra.get("image_provider", "cloudrun_z_image_turbo")
+        from pipeline.images.images import CANONICAL_IMAGE_PROVIDER  # noqa: PLC0415
+        provider = spec.extra.get("image_provider") or CANONICAL_IMAGE_PROVIDER
         style_prefix = spec.extra.get("image_style_prefix", "")
         seed_base = int(spec.extra.get("image_seed", 42))
         steps = int(spec.extra.get("image_steps", 4))

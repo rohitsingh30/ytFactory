@@ -25,7 +25,6 @@ tts_voice: pipeline/voice_refs/sarah.wav
 tts_speed: 0.90
 
 # ---- Image gen ---------------------------------------------------------
-image_provider: cloudrun_z_image_turbo
 # Style rewritten 2026-05-17 to match the actual production look of the
 # uploaded MyStoriesAnimated channel (warm hand-drawn watercolor + ink
 # line illustrations with real distinct characters), and to pass the
@@ -188,7 +187,6 @@ long_form:
   # 60-min-Cloud-Run-timeout failures on this channel.
   panel_seconds_target: 25
   panel_max_count: 120
-  image_provider: cloudrun_z_image_turbo
   image_seed: 4242
   image_steps: 9    # Z-Image-Turbo spec sweet spot (was 4 — unified 2026-05-23)
   image_width: 1344

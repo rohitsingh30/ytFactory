@@ -24,7 +24,6 @@ tts_speed: 0.90
 
 # Image gen — same style + steps + seed as the standard aita_animated,
 # so Part 2 looks like a continuation of Part 1 (cast.json reused).
-image_provider: cloudrun_z_image_turbo
 image_style_prefix: |
   Warm hand-drawn 2D illustration in the style of modern indie
   webcomics. Confident ink line work with varying weight, watercolor

@@ -19,7 +19,6 @@ tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, a
 tts_speed: 1.05
 
 # Image gen — Z-Image-Turbo 6B via mflux.
-image_provider: cloudrun_z_image_turbo
 image_style_prefix: |
   Hand-drawn doodle illustration in the style of modern indie
   webcomics, intentionally simpler than the animated AITA variants

@@ -14,7 +14,6 @@ tts_voice: pipeline/voice_refs/sarah.wav
 tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 1.05
 
-image_provider: cloudrun_z_image_turbo
 image_style_prefix: |
   simple flat 2D doodle illustration, hand-drawn ink line, scribbly
   cartoon style, cute children's-book aesthetic, minimal pastel colors,

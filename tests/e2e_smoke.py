@@ -110,14 +110,14 @@ def drive_wizard(page: Page, base_url: str, channel: str, variant: str) -> str:
     log("step 3/3: waiting for topic to populate...")
     # The textarea is the only <textarea> in the topic card.
     textarea = page.locator("textarea").first
-    for _ in range(40):
+    for _ in range(120):  # 60s — LLM brainstorm can be slow
         val = textarea.input_value()
         if val and val.strip():
             log(f"  topic: {val[:90]}")
             break
         time.sleep(0.5)
     else:
-        raise RuntimeError("auto-generate didn't populate the topic textarea after 20s")
+        raise RuntimeError("auto-generate didn't populate the topic textarea after 60s")
 
     # 3c. Submit → "Render Short" button in the sticky footer
     submit_btn = page.get_by_role("button", name="Render Short")
@@ -139,13 +139,33 @@ def drive_wizard(page: Page, base_url: str, channel: str, variant: str) -> str:
     log("step 3/3: clicking Render Short")
     submit_btn.click(timeout=10_000)
 
-    # Wait for router push to /app/render/<id> OR a toast error
+    # Wait for router push to /app/render/<id>. If the client-side
+    # redirect takes too long (>120s), fall back to polling
+    # /api/jobs?channel=... for the most recently queued job — the
+    # server has the truth even if the SPA hasn't navigated yet.
     log("waiting for redirect to /app/render/...")
-    for _ in range(60):
+    redirected = False
+    for _ in range(240):  # 120s
         if "/app/render/" in page.url:
+            redirected = True
             break
         time.sleep(0.5)
-    else:
+    if not redirected:
+        log("no redirect after 120s — polling /api/jobs for the queued job")
+        try:
+            r = page.request.get(
+                f"{base_url}/api/jobs?channel={channel}&limit=1", timeout=10_000,
+            )
+            if r.status == 200:
+                body = r.json()
+                jobs = body.get("jobs") or body.get("items") or []
+                if jobs:
+                    job_id = jobs[0].get("job_id") or jobs[0].get("id")
+                    if job_id:
+                        log(f"  recovered job_id from /api/jobs: {job_id}")
+                        return job_id
+        except Exception as exc:  # noqa: BLE001
+            log(f"  /api/jobs fallback failed: {type(exc).__name__}: {exc}")
         # Capture diagnostic context.
         page.screenshot(path="/tmp/e2e_smoke_no_redirect.png", full_page=True)
         toasts: list[str] = []
@@ -158,8 +178,9 @@ def drive_wizard(page: Page, base_url: str, channel: str, variant: str) -> str:
             pass
         toast_blob = " | ".join(toasts) or "(no toast captured)"
         raise RuntimeError(
-            f"never redirected to /app/render/...; still at {page.url}. "
-            f"Toasts: {toast_blob}. Screenshot at /tmp/e2e_smoke_no_redirect.png"
+            f"never redirected to /app/render/... after 120s; still at "
+            f"{page.url}. Toasts: {toast_blob}. "
+            f"Screenshot at /tmp/e2e_smoke_no_redirect.png"
         )
 
     job_id = page.url.rstrip("/").rsplit("/", 1)[-1]

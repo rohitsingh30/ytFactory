@@ -12,7 +12,6 @@ tts_speed: 1.0
 # Image gen — Z-Image-Turbo 6B via mflux (MLX-native).
 # Replaced sd_turbo (May 2026) — see wiki_oddities.yaml or
 # images.validate_provider_config for the why.
-image_provider: cloudrun_z_image_turbo
 image_style_prefix: |
   Classic history-book illustration in muted oil-painting style,
   evoking 19th-century narrative paintings. Hand-painted technique

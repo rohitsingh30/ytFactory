@@ -28,7 +28,6 @@ tts_speed: 0.90
 # for the flat-crayon style the gain is mostly "no regression on
 # multi-subject staging" while reclaiming 5-10x render speed.
 # Recommended steps for full quality: 8 NFEs.
-image_provider: cloudrun_z_image_turbo
 # Style rewritten 2026-05-17 to match live MyStoriesAnimated YouTube
 # channel uploads (UCNIeHBf--KUegdiJZs_LSZg). Replaces pre-fix flat-
 # crayon clip-art that rendered as floating objects on Z-Image-Turbo

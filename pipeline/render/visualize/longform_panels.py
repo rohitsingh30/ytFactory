@@ -90,7 +90,8 @@ class LongformPanels:
                 ),
             )
 
-        provider = (spec.extra or {}).get("image_provider", "cloudrun_z_image_turbo")
+        from pipeline.images.images import CANONICAL_IMAGE_PROVIDER  # noqa: PLC0415
+        provider = (spec.extra or {}).get("image_provider") or CANONICAL_IMAGE_PROVIDER
         style_prefix = (spec.extra or {}).get("image_style_prefix", "")
         seed_base = int((spec.extra or {}).get("image_seed", 42))
         steps = int((spec.extra or {}).get("image_steps", 4))

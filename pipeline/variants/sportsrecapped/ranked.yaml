@@ -37,7 +37,6 @@ tts_speed: 0.98
 
 # Visuals — same minimalist Tifo aesthetic. Different seed so the channel
 # feels visually distinct from non-ranked sports shorts.
-image_provider: cloudrun_z_image_turbo
 image_style_prefix: |
   Hand-drawn editorial line-art illustration in the style of modern
   football zines (Mundial, Howler, Tifo Football). Confident ink
