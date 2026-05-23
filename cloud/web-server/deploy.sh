@@ -47,8 +47,16 @@ source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 # Preflight: IAM bindings for the runtime SA. Aborts deploy with a
 # concrete grant command if anything is missing. Read-only — never
 # mutates IAM (operator may not have project-IAM-admin).
-echo "==> Verifying web-runner IAM bindings (preflight)"
-"$(cd "$(dirname "$0")" && pwd)/../iam/verify_web_runner.sh"
+# Skippable via YTFACTORY_SKIP_IAM_PREFLIGHT=1 — useful when the
+# operator can't grant IAM but the bindings already exist (e.g. a
+# prior deploy succeeded). Verify failures still surface concrete
+# repair commands in the script's stderr.
+if [ "${YTFACTORY_SKIP_IAM_PREFLIGHT:-0}" != "1" ]; then
+  echo "==> Verifying web-runner IAM bindings (preflight)"
+  "$(cd "$(dirname "$0")" && pwd)/../iam/verify_web_runner.sh"
+else
+  echo "==> Skipping IAM preflight (YTFACTORY_SKIP_IAM_PREFLIGHT=1)"
+fi
 
 PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
@@ -99,12 +107,12 @@ _resolve_url() {
     --format="value(status.url)" 2>/dev/null
 }
 WEB_NEXT_URL="$(_resolve_url ytfactory-web-next)"
-TTS_CHATTERBOX_URL="$(_resolve_url ytfactory-tts-chatterbox)"
+TTS_CHATTERBOX_URL="$(_resolve_url tts-chatterbox)"
 TTS_INDICF5_URL="$(_resolve_url ytfactory-tts-indicf5)"
 IMAGE_Z_IMAGE_TURBO_URL="$(_resolve_url ytfactory-image-z-image-turbo)"
 ASR_URL="$(_resolve_url ytfactory-asr-whisper)"
 for pair in "ytfactory-web-next:${WEB_NEXT_URL}" \
-            "ytfactory-tts-chatterbox:${TTS_CHATTERBOX_URL}" \
+            "tts-chatterbox:${TTS_CHATTERBOX_URL}" \
             "ytfactory-tts-indicf5:${TTS_INDICF5_URL}" \
             "ytfactory-image-z-image-turbo:${IMAGE_Z_IMAGE_TURBO_URL}" \
             "ytfactory-asr-whisper:${ASR_URL}"; do
