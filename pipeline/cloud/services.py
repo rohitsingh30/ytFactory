@@ -37,7 +37,7 @@ class ServiceKind(str, Enum):
 class Service:
     """One Cloud Run service we care about in the admin panel."""
 
-    name: str  # ytfactory-tts-chatterbox
+    name: str  # Cloud Run service name, e.g. "tts-chatterbox" or "ytfactory-tts-indicf5"
     short: str  # chatterbox  (the suffix we show in the UI)
     kind: ServiceKind
     env_var: Optional[str]  # CLOUDRUN_TTS_CHATTERBOX_URL
@@ -73,7 +73,13 @@ _REGION = "asia-southeast1"
 _SERVICES: tuple[Service, ...] = (
     # --- TTS (GPU L4) ---
     Service(
-        name="ytfactory-tts-chatterbox",
+        # Live service is named without the `ytfactory-` prefix per
+        # audit D3.22 (`cloud/tts-chatterbox/deploy.sh:16` defaults
+        # SERVICE to the dir name). Every other GPU service kept the
+        # prefix; chatterbox is the exception. Don't "normalize" without
+        # also renaming the live service — `gcloud run services
+        # describe <name>` is keyed on this string.
+        name="tts-chatterbox",
         short="chatterbox",
         kind=ServiceKind.TTS,
         env_var="CLOUDRUN_TTS_CHATTERBOX_URL",
@@ -164,7 +170,7 @@ def list_services(
 
 
 def get_service(short_or_name: str) -> Optional[Service]:
-    """Look up by either ``short`` (chatterbox) or ``name`` (ytfactory-tts-chatterbox)."""
+    """Look up by either ``short`` (chatterbox) or ``name`` (tts-chatterbox)."""
     needle = short_or_name.strip()
     for s in _SERVICES:
         if s.short == needle or s.name == needle:

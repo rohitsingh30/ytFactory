@@ -216,7 +216,7 @@ try:
 except Exception:
     _OTEL_OK = False
 
-app = FastAPI(title="ytfactory-tts-chatterbox", version="1")
+app = FastAPI(title="tts-chatterbox", version="1")
 if _OTEL_OK:
     _otel_instrument_fastapi(app)
 

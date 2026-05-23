@@ -55,7 +55,7 @@ YAML — not the code, not these docs.
 |---|---|---|
 | `ytfactory-render-worker-v2` | Job | One execution per render; walks the 7 stages |
 | `ytfactory-image-z-image-turbo` | Service (GPU) | Production image-gen — Z-Image-Turbo 6B S3-DiT |
-| `ytfactory-tts-chatterbox` | Service (GPU) | English TTS — primary for 6/7 channels |
+| `tts-chatterbox` | Service (GPU) | English TTS — primary for 6/7 channels. The lone GPU service without the `ytfactory-` prefix (audit D3.22; kept since renaming would invalidate `CLOUDRUN_TTS_CHATTERBOX_URL` everywhere). |
 | `ytfactory-tts-indicf5` | Service (GPU) | Hindi TTS — `hindutavaanimated` |
 | `ytfactory-asr-whisper` | Service (GPU) | faster-whisper word alignment |
 | `ytfactory-editing-agent` | Service | Optional polish stage (8th, opt-in) |

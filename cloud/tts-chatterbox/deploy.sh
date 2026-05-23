@@ -3,7 +3,7 @@
 # Usage:
 #   ./deploy.sh [service-name] [tag]
 # Example:
-#   ./deploy.sh ytfactory-tts-chatterbox
+#   ./deploy.sh tts-chatterbox  # actual service name (audit D3.22)
 
 set -euo pipefail
 

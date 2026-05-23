@@ -111,7 +111,8 @@ def _service_for_build(build: dict[str, Any], known_short: set[str]) -> Optional
     for tag in (build.get("tags") or []):
         if tag in known_short:
             return tag
-    # Image name fallback: gcr.io/PROJECT/ytfactory-tts-chatterbox:tag
+    # Image name fallback: gcr.io/PROJECT/tts-chatterbox:tag (or
+    # ytfactory-<short> for the prefix-using services).
     images = build.get("images") or []
     for img in images:
         for short in known_short:
