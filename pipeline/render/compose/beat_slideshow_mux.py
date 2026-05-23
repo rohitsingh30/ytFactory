@@ -9,6 +9,7 @@ H.264, AAC 192k. spec.output_resolution + spec.output_fps override.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from pipeline.render.contracts import (
     register_plugin,
 )
 from pipeline.render.shared.ffmpeg_helpers import run_ffmpeg
+from pipeline.render.telemetry_helpers import emit_json_artifact, path_size, track_event
 
 
 class BeatSlideshowMux:
@@ -145,8 +147,59 @@ class BeatSlideshowMux:
             "-t", f"{audio.duration_s:.3f}",
             str(out_path),
         ])
-        run_ffmpeg(cmd)
-        return out_path
+        purpose = self._compose_purpose()
+        full_args = ["ffmpeg", "-y", "-loglevel", "error", *cmd]
+        t0 = time.perf_counter()
+        proc = None
+        success = False
+        stderr = ""
+        exit_code = -1
+        try:
+            proc = run_ffmpeg(cmd, purpose=purpose, output_path=out_path)
+            exit_code = int(getattr(proc, "returncode", 0) or 0)
+            success = exit_code == 0
+            stderr = getattr(proc, "stderr", "") or ""
+            return out_path
+        except Exception as exc:  # noqa: BLE001
+            stderr = getattr(exc, "stderr", "") or str(exc)
+            exit_code = int(getattr(exc, "returncode", -1) or -1)
+            raise
+        finally:
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+            output_bytes = path_size(out_path)
+            metadata = {
+                "purpose": purpose,
+                "inputs": [
+                    str(visuals.video_path),
+                    str(audio.narration_path),
+                    str(music),
+                    *[str(o.asset_path) for o in sorted_overlays],
+                    *[str(o.asset_path) for o in ass_overlays],
+                ],
+                "output_path": str(out_path),
+                "output_bytes": output_bytes,
+                "duration_ms": duration_ms,
+            }
+            track_event(
+                "compose.run",
+                category="pipeline",
+                success=success,
+                duration_ms=duration_ms,
+                metadata=metadata,
+            )
+            emit_json_artifact(
+                "compose",
+                {
+                    "args": full_args,
+                    "output": str(out_path),
+                    "output_bytes": output_bytes,
+                    "exit_code": exit_code,
+                    "stderr_tail": stderr[-2000:],
+                },
+            )
+
+    def _compose_purpose(self) -> str:
+        return str(getattr(self, "_telemetry_purpose", "beat_slideshow_mux"))
 
     def _overlay_xy(self, ov: OverlayElement, spec: Any) -> tuple[str, str]:
         """Compute ffmpeg overlay (x, y) expressions for an OverlayElement.

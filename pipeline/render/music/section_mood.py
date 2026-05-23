@@ -22,6 +22,7 @@ from pipeline.render.contracts import (
     register_plugin,
 )
 from pipeline.render.shared.ffmpeg_helpers import run_ffmpeg
+from pipeline.render.telemetry_helpers import emit_json_artifact, track_event
 
 _logger = logging.getLogger(__name__)
 
@@ -50,12 +51,24 @@ class SectionMood:
 
         # Today: emit silent placeholder. Bigbang PR plumbs real mood
         # crossfade chain.
+        moods = [str((s.extras or {}).get("mood") or "default") for s in sections]
+        track = {
+            "track_id": "section_mood_placeholder_silence",
+            "mood": ",".join(sorted(set(moods))) if moods else "default",
+            "source": "ffmpeg_lavfi",
+            "duration_s": narration_duration_s,
+        }
+        track_event("music.pick", category="pipeline", metadata=track)
         run_ffmpeg([
             "-f", "lavfi", "-t", f"{narration_duration_s:.3f}",
             "-i", "anullsrc=r=24000:cl=mono",
             "-c:a", "pcm_s16le",
             str(out_path),
-        ])
+        ], purpose="section_mood_placeholder")
+        emit_json_artifact(
+            "music",
+            {"track": track, "mood": track["mood"], "duck_curve": None},
+        )
         _logger.info("section_mood: placeholder silent track for %d sections — "
                      "bigbang PR plumbs real mood crossfade", len(sections))
         return out_path

@@ -48,6 +48,7 @@ COPY pipeline/editing/  /workspace/pipeline/editing/
 COPY pipeline/cloud/    /workspace/pipeline/cloud/
 COPY pipeline/__init__.py /workspace/pipeline/__init__.py
 COPY cloud/editing-agent/server.py /workspace/server.py
+COPY cloud/editing-agent/_tel_track_io.py /workspace/_tel_track_io.py
 COPY cloud/editing-agent/otel_init.py /workspace/otel_init.py
 COPY cloud/editing-agent/cloud_run_json_exporter.py /workspace/cloud_run_json_exporter.py
 

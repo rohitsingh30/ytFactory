@@ -74,7 +74,7 @@ def trim_clip_letterbox(
             run_ffmpeg([
                 "-ss", f"{in_s}", "-t", f"{duration}", "-i", str(src),
                 "-an", "-c:v", "copy", str(out_path),
-            ])
+            ], purpose="trim_letterbox_stream_copy")
             return
         # Tier 2: aspect match within 1% but different resolution → plain scale.
         # Skip the split+gblur+overlay chain entirely — it's a no-op when the
@@ -92,7 +92,7 @@ def trim_clip_letterbox(
                 "-threads", "3",
                 "-pix_fmt", "yuv420p",
                 str(out_path),
-            ])
+            ], purpose="trim_letterbox_plain_scale")
             return
 
     grade_tail = f",{grade_filter}" if grade_filter else ""
@@ -111,7 +111,7 @@ def trim_clip_letterbox(
         "-threads", "3",
         "-pix_fmt", "yuv420p",
         str(out_path),
-    ])
+    ], purpose="trim_letterbox_blur")
 
 
 __all__ = ["trim_clip_letterbox"]

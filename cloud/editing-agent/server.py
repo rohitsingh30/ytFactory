@@ -24,21 +24,30 @@ Endpoints:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 import traceback
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+try:
+    import _tel_track_io as _tel
+except Exception:  # noqa: BLE001
+    class _NoopTelemetry:
+        def track(self, *_args, **_kwargs) -> None:
+            return None
+        def track_io(self, *_args, **_kwargs) -> None:
+            return None
+    _tel = _NoopTelemetry()
 from pipeline.editing.executor import execute_local
 from pipeline.editing.schema import (
     EDL_VERSION,
@@ -115,6 +124,7 @@ class EditRequest(BaseModel):
     inputs: dict[str, str]  # basename -> gs:// URI
     output_uri: str  # gs:// URI to write the final mp4
     job_uuid: str | None = None
+    prompt: str | None = None
 
 
 class EditResponse(BaseModel):
@@ -158,19 +168,111 @@ def version() -> dict[str, Any]:
 
 
 def _ffmpeg_version() -> str:
+    cmd = ["ffmpeg", "-version"]
+    t0 = time.perf_counter()
     try:
         proc = subprocess.run(
-            ["ffmpeg", "-version"],
+            cmd,
             capture_output=True, text=True, timeout=5, check=False,
         )
-        return (proc.stdout or "").splitlines()[:1] or ["unknown"]
-    except Exception:  # noqa: BLE001
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        _tel.track(
+            "ffmpeg.call",
+            category="ffmpeg",
+            success=proc.returncode == 0,
+            duration_ms=duration_ms,
+            metadata={
+                "purpose": "editing_agent_version_probe",
+                "args": cmd,
+                "exit_code": proc.returncode,
+                "stderr_tail": (proc.stderr or "")[-4000:],
+                "output_bytes": 0,
+            },
+        )
+        return ((proc.stdout or "").splitlines()[:1] or ["unknown"])[0]
+    except Exception as exc:  # noqa: BLE001
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        _tel.track(
+            "ffmpeg.call",
+            category="ffmpeg",
+            success=False,
+            duration_ms=duration_ms,
+            metadata={
+                "purpose": "editing_agent_version_probe",
+                "args": cmd,
+                "exit_code": -1,
+                "stderr_tail": str(exc)[-4000:],
+                "output_bytes": 0,
+            },
+        )
         return "unknown"
+
+
+def _work_root(job_uuid: str) -> Path:
+    root = Path(os.environ.get("EDITING_AGENT_WORK_ROOT", ".editing-agent-work"))
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"editing-agent-{job_uuid}-{uuid.uuid4().hex[:8]}"
+    path.mkdir(parents=True, exist_ok=False)
+    return path
+
+
+def _output_bytes(path: Path) -> int:
+    try:
+        return path.stat().st_size if path.exists() else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _ffmpeg_observer(job_id: str, counter: dict[str, int]) -> Callable[[list[str], int, str, int, Path], None]:
+    def _observe(cmd: list[str], rc: int, stderr: str, duration_ms: int, output_path: Path) -> None:
+        counter["count"] = int(counter.get("count", 0)) + 1
+        _tel.track(
+            "ffmpeg.call",
+            category="ffmpeg",
+            success=rc == 0,
+            duration_ms=duration_ms,
+            job_id=job_id,
+            metadata={
+                "purpose": "editing_agent_execute_local",
+                "args": [str(c) for c in cmd],
+                "exit_code": rc,
+                "stderr_tail": (stderr or "")[-4000:],
+                "output_bytes": _output_bytes(output_path),
+            },
+        )
+
+    return _observe
+
+
+def _emit_editing_plan(
+    req: EditRequest,
+    *,
+    job_id: str,
+    success: bool,
+    started: float,
+    ffmpeg_calls: int,
+    output_text: Any,
+    error: str | None = None,
+) -> None:
+    prompt = req.prompt or json.dumps(req.edl, sort_keys=True, default=str)
+    output_meta: dict[str, Any] = {"ffmpeg_calls": ffmpeg_calls}
+    if error:
+        output_meta["error"] = error[:500]
+    _tel.track_io(
+        "editing.plan",
+        category="pipeline",
+        success=success,
+        duration_ms=int((time.time() - started) * 1000),
+        job_id=job_id,
+        input_text=prompt,
+        output_text=output_text,
+        output_meta=output_meta,
+    )
 
 
 @app.post("/edit", response_model=EditResponse)
 def edit(req: EditRequest) -> EditResponse:
-    """Compile + run the EDL inside a fresh tempdir.
+    """Compile + run the EDL inside a fresh per-request work dir.
 
     Errors are surfaced as HTTP 4xx/5xx with the exception message in
     the body so the laptop client can decide whether to fall back to
@@ -178,16 +280,27 @@ def edit(req: EditRequest) -> EditResponse:
     user EDL is bad)."""
     job_uuid = req.job_uuid or str(uuid.uuid4())
     started = time.time()
+    plan_emitted = False
+    ffmpeg_calls = 0
 
     # 1. Validate EDL against the whitelist BEFORE staging anything.
     try:
         edl = build_edl_from_planner_json(req.edl)
     except EdlValidationError as e:
         logger.warning("[%s] EDL validation failed: %s", job_uuid, e)
+        _emit_editing_plan(
+            req,
+            job_id=job_uuid,
+            success=False,
+            started=started,
+            ffmpeg_calls=0,
+            output_text=str(e),
+            error="edl_invalid",
+        )
         raise HTTPException(400, {"error": "edl_invalid", "detail": str(e)}) from e
 
-    # 2. Stage inputs from GCS into a tmp dir.
-    work_root = Path(tempfile.mkdtemp(prefix=f"editing-agent-{job_uuid}-"))
+    # 2. Stage inputs from GCS into a per-request work dir.
+    work_root = _work_root(job_uuid)
     inputs_dir = work_root / "inputs"
     output_dir = work_root / "output"
     inputs_dir.mkdir(parents=True, exist_ok=True)
@@ -206,12 +319,15 @@ def edit(req: EditRequest) -> EditResponse:
             logger.info("[%s] staged %s ← %s", job_uuid, basename, gs_uri)
 
         # 3. Run the EDL. SAME executor the laptop runs.
+        ffmpeg_counter = {"count": 0}
         local_out = execute_local(
             edl,
             input_root=inputs_dir,
             output_dir=output_dir,
             output_name=Path(urlparse(req.output_uri).path).name or "edited.mp4",
+            ffmpeg_observer=_ffmpeg_observer(job_uuid, ffmpeg_counter),
         )
+        ffmpeg_calls = ffmpeg_counter["count"]
         logger.info(
             "[%s] ffmpeg done: %s (%.0f bytes)",
             job_uuid, local_out, local_out.stat().st_size,
@@ -223,6 +339,21 @@ def edit(req: EditRequest) -> EditResponse:
         logger.info(
             "[%s] /edit OK in %.1fs → %s", job_uuid, duration, out_uri,
         )
+        _emit_editing_plan(
+            req,
+            job_id=job_uuid,
+            success=True,
+            started=started,
+            ffmpeg_calls=ffmpeg_calls,
+            output_text={
+                "output_uri": out_uri,
+                "shots": len(edl.shots),
+                "mode": edl.mode,
+                "lut": edl.lut,
+                "aspect": edl.aspect,
+            },
+        )
+        plan_emitted = True
         return EditResponse(
             output_uri=out_uri,
             duration_s=round(duration, 2),
@@ -232,11 +363,23 @@ def edit(req: EditRequest) -> EditResponse:
             ),
         )
     except subprocess.CalledProcessError as e:
+        ffmpeg_calls = max(ffmpeg_calls, int((locals().get("ffmpeg_counter") or {}).get("count", 0)))
         # ffmpeg returned non-zero — usually a malformed filter graph.
         # Surface the stderr tail so the laptop client (or human)
         # can act on it.
         tb = traceback.format_exc()
         logger.error("[%s] ffmpeg failed: %s\n%s", job_uuid, e, tb)
+        if not plan_emitted:
+            _emit_editing_plan(
+                req,
+                job_id=job_uuid,
+                success=False,
+                started=started,
+                ffmpeg_calls=ffmpeg_calls,
+                output_text=(e.stderr or "")[-2000:],
+                error="ffmpeg_failed",
+            )
+            plan_emitted = True
         raise HTTPException(
             500,
             {
@@ -245,16 +388,40 @@ def edit(req: EditRequest) -> EditResponse:
                 "stderr_tail": (e.stderr or "")[-2000:],
             },
         ) from e
-    except HTTPException:
+    except HTTPException as e:
+        ffmpeg_calls = max(ffmpeg_calls, int((locals().get("ffmpeg_counter") or {}).get("count", 0)))
+        if not plan_emitted:
+            _emit_editing_plan(
+                req,
+                job_id=job_uuid,
+                success=False,
+                started=started,
+                ffmpeg_calls=ffmpeg_calls,
+                output_text=getattr(e, "detail", ""),
+                error="http_exception",
+            )
+            plan_emitted = True
         raise
     except Exception as e:  # noqa: BLE001
+        ffmpeg_calls = max(ffmpeg_calls, int((locals().get("ffmpeg_counter") or {}).get("count", 0)))
         tb = traceback.format_exc()
         logger.error("[%s] unhandled: %s\n%s", job_uuid, e, tb)
+        if not plan_emitted:
+            _emit_editing_plan(
+                req,
+                job_id=job_uuid,
+                success=False,
+                started=started,
+                ffmpeg_calls=ffmpeg_calls,
+                output_text=f"{e}\n{tb[:2000]}",
+                error=type(e).__name__,
+            )
+            plan_emitted = True
         raise HTTPException(
             500, {"error": "internal", "detail": f"{e}\n{tb[:2000]}"},
         ) from e
     finally:
-        # Always wipe the tempdir — Cloud Run's local FS is ephemeral
+        # Always wipe the work dir — Cloud Run's local FS is ephemeral
         # but explicit cleanup keeps long-running container instances
         # from filling up between requests.
         shutil.rmtree(work_root, ignore_errors=True)

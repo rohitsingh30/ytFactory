@@ -70,7 +70,7 @@ class FootageFiller:
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-pix_fmt", "yuv420p",
             str(out_path),
-        ])
+        ], purpose="footage_filler_solid")
 
         return VisualTrack(
             video_path=out_path,

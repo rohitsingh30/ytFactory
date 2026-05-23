@@ -45,7 +45,7 @@ class SilentMusic:
             "-i", "anullsrc=r=24000:cl=mono",
             "-c:a", "pcm_s16le",
             str(out_path),
-        ])
+        ], purpose="silent_music")
         return out_path
 
 

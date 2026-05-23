@@ -40,6 +40,7 @@ from pipeline.render.contracts import (
     TimelineBuilder,
     register_plugin,
 )
+from pipeline.render.telemetry_helpers import emit_timeline_telemetry
 
 _logger = logging.getLogger(__name__)
 
@@ -68,13 +69,20 @@ class AsrAnchors:
             # Single-section fallback: one Segment covering the whole
             # narration. Matches the behavior of long_form when an
             # envelope ships without sections[].
-            return [Segment(
+            timeline = [Segment(
                 start_s=0.0,
                 end_s=audio.duration_s,
                 text=script.get("narration", ""),
                 anchor_id="full",
                 kind="section",
             )]
+            emit_timeline_telemetry(
+                timeline,
+                total_seconds=audio.duration_s,
+                unanchored_count=0,
+                anchor_method="single_section",
+            )
+            return timeline
 
         kind = "chapter" if "chapters" in script else "section"
         anchors = [(s.get("title") or "").strip() for s in sections]
@@ -115,6 +123,12 @@ class AsrAnchors:
                         seg.anchor_id = str(sec.get("id") or f"sec_{i:03d}")
                 _logger.info("asr_anchors: cloud whisper anchored %d sections",
                              len(cloud_segs))
+                emit_timeline_telemetry(
+                    cloud_segs,
+                    total_seconds=audio.duration_s,
+                    unanchored_count=max(0, len(sections) - len(cloud_segs)),
+                    anchor_method="cloud_anchors",
+                )
                 return cloud_segs
         except Exception as exc:  # noqa: BLE001
             if os.environ.get("CLOUDRUN_ASR_DISABLE_FALLBACK") == "1":
@@ -134,13 +148,27 @@ class AsrAnchors:
                         "start_s": float(w.get("start", 0)),
                         "end_s": float(w.get("end", 0)),
                     })
-            return self._anchor_sections_to_words(sections, words, kind, audio.duration_s)
+            timeline = self._anchor_sections_to_words(sections, words, kind, audio.duration_s)
+            emit_timeline_telemetry(
+                timeline,
+                total_seconds=audio.duration_s,
+                unanchored_count=0,
+                anchor_method="local_anchors",
+            )
+            return timeline
         except Exception as exc:  # noqa: BLE001
             # Cloud whisper down + no laptop whisper available.
             # Fall back to chunk_timings if present, else equal-share.
             _logger.warning("asr_anchors: local whisper also unavailable (%s) — "
                             "using chunk_timings or equal-share", exc)
-            return self._fallback(sections, audio, kind)
+            timeline = self._fallback(sections, audio, kind)
+            emit_timeline_telemetry(
+                timeline,
+                total_seconds=audio.duration_s,
+                unanchored_count=len(sections),
+                anchor_method="chunk_or_equal_fallback",
+            )
+            return timeline
 
     def _anchor_sections_to_words(
         self,

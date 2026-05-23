@@ -38,6 +38,7 @@ class SectionVideoMux:
 
     def __init__(self) -> None:
         self._inner = BeatSlideshowMux()
+        self._inner._telemetry_purpose = "section_video_mux"
 
     def mux(
         self,

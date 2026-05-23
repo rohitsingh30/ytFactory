@@ -10,7 +10,6 @@ The ffmpeg amix chain was inlined from the legacy
 from __future__ import annotations
 
 import logging
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +18,8 @@ from pipeline.render.contracts import (
     Section,
     register_plugin,
 )
+from pipeline.render.shared.ffmpeg_helpers import run_ffmpeg
+from pipeline.render.telemetry_helpers import emit_json_artifact, track_event
 
 _logger = logging.getLogger(__name__)
 
@@ -46,7 +47,6 @@ def _mix_bed_under_narration(
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
         "-i", str(narration_path),
         "-stream_loop", "-1", "-i", str(bed_path),
         "-filter_complex",
@@ -56,7 +56,7 @@ def _mix_bed_under_narration(
         "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le",
         str(out_path),
     ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    run_ffmpeg(cmd, purpose="ducked_loop_mix")
     return out_path
 
 
@@ -70,12 +70,24 @@ class DuckedLoop:
         sections: list[Section] | None = None,
     ) -> Path:
         # sections unused for ducked_loop (single bed).
-        _ = sections, narration_duration_s
+        _ = sections
 
         bed_name = spec.music.default_bed
         if not bed_name or bed_name == "off":
+            track = {
+                "track_id": "silent",
+                "mood": "none",
+                "source": "music_off",
+                "duration_s": narration_duration_s,
+            }
+            track_event("music.pick", category="pipeline", metadata=track)
             from pipeline.render.music.silent import SilentMusic  # noqa: PLC0415
-            return SilentMusic().compose(spec, narration_duration_s)
+            result = SilentMusic().compose(spec, narration_duration_s)
+            emit_json_artifact(
+                "music",
+                {"track": track, "mood": "none", "duck_curve": None},
+            )
+            return result
 
         # Resolve the bed path. Pre-bigbang shorts.py looked it up via
         # cfg["music_bed_default"] under the channel YAML's music_dir;
@@ -84,8 +96,20 @@ class DuckedLoop:
         if bed_path is None or not bed_path.exists():
             _logger.warning("ducked_loop: bed %r not found at %s — falling "
                             "back to silent", bed_name, bed_path)
+            track = {
+                "track_id": "silent",
+                "mood": "none",
+                "source": "missing_bed",
+                "duration_s": narration_duration_s,
+            }
+            track_event("music.pick", category="pipeline", metadata=track)
             from pipeline.render.music.silent import SilentMusic  # noqa: PLC0415
-            return SilentMusic().compose(spec, narration_duration_s)
+            result = SilentMusic().compose(spec, narration_duration_s)
+            emit_json_artifact(
+                "music",
+                {"track": track, "mood": "none", "duck_curve": None},
+            )
+            return result
 
         # Find the narration WAV the audio stage produced (the engine
         # passes its parent path via spec.extra in tests; in production
@@ -95,21 +119,66 @@ class DuckedLoop:
             _logger.warning("ducked_loop: narration WAV not found "
                             "(spec.extra['narration_path']=%r); skipping bed",
                             (spec.extra or {}).get("narration_path"))
+            track = {
+                "track_id": "silent",
+                "mood": "none",
+                "source": "missing_narration",
+                "duration_s": narration_duration_s,
+            }
+            track_event("music.pick", category="pipeline", metadata=track)
             from pipeline.render.music.silent import SilentMusic  # noqa: PLC0415
-            return SilentMusic().compose(spec, narration_duration_s)
+            result = SilentMusic().compose(spec, narration_duration_s)
+            emit_json_artifact(
+                "music",
+                {"track": track, "mood": "none", "duck_curve": None},
+            )
+            return result
 
         out_path = Path("/tmp") / f"ducked_loop_{int(narration_duration_s * 1000)}.wav"
+        bed_db = float(spec.music.music_bed_db)
+        track = {
+            "track_id": bed_name,
+            "mood": "default",
+            "source": str(bed_path),
+            "duration_s": narration_duration_s,
+        }
+        duck_curve = {
+            "duck_curve_id": "constant_bed_attenuation",
+            "max_attenuation_db": abs(bed_db),
+            "breakpoints": [
+                {"t_s": 0.0, "attenuation_db": bed_db},
+                {"t_s": narration_duration_s, "attenuation_db": bed_db},
+            ],
+        }
+        track_event("music.pick", category="pipeline", metadata=track)
+        track_event("music.duck", category="pipeline", metadata=duck_curve)
         try:
             _mix_bed_under_narration(
                 narration_path=narration_path,
                 bed_path=bed_path,
                 out_path=out_path,
-                bed_db=spec.music.music_bed_db,
+                bed_db=bed_db,
             )
-        except subprocess.CalledProcessError as exc:
+        except Exception as exc:  # noqa: BLE001
             _logger.warning("ducked_loop: ffmpeg amix failed (%s) — silent", exc)
+            fallback = {
+                "track_id": "silent",
+                "mood": "none",
+                "source": "duck_mix_failed",
+                "duration_s": narration_duration_s,
+            }
+            track_event("music.pick", category="pipeline", metadata=fallback)
             from pipeline.render.music.silent import SilentMusic  # noqa: PLC0415
-            return SilentMusic().compose(spec, narration_duration_s)
+            result = SilentMusic().compose(spec, narration_duration_s)
+            emit_json_artifact(
+                "music",
+                {"track": fallback, "mood": "none", "duck_curve": duck_curve},
+            )
+            return result
+        emit_json_artifact(
+            "music",
+            {"track": track, "mood": "default", "duck_curve": duck_curve},
+        )
         return out_path
 
     def _resolve_bed_path(self, spec: Any, bed_name: str) -> Path | None:

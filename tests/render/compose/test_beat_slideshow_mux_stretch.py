@@ -55,7 +55,7 @@ class SetptsStretchInsteadOfTpadCloneTest(unittest.TestCase):
         """Invoke the mux with mocked run_ffmpeg, return the cmd list."""
         captured: list[str] = []
 
-        def _fake_run_ffmpeg(cmd: list[str]) -> None:
+        def _fake_run_ffmpeg(cmd: list[str], **_kwargs) -> None:
             captured.extend(cmd)
 
         spec = _FakeSpec()

@@ -27,6 +27,7 @@ still return ``[]`` silently (user explicitly opted out).
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,7 @@ from pipeline.render.contracts import (
     Timeline,
     register_plugin,
 )
+from pipeline.render.telemetry_helpers import track_event
 
 
 class WordCaptionPngs:
@@ -108,9 +110,11 @@ class WordCaptionPngs:
         )
         if has_word_timings:
             try:
+                t0 = time.perf_counter()
                 ass_path = self._build_word_caption_ass(
                     spec, timeline, font_size, out_dir,
                 )
+                duration_ms = int((time.perf_counter() - t0) * 1000)
             except Exception as exc:  # noqa: BLE001
                 _logger.warning(
                     "word_caption_pngs: ASS build failed (%s) — "
@@ -118,6 +122,18 @@ class WordCaptionPngs:
                 )
             else:
                 if timeline:
+                    count, total_chars = self._caption_stats(timeline)
+                    track_event(
+                        "overlay.render",
+                        category="pipeline",
+                        duration_ms=duration_ms,
+                        metadata={
+                            "kind": "word",
+                            "count": count,
+                            "total_chars": total_chars,
+                            "duration_ms": duration_ms,
+                        },
+                    )
                     return [OverlayElement(
                         start_s=timeline[0].start_s,
                         end_s=timeline[-1].end_s,
@@ -163,15 +179,28 @@ class WordCaptionPngs:
                         continue
                     png_path = out_dir / f"word_{word_idx:04d}.png"
                     try:
+                        t0 = time.perf_counter()
                         render_word_caption(
                             text,
                             png_path,
                             canvas_w=spec.output_resolution[0],
                             font_size=font_size,
                         )
+                        duration_ms = int((time.perf_counter() - t0) * 1000)
                     except Exception:  # noqa: BLE001
                         word_idx += 1
                         continue
+                    track_event(
+                        "overlay.render",
+                        category="pipeline",
+                        duration_ms=duration_ms,
+                        metadata={
+                            "kind": "word",
+                            "count": 1,
+                            "total_chars": len(text),
+                            "duration_ms": duration_ms,
+                        },
+                    )
                     elements.append(OverlayElement(
                         start_s=start_s,
                         end_s=end_s,
@@ -186,15 +215,28 @@ class WordCaptionPngs:
                 # segment's duration. Pre-2026-05-17 behaviour.
                 png_path = out_dir / f"word_{word_idx:04d}.png"
                 try:
+                    t0 = time.perf_counter()
                     render_word_caption(
                         seg.text,
                         png_path,
                         canvas_w=spec.output_resolution[0],
                         font_size=font_size,
                     )
+                    duration_ms = int((time.perf_counter() - t0) * 1000)
                 except Exception:  # noqa: BLE001
                     word_idx += 1
                     continue
+                track_event(
+                    "overlay.render",
+                    category="pipeline",
+                    duration_ms=duration_ms,
+                    metadata={
+                        "kind": "word",
+                        "count": 1,
+                        "total_chars": len(seg.text or ""),
+                        "duration_ms": duration_ms,
+                    },
+                )
                 elements.append(OverlayElement(
                     start_s=seg.start_s,
                     end_s=seg.end_s,
@@ -204,6 +246,25 @@ class WordCaptionPngs:
                 ))
                 word_idx += 1
         return elements
+
+    def _caption_stats(self, timeline: Timeline) -> tuple[int, int]:
+        count = 0
+        total_chars = 0
+        for seg in timeline:
+            words = getattr(seg, "words", None)
+            if words:
+                for w in words:
+                    text = (getattr(w, "text", "") or "").strip()
+                    if not text or not any(ch.isalnum() for ch in text):
+                        continue
+                    count += 1
+                    total_chars += len(text)
+            else:
+                text = (seg.text or "").strip()
+                if text:
+                    count += 1
+                    total_chars += len(text)
+        return count, total_chars
 
     def _font_size_for_density(self, spec: Any) -> int:
         # CaptionsDensity → font size: minimal=biggest, dense=smallest.

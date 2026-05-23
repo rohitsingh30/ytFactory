@@ -17,6 +17,7 @@ the helper-import dependency so ``sports_doc.py`` can be deleted.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from pipeline.render.contracts import (
     Timeline,
     register_plugin,
 )
+from pipeline.render.telemetry_helpers import track_event
 
 _logger = logging.getLogger(__name__)
 
@@ -131,6 +133,7 @@ class LowerThird:
                 continue
             png_path = out_dir / f"lt_{i:03d}.png"
             try:
+                t0 = time.perf_counter()
                 _render_lower_third_png(
                     speaker=speaker,
                     handle=handle,
@@ -141,8 +144,20 @@ class LowerThird:
                     font_size=spec.lower_third.font_size,
                     handle_font_size=spec.lower_third.handle_font_size,
                 )
+                duration_ms = int((time.perf_counter() - t0) * 1000)
             except Exception:  # noqa: BLE001
                 continue
+            track_event(
+                "overlay.render",
+                category="pipeline",
+                duration_ms=duration_ms,
+                metadata={
+                    "kind": "lower",
+                    "count": 1,
+                    "total_chars": len(speaker) + len(handle),
+                    "duration_ms": duration_ms,
+                },
+            )
             hold = max(seg.end_s - seg.start_s, spec.lower_third.hold_min_s)
             elements.append(OverlayElement(
                 start_s=seg.start_s,

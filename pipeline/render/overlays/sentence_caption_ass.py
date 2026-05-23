@@ -21,6 +21,7 @@ can be deleted.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ from pipeline.render.contracts import (
     Timeline,
     register_plugin,
 )
+from pipeline.render.telemetry_helpers import track_event
 
 
 class SentenceCaptionAss:
@@ -64,12 +66,25 @@ class SentenceCaptionAss:
         # Defer to the existing helper. It accepts caption-style
         # kwargs we map from spec.caption_style; for now use defaults
         # (the bigbang PR plumbs spec.caption_style fields end-to-end).
+        t0 = time.perf_counter()
         build_captions_ass(
             cues=cues,
             out_path=out_path,
             total_duration_s=audio.duration_s,
             play_res_x=spec.caption_style.play_res_x,
             play_res_y=spec.caption_style.play_res_y,
+        )
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        track_event(
+            "overlay.render",
+            category="pipeline",
+            duration_ms=duration_ms,
+            metadata={
+                "kind": "sentence",
+                "count": len(cues),
+                "total_chars": sum(len(c[2] or "") for c in cues),
+                "duration_ms": duration_ms,
+            },
         )
 
         return [OverlayElement(

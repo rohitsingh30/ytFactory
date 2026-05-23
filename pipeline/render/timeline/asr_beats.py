@@ -35,6 +35,7 @@ from pipeline.render.contracts import (
     TimelineBuilder,
     register_plugin,
 )
+from pipeline.render.telemetry_helpers import emit_timeline_telemetry
 
 _logger = logging.getLogger(__name__)
 
@@ -103,7 +104,7 @@ class AsrBeats:
                     max_s=max_s,
                     forced_narration_lines=forced_lines or None,
                 )
-                return [
+                timeline = [
                     Segment(
                         start_s=float(b.start),
                         end_s=float(b.end),
@@ -114,6 +115,13 @@ class AsrBeats:
                     )
                     for i, b in enumerate(beats)
                 ]
+                emit_timeline_telemetry(
+                    timeline,
+                    total_seconds=audio.duration_s,
+                    unanchored_count=0,
+                    anchor_method="cloud_words",
+                )
+                return timeline
         except Exception as exc:  # noqa: BLE001
             if os.environ.get("CLOUDRUN_ASR_DISABLE_FALLBACK") == "1":
                 raise
@@ -134,7 +142,14 @@ class AsrBeats:
             from pipeline.beats import split_with_forced_boundaries  # noqa: PLC0415
         except ImportError as exc:
             _logger.error("asr_beats: local whisper unavailable: %s", exc)
-            return []
+            timeline: Timeline = []
+            emit_timeline_telemetry(
+                timeline,
+                total_seconds=audio.duration_s,
+                unanchored_count=len(self._forced_beat_texts(script)),
+                anchor_method="local_unavailable",
+            )
+            return timeline
 
         result = transcribe(audio.narration_path)
         # Flatten word-level timestamps. Whisper occasionally emits
@@ -180,7 +195,14 @@ class AsrBeats:
                 "(forced_lines / asr_anchors).",
                 audio.narration_path,
             )
-            return []
+            timeline: Timeline = []
+            emit_timeline_telemetry(
+                timeline,
+                total_seconds=audio.duration_s,
+                unanchored_count=len(self._forced_beat_texts(script)),
+                anchor_method="local_empty_alignment",
+            )
+            return timeline
 
         forced_lines = self._forced_beat_texts(script)
         try:
@@ -205,15 +227,22 @@ class AsrBeats:
         except Exception as exc:  # noqa: BLE001
             _logger.warning("asr_beats: beat-split failed (%s) — "
                             "falling back to one segment per word", exc)
-            return [
+            timeline = [
                 Segment(
                     start_s=w["start"], end_s=w["end"],
                     text=w["text"], anchor_id=f"word_{i:04d}", kind="word",
                 )
                 for i, w in enumerate(words)
             ]
+            emit_timeline_telemetry(
+                timeline,
+                total_seconds=audio.duration_s,
+                unanchored_count=len(timeline),
+                anchor_method="local_word_fallback",
+            )
+            return timeline
 
-        return [
+        timeline = [
             Segment(
                 start_s=float(b.start),
                 end_s=float(b.end),
@@ -229,6 +258,13 @@ class AsrBeats:
             )
             for i, b in enumerate(beats)
         ]
+        emit_timeline_telemetry(
+            timeline,
+            total_seconds=audio.duration_s,
+            unanchored_count=0,
+            anchor_method="local_whisper",
+        )
+        return timeline
 
     def _language_hint(self, spec: Any) -> str | None:
         # Channel YAML may provide ``language`` at root level (hi / en / etc).

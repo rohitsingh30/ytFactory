@@ -20,6 +20,7 @@ with what every existing channel YAML's ``closer_format`` already expects.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from pipeline.render.contracts import (
     Timeline,
     register_plugin,
 )
+from pipeline.render.telemetry_helpers import track_event
 
 _logger = logging.getLogger(__name__)
 
@@ -72,18 +74,31 @@ class CloserPanel:
 
         try:
             from pipeline.captions import render_closer_panel  # noqa: PLC0415
+            t0 = time.perf_counter()
             render_closer_panel(
                 out_path,
                 closer_format=closer_format,
                 canvas_w=spec.output_resolution[0],
                 canvas_h=max(240, spec.output_resolution[1] // 3),
             )
+            duration_ms = int((time.perf_counter() - t0) * 1000)
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
                 "closer_panel: render_closer_panel failed (%s) — skipping",
                 exc,
             )
             return []
+        track_event(
+            "overlay.render",
+            category="pipeline",
+            duration_ms=duration_ms,
+            metadata={
+                "kind": "closer",
+                "count": 1,
+                "total_chars": len(closer_format),
+                "duration_ms": duration_ms,
+            },
+        )
 
         return [OverlayElement(
             start_s=start_s,

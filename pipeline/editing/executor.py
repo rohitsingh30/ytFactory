@@ -37,10 +37,10 @@ import logging
 import shlex
 import shutil
 import subprocess
-import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .schema import (
     Edl,
@@ -304,6 +304,7 @@ def execute_local(
     output_dir: Path,
     output_name: str = "edited.mp4",
     timeout_s: int = 1800,
+    ffmpeg_observer: Callable[[list[str], int, str, int, Path], None] | None = None,
 ) -> Path:
     """Compile + run the EDL on the local ffmpeg. Returns the produced
     mp4 path. Raises :class:`subprocess.CalledProcessError` on ffmpeg
@@ -317,6 +318,7 @@ def execute_local(
     logger.info("editing.executor: %s", compiled.note)
     logger.debug("editing.executor cmd: %s", " ".join(shlex.quote(c) for c in compiled.cmd))
 
+    t0 = time.perf_counter()
     proc = subprocess.run(
         compiled.cmd,
         check=False,
@@ -324,6 +326,18 @@ def execute_local(
         text=True,
         timeout=timeout_s,
     )
+    duration_ms = int((time.perf_counter() - t0) * 1000)
+    if ffmpeg_observer:
+        try:
+            ffmpeg_observer(
+                compiled.cmd,
+                int(proc.returncode),
+                proc.stderr or "",
+                duration_ms,
+                compiled.output_path,
+            )
+        except Exception:  # noqa: BLE001
+            pass
     if proc.returncode != 0:
         # Surface the tail of stderr — ffmpeg errors are usually in the
         # last 20 lines.

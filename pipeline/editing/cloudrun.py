@@ -28,7 +28,9 @@ from typing import Optional
 
 import requests
 
+from pipeline import observability as obs
 from pipeline.cloud.cloudrun_auth import get_id_token
+from pipeline.observability.event_helpers import inject_trace_headers
 
 from .circuit_breaker import (
     CloudRunUnavailable,
@@ -62,6 +64,36 @@ def _timeout_s() -> int:
 
 def _bucket() -> str:
     return os.environ.get("YTFACTORY_BUCKET", "ytfactory-prod-v3-artifacts")
+
+
+def _track_http_call(
+    *,
+    method: str,
+    url: str,
+    status_code: int | None,
+    duration_ms: int,
+    request_body: object | None = None,
+    response_body: object | None = None,
+    success: bool,
+) -> None:
+    try:
+        obs.track(
+            "http.call",
+            category="http",
+            success=success,
+            duration_ms=duration_ms,
+            job_id=os.environ.get("YTFACTORY_JOB_ID") or None,
+            metadata={
+                "service": "editing-agent",
+                "method": method,
+                "url": url,
+                "status_code": status_code,
+                "request_sha256": obs.hash_full(request_body),
+                "response_sha256": obs.hash_full(response_body),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # --- GCS helpers (lazy-import google-cloud-storage so laptop fallback
@@ -127,17 +159,31 @@ def _post_edit(url: str, payload: dict) -> dict:
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
+    inject_trace_headers(headers)
     timeout = _timeout_s()
+    body = json.dumps(payload)
+    endpoint = f"{url}/edit"
     backoff_s = [1, 2, 4, 8]
     last_err: Exception | None = None
     for attempt in (1, 2, 3, 4, 5):
         sess = requests.Session()
+        t0 = time.perf_counter()
         try:
             resp = sess.post(
-                f"{url}/edit",
-                data=json.dumps(payload),
+                endpoint,
+                data=body,
                 headers=headers,
                 timeout=timeout,
+            )
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+            _track_http_call(
+                method="POST",
+                url=endpoint,
+                status_code=resp.status_code,
+                duration_ms=duration_ms,
+                request_body=body,
+                response_body=resp.text,
+                success=resp.status_code == 200,
             )
             if resp.status_code in (429, 503) and attempt <= 4:
                 wait = backoff_s[attempt - 1]
@@ -155,6 +201,16 @@ def _post_edit(url: str, payload: dict) -> dict:
                 )
             return resp.json()
         except requests.exceptions.RequestException as e:
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+            _track_http_call(
+                method="POST",
+                url=endpoint,
+                status_code=None,
+                duration_ms=duration_ms,
+                request_body=body,
+                response_body=str(e),
+                success=False,
+            )
             last_err = e
             if attempt < 5:
                 wait = backoff_s[min(attempt - 1, len(backoff_s) - 1)]
@@ -255,14 +311,40 @@ def warmup() -> bool:
         url = _service_url()
     except CloudRunUnavailable:
         return False
+    endpoint = f"{url}/readyz"
     try:
         token = get_id_token(url)
+        headers = {"Authorization": f"Bearer {token}"}
+        inject_trace_headers(headers)
+        t0 = time.perf_counter()
         resp = requests.get(
-            f"{url}/readyz",
-            headers={"Authorization": f"Bearer {token}"},
+            endpoint,
+            headers=headers,
             timeout=60,
+        )
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        _track_http_call(
+            method="GET",
+            url=endpoint,
+            status_code=resp.status_code,
+            duration_ms=duration_ms,
+            request_body=None,
+            response_body=resp.text,
+            success=resp.status_code == 200,
         )
         return resp.status_code == 200
     except Exception as e:  # noqa: BLE001
+        try:
+            _track_http_call(
+                method="GET",
+                url=endpoint,
+                status_code=None,
+                duration_ms=0,
+                request_body=None,
+                response_body=str(e),
+                success=False,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         logger.info("editing-agent warmup probe failed: %s", e)
         return False

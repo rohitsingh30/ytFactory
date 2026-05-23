@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from pipeline.render.contracts import (
     register_plugin,
 )
 from pipeline.render.shared.trim_letterbox import trim_clip_letterbox
+from pipeline.render.telemetry_helpers import track_event
 
 _logger = logging.getLogger(__name__)
 
@@ -129,6 +131,7 @@ class AnchoredFootage:
                 end_s = start_s + float(entry.get("duration_s", 5))
                 cid = entry.get("id", "anchored")
                 try:
+                    t0 = time.perf_counter()
                     clip_path = _prep_footage_clip(
                         entry, sources_dir, out_dir,
                         spec.output_resolution[0],
@@ -136,9 +139,21 @@ class AnchoredFootage:
                         spec.output_fps,
                         None,  # no grade filter — bigbang plumbs from spec
                     )
+                    duration_ms = int((time.perf_counter() - t0) * 1000)
                 except Exception as exc:  # noqa: BLE001
                     _logger.warning("anchored_footage: skip %s (%s)", cid, exc)
                     continue
+                track_event(
+                    "overlay.render",
+                    category="pipeline",
+                    duration_ms=duration_ms,
+                    metadata={
+                        "kind": "anchor",
+                        "count": 1,
+                        "total_chars": len(str(cid or "")),
+                        "duration_ms": duration_ms,
+                    },
+                )
                 elements.append(OverlayElement(
                     start_s=start_s,
                     end_s=end_s,

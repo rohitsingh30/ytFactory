@@ -13,6 +13,7 @@ as part of the bigbang follow-up.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from pipeline.render.contracts import (
     Timeline,
     register_plugin,
 )
+from pipeline.render.telemetry_helpers import track_event
 
 _logger = logging.getLogger(__name__)
 
@@ -128,6 +130,7 @@ class ChapterCard:
         for i, seg in enumerate(chapters):
             png_path = out_dir / f"cc_{i:03d}.png"
             try:
+                t0 = time.perf_counter()
                 _render_chapter_card_png(
                     chapter_index=i + 1,
                     title=seg.text,
@@ -139,8 +142,20 @@ class ChapterCard:
                     number_font_size=spec.chapter_card.number_font_size,
                     title_font_size=spec.chapter_card.title_font_size,
                 )
+                duration_ms = int((time.perf_counter() - t0) * 1000)
             except Exception:  # noqa: BLE001
                 continue
+            track_event(
+                "overlay.render",
+                category="pipeline",
+                duration_ms=duration_ms,
+                metadata={
+                    "kind": "chap",
+                    "count": 1,
+                    "total_chars": len(seg.text or ""),
+                    "duration_ms": duration_ms,
+                },
+            )
             elements.append(OverlayElement(
                 start_s=seg.start_s,
                 end_s=seg.start_s + spec.chapter_card.duration_s,

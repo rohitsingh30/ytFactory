@@ -19,6 +19,7 @@ from pipeline.render.contracts import (
     register_plugin,
 )
 from pipeline.render.shared.ffmpeg_helpers import run_ffmpeg
+from pipeline.render.telemetry_helpers import emit_json_artifact, track_event
 
 _logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ def _synthesize_ambient_bed(out_path: Path, duration_s: float) -> Path:
     run_ffmpeg([
         "-filter_complex", flt, "-map", "[a]",
         "-c:a", "pcm_s16le", str(out_path),
-    ])
+    ], purpose="single_bed_synth")
     return out_path
 
 
@@ -72,12 +73,23 @@ class SingleBed:
             if bed_path and bed_path.exists():
                 # Loop the curated bed via ffmpeg stream_loop + atrim.
                 try:
+                    track = {
+                        "track_id": bed_name,
+                        "mood": "default",
+                        "source": str(bed_path),
+                        "duration_s": narration_duration_s,
+                    }
+                    track_event("music.pick", category="pipeline", metadata=track)
                     run_ffmpeg([
                         "-stream_loop", "-1", "-i", str(bed_path),
                         "-t", f"{narration_duration_s:.3f}",
                         "-c:a", "pcm_s16le",
                         str(out_path),
-                    ])
+                    ], purpose="single_bed_loop")
+                    emit_json_artifact(
+                        "music",
+                        {"track": track, "mood": "default", "duck_curve": None},
+                    )
                     return out_path
                 except Exception as exc:  # noqa: BLE001
                     _logger.warning("single_bed: failed to loop bed %s (%s) "
@@ -85,7 +97,19 @@ class SingleBed:
 
         # No bed file → synth the ambient drone. Same fallback shape
         # legacy long_form.build_music_bed used.
-        return _synthesize_ambient_bed(out_path, narration_duration_s)
+        track = {
+            "track_id": "ambient_synth",
+            "mood": "ambient",
+            "source": "ffmpeg_lavfi",
+            "duration_s": narration_duration_s,
+        }
+        track_event("music.pick", category="pipeline", metadata=track)
+        result = _synthesize_ambient_bed(out_path, narration_duration_s)
+        emit_json_artifact(
+            "music",
+            {"track": track, "mood": "ambient", "duck_curve": None},
+        )
+        return result
 
     def _resolve_bed_path(self, spec: Any, bed_name: str) -> Path | None:
         """Find the bed mp3/wav under <channel>/music/ or

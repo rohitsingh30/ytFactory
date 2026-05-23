@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from pipeline.render.spec import RenderKind, RenderSpec
+from pipeline.render.telemetry_helpers import enum_value, track_event
 
 # Engine functions are imported lazily to keep this module's import
 # cheap (``video.py`` imports this at module top).
@@ -54,6 +55,7 @@ def pick_engine(spec: RenderSpec) -> EngineFn:
     """
     if spec.kind == RenderKind.SHORT:
         from pipeline.render.short_engine import render_short  # noqa: PLC0415
+        _emit_engine_pick(spec, render_short)
         return render_short
 
     # All long-shaped kinds (LONG_FORM / SPORTS_DOC / FOOTAGE_ONLY) go
@@ -62,9 +64,23 @@ def pick_engine(spec: RenderSpec) -> EngineFn:
     # Bigbang PR collapses these three to a single LONG enum value.
     if spec.kind in {RenderKind.LONG_FORM, RenderKind.SPORTS_DOC, RenderKind.FOOTAGE_ONLY}:
         from pipeline.render.long_engine import render_long  # noqa: PLC0415
+        _emit_engine_pick(spec, render_long)
         return render_long
 
     raise ValueError(f"engine.pick_engine: unknown kind={spec.kind!r}")
+
+
+def _emit_engine_pick(spec: RenderSpec, fn: EngineFn) -> None:
+    track_event(
+        "engine.pick",
+        category="pipeline",
+        metadata={
+            "chosen": getattr(fn, "__name__", str(fn)),
+            "kind": enum_value(spec.kind),
+            "format": getattr(spec, "format", None),
+            "channel": spec.channel,
+        },
+    )
 
 
 __all__ = ["pick_engine", "EngineFn", "ProgressCallback"]
