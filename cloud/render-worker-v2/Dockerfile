@@ -72,6 +72,7 @@ COPY control/       /workspace/control/
 COPY scripts/       /workspace/scripts/
 
 COPY cloud/render-worker-v2/entrypoint.py /workspace/cloud/render-worker-v2/entrypoint.py
+COPY cloud/render-worker-v2/writeback.py /workspace/cloud/render-worker-v2/writeback.py
 COPY cloud/render-worker-v2/otel_init.py /workspace/otel_init.py
 COPY cloud/render-worker-v2/cloud_run_json_exporter.py /workspace/cloud_run_json_exporter.py
 
