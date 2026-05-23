@@ -124,6 +124,23 @@ KNOWN_KINDS: set[str] = {
     "cast",
     "panels",
     "preview",
+    # Telemetry-era additions (2026-05-24). One canonical artifact per
+    # render stage so a post-mortem from gs://.../jobs/<id>/ alone can
+    # reconstruct the full input/output tree without needing to grep
+    # Cloud Logs. Each kind lands at jobs/<id>/<kind>/<filename>.
+    "prompts_raw",       # what the LLM author returned, pre-refiner
+    "prompts_refined",   # refiner output incl. per-beat status
+    "refiner_io",        # exact prompt + raw response that refiner saw
+    "image_meta",        # per-image: prompt, sha, seed, dims, latency
+    "tts_chunks",        # per-chunk text + provider + wav_seconds + cache
+    "asr_alignment",     # full whisper alignment + anchor matches
+    "timeline",          # beat → time-range mapping
+    "music",             # which track, why, ducking decisions
+    "compose",           # ffmpeg args + output stats
+    "render_plan",       # engine pick + resolved plugin slots
+    "decision_log",      # ordered list of non-trivial fallback decisions
+    "events_log",        # full chronological event stream (jsonl)
+    "source",            # raw fetched source body (pre-rewrite)
 }
 
 
@@ -371,4 +388,92 @@ def _update_firestore_artifact(
         )
 
 
-__all__ = ["emit_artifact", "emit_artifact_failed", "KNOWN_KINDS"]
+__all__ = [
+    "emit_artifact",
+    "emit_artifact_failed",
+    "emit_artifact_json",
+    "KNOWN_KINDS",
+]
+
+
+def emit_artifact_json(
+    job_id: str,
+    kind: str,
+    data: Any,
+    *,
+    filename: str | None = None,
+    index: int | None = None,
+    extras: dict[str, Any] | None = None,
+) -> str | None:
+    """Convenience: dump ``data`` to JSON in a temp file and emit_artifact it.
+
+    Saves callers from writing the same five-line "dump to tmp +
+    emit_artifact + cleanup" pattern at every stage boundary. Used by
+    the stage_envelope decorator and by every new telemetry artifact
+    added in the 2026-05-24 observability pass.
+
+    Filename defaults to ``<kind>.json``.
+
+    Never raises — JSON serialisation failures fall through to the
+    standard emit_artifact warning + return None path.
+    """
+    import json as _json  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    filename = filename or f"{kind}.json"
+    try:
+        # Custom default coerces dataclasses / pathlib / set / bytes
+        # into something JSON can render without exploding the render
+        # on a single non-serialisable field.
+        def _fallback(o: Any) -> Any:
+            try:
+                if isinstance(o, (set, frozenset)):
+                    return sorted(o)
+                if isinstance(o, (bytes, bytearray)):
+                    return o.decode("utf-8", errors="replace")
+                if hasattr(o, "__dict__"):
+                    return {k: v for k, v in vars(o).items() if not k.startswith("_")}
+            except Exception:  # noqa: BLE001
+                pass
+            return repr(o)
+
+        body = _json.dumps(data, indent=2, default=_fallback, sort_keys=False)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning(
+            "emit_artifact_json: JSON encode failed kind=%s job=%s: %s",
+            kind, job_id, exc,
+        )
+        return None
+
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".json", delete=False, encoding="utf-8",
+    ) as tmp:
+        tmp.write(body)
+        tmp_path = Path(tmp.name)
+    try:
+        # Rename to the requested filename so the GCS object has the
+        # right name (emit_artifact uses local.name as the blob filename).
+        target = tmp_path.with_name(filename)
+        try:
+            tmp_path.replace(target)
+        except OSError:
+            # Cross-device or permission issue — fall back to using the
+            # tmp path as-is; the blob will have a tmp-style name.
+            target = tmp_path
+        return emit_artifact(
+            job_id=job_id,
+            kind=kind,
+            local_path=target,
+            index=index,
+            extras=extras,
+            content_type="application/json",
+        )
+    finally:
+        # Best-effort cleanup; cloud workdirs are ephemeral so leaks
+        # don't accumulate.
+        for p in (tmp_path, target if 'target' in locals() else None):
+            try:
+                if p and p.exists():
+                    p.unlink()
+            except Exception:  # noqa: BLE001
+                pass

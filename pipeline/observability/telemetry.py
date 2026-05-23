@@ -41,6 +41,43 @@ EVENT_LOG_NAME = "ytfactory.event"
 
 _INSTRUMENTS: dict[str, Any] = {}
 
+# Audit T1.20 (2026-05-24) — fan-out subscribers for every emitted
+# event. Consumers (e.g. cloud/render-worker-v2/_stage_envelope.py's
+# EventsBuffer) register a callback; we invoke each on every track()
+# call. Subscribers MUST be cheap and MUST NOT raise. We swallow
+# their exceptions so a broken subscriber can't break the pipeline.
+_SUBSCRIBERS: list[Any] = []
+
+
+def subscribe(callback: Any) -> None:
+    """Register ``callback(event_dict)`` to be called on every track().
+
+    The ``event_dict`` is the same body used for the structured log
+    record: ``{event, category, success, duration_ms, job_id,
+    metadata}``. Subscribers MUST NOT raise; exceptions are swallowed.
+
+    Idempotent — registering the same callable twice is a no-op.
+    """
+    if callback not in _SUBSCRIBERS:
+        _SUBSCRIBERS.append(callback)
+
+
+def unsubscribe(callback: Any) -> None:
+    """Remove a previously-registered subscriber. Idempotent."""
+    try:
+        _SUBSCRIBERS.remove(callback)
+    except ValueError:
+        pass
+
+
+def _fanout(body: dict[str, Any]) -> None:
+    """Notify every subscriber. Swallows all exceptions."""
+    for cb in list(_SUBSCRIBERS):
+        try:
+            cb(body)
+        except Exception:  # noqa: BLE001
+            pass
+
 
 def _histogram():
     h = _INSTRUMENTS.get("hist")
@@ -192,6 +229,14 @@ def track(
             metadata=metadata or {},
             attrs=attrs,
         )
+        _fanout({
+            "event": event,
+            "category": category,
+            "success": bool(success),
+            "duration_ms": duration_ms,
+            "job_id": job_id,
+            "metadata": metadata or {},
+        })
     except Exception:  # noqa: BLE001
         # Telemetry failure must never break the pipeline.
         pass
