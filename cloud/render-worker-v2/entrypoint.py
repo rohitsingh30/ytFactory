@@ -51,6 +51,8 @@ Environment (set at deploy time on the Cloud Run Job):
 """
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import logging
 import os
@@ -74,6 +76,283 @@ logger = logging.getLogger("render-worker-v2")
 
 REPO_ROOT = Path("/workspace")
 TMP_ROOT = Path("/tmp/render")
+
+# ---------------------------------------------------------------------------
+# Render telemetry bootstrap (Phase 1)
+# ---------------------------------------------------------------------------
+# ``cloud/render-worker-v2`` is not an importable package name because of the
+# hyphen. Cloud Run imports from this directory directly; tests load this file
+# via ``importlib.util.spec_from_file_location`` from the repo root. Support both
+# without mutating sys.path globally.
+try:
+    from _stage_envelope import (  # type: ignore  # noqa: PLC0415
+        EventsBuffer,
+        install_events_buffer,
+        stage_envelope as _worker_stage_envelope,
+    )
+except ModuleNotFoundError:  # pragma: no cover - exercised by importlib-based tests
+    import importlib.util as _importlib_util  # noqa: PLC0415
+
+    _stage_env_name = "_render_worker_v2_stage_envelope"
+    _stage_env_module = sys.modules.get(_stage_env_name)
+    if _stage_env_module is None:
+        _stage_env_path = Path(__file__).with_name("_stage_envelope.py")
+        _stage_env_spec = _importlib_util.spec_from_file_location(
+            _stage_env_name,
+            _stage_env_path,
+        )
+        if _stage_env_spec is None or _stage_env_spec.loader is None:
+            raise
+        _stage_env_module = _importlib_util.module_from_spec(_stage_env_spec)
+        sys.modules[_stage_env_name] = _stage_env_module
+        _stage_env_spec.loader.exec_module(_stage_env_module)
+    EventsBuffer = _stage_env_module.EventsBuffer
+    install_events_buffer = _stage_env_module.install_events_buffer
+    _worker_stage_envelope = _stage_env_module.stage_envelope
+
+
+def _install_render_events_buffer_once() -> None:
+    """Start capturing observability events as soon as the module imports."""
+    try:
+        install_events_buffer()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("install_events_buffer failed: %s", exc)
+    try:
+        from pipeline.observability import subscribe  # noqa: PLC0415
+        subscribe(EventsBuffer.instance().append)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("EventsBuffer subscribe skipped: %s", exc)
+
+
+_install_render_events_buffer_once()
+
+
+def _current_job_id(job: dict | None = None) -> str:
+    if isinstance(job, dict):
+        return str(job.get("job_id") or os.environ.get("YTFACTORY_JOB_ID") or "")
+    return str(os.environ.get("YTFACTORY_JOB_ID") or "")
+
+
+def _safe_track_event(
+    event: str,
+    *,
+    category: str = "pipeline",
+    success: bool = True,
+    duration_ms: int | None = None,
+    job_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    try:
+        from pipeline.observability import track  # noqa: PLC0415
+        track(
+            event,
+            category=category,
+            success=success,
+            duration_ms=duration_ms,
+            job_id=job_id or _current_job_id(),
+            metadata=metadata or {},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _safe_read_json(path: str | Path | None) -> Any:
+    if not path:
+        return None
+    try:
+        p = Path(path)
+        if not p.exists():
+            return None
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _jsonable(value: Any) -> Any:
+    try:
+        json.dumps(value, default=str)
+        return value
+    except Exception:  # noqa: BLE001
+        if isinstance(value, dict):
+            return {k: _jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [_jsonable(v) for v in value]
+        return str(value)
+
+
+def _safe_emit_artifact_payload(
+    *,
+    job_id: str,
+    kind: str,
+    payload: Any,
+    extras: dict[str, Any] | None = None,
+) -> tuple[str | None, dict[str, Any]]:
+    """Best-effort artifact emission shared by helper envelopes."""
+    if payload is None or not job_id:
+        return None, {}
+    try:
+        from pipeline.render import artifacts as _artifacts  # noqa: PLC0415
+        if isinstance(payload, (str, Path)):
+            pth = Path(payload)
+            if not pth.exists():
+                return None, {}
+            uri = _artifacts.emit_artifact(
+                job_id=job_id,
+                kind=kind,
+                local_path=pth,
+                extras=extras or {},
+            )
+            return uri, {
+                "artifact_kind": kind,
+                "artifact_bytes": pth.stat().st_size,
+                "artifact_uri": uri,
+            }
+        if isinstance(payload, (dict, list)):
+            uri = _artifacts.emit_artifact_json(
+                job_id=job_id,
+                kind=kind,
+                data=_jsonable(payload),
+                extras=extras or {},
+            )
+            return uri, {"artifact_kind": kind, "artifact_uri": uri}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("telemetry artifact emit failed kind=%s: %s", kind, exc)
+    return None, {}
+
+
+def _extract_helper_context(
+    sig: inspect.Signature,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        bound = sig.bind_partial(*args, **kwargs)
+        vals = bound.arguments
+    except Exception:  # noqa: BLE001
+        vals = {}
+    job = vals.get("job") if isinstance(vals.get("job"), dict) else None
+    proposal = (job or {}).get("proposal") or {}
+    script_dict = vals.get("script_dict") if isinstance(vals.get("script_dict"), dict) else {}
+    channel_yaml = vals.get("channel_yaml_path")
+    channel = proposal.get("channel") or script_dict.get("channel") or ""
+    if not channel and channel_yaml:
+        try:
+            channel = Path(channel_yaml).parent.name
+        except Exception:  # noqa: BLE001
+            channel = ""
+    return {
+        "job_id": _current_job_id(job),
+        "slug": (job or {}).get("_slug") or script_dict.get("slug") or "",
+        "channel": channel,
+        "variant": (proposal.get("format") or "").strip() if proposal else "",
+        "mode": (job or {}).get("mode") or "real",
+    }
+
+
+def stage_envelope(
+    stage_name: str,
+    *,
+    artifact_kind: str | None = None,
+    artifact_extractor: Callable[[dict[str, Any]], Any] | None = None,
+    artifact_extras_extractor: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Use the Phase-0 worker envelope, with helper-signature support."""
+    base = _worker_stage_envelope(
+        stage_name,
+        artifact_kind=artifact_kind,
+        artifact_extractor=artifact_extractor,
+        artifact_extras_extractor=artifact_extras_extractor,
+    )
+
+    def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
+        sig = inspect.signature(fn)
+        params = list(sig.parameters.values())
+        if len(params) >= 2 and params[0].name == "job" and params[1].name == "work_dir":
+            return base(fn)
+
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            ctx = _extract_helper_context(sig, args, kwargs)
+            t0 = time.perf_counter()
+            _safe_track_event(
+                "stage.start",
+                category="render",
+                job_id=ctx["job_id"],
+                metadata={
+                    "stage": stage_name,
+                    "slug": ctx["slug"],
+                    "channel": ctx["channel"],
+                    "variant": ctx["variant"],
+                    "mode": ctx["mode"],
+                },
+            )
+            try:
+                result = fn(*args, **kwargs)
+            except BaseException as exc:
+                duration_ms = int((time.perf_counter() - t0) * 1000)
+                artifact_summary: dict[str, Any] = {}
+                if artifact_kind and artifact_extractor:
+                    try:
+                        extras = artifact_extras_extractor({}) if artifact_extras_extractor else None
+                        _, artifact_summary = _safe_emit_artifact_payload(
+                            job_id=ctx["job_id"],
+                            kind=artifact_kind,
+                            payload=artifact_extractor({}),
+                            extras=extras,
+                        )
+                    except Exception:  # noqa: BLE001
+                        artifact_summary = {}
+                _safe_track_event(
+                    "stage.failed",
+                    category="render",
+                    success=False,
+                    duration_ms=duration_ms,
+                    job_id=ctx["job_id"],
+                    metadata={
+                        "stage": stage_name,
+                        "slug": ctx["slug"],
+                        "channel": ctx["channel"],
+                        "variant": ctx["variant"],
+                        "error": str(exc)[:500],
+                        "error_type": type(exc).__name__,
+                        "traceback": traceback.format_exc()[-3000:],
+                        **artifact_summary,
+                    },
+                )
+                raise
+
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+            artifact_summary = {}
+            if artifact_kind and artifact_extractor:
+                try:
+                    extras = artifact_extras_extractor({}) if artifact_extras_extractor else None
+                    _, artifact_summary = _safe_emit_artifact_payload(
+                        job_id=ctx["job_id"],
+                        kind=artifact_kind,
+                        payload=artifact_extractor({}),
+                        extras=extras,
+                    )
+                except Exception:  # noqa: BLE001
+                    artifact_summary = {}
+            _safe_track_event(
+                "stage.end",
+                category="render",
+                duration_ms=duration_ms,
+                job_id=ctx["job_id"],
+                metadata={
+                    "stage": stage_name,
+                    "slug": ctx["slug"],
+                    "channel": ctx["channel"],
+                    "variant": ctx["variant"],
+                    **artifact_summary,
+                },
+            )
+            return result
+
+        wrapper.__signature__ = sig  # type: ignore[attr-defined]
+        return wrapper
+
+    return decorate
 
 # ---------------------------------------------------------------------------
 # SIGTERM-induced "silent death" mitigation (B3a in 2026-05-23 docket)
@@ -670,9 +949,210 @@ def _run_stage_stub(stage: str, job: dict, work_dir: Path) -> None:
     time.sleep(2)
 
 # ---------------------------------------------------------------------------
+# Phase-1 telemetry extractors / decision events
+# ---------------------------------------------------------------------------
+
+_LAST_SOURCE_FETCH_ARTIFACT: dict[str, Any] | None = None
+_LAST_PROMPTS_REFINED_ARTIFACT: list[dict[str, Any]] | dict[str, Any] | None = None
+
+
+def _preview_for_metadata(value: Any, limit: int = 240) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _status_code_from_exception(exc: BaseException) -> int | None:
+    response = getattr(exc, "response", None)
+    code = getattr(response, "status_code", None)
+    if isinstance(code, int):
+        return code
+    m = re.search(r"\b([1-5][0-9]{2})\b", str(exc))
+    return int(m.group(1)) if m else None
+
+
+def _source_backend_for(kind: str) -> str:
+    if kind == "reddit_url":
+        try:
+            from pipeline.sources import reddit_api as _reddit_api  # noqa: PLC0415
+            return str(_reddit_api._pick_backend())
+        except Exception:  # noqa: BLE001
+            explicit = (os.environ.get("REDDIT_FETCH_BACKEND") or "").strip().lower()
+            if explicit:
+                return explicit
+            return "pullpush" if os.environ.get("K_SERVICE") else "anon"
+    if kind == "wikipedia_topic":
+        return "wikipedia_html"
+    if kind == "youtube_video":
+        return "youtube_transcript"
+    return "unsupported"
+
+
+def _record_source_fetch_attempt(kind: str, ref: str, backend: str) -> float:
+    t0 = time.perf_counter()
+    try:
+        _safe_track_event(
+            "source.fetch_attempt",
+            category="http",
+            job_id=_current_job_id(),
+            metadata={"kind": kind, "ref": _preview_for_metadata(ref), "backend": backend},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return t0
+
+
+def _record_source_fetch_result(
+    *,
+    kind: str,
+    ref: str,
+    backend: str,
+    t0: float,
+    result: dict | None,
+    fallback_reason: str | None = None,
+    status_code: int | None = None,
+) -> None:
+    global _LAST_SOURCE_FETCH_ARTIFACT
+    body = ""
+    url = ref
+    if isinstance(result, dict):
+        body = str(result.get("body") or "")
+        url = str(result.get("url") or ref)
+        backend = str(result.get("backend") or backend)
+    fallback_used = bool(fallback_reason)
+    if status_code is None and not fallback_used and result is not None:
+        status_code = 200
+    duration_ms = int((time.perf_counter() - t0) * 1000)
+    _LAST_SOURCE_FETCH_ARTIFACT = {
+        "kind": kind,
+        "ref": ref,
+        "url": url,
+        "status": status_code if status_code is not None else ("fallback" if fallback_used else "unknown"),
+        "status_code": status_code,
+        "body": body,
+        "body_chars": len(body),
+        "backend": backend,
+        "fallback_used": fallback_used,
+        "fallback_reason": fallback_reason or "",
+    }
+    try:
+        _safe_track_event(
+            "source.fetch_fallback" if fallback_used else "source.fetch_ok",
+            category="http",
+            success=not fallback_used,
+            duration_ms=duration_ms,
+            job_id=_current_job_id(),
+            metadata={
+                "kind": kind,
+                "ref": _preview_for_metadata(ref),
+                "url": _preview_for_metadata(url),
+                "backend": backend,
+                "status_code": status_code,
+                "body_chars": len(body),
+                "fallback_reason": fallback_reason or "",
+                "original_status": status_code if fallback_used else None,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _extract_source_artifact(_job: dict[str, Any]) -> dict[str, Any] | None:
+    return _LAST_SOURCE_FETCH_ARTIFACT
+
+
+def _extract_script_artifact(job: dict[str, Any]) -> Any:
+    payload = _safe_read_json(job.get("_script_path"))
+    if payload is not None:
+        return payload
+    return job.get("_script_json")
+
+
+def _expected_cast_path(job: dict[str, Any]) -> Path | None:
+    slug = job.get("_slug") or ""
+    channel_yaml = job.get("_channel_yaml")
+    if not slug or not channel_yaml:
+        return None
+    try:
+        from pipeline.paths import RenderPaths  # noqa: PLC0415
+        return RenderPaths.from_channel_yaml(Path(channel_yaml), project_root=REPO_ROOT).cast_for(slug)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _extract_cast_artifact(job: dict[str, Any]) -> Any:
+    cast_path = Path(job["_cast_path"]) if job.get("_cast_path") else _expected_cast_path(job)
+    payload = _safe_read_json(cast_path)
+    if payload is not None:
+        return payload
+    return {
+        "status": "deferred_to_renderer",
+        "cast_path": str(cast_path or ""),
+        "reason": "worker_cast_stage_is_timeline_marker",
+    }
+
+
+def _extract_render_spec_artifact(job: dict[str, Any]) -> Any:
+    return job.get("_render_spec_dict") or job.get("render_spec")
+
+
+def _extract_events_log_artifact(job: dict[str, Any]) -> str | None:
+    return job.get("_events_log_path")
+
+
+def _extract_editing_compose_artifact(job: dict[str, Any]) -> Any:
+    return job.get("_editing_agent_result")
+
+
+def _extract_prompts_refined_artifact(_job: dict[str, Any]) -> Any:
+    return _LAST_PROMPTS_REFINED_ARTIFACT
+
+
+def _prompt_refined_count(prompts: Any) -> tuple[int, int]:
+    if not isinstance(prompts, list):
+        return 0, 0
+    refined_keys = {"refined_visual", "refined_scene", "style_block", "refined_version"}
+    refined = 0
+    for item in prompts:
+        if isinstance(item, dict) and any(item.get(k) for k in refined_keys):
+            refined += 1
+    return refined, max(0, len(prompts) - refined)
+
+
+def _emit_prompts_author_gate(
+    prompts: Any,
+    *,
+    slug: str,
+    prompts_path: Path | None = None,
+    reason: str = "",
+) -> None:
+    global _LAST_PROMPTS_REFINED_ARTIFACT
+    if isinstance(prompts, (list, dict)):
+        _LAST_PROMPTS_REFINED_ARTIFACT = prompts
+    else:
+        _LAST_PROMPTS_REFINED_ARTIFACT = None
+    prompt_count = len(prompts) if isinstance(prompts, list) else 0
+    refined_count, fallback_count = _prompt_refined_count(prompts)
+    _safe_track_event(
+        "prompts.author_gate",
+        category="decision",
+        job_id=_current_job_id(),
+        metadata={
+            "slug": slug,
+            "prompt_count": prompt_count,
+            "refined": refined_count,
+            "refined_count": refined_count,
+            "fallback_count": fallback_count,
+            "fallback_used": fallback_count > 0,
+            "prompts_path": str(prompts_path or ""),
+            "reason": reason,
+        },
+    )
+
+# ---------------------------------------------------------------------------
 # REAL stage handlers — used when YTFACTORY_RENDER_MODE=real
 # ---------------------------------------------------------------------------
 
+@stage_envelope("rewrite", artifact_kind="script", artifact_extractor=_extract_script_artifact)
 def _stage_rewrite_real(job: dict, work_dir: Path) -> None:
     """Synthesize a Script via pipeline.llm.rewrite — Anthropic SDK
     auto-fires on cloud (no claude CLI installed)."""
@@ -724,6 +1204,7 @@ def _stage_rewrite_real(job: dict, work_dir: Path) -> None:
     source_kind = (proposal.get("source_kind") or "auto").strip()
     source_ref = (proposal.get("source_ref") or "").strip()
     fetched: dict | None = None
+    source_fallback_reason: str | None = None
     if source_ref and source_kind not in ("auto", "user_text", ""):
         try:
             fetched = _fetch_source(source_kind, source_ref)
@@ -731,9 +1212,23 @@ def _stage_rewrite_real(job: dict, work_dir: Path) -> None:
                 logger.info("source fetch OK · kind=%s ref=%s len=%d",
                             source_kind, source_ref[:80], len(fetched.get("body", "")))
         except Exception as exc:  # noqa: BLE001
+            source_fallback_reason = str(exc)[:500]
             logger.warning("source fetch failed (kind=%s ref=%s): %s — "
                            "falling back to user topic/notes",
                            source_kind, source_ref[:80], exc)
+            _safe_track_event(
+                "source.fetch_fallback",
+                category="http",
+                success=False,
+                job_id=job_id,
+                metadata={
+                    "kind": source_kind,
+                    "ref": source_ref[:240],
+                    "backend": "worker_dispatch",
+                    "fallback_reason": source_fallback_reason,
+                    "original_status": _status_code_from_exception(exc),
+                },
+            )
 
     if fetched:
         raw_story = {
@@ -744,6 +1239,18 @@ def _stage_rewrite_real(job: dict, work_dir: Path) -> None:
             "url":    fetched.get("url") or source_ref,
         }
     else:
+        if source_ref and source_kind not in ("auto", "user_text", ""):
+            _safe_track_event(
+                "decision.source",
+                category="decision",
+                job_id=job_id,
+                metadata={
+                    "scope": "source",
+                    "chosen": "user_topic_notes",
+                    "alternatives": [source_kind],
+                    "reason": source_fallback_reason or "source_fetch_empty_or_failed",
+                },
+            )
         raw_story = {
             "slug": slug,
             "title": (proposal.get("topic") or "").strip(),
@@ -790,6 +1297,7 @@ def _stage_rewrite_real(job: dict, work_dir: Path) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("emit_artifact(script) failed: %s", exc)
 
+@stage_envelope("source", artifact_kind="source", artifact_extractor=_extract_source_artifact)
 def _fetch_source(kind: str, ref: str) -> dict | None:
     """Adapter dispatcher for source_kind → fetched story dict.
 
@@ -797,51 +1305,65 @@ def _fetch_source(kind: str, ref: str) -> dict | None:
     kind is unrecognised. Raises on upstream failure — caller catches
     and degrades to the user-typed fallback.
     """
-    if kind == "reddit_url":
-        # ref is a full Reddit post URL or permalink. Routes through
-        # pipeline.sources.reddit_api.fetch_post_by_url which auto-picks
-        # the best backend:
-        #   1. OAuth (oauth.reddit.com) — NOT YET IMPLEMENTED. Honored
-        #      only via explicit REDDIT_FETCH_BACKEND=oauth env (raises
-        #      NotImplementedError until the fetcher lands).
-        #   2. Pullpush (api.pullpush.io) — auto-selected on Cloud Run
-        #      (K_SERVICE env present). Open-source Pushshift fork, no
-        #      auth, hours-delayed archival data. Raises
-        #      RedditFetchError when the post isn't yet archived (post
-        #      < a few hours old) — caller (this function's caller)
-        #      catches and degrades to user-typed topic/notes.
-        #   3. Anonymous JSON (works on laptop, 403s on Cloud Run).
-        # See docs/cloud_egress_blocked_apis.md and
-        # pipeline/sources/reddit_api.py::_pick_backend for the full
-        # selection logic.
-        from pipeline.sources.reddit_api import fetch_post_by_url  # noqa: PLC0415
-        return fetch_post_by_url(ref)
-    if kind == "wikipedia_topic":
-        from pipeline.sources.wikipedia import fetch as wiki_fetch  # noqa: PLC0415
-        results = wiki_fetch(ref, limit=1)
-        if not results:
+    global _LAST_SOURCE_FETCH_ARTIFACT
+    _LAST_SOURCE_FETCH_ARTIFACT = None
+    backend = _source_backend_for(kind)
+    t0 = _record_source_fetch_attempt(kind, ref, backend)
+    result: dict | None = None
+    try:
+        if kind == "reddit_url":
+            # ref is a full Reddit post URL or permalink. Routes through
+            # pipeline.sources.reddit_api.fetch_post_by_url which auto-picks
+            # the best backend.
+            from pipeline.sources.reddit_api import fetch_post_by_url  # noqa: PLC0415
+            result = fetch_post_by_url(ref)
+        elif kind == "wikipedia_topic":
+            from pipeline.sources.wikipedia import fetch as wiki_fetch  # noqa: PLC0415
+            results = wiki_fetch(ref, limit=1)
+            if results:
+                s = results[0]
+                result = {"title": s.title, "body": s.body, "source": "wikipedia", "url": s.url or ""}
+        elif kind == "youtube_video":
+            from pipeline.sources.youtube_video import fetch as yt_fetch  # noqa: PLC0415
+            results = yt_fetch(ref)
+            if results:
+                s = results[0]
+                result = {"title": s.title, "body": s.body, "source": "youtube", "url": s.url or ref}
+        else:
+            _record_source_fetch_result(
+                kind=kind,
+                ref=ref,
+                backend=backend,
+                t0=t0,
+                result=None,
+                fallback_reason="unsupported_source_kind",
+            )
             return None
-        s = results[0]
-        return {
-            "title": s.title,
-            "body": s.body,
-            "source": "wikipedia",
-            "url": s.url or "",
-        }
-    if kind == "youtube_video":
-        from pipeline.sources.youtube_video import fetch as yt_fetch  # noqa: PLC0415
-        results = yt_fetch(ref)
-        if not results:
-            return None
-        s = results[0]
-        return {
-            "title": s.title,
-            "body": s.body,
-            "source": "youtube",
-            "url": s.url or ref,
-        }
-    return None
+    except Exception as exc:  # noqa: BLE001
+        _record_source_fetch_result(
+            kind=kind,
+            ref=ref,
+            backend=backend,
+            t0=t0,
+            result=None,
+            fallback_reason=str(exc)[:500],
+            status_code=_status_code_from_exception(exc),
+        )
+        raise
+    if result is None:
+        _record_source_fetch_result(
+            kind=kind,
+            ref=ref,
+            backend=backend,
+            t0=t0,
+            result=None,
+            fallback_reason="empty_source_result",
+        )
+        return None
+    _record_source_fetch_result(kind=kind, ref=ref, backend=backend, t0=t0, result=result)
+    return result
 
+@stage_envelope("cast", artifact_kind="cast", artifact_extractor=_extract_cast_artifact)
 def _stage_cast_real(job: dict, work_dir: Path) -> None:
     """No-op for the v2 worker: the renderer subprocess invokes
     pipeline.llm.cast.author_cast as part of its first stage; we
@@ -1514,6 +2036,7 @@ def _backfill_yaml_image_keys(
     return out
 
 
+@stage_envelope("prompts", artifact_kind="prompts_refined", artifact_extractor=_extract_prompts_refined_artifact)
 def _author_prompts_for_engine(
     *,
     script_dict: dict,
@@ -1566,6 +2089,8 @@ def _author_prompts_for_engine(
     function unconditionally authors prompts.json (legacy parity);
     the refiner only runs if the env flag is on.
     """
+    global _LAST_PROMPTS_REFINED_ARTIFACT
+    _LAST_PROMPTS_REFINED_ARTIFACT = None
     out: dict = {}
     try:
         from pipeline import beats as _beats_mod  # noqa: PLC0415
@@ -1576,6 +2101,7 @@ def _author_prompts_for_engine(
             "prompts authoring: import failed (%s) — engine will use bare Segment.text",  # coverage: import-failure path requires breaking pipeline imports system-wide
             exc,
         )
+        _emit_prompts_author_gate([], slug="unknown", reason="import_failed")
         return {}  # coverage: import-failure path requires breaking pipeline imports system-wide
 
     slug = script_dict.get("slug") or "unknown"
@@ -1637,6 +2163,7 @@ def _author_prompts_for_engine(
             )
     if not beat_list:
         logger.info("prompts authoring: no beats and no narration in script — skipping")
+        _emit_prompts_author_gate([], slug=slug, reason="no_beats")
         return {}
 
     # ----- Cast / character description ----------------------------------
@@ -1703,10 +2230,11 @@ def _author_prompts_for_engine(
     # ketchup bottles.
     import time as _time  # noqa: PLC0415
     last_exc: BaseException | None = None
+    authored_prompts: Any = None
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
-            _prompts_mod.author_beat_prompts(
+            authored_prompts = _prompts_mod.author_beat_prompts(
                 narration=script_dict.get("narration", "") or "",
                 beats=beat_list,
                 source_story=script_dict.get("source_story") or script_dict.get("narration") or "",
@@ -1747,6 +2275,11 @@ def _author_prompts_for_engine(
             f"{last_exc}"
         ) from last_exc
 
+    prompts_payload = _safe_read_json(prompts_path)
+    if prompts_payload is None:
+        prompts_payload = authored_prompts if isinstance(authored_prompts, list) else []
+    _emit_prompts_author_gate(prompts_payload, slug=slug, prompts_path=prompts_path)
+
     out["prompts_path"] = str(prompts_path)
     if era_anchor_prefix:
         out["era_anchor_prefix"] = era_anchor_prefix
@@ -1757,6 +2290,7 @@ def _author_prompts_for_engine(
     return out
 
 
+@stage_envelope("render_plan", artifact_kind="render_plan", artifact_extractor=_extract_render_spec_artifact)
 def _run_renderer_via_engines(
     job: dict,
     work_dir: Path,
@@ -1860,6 +2394,11 @@ def _run_renderer_via_engines(
             sorted(extra_updates.keys()),
         )
 
+    try:
+        job["_render_spec_dict"] = spec.to_dict()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("renderer (engines): RenderSpec telemetry extract failed: %s", exc)
+
     # Resolve where the engine should write the mp4. Mirror the legacy
     # path so the worker's downstream upload + thumb steps find it.
     from pipeline.paths import RenderPaths  # noqa: PLC0415
@@ -1896,6 +2435,7 @@ def _run_renderer_via_engines(
             progress_cb=progress_cb,
         )
 
+@stage_envelope("compose", artifact_kind="render_plan", artifact_extractor=_extract_render_spec_artifact)
 def _stage_render_real(
     job: dict,
     work_dir: Path,
@@ -2056,12 +2596,76 @@ def _stage_render_real(
         logger.warning("post-render artifact emission failed: %s", exc)
     job["_real_thumb"] = str(thumb) if thumb.exists() else None
 
+def _decision_log_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for ev in events:
+        try:
+            md = ev.get("metadata") or {}
+            scope = md.get("scope") if isinstance(md, dict) else None
+            if not scope:
+                continue
+            out.append({
+                "ts": ev.get("ts"),
+                "event": ev.get("event"),
+                "scope": scope,
+                "chosen": md.get("chosen"),
+                "alternatives": md.get("alternatives"),
+                "reason": md.get("reason"),
+                "success": ev.get("success"),
+                "metadata": md,
+            })
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+@stage_envelope("upload", artifact_kind="events_log", artifact_extractor=_extract_events_log_artifact)
 def _stage_upload_real(job: dict, work_dir: Path) -> None:
     """No-op: actual GCS upload happens after the stage loop in main()
     so we can update Firestore with the URI in one shot. This keeps
     the timeline label honest."""
     time.sleep(0.05)
+    try:
+        snapshot = EventsBuffer.instance().snapshot()
+        decision_log = _decision_log_from_events(snapshot)
+        job["_decision_log"] = decision_log
+        try:
+            _wb.write_decision_log(
+                job.get("job_id") or os.environ.get("YTFACTORY_JOB_ID", ""),
+                decision_log,
+                update_job=_update_job,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("decision_log Firestore write failed: %s", exc)
+        try:
+            from pipeline.render.artifacts import emit_artifact_json  # noqa: PLC0415
+            uri = emit_artifact_json(
+                job_id=job.get("job_id") or os.environ.get("YTFACTORY_JOB_ID", ""),
+                kind="decision_log",
+                data=decision_log,
+                filename="decision_log.json",
+            )
+            if uri:
+                job["_decision_log_uri"] = uri
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("decision_log artifact upload failed: %s", exc)
 
+        events_path = work_dir / "events.jsonl"
+        flushed = EventsBuffer.instance().flush_to_disk(events_path)
+        if flushed:
+            job["_events_log_path"] = str(flushed)
+            from pipeline.render.artifacts import emit_artifact  # noqa: PLC0415
+            uri = emit_artifact(
+                job_id=job.get("job_id") or os.environ.get("YTFACTORY_JOB_ID", ""),
+                kind="events_log",
+                local_path=flushed,
+            )
+            if uri:
+                job["_events_log_uri"] = uri
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("events buffer flush/upload failed: %s", exc)
+
+@stage_envelope("editing_agent", artifact_kind="compose", artifact_extractor=_extract_editing_compose_artifact)
 def _stage_editing_agent_real(job: dict, work_dir: Path) -> None:
     """Optional 8th stage: post-compose cinematic polish.
 
@@ -2144,6 +2748,14 @@ def _stage_editing_agent_real(job: dict, work_dir: Path) -> None:
         output_dir=work_output,
         output_name=f"{src_mp4.stem}__edited.mp4",
     )
+    job["_editing_agent_result"] = {
+        "input_mp4": str(src_mp4),
+        "staged_mp4": str(staged),
+        "output_mp4": str(out_mp4),
+        "input_root": str(work_input),
+        "output_dir": str(work_output),
+        "mode": "polish",
+    }
     logger.info("editing_agent: %s → %s", src_mp4, out_mp4)
 
     # Replace the upload-stage's mp4 with the polished version. Leave
