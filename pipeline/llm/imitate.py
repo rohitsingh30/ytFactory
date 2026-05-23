@@ -272,6 +272,16 @@ def analyze(
         budget_usd=1.0,
         stage="imitate_analyze",
     )
+    try:
+        _obs.track_io(
+            "llm.module.imitate_analyze",
+            category="llm",
+            input_text=prompt,
+            output_text=profile,
+            metadata={"stage": "imitate_analyze", "model": analyze_model},
+        )
+    except Exception:  # noqa: BLE001
+        pass
     if not isinstance(profile, dict):
         raise llm.ClaudeCLIError(f"analyze: expected object, got {type(profile).__name__}")
 
@@ -325,14 +335,25 @@ def ideate(profile: dict, *, n: int = 3) -> list[RawStory]:
     """Generate N novel story seeds matching the profile."""
     print(f"[imitate] [ideate] generating {n} seeds for niche={profile.get('niche_match')}")
     prompt = _ideate_prompt(profile, n)
+    imitate_model = llm.model_for("imitate_apply")
     seeds_raw = llm.call_claude_cli(
         prompt,
         output_json=True,
-        model=llm.model_for("imitate_apply"),
+        model=imitate_model,
         timeout_s=240,
         budget_usd=1.0,
         stage="imitate_apply",
     )
+    try:
+        _obs.track_io(
+            "llm.module.imitate_apply",
+            category="llm",
+            input_text=prompt,
+            output_text=seeds_raw,
+            metadata={"stage": "imitate_apply", "model": imitate_model},
+        )
+    except Exception:  # noqa: BLE001
+        pass
     if not isinstance(seeds_raw, list):
         raise llm.ClaudeCLIError(f"ideate: expected array, got {type(seeds_raw).__name__}")
 

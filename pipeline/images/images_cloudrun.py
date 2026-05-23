@@ -58,7 +58,9 @@ from pathlib import Path
 import requests
 
 from pipeline.cloud.cloudrun_auth import get_id_token
+from pipeline import observability as _obs
 from pipeline import telemetry as _tlm
+from pipeline.observability import propagation as _propagation
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +183,59 @@ class CloudRunUnavailable(RuntimeError):
     breaker, if `once_per_render` mode)."""
 
 
+def _inject_trace_context(headers: dict[str, str]) -> None:
+    try:
+        _propagation.inject_into_dict(headers)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _track_http_call(
+    *,
+    url: str,
+    request_body_json: str,
+    response_body_preview: str | None,
+    status_code: int | None,
+    latency_ms: int,
+    success: bool,
+) -> None:
+    try:
+        _obs.track_io(
+            "http.call",
+            category="http",
+            success=success,
+            duration_ms=latency_ms,
+            input_text=request_body_json,
+            output_text=response_body_preview,
+            input_meta={
+                "service": "image-z-image-turbo",
+                "method": "POST",
+                "url": url,
+            },
+            output_meta={
+                "status_code": status_code,
+                "latency_ms": latency_ms,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _track_image_retry(*, reason: str, attempt: int, metadata: dict | None = None) -> None:
+    try:
+        meta = dict(metadata or {})
+        meta.update({"reason": reason, "attempt": attempt})
+        _tlm.track(
+            "image.gen.retry",
+            category="image",
+            success=False,
+            job_id=os.environ.get("YTFACTORY_JOB_ID") or None,
+            metadata=meta,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _post_generate(url: str, payload: dict) -> dict:
     """POST to /generate, return parsed JSON. Raises
     CloudRunUnavailable on connection error / timeout / 5xx so the
@@ -198,7 +253,10 @@ def _post_generate(url: str, payload: dict) -> dict:
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
+    _inject_trace_context(headers)
     timeout = _timeout_s()
+    generate_url = f"{url}/generate"
+    request_body_json = json.dumps(payload)
     last_err: Exception | None = None
     # 5 attempts with exponential backoff for 503/429 (Cloud Run "Rate
     # exceeded" — happens when the renderer fires N parallel image-gen
@@ -215,10 +273,20 @@ def _post_generate(url: str, payload: dict) -> dict:
     backoff_s = [5, 15, 30, 60]
     for attempt in (1, 2, 3, 4, 5):
         sess = requests.Session()
+        attempt_t0 = time.perf_counter()
         try:
             resp = sess.post(
-                f"{url}/generate", data=json.dumps(payload),
+                generate_url, data=request_body_json,
                 headers=headers, timeout=timeout,
+            )
+            latency_ms = int((time.perf_counter() - attempt_t0) * 1000)
+            _track_http_call(
+                url=generate_url,
+                request_body_json=request_body_json,
+                response_body_preview=resp.text[:4000],
+                status_code=resp.status_code,
+                latency_ms=latency_ms,
+                success=200 <= resp.status_code < 400,
             )
             if resp.status_code in (429, 503) and attempt <= 4:
                 wait_s = backoff_s[attempt - 1]
@@ -226,6 +294,15 @@ def _post_generate(url: str, payload: dict) -> dict:
                     "cloudrun /generate %d (Rate exceeded) attempt %d/5; "
                     "sleeping %ds before retry",
                     resp.status_code, attempt, wait_s,
+                )
+                _track_image_retry(
+                    reason="rate_limited",
+                    attempt=attempt + 1,
+                    metadata={
+                        "failed_attempt": attempt,
+                        "status_code": resp.status_code,
+                        "wait_s": wait_s,
+                    },
                 )
                 import time as _time  # noqa: PLC0415
                 _time.sleep(wait_s)
@@ -246,6 +323,11 @@ def _post_generate(url: str, payload: dict) -> dict:
                     "cloudrun /generate 401 unauthorized — refreshing "
                     "ID token and retrying"
                 )
+                _track_image_retry(
+                    reason="auth_refresh",
+                    attempt=attempt + 1,
+                    metadata={"failed_attempt": attempt, "status_code": 401},
+                )
                 from pipeline.cloud.cloudrun_auth import _TOKENS
                 _TOKENS.pop(url, None)
                 token = get_id_token(url)
@@ -263,12 +345,31 @@ def _post_generate(url: str, payload: dict) -> dict:
             requests.exceptions.Timeout,
         ) as e:
             last_err = e
+            latency_ms = int((time.perf_counter() - attempt_t0) * 1000)
+            _track_http_call(
+                url=generate_url,
+                request_body_json=request_body_json,
+                response_body_preview=f"{type(e).__name__}: {e}",
+                status_code=None,
+                latency_ms=latency_ms,
+                success=False,
+            )
             logger.warning(
                 "cloudrun /generate attempt %d/5 failed (%s); %s",
                 attempt, type(e).__name__,
                 "retrying with fresh connection" if attempt <= 4
                 else "giving up → CloudRunUnavailable",
             )
+            if attempt <= 4:
+                _track_image_retry(
+                    reason="network_error",
+                    attempt=attempt + 1,
+                    metadata={
+                        "failed_attempt": attempt,
+                        "error_type": type(e).__name__,
+                        "latency_ms": latency_ms,
+                    },
+                )
         except CloudRunUnavailable:
             raise  # already wrapped, no retry
         finally:
@@ -492,11 +593,13 @@ def _readyz(model: str) -> dict:
     (see _post_generate docstring for the urllib post-mortem)."""
     url = _service_url(model)
     token = get_id_token(url)
+    headers = {"Authorization": f"Bearer {token}"}
+    _inject_trace_context(headers)
     sess = requests.Session()
     try:
         resp = sess.get(
             f"{url}/readyz",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=headers,
             timeout=900,  # cold-load can be 5-7 min on FLUX, longer on Z-Image
         )
         resp.raise_for_status()

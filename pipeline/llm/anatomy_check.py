@@ -90,6 +90,16 @@ def check_anatomy(
             budget_usd=0.05,
             stage="anatomy_check",
         )
+        try:
+            _obs.track_io(
+                "llm.module.anatomy_check",
+                category="llm",
+                input_text=prompt,
+                output_text=result,
+                metadata={"stage": "anatomy_check", "model": model},
+            )
+        except Exception:  # noqa: BLE001
+            pass
     except Exception as e:
         # Fail open on infrastructure issues. The dominant gate is
         # luminance/edges; anatomy is the cherry on top.

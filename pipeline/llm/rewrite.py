@@ -694,7 +694,18 @@ def _rewrite_legacy(raw_story: dict, channel_cfg: dict) -> Script:
     )
 
     print(f"[rewrite] authoring narration via claude CLI for {raw_story.get('slug')!r}…")
-    raw = llm.call_claude_cli(prompt, output_json=True, model=llm.model_for("rewrite"), stage="rewrite")
+    rewrite_model = llm.model_for("rewrite")
+    raw = llm.call_claude_cli(prompt, output_json=True, model=rewrite_model, stage="rewrite")
+    try:
+        _obs.track_io(
+            "llm.module.rewrite",
+            category="llm",
+            input_text=prompt,
+            output_text=raw,
+            metadata={"stage": "rewrite", "model": rewrite_model},
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
     if not isinstance(raw, dict):
         raise ValueError(f"rewrite expected a JSON object, got {type(raw).__name__}")
@@ -768,7 +779,18 @@ def rewrite_part2(
     )
 
     print(f"[rewrite_part2] authoring Part-2 narration via claude CLI for {raw_story.get('slug')!r}…")
-    raw = llm.call_claude_cli(prompt, output_json=True, model=llm.model_for("rewrite"), stage="rewrite_part2")
+    rewrite_model = llm.model_for("rewrite")
+    raw = llm.call_claude_cli(prompt, output_json=True, model=rewrite_model, stage="rewrite_part2")
+    try:
+        _obs.track_io(
+            "llm.module.rewrite_part2",
+            category="llm",
+            input_text=prompt,
+            output_text=raw,
+            metadata={"stage": "rewrite_part2", "model": rewrite_model},
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
     if not isinstance(raw, dict):
         raise ValueError(f"rewrite_part2 expected a JSON object, got {type(raw).__name__}")

@@ -1411,14 +1411,25 @@ def author_beat_prompts(
     )
 
     print(f"[prompts] authoring {len(beats)} beat prompts via claude CLI…")
+    prompts_model = llm.model_for("prompts")
     raw = llm.call_claude_cli(
         full_prompt,
         output_json=True,
         json_schema=_BEAT_RESPONSE_SCHEMA,
         strict_schema=True,
-        model=llm.model_for("prompts"),
+        model=prompts_model,
         stage="prompts",
     )
+    try:
+        _obs.track_io(
+            "llm.module.prompts",
+            category="llm",
+            input_text=full_prompt,
+            output_text=raw,
+            metadata={"stage": "prompts", "model": prompts_model},
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
     cleaned = _validate_and_clean(
         raw, beats, opening_directives,
@@ -1473,9 +1484,36 @@ def _maybe_refine_prompts(
     - :func:`pipeline.images.images.build_full_prompt` at render time
       (also gated by the same env flag — kill-switch path).
     """
+    def _track_gate(
+        *, attempted: bool, skipped_reason: str | None,
+        refined_count: int, fallback_count: int,
+    ) -> None:
+        try:
+            _obs.track(
+                "prompts.refiner_gate",
+                category="llm",
+                success=True,
+                metadata={
+                    "refiner_attempted": attempted,
+                    "refiner_skipped_reason": skipped_reason,
+                    "refined_count": refined_count,
+                    "fallback_count": fallback_count,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     if not _env_flag_enabled("YTFACTORY_PROMPT_REFINER"):
+        _track_gate(
+            attempted=False, skipped_reason="env_disabled",
+            refined_count=0, fallback_count=0,
+        )
         return cleaned
     if not cleaned:
+        _track_gate(
+            attempted=False, skipped_reason="empty_batch",
+            refined_count=0, fallback_count=0,
+        )
         return cleaned
 
     # Local import keeps the LLM-prompts module light at import time
@@ -1497,12 +1535,20 @@ def _maybe_refine_prompts(
             f"[prompts] refiner pre-step FAILED ({exc}); "
             "all beats fall back to legacy path"
         )
+        _track_gate(
+            attempted=True, skipped_reason="exception",
+            refined_count=0, fallback_count=len(cleaned),
+        )
         return cleaned
 
     if len(refined) != len(cleaned):
         print(
             f"[prompts] refiner returned {len(refined)} slots for "
             f"{len(cleaned)} beats; ignoring (whole batch falls back)"
+        )
+        _track_gate(
+            attempted=True, skipped_reason="count_mismatch",
+            refined_count=0, fallback_count=len(cleaned),
         )
         return cleaned
 
@@ -1511,6 +1557,11 @@ def _maybe_refine_prompts(
         if slot:  # empty dict {} → per-beat fallback, leave beat untouched
             beat.update(slot)
             refined_count += 1
+    fallback_count = len(cleaned) - refined_count
+    _track_gate(
+        attempted=True, skipped_reason=None,
+        refined_count=refined_count, fallback_count=fallback_count,
+    )
     print(
         f"[prompts] refiner: refined {refined_count}/{len(cleaned)} beats"
     )

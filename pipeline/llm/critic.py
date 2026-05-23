@@ -393,6 +393,16 @@ def critique_short(
         budget_usd=1.5,
         stage="critic",
     )
+    try:
+        _obs.track_io(
+            "llm.module.critic",
+            category="llm",
+            input_text=prompt,
+            output_text=raw,
+            metadata={"stage": "critic", "model": critic_model},
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
     if not isinstance(raw, dict):
         raise ValueError(f"critic expected JSON object, got {type(raw).__name__}")

@@ -53,6 +53,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, runtime_checkable
 
+from pipeline import observability as _obs
 from .. import telemetry as _tlm
 from .cli import call_claude_cli, model_for
 from .fix import Fix, ValidationFailure, errors as fix_errors, warnings as fix_warnings  # noqa: F401
@@ -273,13 +274,29 @@ def run_stage(
             prompt = contract.regen_prompt(ctx, prev_output, prev_fixes)
 
         try:
+            stage_model = model_for(contract.name)
             output = llm_call(
                 prompt,
                 output_json=True,
-                model=model_for(contract.name),
+                model=stage_model,
                 stage=contract.name,
                 timeout_s=timeout_s,
             )
+            try:
+                _obs.track_io(
+                    f"llm.module.{contract.name}",
+                    category="llm",
+                    input_text=prompt,
+                    output_text=output,
+                    metadata={
+                        "stage": contract.name,
+                        "model": stage_model,
+                        "attempt": attempt + 1,
+                        "backend": backend_tag,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
         except Exception as e:
             _tlm.track(
                 "llm_stage", category="llm", success=False,

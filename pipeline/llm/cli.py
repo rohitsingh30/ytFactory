@@ -39,8 +39,64 @@ from pathlib import Path
 from typing import Any
 
 from .. import telemetry as _tlm
+from pipeline.observability import bodies as _bodies
 
 logger = logging.getLogger(__name__)
+
+
+def _track_llm_io(
+    *,
+    success: bool,
+    duration_ms: int,
+    job_id: str | None,
+    input_text: Any,
+    output_text: Any = None,
+    input_meta: dict[str, Any] | None = None,
+    output_meta: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    try:
+        _bodies.track_io(
+            "llm.call",
+            category="llm",
+            success=success,
+            duration_ms=duration_ms,
+            job_id=job_id,
+            input_text=input_text,
+            output_text=output_text,
+            input_meta=input_meta,
+            output_meta=output_meta,
+            metadata=metadata,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _track_llm_retry(
+    *,
+    job_id: str | None,
+    reason: str,
+    attempt: int,
+    duration_ms: int | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    try:
+        meta = dict(metadata or {})
+        meta.update({"reason": reason, "attempt": attempt})
+        _tlm.track(
+            "llm.retry",
+            category="llm",
+            success=False,
+            duration_ms=duration_ms,
+            job_id=job_id,
+            metadata=meta,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _llm_max_tokens_from_kwargs(kwargs: dict[str, Any]) -> Any:
+    return kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
 
 
 CLAUDE_BIN = "claude"
@@ -621,6 +677,7 @@ def call_claude_cli(
 # Public alias — newer code can call ``call_llm`` instead of the
 # legacy ``call_claude_cli`` name. Both go through the same dispatcher.
 call_llm = call_claude_cli
+_call_llm = call_claude_cli
 
 
 def _call_claude_cli_subprocess(
@@ -724,21 +781,30 @@ def _call_claude_cli_subprocess(
             check=False,
         )
     except subprocess.TimeoutExpired as e:
-        _tlm.track("llm_call", category="llm", success=False,
-                   duration_ms=int((time.time() - t0) * 1000),
-                   job_id=job_id,
-                   metadata={**tlm_meta, "error": f"timeout {timeout_s}s"})
+        _track_llm_io(
+            success=False,
+            duration_ms=int((time.time() - t0) * 1000),
+            job_id=job_id,
+            input_text=prompt,
+            input_meta={**tlm_meta, "attempt": 1},
+            output_meta={"error": f"timeout {timeout_s}s"},
+        )
         raise ClaudeCLIError(f"claude CLI timed out after {timeout_s}s") from e
 
     stdout = _ANSI_RE.sub("", proc.stdout or "")
     stderr = _ANSI_RE.sub("", proc.stderr or "")
 
     if proc.returncode != 0:
-        _tlm.track("llm_call", category="llm", success=False,
-                   duration_ms=int((time.time() - t0) * 1000),
-                   job_id=job_id,
-                   metadata={**tlm_meta, "error": f"rc={proc.returncode}",
-                             "stderr_head": stderr[:200]})
+        _track_llm_io(
+            success=False,
+            duration_ms=int((time.time() - t0) * 1000),
+            job_id=job_id,
+            input_text=prompt,
+            output_text=stdout or stderr,
+            input_meta={**tlm_meta, "attempt": 1},
+            output_meta={"error": f"rc={proc.returncode}",
+                         "stderr_head": stderr[:200]},
+        )
         raise ClaudeCLIError(
             f"claude CLI exited {proc.returncode}\n"
             f"stderr: {stderr[:500]}\nstdout: {stdout[:500]}"
@@ -752,11 +818,17 @@ def _call_claude_cli_subprocess(
         ) from e
 
     if envelope.get("is_error"):
-        _tlm.track("llm_call", category="llm", success=False,
-                   duration_ms=int((time.time() - t0) * 1000),
-                   job_id=job_id,
-                   metadata={**tlm_meta,
-                             "error": str(envelope.get("result") or "envelope")[:200]})
+        _track_llm_io(
+            success=False,
+            duration_ms=int((time.time() - t0) * 1000),
+            job_id=job_id,
+            input_text=prompt,
+            output_text=envelope.get("result") or stdout,
+            input_meta={**tlm_meta, "attempt": 1},
+            output_meta={
+                "error": str(envelope.get("result") or "envelope")[:200],
+            },
+        )
         raise ClaudeCLIError(
             f"claude CLI error envelope: {envelope.get('result') or envelope}"
         )
@@ -765,19 +837,6 @@ def _call_claude_cli_subprocess(
     # fields come from the CLI envelope when present (it surfaces them as
     # `usage.input_tokens` / `usage.output_tokens` / `total_cost_usd`).
     usage = envelope.get("usage") if isinstance(envelope.get("usage"), dict) else {}
-    _tlm.track(
-        "llm_call",
-        category="llm",
-        success=True,
-        duration_ms=int((time.time() - t0) * 1000),
-        job_id=job_id,
-        metadata={
-            **tlm_meta,
-            "input_tokens": usage.get("input_tokens"),
-            "output_tokens": usage.get("output_tokens"),
-            "cost_usd": envelope.get("total_cost_usd"),
-        },
-    )
 
     # When `--json-schema` is passed, the CLI parses + validates the model's
     # output and puts the resulting object in `structured_output`; `result`
@@ -785,12 +844,41 @@ def _call_claude_cli_subprocess(
     if output_json and json_schema is not None:
         structured = envelope.get("structured_output")
         if isinstance(structured, (dict, list)):
+            _track_llm_io(
+                success=True,
+                duration_ms=int((time.time() - t0) * 1000),
+                job_id=job_id,
+                input_text=prompt,
+                output_text=structured,
+                input_meta={**tlm_meta, "attempt": 1},
+                output_meta={
+                    "input_tokens": usage.get("input_tokens"),
+                    "output_tokens": usage.get("output_tokens"),
+                    "cost_usd": envelope.get("total_cost_usd"),
+                    "finish_reason": envelope.get("subtype"),
+                },
+            )
             return structured
         # Fall through to result parsing if the CLI didn't populate it.
 
     result_text = envelope.get("result")
     if result_text is None:
         raise ClaudeCLIError(f"claude CLI envelope missing 'result': {envelope}")
+
+    _track_llm_io(
+        success=True,
+        duration_ms=int((time.time() - t0) * 1000),
+        job_id=job_id,
+        input_text=prompt,
+        output_text=result_text,
+        input_meta={**tlm_meta, "attempt": 1},
+        output_meta={
+            "input_tokens": usage.get("input_tokens"),
+            "output_tokens": usage.get("output_tokens"),
+            "cost_usd": envelope.get("total_cost_usd"),
+            "finish_reason": envelope.get("subtype"),
+        },
+    )
 
     if not output_json:
         return result_text
@@ -1172,6 +1260,7 @@ def _call_azure_openai(
             kwargs["response_format"] = {"type": "json_object"}
 
     t0 = time.time()
+    attempt_number = 1
     try:
         resp = client.chat.completions.create(**kwargs)
     except Exception as e:
@@ -1207,6 +1296,7 @@ def _call_azure_openai(
         # Any other failure → ClaudeCLIError.
         msg = str(e)
         retry_label: str | None = None
+        retry_reason: str | None = None
         swap_to: str | None = None
         reasoning_effort_dropped = False
 
@@ -1215,10 +1305,12 @@ def _call_azure_openai(
                 kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
                 swap_to = "max_completion_tokens"
                 retry_label = "max_completion_tokens"
+                retry_reason = "max_tokens_swap"
             elif "max_completion_tokens" in kwargs:
                 kwargs["max_tokens"] = kwargs.pop("max_completion_tokens")
                 swap_to = "max_tokens"
                 retry_label = "max_tokens"
+                retry_reason = "max_tokens_swap"
         elif (
             "reasoning_effort" in msg
             and "reasoning_effort" in kwargs
@@ -1226,6 +1318,7 @@ def _call_azure_openai(
             kwargs.pop("reasoning_effort", None)
             reasoning_effort_dropped = True
             retry_label = "no_reasoning_effort"
+            retry_reason = "reasoning_effort_drop"
         elif (
             output_json
             and "response_format" in msg
@@ -1233,19 +1326,41 @@ def _call_azure_openai(
         ):
             kwargs.pop("response_format", None)
             retry_label = "no_response_format"
+            retry_reason = "response_format_swap"
 
         if retry_label:
+            retry_attempt = attempt_number + 1
+            _track_llm_retry(
+                job_id=job_id,
+                reason=retry_reason or retry_label,
+                attempt=retry_attempt,
+                duration_ms=int((time.time() - t0) * 1000),
+                metadata={**tlm_meta, "retry": retry_label, "error": msg[:200]},
+            )
             try:
                 resp = client.chat.completions.create(**kwargs)
             except Exception as e2:  # noqa: BLE001
-                _tlm.track("llm_call", category="llm", success=False,
-                           duration_ms=int((time.time() - t0) * 1000),
-                           job_id=job_id,
-                           metadata={**tlm_meta, "error": str(e2)[:200],
-                                     "retry": retry_label})
+                _track_llm_io(
+                    success=False,
+                    duration_ms=int((time.time() - t0) * 1000),
+                    job_id=job_id,
+                    input_text=user_prompt,
+                    input_meta={
+                        **tlm_meta,
+                        "temperature": None,
+                        "max_tokens": _llm_max_tokens_from_kwargs(kwargs),
+                        "response_format": kwargs.get("response_format"),
+                        "attempt": retry_attempt,
+                    },
+                    output_meta={
+                        "error": str(e2)[:200],
+                        "retry": retry_label,
+                    },
+                )
                 raise ClaudeCLIError(
                     f"azure_openai chat error (post-retry={retry_label}): {e2}"
                 ) from e2
+            attempt_number = retry_attempt
             # Retry succeeded — cache the discoveries so subsequent
             # calls in this process pick the right shape on first try.
             if swap_to:
@@ -1253,10 +1368,20 @@ def _call_azure_openai(
             if reasoning_effort_dropped:
                 _remember_azure_reasoning_effort_support(deployment, False)
         else:
-            _tlm.track("llm_call", category="llm", success=False,
-                       duration_ms=int((time.time() - t0) * 1000),
-                       job_id=job_id,
-                       metadata={**tlm_meta, "error": msg[:200]})
+            _track_llm_io(
+                success=False,
+                duration_ms=int((time.time() - t0) * 1000),
+                job_id=job_id,
+                input_text=user_prompt,
+                input_meta={
+                    **tlm_meta,
+                    "temperature": None,
+                    "max_tokens": _llm_max_tokens_from_kwargs(kwargs),
+                    "response_format": kwargs.get("response_format"),
+                    "attempt": attempt_number,
+                },
+                output_meta={"error": msg[:200]},
+            )
             raise ClaudeCLIError(f"azure_openai chat error: {e}") from e
     else:
         # First-try success — also warm the cache so the cache reflects
@@ -1294,21 +1419,48 @@ def _call_azure_openai(
                 bumped,
             )
             kwargs[token_param] = bumped
+            retry_attempt = attempt_number + 1
+            _track_llm_retry(
+                job_id=job_id,
+                reason="max_tokens_double",
+                attempt=retry_attempt,
+                duration_ms=int((time.time() - t0) * 1000),
+                metadata={
+                    **tlm_meta,
+                    "finish_reason": "length",
+                    "max_tokens_first": cap_used,
+                    "max_tokens_retry": bumped,
+                },
+            )
             t0_retry = time.time()
             try:
                 resp = client.chat.completions.create(**kwargs)
             except Exception as e:  # noqa: BLE001
-                _tlm.track("llm_call", category="llm", success=False,
-                           duration_ms=int((time.time() - t0_retry) * 1000),
-                           job_id=job_id,
-                           metadata={**tlm_meta, "error": str(e)[:200],
-                                     "retry": "max_tokens_doubled",
-                                     "max_tokens_first": cap_used,
-                                     "max_tokens_retry": bumped})
+                _track_llm_io(
+                    success=False,
+                    duration_ms=int((time.time() - t0_retry) * 1000),
+                    job_id=job_id,
+                    input_text=user_prompt,
+                    output_text=text,
+                    input_meta={
+                        **tlm_meta,
+                        "temperature": None,
+                        "max_tokens": _llm_max_tokens_from_kwargs(kwargs),
+                        "response_format": kwargs.get("response_format"),
+                        "attempt": retry_attempt,
+                    },
+                    output_meta={
+                        "error": str(e)[:200],
+                        "retry": "max_tokens_doubled",
+                        "max_tokens_first": cap_used,
+                        "max_tokens_retry": bumped,
+                    },
+                )
                 raise ClaudeCLIError(
                     f"azure_openai chat error (post-retry=max_tokens_doubled "
                     f"to {bumped}, original truncated at {cap_used}): {e}"
                 ) from e
+            attempt_number = retry_attempt
             text = (resp.choices[0].message.content or "").strip()
             usage = getattr(resp, "usage", None)
             finish_reason = getattr(resp.choices[0], "finish_reason", None)
@@ -1331,14 +1483,27 @@ def _call_azure_openai(
             f"max_completion_tokens for INVISIBLE reasoning tokens — "
             f"see docs/llm_max_tokens.md."
         )
-        _tlm.track("llm_call", category="llm", success=False,
-                   duration_ms=int((time.time() - t0) * 1000),
-                   job_id=job_id,
-                   metadata={**tlm_meta, "error": msg[:200],
-                             "finish_reason": "length",
-                             "max_tokens_used": cap_used,
-                             "completion_tokens": completion,
-                             "reasoning_tokens": reasoning})
+        _track_llm_io(
+            success=False,
+            duration_ms=int((time.time() - t0) * 1000),
+            job_id=job_id,
+            input_text=user_prompt,
+            output_text=text,
+            input_meta={
+                **tlm_meta,
+                "temperature": None,
+                "max_tokens": _llm_max_tokens_from_kwargs(kwargs),
+                "response_format": kwargs.get("response_format"),
+                "attempt": attempt_number,
+            },
+            output_meta={
+                "error": msg[:200],
+                "finish_reason": "length",
+                "max_tokens_used": cap_used,
+                "completion_tokens": completion,
+                "reasoning_tokens": reasoning,
+            },
+        )
         raise ClaudeCLIError(msg)
 
     # finish_reason=content_filter: Azure's safety filter suppressed
@@ -1358,23 +1523,49 @@ def _call_azure_openai(
             f"back to a non-LLM source for this slot — see "
             f"pipeline/llm/rewrite_long_form.py::_generate_all_section_bodies."
         )
-        _tlm.track("llm_call", category="llm", success=False,
-                   duration_ms=int((time.time() - t0) * 1000),
-                   job_id=job_id,
-                   metadata={**tlm_meta, "error": msg[:200],
-                             "finish_reason": "content_filter",
-                             "completion_tokens": completion})
+        _track_llm_retry(
+            job_id=job_id,
+            reason="content_filter",
+            attempt=attempt_number,
+            duration_ms=int((time.time() - t0) * 1000),
+            metadata={**tlm_meta, "finish_reason": "content_filter"},
+        )
+        _track_llm_io(
+            success=False,
+            duration_ms=int((time.time() - t0) * 1000),
+            job_id=job_id,
+            input_text=user_prompt,
+            output_text=text,
+            input_meta={
+                **tlm_meta,
+                "temperature": None,
+                "max_tokens": _llm_max_tokens_from_kwargs(kwargs),
+                "response_format": kwargs.get("response_format"),
+                "attempt": attempt_number,
+            },
+            output_meta={
+                "error": msg[:200],
+                "finish_reason": "content_filter",
+                "completion_tokens": completion,
+            },
+        )
         raise ContentFilterError(msg)
 
-    _tlm.track(
-        "llm_call",
-        category="llm",
+    _track_llm_io(
         success=True,
         duration_ms=int((time.time() - t0) * 1000),
         job_id=job_id,
-        metadata={
+        input_text=user_prompt,
+        output_text=text,
+        input_meta={
             **tlm_meta,
-            "input_tokens":  getattr(usage, "prompt_tokens", None),
+            "temperature": None,
+            "max_tokens": _llm_max_tokens_from_kwargs(kwargs),
+            "response_format": kwargs.get("response_format"),
+            "attempt": attempt_number,
+        },
+        output_meta={
+            "input_tokens": getattr(usage, "prompt_tokens", None),
             "output_tokens": getattr(usage, "completion_tokens", None),
             "reasoning_tokens": _reasoning_tokens(usage),
             "finish_reason": finish_reason,
@@ -1456,10 +1647,20 @@ def _call_anthropic_sdk(
             messages=[{"role": "user", "content": user_prompt}],
         )
     except Exception as e:
-        _tlm.track("llm_call", category="llm", success=False,
-                   duration_ms=int((time.time() - t0) * 1000),
-                   job_id=job_id,
-                   metadata={**tlm_meta, "error": str(e)[:200]})
+        _track_llm_io(
+            success=False,
+            duration_ms=int((time.time() - t0) * 1000),
+            job_id=job_id,
+            input_text=user_prompt,
+            input_meta={
+                **tlm_meta,
+                "temperature": None,
+                "max_tokens": max_tokens_for(stage),
+                "response_format": "json" if output_json else None,
+                "attempt": 1,
+            },
+            output_meta={"error": str(e)[:200]},
+        )
         raise ClaudeCLIError(f"anthropic_sdk error: {e}") from e
 
     parts = [
@@ -1469,16 +1670,23 @@ def _call_anthropic_sdk(
     ]
     text = "".join(parts).strip()
     usage = getattr(resp, "usage", None)
-    _tlm.track(
-        "llm_call",
-        category="llm",
+    _track_llm_io(
         success=True,
         duration_ms=int((time.time() - t0) * 1000),
         job_id=job_id,
-        metadata={
+        input_text=user_prompt,
+        output_text=text,
+        input_meta={
             **tlm_meta,
-            "input_tokens":  getattr(usage, "input_tokens", None),
+            "temperature": None,
+            "max_tokens": max_tokens_for(stage),
+            "response_format": "json" if output_json else None,
+            "attempt": 1,
+        },
+        output_meta={
+            "input_tokens": getattr(usage, "input_tokens", None),
             "output_tokens": getattr(usage, "output_tokens", None),
+            "finish_reason": getattr(resp, "stop_reason", None),
         },
     )
 

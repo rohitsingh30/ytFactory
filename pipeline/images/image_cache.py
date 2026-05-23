@@ -39,8 +39,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
+
+from pipeline import observability as _obs
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +94,25 @@ def _get_storage_client():
         return None
 
 
+def _prompt_sha256(prompt: str) -> str:
+    return hashlib.sha256((prompt or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+def _track_cache_event(event: str, *, key: str, prompt_sha: str, path: str) -> None:
+    try:
+        _obs.track(
+            event,
+            category="image",
+            metadata={
+                "cache_key": key,
+                "prompt_sha256": prompt_sha,
+                "path": path,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _try_cache_hit(blob, out_path: Path) -> bool:
     """Download blob to out_path. Returns True on success."""
     try:
@@ -131,11 +153,14 @@ def generate_with_cache(
     height: int,
     steps: int,
     provider: str,
+    job_id: str | None = None,
+    panel_index: int | None = None,
 ) -> Path:
     """Drop-in replacement for ``pipeline.images.images.generate`` with
     GCS cache lookup. On miss, generates normally + uploads to cache.
     On hit, downloads + refreshes blob creation date.
     """
+    lookup_t0 = time.perf_counter()
     # Build the cache key from the final prompt (after style_prefix
     # is appended). This matches what the generator actually sends.
     final_prompt = (prompt or "").strip()
@@ -145,28 +170,86 @@ def generate_with_cache(
     key = cache_key(
         prompt=final_prompt, seed=seed, width=width, height=height, steps=steps,
     )
+    prompt_sha = _prompt_sha256(final_prompt)
+    bucket_name = _cache_bucket()
+    cache_path = f"gs://{bucket_name}/images/{key}.png"
 
     client = _get_storage_client()
     blob = None
-    bucket_name = _cache_bucket()
+    lookup_emitted = False
     if client is not None:
         try:
             bucket = client.bucket(bucket_name)
             blob = bucket.blob(f"images/{key}.png")
             if blob.exists():
                 if _try_cache_hit(blob, out_path):
+                    _track_cache_event(
+                        "image.cache.hit", key=key,
+                        prompt_sha=prompt_sha, path=cache_path,
+                    )
+                    lookup_emitted = True
                     logger.info(
                         "image_cache HIT: key=%s out=%s",
                         key[:12], out_path.name,
                     )
                     _refresh_blob_creation_date(blob)
+                    try:
+                        from pipeline.images.images import (  # noqa: PLC0415
+                            _assemble_final_prompt,
+                            _record_image_gen_telemetry,
+                            _wire_prompt_for_provider,
+                        )
+                        wire_prompt = _wire_prompt_for_provider(
+                            _assemble_final_prompt(
+                                prompt=prompt,
+                                style_prefix=style_prefix,
+                                provider=provider,
+                                force_positive=None,
+                            ),
+                            provider,
+                        )
+                        _record_image_gen_telemetry(
+                            final_prompt=wire_prompt,
+                            negative_prompt="",
+                            seed=seed,
+                            cfg=0.0,
+                            cache_hit=True,
+                            out_path=out_path,
+                            bytes_out=out_path.stat().st_size,
+                            provider=provider,
+                            width=width,
+                            height=height,
+                            steps=steps,
+                            job_id=job_id or os.environ.get("YTFACTORY_JOB_ID") or None,
+                            panel_index=panel_index,
+                            duration_ms=int((time.perf_counter() - lookup_t0) * 1000),
+                            success=True,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     return out_path
+            _track_cache_event(
+                "image.cache.miss", key=key,
+                prompt_sha=prompt_sha, path=cache_path,
+            )
+            lookup_emitted = True
         except Exception as exc:  # noqa: BLE001
+            if not lookup_emitted:
+                _track_cache_event(
+                    "image.cache.miss", key=key,
+                    prompt_sha=prompt_sha, path=cache_path,
+                )
+                lookup_emitted = True
             logger.warning(
                 "image_cache: HEAD failed (%s) — falling through to generate",
                 exc,
             )
             blob = None
+    elif not lookup_emitted:
+        _track_cache_event(
+            "image.cache.miss", key=key,
+            prompt_sha=prompt_sha, path=cache_path,
+        )
 
     # MISS — generate normally then upload.
     from pipeline.images.images import generate as _real_generate  # noqa: PLC0415
@@ -179,10 +262,17 @@ def generate_with_cache(
         height=height,
         steps=steps,
         provider=provider,
+        job_id=job_id,
+        panel_index=panel_index,
+        cache_hit=False,
     )
     if blob is not None:
         try:
             blob.upload_from_filename(str(out_path), content_type="image/png")
+            _track_cache_event(
+                "image.cache.store", key=key,
+                prompt_sha=prompt_sha, path=cache_path,
+            )
             logger.info(
                 "image_cache MISS-then-store: key=%s out=%s",
                 key[:12], out_path.name,
@@ -194,4 +284,11 @@ def generate_with_cache(
     return out_path
 
 
-__all__ = ["generate_with_cache", "cache_key", "MODEL_VERSION"]
+class ImageCache:
+    """Tiny compatibility facade for callers that import ``ImageCache``."""
+
+    cache_key = staticmethod(cache_key)
+    generate_with_cache = staticmethod(generate_with_cache)
+
+
+__all__ = ["ImageCache", "generate_with_cache", "cache_key", "MODEL_VERSION"]

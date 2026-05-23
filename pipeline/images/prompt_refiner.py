@@ -70,11 +70,65 @@ Failure modes
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
 import re
 from typing import Any, Callable
 
+from pipeline import observability as _obs
+from pipeline.render.artifacts import emit_artifact_json
+
 logger = logging.getLogger(__name__)
+
+
+def _track_refiner_fallback(beat_index: int, reason: str) -> None:
+    try:
+        _obs.track(
+            "image.refiner.fallback",
+            category="image",
+            success=False,
+            metadata={"beat_index": beat_index, "reason": reason},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _raw_response_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001
+        return repr(value)
+
+
+def _emit_refiner_io_artifact(
+    *,
+    input_batch: dict[str, Any],
+    raw_response_str: str | None,
+    parsed: Any,
+    fallback_count: int,
+) -> None:
+    try:
+        job_id = os.environ.get("YTFACTORY_JOB_ID") or None
+        if not job_id:
+            return
+        emit_artifact_json(
+            job_id,
+            "refiner_io",
+            {
+                "input_batch": input_batch,
+                "raw_response": raw_response_str,
+                "parsed": parsed,
+                "fallback_count": fallback_count,
+            },
+            filename="refiner_io.json",
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 REFINER_VERSION = "v2-zturbo"  # 2026-05-23 P4.1: bumped from v1 (klein) to
@@ -351,7 +405,9 @@ def _build_user_prompt(
     return "\n".join(lines)
 
 
-def _validate_one_item(item: object, *, beat_index: int) -> dict[str, str] | None:
+def _validate_one_item(
+    item: object, *, beat_index: int,
+) -> tuple[dict[str, str] | None, str | None]:
     """Validate one item emitted by the refiner LLM.
 
     Returns the cleaned dict on success, or ``None`` on validation
@@ -363,7 +419,7 @@ def _validate_one_item(item: object, *, beat_index: int) -> dict[str, str] | Non
             "prompt_refiner: beat %d item not an object: %s",
             beat_index, type(item).__name__,
         )
-        return None
+        return None, "missing_field"
     rv = (item.get("refined_visual") or "").strip()
     rs = (item.get("refined_scene") or "").strip()
     sb = (item.get("style_block") or "").strip()
@@ -373,7 +429,7 @@ def _validate_one_item(item: object, *, beat_index: int) -> dict[str, str] | Non
             "(rv=%s rs=%s sb=%s)",
             beat_index, bool(rv), bool(rs), bool(sb),
         )
-        return None
+        return None, "missing_field"
     # Anti-text prefix MUST lead refined_scene — required for downstream
     # idempotence with images_cloudrun._append_anti_text_suffix.
     if not rs.lower().startswith("no readable text in image"):
@@ -382,10 +438,11 @@ def _validate_one_item(item: object, *, beat_index: int) -> dict[str, str] | Non
             "prefix; clearing",
             beat_index,
         )
-        return None
-    return {"refined_visual": rv, "refined_scene": rs, "style_block": sb}
+        return None, "missing_field"
+    return {"refined_visual": rv, "refined_scene": rs, "style_block": sb}, None
 
 
+@_obs.traced(name="image.refiner.batch", category="llm")
 def refine_prompts_batch(
     beats: list[dict[str, Any]],
     *,
@@ -453,6 +510,15 @@ def refine_prompts_batch(
         mood=mood,
     )
     full_prompt = _REFINER_SYSTEM + "\n\n---\n\n" + user_prompt
+    input_batch = {
+        "channel_key": channel_key,
+        "era_anchor_prefix": era_anchor_prefix,
+        "character_description": character_description,
+        "style": style,
+        "mood": mood,
+        "beats": beats,
+        "prompt": full_prompt,
+    }
 
     try:
         raw = llm_call(
@@ -467,14 +533,32 @@ def refine_prompts_batch(
             "back to legacy path",
             exc, n,
         )
+        for i in range(n):
+            _track_refiner_fallback(i, "truncated")
+        _emit_refiner_io_artifact(
+            input_batch=input_batch,
+            raw_response_str=f"<{type(exc).__name__}: {exc}>",
+            parsed=None,
+            fallback_count=n,
+        )
         return [{} for _ in range(n)]
 
+    raw_response_str = _raw_response_string(raw)
     if not isinstance(raw, list) or len(raw) != n:
+        reason = "dict_returned" if isinstance(raw, dict) else "truncated"
         logger.warning(
             "prompt_refiner: LLM returned %s (expected list of %d); "
             "whole batch falls back",
             type(raw).__name__ if not isinstance(raw, list) else f"list[{len(raw)}]",
             n,
+        )
+        for i in range(n):
+            _track_refiner_fallback(i, reason)
+        _emit_refiner_io_artifact(
+            input_batch=input_batch,
+            raw_response_str=raw_response_str,
+            parsed=raw,
+            fallback_count=n,
         )
         return [{} for _ in range(n)]
 
@@ -485,8 +569,9 @@ def refine_prompts_batch(
     from pipeline.images import images as _images  # noqa: PLC0415
 
     for i, (beat, item) in enumerate(zip(beats, raw)):
-        refined = _validate_one_item(item, beat_index=i)
+        refined, fallback_reason = _validate_one_item(item, beat_index=i)
         if not refined:
+            _track_refiner_fallback(i, fallback_reason or "missing_field")
             out.append({})
             continue
         rv_clean, rv_removed = _images.strip_text_bait(refined["refined_visual"])
@@ -497,6 +582,7 @@ def refine_prompts_batch(
                 "after refining (%s); clearing and falling back",
                 i, list(rv_removed) + list(rs_removed),
             )
+            _track_refiner_fallback(i, "length_violation")
             out.append({})
             continue
         out.append({
@@ -512,6 +598,13 @@ def refine_prompts_batch(
                 mood=mood,
             ),
         })
+    fallback_count = sum(1 for slot in out if not slot)
+    _emit_refiner_io_artifact(
+        input_batch=input_batch,
+        raw_response_str=raw_response_str,
+        parsed=raw,
+        fallback_count=fallback_count,
+    )
     return out
 
 

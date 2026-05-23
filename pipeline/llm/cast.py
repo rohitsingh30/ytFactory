@@ -269,7 +269,18 @@ def author_cast(
     )
 
     print(f"[cast] authoring narrator via claude CLI for {raw_story.get('slug')!r}…")
-    raw = llm.call_claude_cli(prompt, output_json=True, model=llm.model_for("cast"), stage="cast")
+    cast_model = llm.model_for("cast")
+    raw = llm.call_claude_cli(prompt, output_json=True, model=cast_model, stage="cast")
+    try:
+        _obs.track_io(
+            "llm.module.cast",
+            category="llm",
+            input_text=prompt,
+            output_text=raw,
+            metadata={"stage": "cast", "model": cast_model},
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
     if not isinstance(raw, dict) or "narrator" not in raw:
         raise ValueError(f"cast author returned unexpected shape: {raw!r}")

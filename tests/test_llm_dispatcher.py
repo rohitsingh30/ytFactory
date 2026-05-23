@@ -609,10 +609,14 @@ class AzureBackendTest(unittest.TestCase):
         self._fake_client.chat.completions.create.return_value = \
             self._make_resp('{}')
         captured: list[dict] = []
-        with patch.object(
-            llm_cli._tlm, "track",
-            side_effect=lambda *a, **kw: captured.append(kw.get("metadata") or {}),
-        ):
+        def fake_track_io(**kw):
+            meta = {}
+            meta.update(kw.get("metadata") or {})
+            meta.update(kw.get("input_meta") or {})
+            meta.update(kw.get("output_meta") or {})
+            captured.append(meta)
+
+        with patch.object(llm_cli, "_track_llm_io", side_effect=fake_track_io):
             llm_cli._call_azure_openai(
                 "x", output_json=True, json_schema=None,
                 model="opus", timeout_s=30, stage="rewrite",
@@ -762,10 +766,14 @@ class AzureBackendTest(unittest.TestCase):
         self._fake_client.chat.completions.create.return_value = \
             self._make_resp('{"ok": true}')
         captured: list[dict] = []
-        with patch.object(
-            llm_cli._tlm, "track",
-            side_effect=lambda *a, **kw: captured.append(kw.get("metadata") or {}),
-        ):
+        def fake_track_io(**kw):
+            meta = {}
+            meta.update(kw.get("metadata") or {})
+            meta.update(kw.get("input_meta") or {})
+            meta.update(kw.get("output_meta") or {})
+            captured.append(meta)
+
+        with patch.object(llm_cli, "_track_llm_io", side_effect=fake_track_io):
             llm_cli._call_azure_openai(
                 "x", output_json=True, json_schema=None,
                 model="opus", timeout_s=30, stage="rewrite_long_form",
@@ -1307,10 +1315,14 @@ class CliSubprocessMaxTokensTest(unittest.TestCase):
         captured: list[dict] = []
         from pipeline.llm import cli as cli_mod
 
-        def fake_track(*_a, **kwargs):
-            captured.append(kwargs.get("metadata") or {})
+        def fake_track_io(**kwargs):
+            meta = {}
+            meta.update(kwargs.get("metadata") or {})
+            meta.update(kwargs.get("input_meta") or {})
+            meta.update(kwargs.get("output_meta") or {})
+            captured.append(meta)
 
-        with patch.object(cli_mod._tlm, "track", side_effect=fake_track), \
+        with patch.object(cli_mod, "_track_llm_io", side_effect=fake_track_io), \
              patch("subprocess.run",
                    return_value=self._make_envelope_proc("hi")):
             cli_mod._call_claude_cli_subprocess(

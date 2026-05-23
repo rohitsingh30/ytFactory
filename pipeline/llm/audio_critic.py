@@ -530,6 +530,16 @@ def critique_audio(
         budget_usd=2.0,
         stage="audio_critic",
     )
+    try:
+        _obs.track_io(
+            "llm.module.audio_critic",
+            category="llm",
+            input_text=prompt,
+            output_text=raw,
+            metadata={"stage": "audio_critic", "model": critic_model},
+        )
+    except Exception:  # noqa: BLE001
+        pass
     if not isinstance(raw, dict):
         raise ValueError(f"audio-critic returned {type(raw).__name__}, not object")
 

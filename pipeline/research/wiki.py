@@ -30,12 +30,14 @@ import hashlib
 import json
 import os
 import re
+import time
 from pathlib import Path
 from urllib.parse import quote
 
 import requests
 
 from pipeline.llm import cli as llm
+from pipeline.observability.event_helpers import safe_track_io, track_http_call
 
 
 WIKI_API = "https://en.wikipedia.org/w/api.php"
@@ -80,15 +82,36 @@ def _wiki_search(query: str) -> str | None:
         "format": "json",
     }
     try:
+        t0 = time.perf_counter()
         r = requests.get(
             WIKI_API,
             params=params,
             headers={"User-Agent": USER_AGENT},
             timeout=TIMEOUT,
         )
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        track_http_call(
+            service="wikipedia",
+            method="GET",
+            url=WIKI_API,
+            status_code=r.status_code,
+            request_body=params,
+            response_body=r.text,
+            duration_ms=duration_ms,
+        )
         r.raise_for_status()
         hits = r.json().get("query", {}).get("search", [])
     except (requests.RequestException, ValueError) as e:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        track_http_call(
+            service="wikipedia",
+            method="GET",
+            url=WIKI_API,
+            status_code=status,
+            request_body=params,
+            response_body=str(e),
+            success=False,
+        )
         print(f"[wiki] search failed for {query!r}: {e}")
         return None
     if not hits:
@@ -116,15 +139,36 @@ def _wiki_extract(title: str) -> str | None:
         "redirects": 1,
     }
     try:
+        t0 = time.perf_counter()
         r = requests.get(
             WIKI_API,
             params=params,
             headers={"User-Agent": USER_AGENT},
             timeout=TIMEOUT,
         )
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        track_http_call(
+            service="wikipedia",
+            method="GET",
+            url=WIKI_API,
+            status_code=r.status_code,
+            request_body=params,
+            response_body=r.text,
+            duration_ms=duration_ms,
+        )
         r.raise_for_status()
         pages = r.json().get("query", {}).get("pages", {})
     except (requests.RequestException, ValueError) as e:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        track_http_call(
+            service="wikipedia",
+            method="GET",
+            url=WIKI_API,
+            status_code=status,
+            request_body=params,
+            response_body=str(e),
+            success=False,
+        )
         print(f"[wiki] extract failed for {title!r}: {e}")
         return None
     # Wikipedia returns negative page-ids for missing pages; positive
@@ -352,12 +396,44 @@ def author_dossier(
     )
 
     print(f"[wiki] authoring dossier via claude CLI for {raw_story.get('slug')!r}…")
-    raw = llm.call_claude_cli(
-        prompt,
-        output_json=True,
-        json_schema=DOSSIER_SCHEMA,
-        model=llm.model_for("cast"),  # same tier as cast — judgment-heavy
-        timeout_s=300,
+    llm_model = llm.model_for("cast")
+    llm_t0 = time.perf_counter()
+    try:
+        raw = llm.call_claude_cli(
+            prompt,
+            output_json=True,
+            json_schema=DOSSIER_SCHEMA,
+            model=llm_model,  # same tier as cast — judgment-heavy
+            timeout_s=300,
+        )
+    except Exception as exc:  # noqa: BLE001
+        safe_track_io(
+            "llm.module.research_wiki",
+            category="llm",
+            success=False,
+            duration_ms=int((time.perf_counter() - llm_t0) * 1000),
+            input_text=prompt,
+            output_text=str(exc),
+            output_meta={
+                "model": llm_model,
+                "wiki_title": wiki_title,
+                "slug": raw_story.get("slug"),
+                "error_type": type(exc).__name__,
+            },
+        )
+        raise
+    safe_track_io(
+        "llm.module.research_wiki",
+        category="llm",
+        success=True,
+        duration_ms=int((time.perf_counter() - llm_t0) * 1000),
+        input_text=prompt,
+        output_text=raw,
+        output_meta={
+            "model": llm_model,
+            "wiki_title": wiki_title,
+            "slug": raw_story.get("slug"),
+        },
     )
 
     if not isinstance(raw, dict) or "people" not in raw:

@@ -405,9 +405,9 @@ def emit_artifact_json(
     index: int | None = None,
     extras: dict[str, Any] | None = None,
 ) -> str | None:
-    """Convenience: dump ``data`` to JSON in a temp file and emit_artifact it.
+    """Convenience: dump ``data`` to JSON in a staging file and emit it.
 
-    Saves callers from writing the same five-line "dump to tmp +
+    Saves callers from writing the same five-line "dump JSON +
     emit_artifact + cleanup" pattern at every stage boundary. Used by
     the stage_envelope decorator and by every new telemetry artifact
     added in the 2026-05-24 observability pass.
@@ -418,9 +418,9 @@ def emit_artifact_json(
     standard emit_artifact warning + return None path.
     """
     import json as _json  # noqa: PLC0415
-    import tempfile  # noqa: PLC0415
+    import uuid as _uuid  # noqa: PLC0415
 
-    filename = filename or f"{kind}.json"
+    filename = Path(filename or f"{kind}.json").name
     try:
         # Custom default coerces dataclasses / pathlib / set / bytes
         # into something JSON can render without exploding the render
@@ -445,21 +445,14 @@ def emit_artifact_json(
         )
         return None
 
-    with tempfile.NamedTemporaryFile(
-        "w", suffix=".json", delete=False, encoding="utf-8",
-    ) as tmp:
-        tmp.write(body)
-        tmp_path = Path(tmp.name)
+    staging_dir = Path(os.environ.get("YTFACTORY_ARTIFACT_STAGING_DIR", ".tmp/artifacts"))
+    target_dir: Path | None = None
+    target: Path | None = None
     try:
-        # Rename to the requested filename so the GCS object has the
-        # right name (emit_artifact uses local.name as the blob filename).
-        target = tmp_path.with_name(filename)
-        try:
-            tmp_path.replace(target)
-        except OSError:
-            # Cross-device or permission issue — fall back to using the
-            # tmp path as-is; the blob will have a tmp-style name.
-            target = tmp_path
+        target_dir = staging_dir / _uuid.uuid4().hex
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / filename
+        target.write_text(body, encoding="utf-8")
         return emit_artifact(
             job_id=job_id,
             kind=kind,
@@ -468,12 +461,17 @@ def emit_artifact_json(
             extras=extras,
             content_type="application/json",
         )
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning(
+            "emit_artifact_json: staging failed kind=%s job=%s: %s",
+            kind, job_id, exc,
+        )
+        return None
     finally:
-        # Best-effort cleanup; cloud workdirs are ephemeral so leaks
-        # don't accumulate.
-        for p in (tmp_path, target if 'target' in locals() else None):
-            try:
-                if p and p.exists():
-                    p.unlink()
-            except Exception:  # noqa: BLE001
-                pass
+        try:
+            if target and target.exists():
+                target.unlink()
+            if target_dir and target_dir.exists():
+                target_dir.rmdir()
+        except Exception:  # noqa: BLE001
+            pass

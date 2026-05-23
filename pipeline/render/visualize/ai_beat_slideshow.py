@@ -67,9 +67,11 @@ import hashlib
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
+from pipeline import observability as _obs
 from pipeline.render.contracts import (
     RenderFailedError,
     Timeline,
@@ -162,6 +164,7 @@ def _load_prompts_json(path: str | Path | None) -> list[dict] | None:
     return data
 
 
+@_obs.traced(name="prompts.resolve_for_beat", category="llm", capture=["beat_index"])
 def _resolve_prompt_for_beat(
     *,
     beat: dict[str, Any] | None,
@@ -170,6 +173,7 @@ def _resolve_prompt_for_beat(
     character_description: str | None,
     era_anchor_prefix: str | None,
     mood: str | None,
+    beat_index: int | None = None,
 ) -> str:
     """Assemble the final image-gen prompt for one beat.
 
@@ -183,28 +187,52 @@ def _resolve_prompt_for_beat(
     3. No beat dict → bare ``fallback_text`` (engine-test legacy
        contract; works for fixture renders that have no prompts.json).
     """
-    if beat is None:
-        return fallback_text
-    from pipeline.images import images as _images  # noqa: PLC0415
-    from pipeline.images.prompt_refiner import refined_fields_for_render  # noqa: PLC0415
+    start = time.perf_counter()
+    source = "fallback"
+    scene_text = fallback_text
+    final_prompt = fallback_text
+    try:
+        if beat is None:
+            return final_prompt
+        from pipeline.images import images as _images  # noqa: PLC0415
+        from pipeline.images.prompt_refiner import refined_fields_for_render  # noqa: PLC0415
 
-    rv, rs, sb = refined_fields_for_render(
-        beat,
-        era_anchor_prefix=era_anchor_prefix,
-        character_description=character_description,
-        style=style_prefix,
-        mood=mood,
-    )
-    return _images.build_full_prompt(
-        style_prefix=style_prefix,
-        character_description=character_description,
-        key_visual=beat.get("key_visual", ""),
-        scene=beat.get("scene", "") or fallback_text,
-        era_anchor_prefix=era_anchor_prefix,
-        refined_visual=rv,
-        refined_scene=rs,
-        style_block=sb,
-    )
+        rv, rs, sb = refined_fields_for_render(
+            beat,
+            era_anchor_prefix=era_anchor_prefix,
+            character_description=character_description,
+            style=style_prefix,
+            mood=mood,
+        )
+        source = "refined" if (rv and rs and sb) else "legacy_build_full_prompt"
+        scene_text = beat.get("scene", "") or fallback_text
+        final_prompt = _images.build_full_prompt(
+            style_prefix=style_prefix,
+            character_description=character_description,
+            key_visual=beat.get("key_visual", ""),
+            scene=scene_text,
+            era_anchor_prefix=era_anchor_prefix,
+            refined_visual=rv,
+            refined_scene=rs,
+            style_block=sb,
+        )
+        return final_prompt
+    finally:
+        try:
+            _obs.track(
+                "prompts.resolve_for_beat",
+                category="llm",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                metadata={
+                    "beat_index": beat_index,
+                    "source": source,
+                    "cast_chars": len(character_description or ""),
+                    "scene_chars": len(scene_text or ""),
+                    "final_chars": len(final_prompt or ""),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class AiBeatSlideshow:
@@ -389,6 +417,7 @@ class AiBeatSlideshow:
         # behavior (cache-friendly, reproducible against pre-fix
         # snapshots). Default = 9973 matches the dedupe retry constant.
         seed_stride = int(spec.extra.get("image_seed_stride", 9973))
+        job_id = spec.extra.get("job_id") or os.environ.get("YTFACTORY_JOB_ID") or None
 
         # Parallel per-beat fan-out — W = ceil(N/4) workers, capped by
         # the GPU quota / max-instances ceiling. Cloud Run's LB queues
@@ -418,6 +447,7 @@ class AiBeatSlideshow:
                 character_description=character_description,
                 era_anchor_prefix=era_anchor_prefix,
                 mood=mood,
+                beat_index=i,
             )
             # When a beat dict is present, _resolve_prompt_for_beat
             # used build_full_prompt which already inlines the style
@@ -436,6 +466,8 @@ class AiBeatSlideshow:
                     height=spec.output_resolution[1],
                     steps=steps,
                     provider=provider,
+                    job_id=job_id,
+                    panel_index=i,
                 )
             except Exception as exc:  # noqa: BLE001
                 _logger.warning(
@@ -492,6 +524,7 @@ class AiBeatSlideshow:
                     character_description=character_description,
                     era_anchor_prefix=era_anchor_prefix,
                     mood=mood,
+                    beat_index=i,
                 )
                 style_for_generate = "" if beat is not None else style_prefix
                 # Bump by an extra stride so the retry lands in a
@@ -513,6 +546,8 @@ class AiBeatSlideshow:
                         height=spec.output_resolution[1],
                         steps=steps,
                         provider=provider,
+                        job_id=job_id,
+                        panel_index=i,
                     )
                 except Exception as exc:  # noqa: BLE001
                     _logger.warning(
@@ -594,7 +629,7 @@ class AiBeatSlideshow:
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                     "-pix_fmt", "yuv420p",
                     str(clip_p),
-                ])
+                ], purpose="ai_beat_slideshow_static_fallback")
                 clip_paths.append(clip_p)
 
         concat_list = out_path.parent / f"{out_path.stem}_concat.txt"
@@ -606,7 +641,7 @@ class AiBeatSlideshow:
             "-f", "concat", "-safe", "0", "-i", str(concat_list),
             "-c", "copy",
             str(out_path),
-        ])
+        ], purpose="ai_beat_slideshow_concat")
 
 register_plugin("visualize", "ai_beat_slideshow", AiBeatSlideshow())
 assert isinstance(AiBeatSlideshow(), VisualProducer)

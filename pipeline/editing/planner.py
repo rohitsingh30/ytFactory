@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Optional
 
 from pipeline.llm.cli import call_llm, ClaudeCLIError
+from pipeline.observability.bodies import track_io
 
 from .schema import (
     Edl,
@@ -252,14 +254,55 @@ def plan_edit(
         "editing.planner: calling LLM (mode=%s, inputs=%d, target=%.1fs, model=%s)",
         mode_enum.value, len(input_manifest), target_duration_s, model,
     )
-    raw = call_llm(
-        full_prompt,
-        output_json=True,
-        json_schema=JSON_SCHEMA_HINT,
-        model=model,
-        timeout_s=timeout_s,
-        stage="editing_plan",
-    )
+    t0 = time.perf_counter()
+    try:
+        raw = call_llm(
+            full_prompt,
+            output_json=True,
+            json_schema=JSON_SCHEMA_HINT,
+            model=model,
+            timeout_s=timeout_s,
+            stage="editing_plan",
+        )
+    except Exception as exc:  # noqa: BLE001
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        try:
+            track_io(
+                "llm.module.editing_planner",
+                category="llm",
+                success=False,
+                duration_ms=duration_ms,
+                input_text=full_prompt,
+                output_text=str(exc),
+                input_meta={"model": model},
+                output_meta={
+                    "tokens": {"input_est": len(full_prompt.split()), "output_est": 0},
+                    "error": type(exc).__name__,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    duration_ms = int((time.perf_counter() - t0) * 1000)
+    raw_response = json.dumps(raw, ensure_ascii=False, default=str)
+    try:
+        track_io(
+            "llm.module.editing_planner",
+            category="llm",
+            success=True,
+            duration_ms=duration_ms,
+            input_text=full_prompt,
+            output_text=raw_response,
+            input_meta={"model": model},
+            output_meta={
+                "tokens": {
+                    "input_est": len(full_prompt.split()),
+                    "output_est": len(raw_response.split()),
+                },
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
     if not isinstance(raw, dict):
         raise EdlValidationError(
             f"planner returned non-object JSON ({type(raw).__name__}); "

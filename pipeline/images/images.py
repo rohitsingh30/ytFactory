@@ -377,7 +377,27 @@ def build_full_prompt(
             parts.append(scene.strip())
         if style_prefix and style_prefix.strip():
             parts.append(style_prefix.strip())
-    return ". ".join(parts)
+    full_prompt = ". ".join(parts)
+    if not using_refined:
+        try:
+            cast_prefix_chars = len(". ".join(
+                p.strip() for p in (era_anchor_prefix, character_description)
+                if p and p.strip()
+            ))
+            scene_chars = len((scene or "").strip())
+            denom = max(1, cast_prefix_chars + scene_chars)
+            _obs.track(
+                "prompts.legacy_path",
+                category="image",
+                metadata={
+                    "cast_prefix_chars": cast_prefix_chars,
+                    "scene_chars": scene_chars,
+                    "ratio": round(cast_prefix_chars / denom, 4),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return full_prompt
 
 
 # --- Pipeline lazy-load ------------------------------------------------
@@ -540,6 +560,132 @@ def warmup(
 # --- Generation --------------------------------------------------------
 
 
+def _normalise_prompt_list(value: str | list[str] | None) -> str:
+    if not value:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(s.strip() for s in value if s and s.strip())
+    return value.strip()
+
+
+def _assemble_final_prompt(
+    *,
+    prompt: str,
+    style_prefix: str,
+    provider: str,
+    force_positive: str | list[str] | None,
+) -> str:
+    final_prompt = (
+        f"{prompt.strip()}. {style_prefix.strip()}"
+        if style_prefix and style_prefix.strip()
+        else prompt.strip()
+    )
+    if provider == "cloudrun_z_image_turbo":
+        force_pos_str = _normalise_prompt_list(force_positive)
+        if force_pos_str:
+            final_prompt = f"{final_prompt} {force_pos_str}"
+    return final_prompt
+
+
+def _wire_prompt_for_provider(final_prompt: str, provider: str) -> str:
+    if provider == "cloudrun_z_image_turbo":
+        try:
+            from pipeline.images.images_cloudrun import _append_anti_text_suffix  # noqa: PLC0415
+            return _append_anti_text_suffix(final_prompt, model="z_image_turbo")
+        except Exception:  # noqa: BLE001
+            return final_prompt
+    return final_prompt
+
+
+def _current_job_id(explicit: str | None = None) -> str | None:
+    if explicit:
+        return explicit
+    try:
+        ctx = _obs.current_context()
+        if ctx.job_id:
+            return ctx.job_id
+    except Exception:  # noqa: BLE001
+        pass
+    return _os.environ.get("YTFACTORY_JOB_ID") or None
+
+
+def _record_image_gen_telemetry(
+    *,
+    final_prompt: str,
+    negative_prompt: str,
+    seed: int,
+    cfg: float,
+    cache_hit: bool,
+    out_path: Path,
+    bytes_out: int | None,
+    provider: str,
+    width: int,
+    height: int,
+    steps: int,
+    job_id: str | None,
+    panel_index: int | None,
+    duration_ms: int,
+    success: bool,
+    error: str | None = None,
+) -> None:
+    try:
+        _obs.track_io(
+            "image.gen",
+            category="image",
+            success=success,
+            duration_ms=duration_ms,
+            job_id=job_id,
+            input_text=final_prompt,
+            output_text=error,
+            input_meta={
+                "final_prompt_sha256": _obs.hash_full(final_prompt),
+                "final_prompt_preview": _obs.preview(final_prompt),
+                "negative_prompt": negative_prompt,
+                "seed": seed,
+                "width": width,
+                "height": height,
+                "steps": steps,
+                "cfg": cfg,
+                "model": provider,
+                "cache_hit": bool(cache_hit),
+                "panel_index": panel_index,
+            },
+            output_meta={
+                "bytes": bytes_out,
+                "path": str(out_path),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    if not success or not job_id:
+        return
+    try:
+        from pipeline.render.artifacts import emit_artifact_json  # noqa: PLC0415
+        filename = f"{panel_index:05d}.json" if panel_index is not None else "image_meta.json"
+        emit_artifact_json(
+            job_id=job_id,
+            kind="image_meta",
+            data={
+                "final_prompt": final_prompt,
+                "negative_prompt": negative_prompt,
+                "seed": seed,
+                "cfg": cfg,
+                "cache_hit": bool(cache_hit),
+                "bytes": bytes_out,
+                "path": str(out_path),
+                "width": width,
+                "height": height,
+                "steps": steps,
+                "model": provider,
+                "prompt_sha256": _obs.hash_full(final_prompt),
+            },
+            filename=filename,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def generate(
     prompt: str,
     style_prefix: str,
@@ -554,6 +700,9 @@ def generate(
     ip_adapter_scale: float = 0.6,
     extra_negative: str | list[str] | None = None,
     force_positive: str | list[str] | None = None,
+    job_id: str | None = None,
+    panel_index: int | None = None,
+    cache_hit: bool = False,
 ) -> Path:
     """Generate one image. Dispatches on ``provider``.
 
@@ -563,6 +712,15 @@ def generate(
     ``provider``, ``prompt_chars``, ``width``, ``height``, ``steps``,
     ``seed`` as attrs.
     """
+    assembled_prompt = _assemble_final_prompt(
+        prompt=prompt,
+        style_prefix=style_prefix,
+        provider=provider,
+        force_positive=force_positive,
+    )
+    final_prompt = _wire_prompt_for_provider(assembled_prompt, provider)
+    negative_prompt = _normalise_prompt_list(extra_negative)
+    effective_job_id = _current_job_id(job_id)
     metadata = {
         "provider": provider,
         "prompt_chars": len(prompt or ""),
@@ -572,27 +730,65 @@ def generate(
         "steps": steps,
         "seed": seed,
         "out_path": str(out_path),
+        "panel_index": panel_index,
+        "cache_hit": bool(cache_hit),
     }
-    with _obs.timed("image_gen", category="image", metadata=metadata) as t:
-        result = _generate_impl(
-            prompt=prompt,
-            style_prefix=style_prefix,
+    start = _time.perf_counter()
+    result: Path | None = None
+    bytes_out: int | None = None
+    success = False
+    error: str | None = None
+    try:
+        with _obs.timed("image_gen", category="image", job_id=effective_job_id, metadata=metadata) as t:
+            result = _generate_impl(
+                prompt=prompt,
+                style_prefix=style_prefix,
+                seed=seed,
+                out_path=out_path,
+                width=width,
+                height=height,
+                steps=steps,
+                provider=provider,
+                ip_adapter_image=ip_adapter_image,
+                ip_adapter_scale=ip_adapter_scale,
+                extra_negative=extra_negative,
+                force_positive=force_positive,
+            )
+            try:
+                bytes_out = result.stat().st_size
+                t.add(metadata={"out_bytes": bytes_out})
+            except Exception:  # noqa: BLE001
+                pass
+            success = True
+            return result
+    except Exception as exc:  # noqa: BLE001
+        error = f"{type(exc).__name__}: {exc}"[:1000]
+        raise
+    finally:
+        duration_ms = int((_time.perf_counter() - start) * 1000)
+        if bytes_out is None:
+            try:
+                bytes_out = out_path.stat().st_size if out_path.exists() else None
+            except Exception:  # noqa: BLE001
+                bytes_out = None
+        _record_image_gen_telemetry(
+            final_prompt=final_prompt,
+            negative_prompt=negative_prompt,
             seed=seed,
-            out_path=out_path,
+            cfg=0.0 if provider == "cloudrun_z_image_turbo" else 0.0,
+            cache_hit=cache_hit,
+            out_path=result or out_path,
+            bytes_out=bytes_out,
+            provider=provider,
             width=width,
             height=height,
             steps=steps,
-            provider=provider,
-            ip_adapter_image=ip_adapter_image,
-            ip_adapter_scale=ip_adapter_scale,
-            extra_negative=extra_negative,
-            force_positive=force_positive,
+            job_id=effective_job_id,
+            panel_index=panel_index,
+            duration_ms=duration_ms,
+            success=success,
+            error=error,
         )
-        try:
-            t.add(metadata={"out_bytes": result.stat().st_size})
-        except Exception:  # noqa: BLE001
-            pass
-        return result
 
 
 def _generate_impl(
@@ -625,25 +821,12 @@ def _generate_impl(
     see ``build_full_prompt()``. ``style_prefix`` is appended at the
     end for back-compat.
     """
-    final_prompt = (
-        f"{prompt.strip()}. {style_prefix.strip()}"
-        if style_prefix and style_prefix.strip()
-        else prompt.strip()
+    final_prompt = _assemble_final_prompt(
+        prompt=prompt,
+        style_prefix=style_prefix,
+        provider=provider,
+        force_positive=force_positive,
     )
-
-    # Cloud guidance-distilled provider (Z-Image-Turbo at gs=0.0)
-    # ignores negative prompts. Channel YAML opts in via
-    # ``force_positive`` to assert what SHOULD be in frame (the only
-    # knob that actually shifts cloud diffusion output).
-    if provider == "cloudrun_z_image_turbo":
-        force_pos_str = ""
-        if force_positive:
-            if isinstance(force_positive, list):
-                force_pos_str = ", ".join(s.strip() for s in force_positive if s.strip())
-            elif isinstance(force_positive, str):
-                force_pos_str = force_positive.strip()
-        if force_pos_str:
-            final_prompt = f"{final_prompt} {force_pos_str}"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 

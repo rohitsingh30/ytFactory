@@ -58,6 +58,8 @@ import math
 import re
 from typing import Any
 
+from pipeline import observability as _obs
+
 from . import cli as _llm
 from .script_schema import (
     LongFormPanel,
@@ -653,13 +655,24 @@ def _call_outline_llm(
         niche_title_rules=niche_title_rules,
     ) + extra_rules
 
+    outline_model = _llm.model_for("rewrite_long_form")
     raw = _llm.call_claude_cli(
         prompt,
         output_json=True,
         json_schema=_OUTLINE_SCHEMA,
-        model=_llm.model_for("rewrite_long_form"),
+        model=outline_model,
         stage="rewrite_long_form_outline",
     )
+    try:
+        _obs.track_io(
+            "llm.module.rewrite_long_form_outline",
+            category="llm",
+            input_text=prompt,
+            output_text=raw,
+            metadata={"stage": "rewrite_long_form_outline", "model": outline_model},
+        )
+    except Exception:  # noqa: BLE001
+        pass
     if not isinstance(raw, dict):
         raise RuntimeError(
             f"_call_outline_llm: LLM returned {type(raw).__name__}, "
@@ -1165,13 +1178,28 @@ def _call_section_body_llm(
         emphasis_block=emphasis_block,
     )
 
+    section_model = _llm.model_for("rewrite_long_form")
     raw = _llm.call_claude_cli(
         prompt,
         output_json=True,
         json_schema=_SECTION_BODY_SCHEMA,
-        model=_llm.model_for("rewrite_long_form"),
+        model=section_model,
         stage="rewrite_long_form_section",
     )
+    try:
+        _obs.track_io(
+            "llm.module.rewrite_long_form_section",
+            category="llm",
+            input_text=prompt,
+            output_text=raw,
+            metadata={
+                "stage": "rewrite_long_form_section",
+                "model": section_model,
+                "section_id": section_id,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
     if not isinstance(raw, dict):
         raise RuntimeError(
             f"_call_section_body_llm: LLM returned {type(raw).__name__}, "
