@@ -184,89 +184,217 @@ having to spelunk into Cloud Logging.
 When a render produces an unexpected mp4, work through these recipes
 **in order**. Stop at the first one that points at the bug.
 
-### Recipe A — "23 identical panels" (image diversity)
+All recipes assume these shell vars are set:
 
-1. `gsutil cp gs://ytfactory-prod-v3-artifacts/jobs/<job>/decision_log/decision_log.json -`
-   → look for `scope=refiner chosen=fallback`. If present, the
-     refiner failed and every prompt went through the legacy path —
-     skip to step 4.
-2. `gsutil cp gs://.../jobs/<job>/refiner_io/refiner_io.json -`
-   → inspect the raw LLM response. If it's a dict instead of a
-     list[N], bug B. If it's truncated, the token cap fired.
-3. `gsutil cp gs://.../jobs/<job>/prompts_refined/prompts.json -`
-   → if this file exists with N distinct prompts, refiner ran; the
-     bug is downstream (image cache, server-side prompt collapse, or
-     LoRA dominance). Move to step 4.
-4. `gsutil cp gs://.../jobs/<job>/image_meta/00000.json -`
-   → inspect `final_prompt_preview`. This is the EXACT string the
-     z-image-turbo server received. If the cast prefix is 80%+ of the
-     prompt, that's the legacy cast-dominance bug; verify with
-     `cat 00007.json` etc — if they're all near-identical, the
-     legacy path is winning.
-5. If the final prompts ARE distinct but the panels still look
-   identical, query the `image.cache.hit` events — a hash collision
-   would surface here.
+```bash
+export PROJECT=ytfactory-prod-v3
+export BUCKET=ytfactory-prod-v3-artifacts
+export JOB=24c5887a-d111-4b22-9e2f-eaa0a0a0a0a0   # full job id (uuid)
+```
+
+If you only have the short prefix (e.g. `24c5887a`), look it up:
+
+```bash
+gsutil ls gs://$BUCKET/jobs/ | grep 24c5887a
+```
+
+### Recipe A — "N identical panels" (image diversity)
+
+**Job 24c5887a worked example** — TIFU short rendered 23
+near-identical brunette/yellow-tee/bedroom panels despite a 4-character
+cast and a varied script.
+
+```bash
+# Step 1 — was there a refiner fallback? (the fastest signal)
+gsutil cat gs://$BUCKET/jobs/$JOB/decision_log/decision_log.json \
+  | jq '.entries[] | select(.scope=="refiner")'
+#   → {"scope":"refiner","chosen":"fallback","reason":"dict_returned",...}
+#   means refiner failed and every prompt went through the legacy path.
+#   Skip to step 4.
+
+# Step 2 — inspect the raw refiner LLM call
+gsutil cat gs://$BUCKET/jobs/$JOB/refiner_io/refiner_io.json | jq .
+#   → .request.prompt[:500]        — what we sent
+#   → .response.raw_text[:500]     — what the model returned (often a
+#                                    dict {"prompt_0":"..."} not list[N])
+#   → .response.parse_error        — why the parser rejected it
+#   This is bug B forensics.
+
+# Step 3 — if refiner ran successfully, did its output flow through?
+gsutil cat gs://$BUCKET/jobs/$JOB/prompts_refined/prompts.json | jq 'length'
+#   N distinct refined prompts here = refiner is healthy. Bug is
+#   downstream. Move to step 4.
+
+# Step 4 — read what z-image-turbo ACTUALLY received per panel
+for i in 00000 00007 00014; do
+  echo "=== panel $i ==="
+  gsutil cat gs://$BUCKET/jobs/$JOB/image_meta/$i.json \
+    | jq '{final_prompt_preview, seed, cfg, cache_hit}'
+done
+#   If `final_prompt_preview` for all panels starts with the same
+#   200-char cast prefix and only varies in the last 10%, the legacy
+#   cast-dominance path is winning (bug C).
+
+# Step 5 — distinct prompts but identical pixels → cache collision
+gcloud logging read \
+  "jsonPayload.event=\"image.cache.hit\" AND jsonPayload.job_id=\"$JOB\"" \
+  --project=$PROJECT --limit=50 --format=json \
+  | jq '.[] | {prompt_sha256: .jsonPayload.metadata.prompt_sha256, path: .jsonPayload.metadata.path}'
+#   If multiple distinct panel indices all resolved to the same
+#   cache path, you've found a hash-collision or key-truncation bug.
+```
 
 ### Recipe B — "source fetch fell back"
 
-1. Look for `event=source.fetch_fallback` in Cloud Logging:
-   `gcloud logging read 'jsonPayload.event="source.fetch_fallback" AND jsonPayload.job_id="<job>"' --limit=10`.
-2. `metadata.fallback_reason` tells you what went wrong (403, 404,
-   timeout, parser error).
-3. `gsutil cp gs://.../source/source.json -` to see what body was
-   ACTUALLY used by the downstream rewrite.
+**Worked example** — bug A on job 24c5887a: Reddit returned 403, the
+adapter silently swapped to the anonymous JSON endpoint, downstream
+rewrite never knew the body was the lower-fidelity sanitized text.
+
+```bash
+# Step 1 — Cloud Logging: every fallback decision
+gcloud logging read \
+  "jsonPayload.event=\"source.fetch_fallback\" AND jsonPayload.job_id=\"$JOB\"" \
+  --project=$PROJECT --limit=10 --format=json \
+  | jq '.[].jsonPayload.metadata'
+#   → {"kind":"reddit","ref":"r/tifu/comments/...","fallback_reason":"403",
+#      "backend_attempted":"oauth","backend_used":"json_anon"}
+
+# Step 2 — what body did the rewrite stage ACTUALLY see?
+gsutil cat gs://$BUCKET/jobs/$JOB/source/source.json \
+  | jq '{backend_used, status_code, body_chars, body_sha256, body: .body[:500]}'
+
+# Step 3 — Firestore decision_log mirror (one read, no log query)
+gcloud firestore documents describe jobs/$JOB \
+  --project=$PROJECT --format=json \
+  | jq '.fields.decision_log.arrayValue.values[].mapValue.fields | select(.scope.stringValue=="source")'
+```
 
 ### Recipe C — "LLM returned the wrong shape"
 
-1. Filter Cloud Logging by `jsonPayload.event="llm.call" AND
-   jsonPayload.job_id="<job>" AND jsonPayload.metadata.success=false`.
-2. Read `metadata.retry`, `metadata.reason`. Common values:
-   `max_tokens_swap`, `response_format_swap`, `content_filter`,
-   `max_tokens_double` (token cap retry).
-3. For the actual prompt + response, the matching event also has
-   `metadata.prompt_sha256` and `metadata.response_sha256`. Pull the
-   refiner_io / prompts_refined artifact for the full text.
+Most common cause of bad renders. Hits the refiner, the rewrite, and
+the cast author.
+
+```bash
+# Step 1 — all failed LLM calls for this job, with retry reasons
+gcloud logging read \
+  "jsonPayload.event=\"llm.call\" AND jsonPayload.job_id=\"$JOB\" AND jsonPayload.success=false" \
+  --project=$PROJECT --limit=20 --format=json \
+  | jq '.[].jsonPayload.metadata | {module: .module, backend: .backend, retry: .retry, reason: .reason, prompt_sha256: .prompt_sha256}'
+
+# Step 2 — pair with the matching retry events to see the full chain
+gcloud logging read \
+  "jsonPayload.event=\"llm.retry\" AND jsonPayload.job_id=\"$JOB\"" \
+  --project=$PROJECT --limit=20 --format=json \
+  | jq '.[].jsonPayload.metadata'
+#   Common reason values:
+#     max_tokens_swap         — we doubled max_tokens and retried
+#     response_format_swap    — we dropped JSON mode and retried
+#     reasoning_effort_drop   — gpt-5 reasoning was downgraded
+#     content_filter          — Azure refused; we reframed
+#     max_tokens_double       — token cap fired twice
+
+# Step 3 — for the actual prompt+response, pull the module's artifact
+gsutil cat gs://$BUCKET/jobs/$JOB/refiner_io/refiner_io.json | jq .
+#   (or prompts_raw, script, cast — depending on the module hit)
+```
 
 ### Recipe D — "ffmpeg failed"
 
-1. `gcloud logging read 'jsonPayload.event="ffmpeg.call" AND jsonPayload.success=false AND jsonPayload.job_id="<job>"'`.
-2. `metadata.stderr_tail` (last 4kB) + `metadata.args[]` reproduce the
-   exact ffmpeg invocation.
-3. `metadata.purpose` identifies which compose / overlay / music
-   helper made the call.
+```bash
+# Step 1 — every failed ffmpeg invocation for this job
+gcloud logging read \
+  "jsonPayload.event=\"ffmpeg.call\" AND jsonPayload.success=false AND jsonPayload.job_id=\"$JOB\"" \
+  --project=$PROJECT --limit=10 --format=json \
+  | jq '.[].jsonPayload.metadata | {purpose, exit_code, stderr_tail, args}'
+#   → metadata.purpose       identifies the caller (compose, overlay,
+#                            music, trim_letterbox, …)
+#   → metadata.stderr_tail   last 4kB of ffmpeg stderr
+#   → metadata.args          the full argv — paste into a local shell
+#                            to reproduce
 
-### Recipe E — "TTS sounded wrong"
+# Step 2 — was the compose stage even reached?
+gcloud firestore documents describe jobs/$JOB \
+  --project=$PROJECT --format=json \
+  | jq '.fields.stages.mapValue.fields.compose'
+```
 
-1. `gsutil ls gs://.../jobs/<job>/tts_chunks/` → enumerate chunks.
-2. `gsutil cp gs://.../tts_chunks/<NNNNN>.json -` to see the text +
-   voice the TTS server received.
-3. Cross-check against `event=tts.server` log entries for
-   `audio_seconds` / WPM anomalies.
+### Recipe E — "TTS sounded wrong" (mispronounced word, wrong voice, wrong pace)
 
-### Recipe F — "ASR misaligned beats"
+```bash
+# Step 1 — list every TTS chunk this run produced
+gsutil ls gs://$BUCKET/jobs/$JOB/tts_chunks/
+#   → 00000.json … 00042.json (one per chunk)
 
-1. `gsutil cp gs://.../jobs/<job>/asr_alignment/asr.json -` for the
-   word-by-word alignment.
-2. `gsutil cp gs://.../jobs/<job>/timeline/timeline.json -` for the
-   beat→time bounds the renderer ended up using.
-3. Look for `event=timeline.beat_map` entries with
-   `metadata.unanchored_count > 0` — those are beats that fell back
-   to fixed timing.
+# Step 2 — read text + voice + audio_seconds per chunk
+for f in $(gsutil ls gs://$BUCKET/jobs/$JOB/tts_chunks/); do
+  gsutil cat $f | jq '{chunk_index, voice, audio_seconds, text_chars, text_preview}'
+done
 
-### Recipe G — "wrong engine ran"
+# Step 3 — server-side timing/WPM anomalies
+gcloud logging read \
+  "jsonPayload.event=\"tts.server\" AND jsonPayload.job_id=\"$JOB\"" \
+  --project=$PROJECT --limit=50 --format=json \
+  | jq '.[].jsonPayload.metadata | {chunk_index, voice, text_chars, audio_seconds, gpu_seconds, wpm: ((.text_chars / 5) / (.audio_seconds / 60))}'
+#   Acceptable narration WPM: 140–185. Outside that band = pronunciation
+#   bug or wrong voice profile selected.
+```
 
-1. `gcloud logging read 'jsonPayload.event="engine.pick" AND jsonPayload.job_id="<job>"'`.
-2. `metadata.chosen` is the engine name; `metadata.kind` /
-   `metadata.format` are the inputs to the picker.
+### Recipe F — "ASR misaligned beats / captions drift"
 
-### Recipe H — "everything looks fine but the mp4 is empty"
+```bash
+# Step 1 — per-word alignment (the raw faster-whisper output)
+gsutil cat gs://$BUCKET/jobs/$JOB/asr_alignment/asr.json \
+  | jq '.words[:20]'
 
-1. `gsutil cp gs://.../jobs/<job>/events_log/events.jsonl - | jq -r '.event' | sort | uniq -c`
-   → which stages emitted zero events.
-2. Cross-check against `jobs/<job>.stages` in Firestore for which
-   stages were even run.
-3. A stage that ran but emitted nothing is a telemetry bug — fix
-   that first.
+# Step 2 — how the renderer mapped beats to seconds
+gsutil cat gs://$BUCKET/jobs/$JOB/timeline/timeline.json \
+  | jq '.beats[] | {idx, text_preview, start, end, anchored, anchor_source}'
+
+# Step 3 — count unanchored beats (those that fell back to fixed timing)
+gcloud logging read \
+  "jsonPayload.event=\"timeline.beat_map\" AND jsonPayload.job_id=\"$JOB\"" \
+  --project=$PROJECT --limit=5 --format=json \
+  | jq '.[].jsonPayload.metadata | {beat_count, unanchored_count, total_seconds}'
+#   Any unanchored_count > 0 is a probable cause of caption drift.
+```
+
+### Recipe G — "wrong engine ran" (short instead of long, or vice versa)
+
+```bash
+gcloud logging read \
+  "jsonPayload.event=\"engine.pick\" AND jsonPayload.job_id=\"$JOB\"" \
+  --project=$PROJECT --limit=5 --format=json \
+  | jq '.[].jsonPayload.metadata'
+#   → {"chosen":"render_short","kind":"reddit_tifu","format":"9x16",
+#      "spec_path":"gs://.../render_plan/plan.json"}
+
+# To see the full RenderSpec that was dispatched:
+gsutil cat gs://$BUCKET/jobs/$JOB/render_plan/plan.json | jq .
+```
+
+### Recipe H — "everything looks fine but the mp4 is empty / broken"
+
+```bash
+# Step 1 — which stages emitted events at all
+gsutil cat gs://$BUCKET/jobs/$JOB/events_log/events.jsonl \
+  | jq -r '.event' | sort | uniq -c | sort -rn
+#   Expected stages: rewrite, cast, prompts.author_gate, image.gen,
+#   tts.chunk, asr.chunk, timeline.beat_map, ffmpeg.call, compose.run,
+#   artifact.upload. A stage with 0 events is a telemetry bug — fix
+#   that BEFORE diagnosing the render issue.
+
+# Step 2 — Firestore stage summary
+gcloud firestore documents describe jobs/$JOB \
+  --project=$PROJECT --format=json \
+  | jq '.fields.stages.mapValue.fields | to_entries[] | {stage: .key, duration_ms: .value.mapValue.fields.duration_ms.integerValue, success: .value.mapValue.fields.success.booleanValue}'
+
+# Step 3 — full event timeline (last resort, when 1+2 don't pinpoint it)
+gcloud logging read \
+  "jsonPayload.job_id=\"$JOB\"" \
+  --project=$PROJECT --limit=500 --format=json --order=asc \
+  | jq -r '.[].jsonPayload | "\(.timestamp) \(.event) success=\(.success) \(.metadata.purpose // .metadata.stage // "")"' \
+  | less
+```
 
 ---
 
@@ -308,24 +436,24 @@ is a snapshot. Update on every PR that touches the pipeline.
 
 | Layer | Files | Status |
 |---|---|---|
-| `cloud/render-worker-v2` | entrypoint.py (13 stages), writeback.py | wiring |
-| `cloud/image-z-image-turbo` | server.py | wiring |
-| `cloud/tts-chatterbox`, `cloud/tts-indicf5` | server.py | wiring |
-| `cloud/asr-whisper` | server.py | wiring |
-| `cloud/editing-agent` | server.py | wiring |
-| `cloud/clone-video-worker` | server.py | wiring |
-| `pipeline/llm` | cli.py + 14 modules | bodies pending |
-| `pipeline/images` | images.py, prompt_refiner.py, image_cache.py, images_cloudrun.py | wiring |
-| `pipeline/sources` | reddit_api, youtube_video, wikipedia, today_in_history | wiring |
-| `pipeline/research` | wiki.py, channel_assets.py | wiring |
-| `pipeline/render/audio` | tts_single, tts_chunked | wiring |
-| `pipeline/render/timeline` | asr_anchors, asr_beats | wiring |
-| `pipeline/render/visualize` | ai_beat_slideshow, longform_panels, footage_filler | wiring |
-| `pipeline/render/compose` | beat_slideshow_mux, section_video_mux | wiring |
-| `pipeline/render/music` | single_bed, ducked_loop, section_mood | wiring |
-| `pipeline/render/overlays` | word_caption_pngs, sentence_caption_ass, chapter_card, lower_third, anchored_footage, closer_panel | wiring |
-| `pipeline/render/shared` | ffmpeg_helpers, trim_letterbox | wiring |
-| `control/core` | jobs, scheduler, queue, reconciler, storage, sim_worker, cloud_run | wiring |
+| `cloud/render-worker-v2` | entrypoint.py (13 stages), writeback.py | ✅ complete (phase 1) |
+| `cloud/image-z-image-turbo` | server.py | ✅ complete (phase 3) |
+| `cloud/tts-chatterbox`, `cloud/tts-indicf5` | server.py | ✅ complete (phase 4) |
+| `cloud/asr-whisper` | server.py | ✅ complete (phase 4) |
+| `cloud/editing-agent` | server.py | ✅ complete (phase 5) |
+| `cloud/clone-video-worker` | server.py | ✅ complete (phase 3) |
+| `pipeline/llm` | cli.py + 14 modules | ✅ complete (phase 2) |
+| `pipeline/images` | images.py, prompt_refiner.py, image_cache.py, images_cloudrun.py | ✅ complete (phases 2-3) |
+| `pipeline/sources` | reddit_api, youtube_video, wikipedia, today_in_history | ✅ complete (phase 6) |
+| `pipeline/research` | wiki.py, channel_assets.py | ✅ complete (phase 6) |
+| `pipeline/render/audio` | tts_single, tts_chunked | ✅ complete (phase 4) |
+| `pipeline/render/timeline` | asr_anchors, asr_beats | ✅ complete (phase 5) |
+| `pipeline/render/visualize` | ai_beat_slideshow, longform_panels, footage_filler | ✅ complete (phases 2-3) |
+| `pipeline/render/compose` | beat_slideshow_mux, section_video_mux | ✅ complete (phase 5) |
+| `pipeline/render/music` | single_bed, ducked_loop, section_mood | ✅ complete (phase 5) |
+| `pipeline/render/overlays` | word_caption_pngs, sentence_caption_ass, chapter_card, lower_third, anchored_footage, closer_panel | ✅ complete (phase 5) |
+| `pipeline/render/shared` | ffmpeg_helpers, trim_letterbox | ✅ complete (phase 5) |
+| `control/core` | jobs, scheduler, queue, reconciler, storage, sim_worker, cloud_run | ✅ complete (phase 8) |
 
 **100% coverage** = every file in the matrix has at least one
 `track()` / `track_io()` call **at a meaningful decision point**, not

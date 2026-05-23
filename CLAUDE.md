@@ -122,6 +122,16 @@ See `.claude/skills/critique-video/SKILL.md` for the full lens list.
 
 - Read the code before writing or editing. Comments and docstrings can
   drift; the function body is authoritative.
+- **Pull cloud logs and GCS artifacts BEFORE diagnosing a bad render.**
+  Every render emits structured events to Cloud Logging, dumps every
+  stage's real input/output to `gs://ytfactory-prod-v3-artifacts/jobs/<job_id>/`,
+  and writes a decision log to Firestore. The catalogue + 8 diagnostic
+  recipes (A-H, with copy-pasteable `gcloud` / `gsutil` commands) live
+  in `docs/render_telemetry.md`. Reading frames from the final mp4 to
+  guess what went wrong is an anti-pattern — start at the artifacts.
+  If a question about a render can't be answered from those three
+  surfaces, the gap is a telemetry bug; fix the telemetry first, then
+  the underlying issue.
 - If a stage can't produce its real output, raise an exception. Don't
   return a placeholder (solid-color mp4, empty caption list, silent
   audio) that makes the render look successful when it isn't.
