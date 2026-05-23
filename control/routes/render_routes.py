@@ -154,12 +154,12 @@ async def render(
         # (state_dir, variant_yaml) — state_dir = "channel/niche_subdir"
         # so a registered niche like 'tifu' ("mystoriesanimated/reddit_tifu",
         # ...) failed equality against the bare 'mystoriesanimated' slug.
-        if owning and owning.key != req.channel:
+        if owning and owning.slug != req.channel:
             raise HTTPException(
                 status_code=422,
                 detail=(
                     f"niche/format {fmt!r} belongs to channel "
-                    f"{owning.key!r}, not {req.channel!r}. Either switch "
+                    f"{owning.slug!r}, not {req.channel!r}. Either switch "
                     f"the channel or pick a different format. Registered "
                     f"niches for {req.channel!r}: "
                     f"{sorted(ch.niches.keys()) if ch.niches else '(none — channel uses defaults)'}."
