@@ -25,7 +25,7 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -34,6 +34,47 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
 )
 logger = logging.getLogger("ytfactory.tts.indicf5")
+try:
+    from _tel_track_io import track_io as _tel_track_io  # type: ignore[import-not-found]
+except Exception:  # noqa: BLE001
+    _tel_track_io = None
+
+
+def _trace_id_from_request(request: Request) -> str | None:
+    try:
+        parts = (request.headers.get("traceparent") or "").split("-")
+        if len(parts) >= 4 and len(parts[1]) == 32:
+            return parts[1]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _track_request_event(event: str, request: Request, metadata: dict | None = None) -> None:
+    try:
+        from opentelemetry import _logs as _logs_api  # noqa: PLC0415
+        meta = dict(metadata or {})
+        trace_id = _trace_id_from_request(request)
+        if trace_id:
+            meta["trace_id"] = trace_id
+        _logs_api.get_logger("ytfactory.event").emit(_logs_api.LogRecord(
+            timestamp=time.time_ns(),
+            observed_timestamp=time.time_ns(),
+            severity_number=_logs_api.SeverityNumber.INFO,
+            severity_text="INFO",
+            body={
+                "event": event,
+                "category": "tts",
+                "success": True,
+                "duration_ms": None,
+                "job_id": None,
+                "metadata": meta,
+            },
+            attributes={},
+        ))
+    except Exception:  # noqa: BLE001
+        pass
+
 
 INLINE_LIMIT_BYTES = 5 * 1024 * 1024
 GCS_BUCKET = os.environ.get("GCS_BUCKET", "ytfactory-tts-io")
@@ -225,14 +266,21 @@ def _ref_audio_to_path(ref_b64: str) -> Path:
 
 
 @app.get("/readyz")
-def readyz() -> dict:
+def readyz(request: Request) -> dict:
+    _track_request_event("tts.readyz", request, {"endpoint": "/readyz", "model": "indicf5"})
     t0 = time.time()
     _model()
     return {"status": "ready", "warm_s": round(time.time() - t0, 2)}
 
 
+@app.post("/synthesize")
 @app.post("/synth")
-def synth(req: SynthIn) -> JSONResponse:
+def synth(req: SynthIn, request: Request) -> JSONResponse:
+    _track_request_event(
+        "tts.server",
+        request,
+        {"endpoint": "/synth", "model": "indicf5", "text_chars": len(req.text or "")},
+    )
     if not req.text.strip():
         raise HTTPException(400, "empty text")
     if not req.ref_text.strip():
@@ -279,8 +327,49 @@ def synth(req: SynthIn) -> JSONResponse:
     else:
         payload["output_inline"] = base64.b64encode(wav_bytes).decode("ascii")
 
+    _emit_tts_server_telemetry(
+        req=req,
+        request=request,
+        wall_s=wall_s,
+        duration_s=duration_s,
+    )
     out_path.unlink(missing_ok=True)
     return JSONResponse(payload)
+
+
+def _emit_tts_server_telemetry(
+    *,
+    req: SynthIn,
+    request: Request,
+    wall_s: float,
+    duration_s: float,
+) -> None:
+    try:
+        if _tel_track_io is None:
+            return
+        voice = None
+        if req.ref_audio_b64:
+            voice = hashlib.sha256(req.ref_audio_b64.encode("utf-8")).hexdigest()[:16]
+        traceparent = request.headers.get("traceparent") if request else None
+        metadata = {"traceparent": traceparent} if traceparent else None
+        _tel_track_io(
+            "tts.server",
+            category="tts",
+            input_text=req.text,
+            output_text=None,
+            input_meta={
+                "voice": voice,
+                "model": req.model or "indicf5",
+            },
+            output_meta={
+                "gpu_seconds": wall_s,
+                "audio_seconds": duration_s,
+            },
+            metadata=metadata,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
 
 
 def _synth_indicf5(*, text, ref_audio_path, ref_audio_text, out_path, speed=1.0):

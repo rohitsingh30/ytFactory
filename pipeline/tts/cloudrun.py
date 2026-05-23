@@ -204,9 +204,11 @@ def warmup(provider: str) -> "threading.Thread | None":
         sess = requests.Session()
         try:
             t0 = time.time()
+            headers = {"Authorization": f"Bearer {token}"}
+            _inject_trace_headers(headers)
             resp = sess.get(
                 f"{url}/readyz",
-                headers={"Authorization": f"Bearer {token}"},
+                headers=headers,
                 timeout=900,
             )
             resp.raise_for_status()
@@ -232,6 +234,21 @@ def warmup(provider: str) -> "threading.Thread | None":
 class CloudRunUnavailable(RuntimeError):
     """Raised when the cloud service can't satisfy the request and the
     caller should fall back to the local provider."""
+
+
+
+def _inject_trace_headers(headers: dict[str, str]) -> None:
+    try:
+        from pipeline.observability.propagation import inject_into_dict  # noqa: PLC0415
+
+        carrier: dict[str, str] = {}
+        inject_into_dict(carrier)
+        for key in ("traceparent", "tracestate"):
+            if carrier.get(key):
+                headers[key] = carrier[key]
+    except Exception:  # noqa: BLE001
+        pass
+
 
 
 def _post_synth(payload: dict) -> dict:
@@ -277,13 +294,15 @@ def _post_synth(payload: dict) -> dict:
     token = _get_id_token(url)
 
     body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    _inject_trace_headers(headers)
     req = urllib.request.Request(
         f"{url}/synth",
         data=body,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         method="POST",
     )
 

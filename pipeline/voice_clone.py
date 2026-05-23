@@ -34,6 +34,7 @@ import hashlib
 import json
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -46,6 +47,29 @@ from pipeline.paths import MODEL_CACHE_DIR
 # a voice clone consumed by multiple channel renders). Lives under the
 # cross-channel ML model cache.
 CACHE_DIR = MODEL_CACHE_DIR / "voice_clones"
+
+
+
+def _track(
+    event: str,
+    *,
+    category: str = "pipeline",
+    success: bool = True,
+    duration_ms: int | None = None,
+    metadata: dict | None = None,
+) -> None:
+    try:
+        from pipeline import observability as obs  # noqa: PLC0415
+
+        obs.track(
+            event,
+            category=category,
+            success=success,
+            duration_ms=duration_ms,
+            metadata=metadata or {},
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @dataclass
@@ -133,6 +157,15 @@ def _download_audio(url: str) -> tuple[Path, str]:
     existing = list(CACHE_DIR.glob(f"{vid}.*"))
     if existing:
         print(f"[cache] {existing[0].name} (skip download)")
+        _track(
+            "voice_clone.download",
+            category="decision",
+            metadata={
+                "source_video_id": vid,
+                "chosen": "cache_hit",
+                "path": str(existing[0]),
+            },
+        )
         return existing[0], vid
 
     # Resolve via ``sys.modules`` so test mocks of
@@ -148,11 +181,34 @@ def _download_audio(url: str) -> tuple[Path, str]:
 
     print(f"[download] cloud-yt-dlp → {vid}")
     out_template = CACHE_DIR / f"{vid}.%(ext)s"
+    t0 = time.time()
     try:
         path = yt_dlp_cloudrun.download(
             url, output_path=out_template, audio_only=True, audio_ext="m4a",
         )
+        _track(
+            "voice_clone.download",
+            category="http",
+            duration_ms=int((time.time() - t0) * 1000),
+            metadata={
+                "source_video_id": vid,
+                "chosen": "cloud_yt_dlp",
+                "path": str(path),
+                "bytes": path.stat().st_size if path.exists() else 0,
+            },
+        )
     except Exception as e:  # noqa: BLE001
+        _track(
+            "voice_clone.download",
+            category="http",
+            success=False,
+            duration_ms=int((time.time() - t0) * 1000),
+            metadata={
+                "source_video_id": vid,
+                "chosen": "cloud_yt_dlp",
+                "error": f"{type(e).__name__}: {e}"[:500],
+            },
+        )
         # The cloud module's own error class has CloudRunYtDlpFailed; we
         # also catch generic RuntimeError so the test-mock path (which
         # uses bare RuntimeError) is honoured.
@@ -176,7 +232,46 @@ def _trim_and_clean(
         "-af", af,
         str(dst),
     ]
-    subprocess.run(cmd, check=True)
+    t0 = time.time()
+    try:
+        subprocess.run(cmd, check=True)
+        _track(
+            "ffmpeg.call",
+            category="ffmpeg",
+            duration_ms=int((time.time() - t0) * 1000),
+            metadata={
+                "purpose": "voice_clone.trim_clean",
+                "args": cmd,
+                "exit_code": 0,
+                "output_bytes": dst.stat().st_size if dst.exists() else 0,
+            },
+        )
+    except subprocess.CalledProcessError as exc:
+        _track(
+            "ffmpeg.call",
+            category="ffmpeg",
+            success=False,
+            duration_ms=int((time.time() - t0) * 1000),
+            metadata={
+                "purpose": "voice_clone.trim_clean",
+                "args": cmd,
+                "exit_code": exc.returncode,
+            },
+        )
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _track(
+            "ffmpeg.call",
+            category="ffmpeg",
+            success=False,
+            duration_ms=int((time.time() - t0) * 1000),
+            metadata={
+                "purpose": "voice_clone.trim_clean",
+                "args": cmd,
+                "error": f"{type(exc).__name__}: {exc}"[:500],
+            },
+        )
+        raise
 
 
 def clone_from_youtube(
@@ -222,6 +317,16 @@ def clone_from_youtube(
         raise ValueError("pass either (channel, slug) or (out_wav, out_json)")
 
     src, vid = _download_audio(url)
+    _track(
+        "voice_clone.chunk",
+        metadata={
+            "source_video_id": vid,
+            "source_path": str(src),
+            "start_s": start,
+            "duration_s": duration,
+            "ref_wav": str(ref_wav),
+        },
+    )
     print(f"[trim] {src.name} [{start:.1f}..{start+duration:.1f}s] → {ref_wav}")
     _trim_and_clean(src, ref_wav, start=start, duration=duration)
 
@@ -237,8 +342,34 @@ def clone_from_youtube(
     if asr is None:
         asr = importlib.import_module("pipeline.audio.asr")
 
-    result = asr.transcribe(ref_wav, provider=asr_provider)
+    t0 = time.time()
+    try:
+        result = asr.transcribe(ref_wav, provider=asr_provider)
+    except Exception as exc:  # noqa: BLE001
+        _track(
+            "voice_clone.asr",
+            category="asr",
+            success=False,
+            duration_ms=int((time.time() - t0) * 1000),
+            metadata={
+                "provider": asr_provider,
+                "ref_wav": str(ref_wav),
+                "error": f"{type(exc).__name__}: {exc}"[:500],
+            },
+        )
+        raise
     ref_text = (result.get("text") or "").strip()
+    _track(
+        "voice_clone.asr",
+        category="asr",
+        success=bool(ref_text),
+        duration_ms=int((time.time() - t0) * 1000),
+        metadata={
+            "provider": asr_provider,
+            "ref_wav": str(ref_wav),
+            "ref_text_chars": len(ref_text),
+        },
+    )
     if not ref_text:
         raise RuntimeError(
             "ASR produced empty transcript — pick a clearer window with "
@@ -255,6 +386,14 @@ def clone_from_youtube(
         "start": start,
         "duration": duration,
     }, indent=2))
+    _track(
+        "voice_clone.write_metadata",
+        metadata={
+            "voice_json": str(voice_json),
+            "ref_wav": str(ref_wav),
+            "source_video_id": vid,
+        },
+    )
     print(f"[done] wrote {voice_json}")
     return ClonedVoice(ref_wav=ref_wav, ref_text=ref_text, voice_json=voice_json)
 

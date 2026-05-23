@@ -85,6 +85,54 @@ def _id_token(audience: str) -> Optional[str]:
         return None
 
 
+
+def _inject_trace_headers(headers: dict[str, str]) -> None:
+    try:
+        from pipeline.observability.propagation import inject_into_dict  # noqa: PLC0415
+
+        carrier: dict[str, str] = {}
+        inject_into_dict(carrier)
+        for key in ("traceparent", "tracestate"):
+            if carrier.get(key):
+                headers[key] = carrier[key]
+    except Exception:  # noqa: BLE001
+        pass
+
+
+
+def _track_http_call(
+    *,
+    method: str,
+    url: str,
+    status_code: int | None,
+    response_bytes: int,
+    duration_ms: int,
+    success: bool,
+    error: str | None = None,
+) -> None:
+    try:
+        from pipeline import observability as obs  # noqa: PLC0415
+
+        meta: dict[str, Any] = {
+            "service": "yt_dlp_cloudrun",
+            "method": method,
+            "url": url,
+            "status_code": status_code,
+            "response_bytes": response_bytes,
+        }
+        if error:
+            meta["error"] = error[:500]
+        obs.track(
+            "http.call",
+            category="http",
+            success=success,
+            duration_ms=duration_ms,
+            metadata=meta,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
@@ -143,16 +191,28 @@ def download(
     token = _id_token(base_url)
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    _inject_trace_headers(headers)
 
+    request_url = f"{base_url}/download"
+    request_t0 = time.time()
     try:
         resp = requests.post(
-            f"{base_url}/download",
+            request_url,
             json=body,
             headers=headers,
             timeout=timeout_s + 30,
             stream=True,
         )
     except requests.RequestException as exc:
+        _track_http_call(
+            method="POST",
+            url=request_url,
+            status_code=None,
+            response_bytes=0,
+            duration_ms=int((time.time() - request_t0) * 1000),
+            success=False,
+            error=f"{type(exc).__name__}: {exc}",
+        )
         if fallback_to_local and _local_fallback_enabled():
             logger.warning("cloudrun yt-dlp: HTTP failed (%s) → falling back to local", exc)
             return _local_fallback_download(
@@ -165,12 +225,30 @@ def download(
         raise CloudRunYtDlpUnavailable(f"cloud yt-dlp HTTP failed: {exc}") from exc
 
     if resp.status_code == 400:
+        _track_http_call(
+            method="POST",
+            url=request_url,
+            status_code=resp.status_code,
+            response_bytes=len(resp.content or b""),
+            duration_ms=int((time.time() - request_t0) * 1000),
+            success=False,
+            error=resp.text[:300],
+        )
         # Genuine yt-dlp failure — don't fall back to laptop, the URL
         # itself is the problem.
         raise CloudRunYtDlpFailed(
             f"cloud yt-dlp 400: {resp.text[:300]}"
         )
     if resp.status_code == 504:
+        _track_http_call(
+            method="POST",
+            url=request_url,
+            status_code=resp.status_code,
+            response_bytes=len(resp.content or b""),
+            duration_ms=int((time.time() - request_t0) * 1000),
+            success=False,
+            error=resp.text[:300],
+        )
         # Audit D3.59 — pre-fix this raised CloudRunYtDlpFailed (no
         # local retry), but a 504 is a SERVICE-side timeout: the same
         # URL might succeed on the laptop's faster network or under
@@ -192,6 +270,15 @@ def download(
             f"cloud yt-dlp timeout: {resp.text[:200]}"
         )
     if resp.status_code != 200:
+        _track_http_call(
+            method="POST",
+            url=request_url,
+            status_code=resp.status_code,
+            response_bytes=len(resp.content or b""),
+            duration_ms=int((time.time() - request_t0) * 1000),
+            success=False,
+            error=resp.text[:300],
+        )
         # 401/403/5xx → service issue; fall back to laptop.
         if fallback_to_local and _local_fallback_enabled():
             logger.warning(
@@ -232,21 +319,42 @@ def download(
     chunk_timeout_s = float(
         os.environ.get("YTFACTORY_YTDLP_CHUNK_READ_TIMEOUT_S", "60")
     )
-    with out_path.open("wb") as fh:
-        last_chunk_at = time.time()
-        for chunk in resp.iter_content(chunk_size=64 * 1024):
-            now = time.time()
-            if (now - last_chunk_at) > chunk_timeout_s:
-                out_path.unlink(missing_ok=True)
-                raise CloudRunYtDlpFailed(
-                    f"cloud yt-dlp body stalled: no chunk in "
-                    f"{chunk_timeout_s:.0f}s ({bytes_written} bytes received)"
-                )
-            if chunk:
-                fh.write(chunk)
-                bytes_written += len(chunk)
-                last_chunk_at = now
+    try:
+        with out_path.open("wb") as fh:
+            last_chunk_at = time.time()
+            for chunk in resp.iter_content(chunk_size=64 * 1024):
+                now = time.time()
+                if (now - last_chunk_at) > chunk_timeout_s:
+                    out_path.unlink(missing_ok=True)
+                    raise CloudRunYtDlpFailed(
+                        f"cloud yt-dlp body stalled: no chunk in "
+                        f"{chunk_timeout_s:.0f}s ({bytes_written} bytes received)"
+                    )
+                if chunk:
+                    fh.write(chunk)
+                    bytes_written += len(chunk)
+                    last_chunk_at = now
+    except Exception as exc:  # noqa: BLE001
+        _track_http_call(
+            method="POST",
+            url=request_url,
+            status_code=resp.status_code,
+            response_bytes=bytes_written,
+            duration_ms=int((time.time() - request_t0) * 1000),
+            success=False,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
 
+    _track_http_call(
+        method="POST",
+        url=request_url,
+        status_code=resp.status_code,
+        response_bytes=bytes_written,
+        duration_ms=int((time.time() - request_t0) * 1000),
+        success=bytes_written > 0,
+        error="0-byte body" if bytes_written == 0 else None,
+    )
     if bytes_written == 0:
         out_path.unlink(missing_ok=True)
         raise CloudRunYtDlpFailed("cloud yt-dlp returned 0-byte body")

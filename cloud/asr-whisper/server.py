@@ -51,11 +51,12 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
@@ -77,6 +78,46 @@ except Exception:  # noqa: BLE001
 
 _logger = logging.getLogger(__name__)
 _logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO")))
+try:
+    from _tel_track_io import track_io as _tel_track_io  # type: ignore[import-not-found]
+except Exception:  # noqa: BLE001
+    _tel_track_io = None
+
+
+def _trace_id_from_request(request: Request) -> str | None:
+    try:
+        parts = (request.headers.get("traceparent") or "").split("-")
+        if len(parts) >= 4 and len(parts[1]) == 32:
+            return parts[1]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _track_request_event(event: str, request: Request, metadata: dict | None = None) -> None:
+    try:
+        from opentelemetry import _logs as _logs_api  # noqa: PLC0415
+        meta = dict(metadata or {})
+        trace_id = _trace_id_from_request(request)
+        if trace_id:
+            meta["trace_id"] = trace_id
+        _logs_api.get_logger("ytfactory.event").emit(_logs_api.LogRecord(
+            timestamp=time.time_ns(),
+            observed_timestamp=time.time_ns(),
+            severity_number=_logs_api.SeverityNumber.INFO,
+            severity_text="INFO",
+            body={
+                "event": event,
+                "category": "asr",
+                "success": True,
+                "duration_ms": None,
+                "job_id": None,
+                "metadata": meta,
+            },
+            attributes={},
+        ))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +232,7 @@ class AlignResponse(BaseModel):
     language: str
     segments: list[Segment]
     word_count: int
+    gpu_seconds: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -199,12 +241,23 @@ class AlignResponse(BaseModel):
 
 
 @app.get("/healthz")
-def healthz() -> dict[str, Any]:
+def healthz(request: Request) -> dict[str, Any]:
+    _track_request_event("asr.healthz", request, {"endpoint": "/healthz"})
     return {"ok": True, "model": _MODEL_NAME, "device": _DEVICE}
 
 
+@app.post("/transcribe", response_model=AlignResponse)
+def transcribe(req: AlignRequest, request: Request) -> AlignResponse:
+    _track_request_event("asr.server", request, {"endpoint": "/transcribe", "mode": "words"})
+    data = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+    data["mode"] = "words"
+    data["anchors"] = []
+    return align(AlignRequest(**data), request)
+
+
 @app.post("/align", response_model=AlignResponse)
-def align(req: AlignRequest) -> AlignResponse:
+def align(req: AlignRequest, request: Request) -> AlignResponse:
+    _track_request_event("asr.server", request, {"endpoint": "/align", "mode": req.mode})
     if not (req.narration_wav_url or req.narration_wav_b64):
         raise HTTPException(400, "one of narration_wav_url or narration_wav_b64 required")
     if req.mode not in {"words", "beats", "anchors"}:
@@ -213,12 +266,26 @@ def align(req: AlignRequest) -> AlignResponse:
         raise HTTPException(400, "mode=anchors requires non-empty anchors[]")
 
     wav_path = _resolve_wav(req)
+    t0 = time.time()
     try:
         words, language = _transcribe_words(wav_path, language=req.language)
+    except Exception as exc:  # noqa: BLE001
+        _emit_asr_server_telemetry(
+            req=req,
+            request=request,
+            audio_seconds=0.0,
+            language=req.language or "unknown",
+            word_count=0,
+            gpu_seconds=time.time() - t0,
+            success=False,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
     finally:
         if wav_path and wav_path.exists() and str(wav_path).startswith("/tmp/"):
             wav_path.unlink(missing_ok=True)
 
+    gpu_seconds = time.time() - t0
     duration_s = words[-1]["end_s"] if words else 0.0
 
     if req.mode == "words":
@@ -237,17 +304,69 @@ def align(req: AlignRequest) -> AlignResponse:
     else:  # anchors
         segments = _match_anchors(words, anchors=req.anchors, total_s=duration_s)
 
+    _emit_asr_server_telemetry(
+        req=req,
+        request=request,
+        audio_seconds=duration_s,
+        language=language,
+        word_count=len(words),
+        gpu_seconds=gpu_seconds,
+        success=True,
+    )
     return AlignResponse(
         duration_s=duration_s,
         language=language,
         segments=segments,
         word_count=len(words),
+        gpu_seconds=gpu_seconds,
     )
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _emit_asr_server_telemetry(
+    *,
+    req: AlignRequest,
+    request: Request,
+    audio_seconds: float,
+    language: str,
+    word_count: int,
+    gpu_seconds: float,
+    success: bool,
+    error: str | None = None,
+) -> None:
+    try:
+        if _tel_track_io is None:
+            return
+        traceparent = request.headers.get("traceparent") if request else None
+        metadata: dict[str, Any] = {}
+        if traceparent:
+            metadata["traceparent"] = traceparent
+        if error:
+            metadata["error"] = error[:500]
+        _tel_track_io(
+            "asr.server",
+            category="asr",
+            success=success,
+            input_text=None,
+            output_text=None,
+            input_meta={
+                "audio_seconds": audio_seconds,
+                "model": req.model or _MODEL_NAME,
+                "language": language,
+            },
+            output_meta={
+                "word_count": word_count,
+                "gpu_seconds": gpu_seconds,
+            },
+            metadata=metadata or None,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
 
 
 def _resolve_wav(req: AlignRequest) -> Path:

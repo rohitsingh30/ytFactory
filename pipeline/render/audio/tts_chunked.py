@@ -21,6 +21,7 @@ canonical pattern.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +50,10 @@ class TtsChunked:
         script: dict[str, Any],
         work_dir: Path,
     ) -> AudioResult:
-        from pipeline.render.shared.long_form_lib import synth_long_narration  # noqa: PLC0415
+        from pipeline.render.shared.long_form_lib import (  # noqa: PLC0415
+            _split_into_chunks,
+            synth_long_narration,
+        )
 
         narration_text = self._narration_text(script)
         out_path = work_dir / "narration.wav"
@@ -84,6 +88,10 @@ class TtsChunked:
         # caller→callee binding with ``inspect.signature`` so future
         # signature renames hard-fail at unit-test time, not at the
         # cloud render boundary.
+        chunk_texts = _split_into_chunks(
+            narration_text,
+            target_chars=spec.tts.chunk_target_chars,
+        )
         narration_wav, chunks = synth_long_narration(
             text=narration_text,
             voice_id=voice_id,
@@ -115,9 +123,17 @@ class TtsChunked:
         # — saves the asr_anchors plugin from re-probing each chunk.
         chunk_timings: list[tuple[float, float]] = []
         cursor = 0.0
-        for chunk_path in chunks:
+        for i, chunk_path in enumerate(chunks):
             chunk_dur = probe_duration(chunk_path)
             chunk_timings.append((cursor, cursor + chunk_dur))
+            _emit_tts_chunk_telemetry(
+                chunk_index=i,
+                chunk_text=chunk_texts[i] if i < len(chunk_texts) else "",
+                voice=voice_id,
+                provider=provider,
+                audio_path=chunk_path,
+                audio_seconds=chunk_dur,
+            )
             cursor += chunk_dur + spec.tts.chunk_join_silence_s
 
         return AudioResult(
@@ -217,6 +233,55 @@ class TtsChunked:
                 voice_id, exc,
             )
             return voice_id, None
+
+
+def _emit_tts_chunk_telemetry(
+    *,
+    chunk_index: int,
+    chunk_text: str,
+    voice: str,
+    provider: str,
+    audio_path: Path,
+    audio_seconds: float,
+) -> None:
+    try:
+        from pipeline.observability import current_context, track_io  # noqa: PLC0415
+
+        audio_bytes = audio_path.stat().st_size if audio_path.exists() else 0
+        job_id = current_context().job_id or os.environ.get("YTFACTORY_JOB_ID")
+        track_io(
+            "tts.chunk",
+            category="tts",
+            job_id=job_id,
+            input_text=chunk_text,
+            output_text=None,
+            input_meta={
+                "chunk_index": chunk_index,
+                "voice": voice,
+                "provider": provider,
+            },
+            output_meta={
+                "audio_seconds": audio_seconds,
+                "audio_bytes": audio_bytes,
+            },
+        )
+        if job_id:
+            from pipeline.render.artifacts import emit_artifact_json  # noqa: PLC0415
+
+            emit_artifact_json(
+                job_id=job_id,
+                kind="tts_chunks",
+                data={
+                    "chunk_index": chunk_index,
+                    "text": chunk_text,
+                    "voice": voice,
+                    "audio_seconds": audio_seconds,
+                },
+                filename=f"{chunk_index:05d}.json",
+                index=chunk_index,
+            )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 register_plugin("audio", "tts_chunked", TtsChunked())

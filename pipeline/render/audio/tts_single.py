@@ -38,6 +38,7 @@ method against a stub. See
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +113,14 @@ class TtsSingle:
         write_sidecar(out_path, fp)
 
         duration_s = probe_duration(out_path)
+        _emit_tts_chunk_telemetry(
+            chunk_index=0,
+            chunk_text=narration_text,
+            voice=voice_id,
+            provider=provider,
+            audio_path=out_path,
+            audio_seconds=duration_s,
+        )
         return AudioResult(
             narration_path=out_path,
             duration_s=duration_s,
@@ -138,6 +147,55 @@ class TtsSingle:
         if spec.tone and spec.tone in spec.tts.tone_overrides:
             return spec.tts.tone_overrides[spec.tone].get("atempo", spec.tts.post_atempo_default)
         return spec.tts.post_atempo_default
+
+
+def _emit_tts_chunk_telemetry(
+    *,
+    chunk_index: int,
+    chunk_text: str,
+    voice: str,
+    provider: str,
+    audio_path: Path,
+    audio_seconds: float,
+) -> None:
+    try:
+        from pipeline.observability import current_context, track_io  # noqa: PLC0415
+
+        audio_bytes = audio_path.stat().st_size if audio_path.exists() else 0
+        job_id = current_context().job_id or os.environ.get("YTFACTORY_JOB_ID")
+        track_io(
+            "tts.chunk",
+            category="tts",
+            job_id=job_id,
+            input_text=chunk_text,
+            output_text=None,
+            input_meta={
+                "chunk_index": chunk_index,
+                "voice": voice,
+                "provider": provider,
+            },
+            output_meta={
+                "audio_seconds": audio_seconds,
+                "audio_bytes": audio_bytes,
+            },
+        )
+        if job_id:
+            from pipeline.render.artifacts import emit_artifact_json  # noqa: PLC0415
+
+            emit_artifact_json(
+                job_id=job_id,
+                kind="tts_chunks",
+                data={
+                    "chunk_index": chunk_index,
+                    "text": chunk_text,
+                    "voice": voice,
+                    "audio_seconds": audio_seconds,
+                },
+                filename=f"{chunk_index:05d}.json",
+                index=chunk_index,
+            )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # Module-import side-effect: register the plugin under

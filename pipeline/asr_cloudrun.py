@@ -41,6 +41,9 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import re
+import time
+import wave
 from pathlib import Path
 from typing import Any
 
@@ -139,7 +142,11 @@ def align_via_cloud(
         "Authorization": f"Bearer {_id_token_for(base_url)}",
         "Content-Type": "application/json",
     }
+    _inject_trace_headers(headers)
 
+    audio_seconds = _audio_duration_s(narration_wav)
+    chunk_index = _chunk_index_from_path(narration_wav)
+    t0 = time.time()
     try:
         resp = requests.post(
             align_url,
@@ -157,6 +164,15 @@ def align_via_cloud(
         # requests-library equivalent on this code path is
         # ChunkedEncodingError. Pinning at the same layer keeps both
         # cloud clients symmetrically resilient.
+        _track_asr_chunk(
+            chunk_index=chunk_index,
+            audio_seconds=audio_seconds,
+            word_count=0,
+            gpu_seconds=time.time() - t0,
+            language=language,
+            success=False,
+            error=f"{type(exc).__name__}: {exc}",
+        )
         _logger.warning("cloud ASR call failed (%s) — caller will fall back",
                         type(exc).__name__)
         raise CloudRunAsrUnavailable(
@@ -168,6 +184,16 @@ def align_via_cloud(
         # that should trigger fallback. 4xx callers should fix the
         # request rather than fall back, so re-raise with detail.
         body = resp.text[:500]
+        _track_asr_chunk(
+            chunk_index=chunk_index,
+            audio_seconds=audio_seconds,
+            word_count=0,
+            gpu_seconds=time.time() - t0,
+            language=language,
+            success=False,
+            status_code=resp.status_code,
+            error=body,
+        )
         if 500 <= resp.status_code < 600:
             raise CloudRunAsrUnavailable(
                 f"cloud ASR HTTP {resp.status_code}: {body}"
@@ -176,7 +202,29 @@ def align_via_cloud(
             f"cloud ASR HTTP {resp.status_code} (non-retryable): {body}"
         )
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        _track_asr_chunk(
+            chunk_index=chunk_index,
+            audio_seconds=audio_seconds,
+            word_count=0,
+            gpu_seconds=time.time() - t0,
+            language=language,
+            success=False,
+            status_code=resp.status_code,
+            error=f"json_decode: {exc}",
+        )
+        raise
+    _track_asr_chunk(
+        chunk_index=chunk_index,
+        audio_seconds=audio_seconds or float(data.get("duration_s") or 0.0),
+        word_count=int(data.get("word_count") or 0),
+        gpu_seconds=float(data.get("gpu_seconds") or (time.time() - t0)),
+        language=data.get("language") or language,
+        success=True,
+        status_code=resp.status_code,
+    )
     return [
         Segment(
             start_s=float(s["start_s"]),
@@ -187,6 +235,82 @@ def align_via_cloud(
         )
         for i, s in enumerate(data.get("segments", []))
     ]
+
+
+def _inject_trace_headers(headers: dict[str, str]) -> None:
+    try:
+        from pipeline.observability.propagation import inject_into_dict  # noqa: PLC0415
+
+        carrier: dict[str, str] = {}
+        inject_into_dict(carrier)
+        for key in ("traceparent", "tracestate"):
+            if carrier.get(key):
+                headers[key] = carrier[key]
+    except Exception:  # noqa: BLE001
+        pass
+
+
+
+def _audio_duration_s(path: Path) -> float:
+    try:
+        with wave.open(str(path), "rb") as wav:
+            frames = wav.getnframes()
+            rate = wav.getframerate() or 1
+            return frames / float(rate)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+
+def _chunk_index_from_path(path: Path) -> int:
+    try:
+        m = re.search(r"(?:chunk|raw|part)[_-]?(\d+)", path.stem)
+        if m:
+            return int(m.group(1))
+    except Exception:  # noqa: BLE001
+        pass
+    return 0
+
+
+
+def _track_asr_chunk(
+    *,
+    chunk_index: int,
+    audio_seconds: float,
+    word_count: int,
+    gpu_seconds: float,
+    language: str | None,
+    success: bool,
+    status_code: int | None = None,
+    error: str | None = None,
+) -> None:
+    try:
+        from pipeline.observability import track_io  # noqa: PLC0415
+
+        output_meta: dict[str, Any] = {
+            "word_count": word_count,
+            "gpu_seconds": gpu_seconds,
+            "language": language,
+        }
+        if status_code is not None:
+            output_meta["status_code"] = status_code
+        if error:
+            output_meta["error"] = error[:500]
+        track_io(
+            "asr.chunk",
+            category="asr",
+            success=success,
+            input_text=None,
+            output_text=None,
+            input_meta={
+                "chunk_index": chunk_index,
+                "audio_seconds": audio_seconds,
+            },
+            output_meta=output_meta,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
 
 
 def _upload_to_gcs(narration_wav: Path) -> str:

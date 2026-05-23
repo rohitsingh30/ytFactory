@@ -42,6 +42,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -53,6 +54,50 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 UA = "ytFactory/cosmos-decoded-prep (+rohittomar@microsoft.com)"
 
 ASPECT_DIMS = {"16:9": (1920, 1080), "9:16": (1080, 1920)}
+
+
+
+def _track(
+    event: str,
+    *,
+    category: str = "pipeline",
+    success: bool = True,
+    duration_ms: int | None = None,
+    metadata: dict | None = None,
+) -> None:
+    try:
+        from pipeline import observability as obs  # noqa: PLC0415
+
+        obs.track(
+            event,
+            category=category,
+            success=success,
+            duration_ms=duration_ms,
+            metadata=metadata or {},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+
+def _track_decision(
+    *,
+    source: str,
+    url: str,
+    chosen: str,
+    reason: str,
+    extra: dict | None = None,
+) -> None:
+    meta = {
+        "scope": "cosmos_footage_prep",
+        "source": source,
+        "url": url,
+        "chosen": chosen,
+        "reason": reason,
+    }
+    if extra:
+        meta.update(extra)
+    _track("decision.footage_prep", category="decision", metadata=meta)
 
 
 @dataclass
@@ -68,15 +113,52 @@ def _http_get(url: str, dest: Path, *, timeout: int = 60, expect_kind: str = "an
     content-type guard — pass 'image' or 'video' to fail loudly if the
     server returns text/html (i.e. the URL was not actually a direct
     asset)."""
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        ct = (r.headers.get("Content-Type") or "").lower()
-        if expect_kind == "image" and "image/" not in ct:
-            raise RuntimeError(f"expected image, got Content-Type {ct!r} — URL probably resolves to a wiki page rather than a direct asset")
-        if expect_kind == "video" and "video/" not in ct and "octet-stream" not in ct:
-            raise RuntimeError(f"expected video, got Content-Type {ct!r}")
-        with dest.open("wb") as f:
-            shutil.copyfileobj(r, f)
+    t0 = time.time()
+    status_code = None
+    ct = ""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            status_code = getattr(r, "status", None)
+            ct = (r.headers.get("Content-Type") or "").lower()
+            if expect_kind == "image" and "image/" not in ct:
+                raise RuntimeError(f"expected image, got Content-Type {ct!r} — URL probably resolves to a wiki page rather than a direct asset")
+            if expect_kind == "video" and "video/" not in ct and "octet-stream" not in ct:
+                raise RuntimeError(f"expected video, got Content-Type {ct!r}")
+            with dest.open("wb") as f:
+                shutil.copyfileobj(r, f)
+        _track(
+            "http.call",
+            category="http",
+            duration_ms=int((time.time() - t0) * 1000),
+            metadata={
+                "service": "cosmos_footage_prep",
+                "method": "GET",
+                "url": url,
+                "status_code": status_code,
+                "response_bytes": dest.stat().st_size if dest.exists() else 0,
+                "content_type": ct,
+                "expect_kind": expect_kind,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        _track(
+            "http.call",
+            category="http",
+            success=False,
+            duration_ms=int((time.time() - t0) * 1000),
+            metadata={
+                "service": "cosmos_footage_prep",
+                "method": "GET",
+                "url": url,
+                "status_code": status_code,
+                "response_bytes": dest.stat().st_size if dest.exists() else 0,
+                "content_type": ct,
+                "expect_kind": expect_kind,
+                "error": f"{type(exc).__name__}: {exc}"[:500],
+            },
+        )
+        raise
 
 
 def _resolve_wikimedia(url: str) -> Optional[str]:
@@ -244,7 +326,50 @@ def _still_to_video(still: Path, out_path: Path, *, duration_s: float, aspect: s
         "-crf", "23", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
         "-an", str(out_path),
     ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    t0 = time.time()
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        _track(
+            "ffmpeg.call",
+            category="ffmpeg",
+            duration_ms=int((time.time() - t0) * 1000),
+            metadata={
+                "purpose": "cosmos_footage_prep.still_to_video",
+                "args": cmd,
+                "exit_code": 0,
+                "output_bytes": out_path.stat().st_size if out_path.exists() else 0,
+            },
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr_tail = ""
+        if exc.stderr:
+            stderr_tail = exc.stderr.decode("utf-8", errors="replace")[-1000:]
+        _track(
+            "ffmpeg.call",
+            category="ffmpeg",
+            success=False,
+            duration_ms=int((time.time() - t0) * 1000),
+            metadata={
+                "purpose": "cosmos_footage_prep.still_to_video",
+                "args": cmd,
+                "exit_code": exc.returncode,
+                "stderr_tail": stderr_tail,
+            },
+        )
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _track(
+            "ffmpeg.call",
+            category="ffmpeg",
+            success=False,
+            duration_ms=int((time.time() - t0) * 1000),
+            metadata={
+                "purpose": "cosmos_footage_prep.still_to_video",
+                "args": cmd,
+                "error": f"{type(exc).__name__}: {exc}"[:500],
+            },
+        )
+        raise
 
 
 def _entries_from_shotlist(shotlist: dict) -> tuple[list[dict], str]:
@@ -287,18 +412,49 @@ def prep_shotlist(channel: str, slug: str, *, force: bool = False) -> PrepResult
         out_s = float(entry.get("out_s", 8.0))
         if not src_name:
             res.errors.append((f"<entry {i}>", str(url), "no `source` filename"))
+            _track_decision(
+                source=f"<entry {i}>",
+                url=str(url),
+                chosen="error",
+                reason="no source filename",
+            )
             continue
 
         dest = sources_dir / src_name
         if dest.exists() and not force:
             res.skipped.append(src_name)
+            _track_decision(
+                source=src_name,
+                url=str(url),
+                chosen="skip_existing",
+                reason="destination exists",
+                extra={"dest": str(dest), "kind": kind},
+            )
             continue
 
         if not url:
             res.manual.append((src_name, "<no source_url>", "shotlist entry missing source_url"))
+            _track_decision(
+                source=src_name,
+                url="<no source_url>",
+                chosen="manual",
+                reason="shotlist entry missing source_url",
+                extra={"dest": str(dest), "kind": kind},
+            )
             continue
 
         resolved, reason = _resolve_url(url)
+        _track_decision(
+            source=src_name,
+            url=url,
+            chosen="resolved" if resolved else "manual",
+            reason=reason or "direct asset resolved",
+            extra={
+                "dest": str(dest),
+                "kind": kind,
+                "resolved_url": resolved,
+            },
+        )
         if not resolved:
             res.manual.append((src_name, url, reason or "unsupported host"))
             print(f"[prep] {i+1}/{len(entries)}  MANUAL  {src_name}  ({reason})")
@@ -311,19 +467,57 @@ def prep_shotlist(channel: str, slug: str, *, force: bool = False) -> PrepResult
                 still_path = cache_dir / f"{src_name}.still{still_ext}"
                 if not still_path.exists():
                     print(f"[prep] {i+1}/{len(entries)}  fetch still  {src_name}")
+                    _track_decision(
+                        source=src_name,
+                        url=resolved,
+                        chosen="fetch_still",
+                        reason="still image source requires local cache",
+                        extra={"dest": str(still_path)},
+                    )
                     _http_get(resolved, still_path, expect_kind="image")
                 duration = max(1.0, out_s - in_s)
                 print(f"[prep] {i+1}/{len(entries)}  still→mp4  {src_name}  {duration:.1f}s {aspect}")
+                _track_decision(
+                    source=src_name,
+                    url=resolved,
+                    chosen="convert_still_to_video",
+                    reason="renderer expects mp4 clip",
+                    extra={"dest": str(dest), "duration_s": duration, "aspect": aspect},
+                )
                 _still_to_video(still_path, dest, duration_s=duration, aspect=aspect)
             else:
                 # Direct download.
                 print(f"[prep] {i+1}/{len(entries)}  fetch video  {src_name}")
+                _track_decision(
+                    source=src_name,
+                    url=resolved,
+                    chosen="fetch_video",
+                    reason="video source direct download",
+                    extra={"dest": str(dest)},
+                )
                 _http_get(resolved, dest, timeout=300, expect_kind="video")
                 if not dest.exists() or dest.stat().st_size < 1024:
                     raise RuntimeError(f"download produced empty file")
             res.fetched.append(src_name)
+            _track_decision(
+                source=src_name,
+                url=url,
+                chosen="fetched",
+                reason="prep completed",
+                extra={
+                    "dest": str(dest),
+                    "bytes": dest.stat().st_size if dest.exists() else 0,
+                },
+            )
         except Exception as e:
             res.errors.append((src_name, url, f"{type(e).__name__}: {e}"))
+            _track_decision(
+                source=src_name,
+                url=url,
+                chosen="error",
+                reason=f"{type(e).__name__}: {e}"[:500],
+                extra={"dest": str(dest), "kind": kind},
+            )
             print(f"[prep] {i+1}/{len(entries)}  ERROR  {src_name}  {type(e).__name__}: {e}")
             # Tidy up partial download.
             if dest.exists() and dest.stat().st_size < 1024:
