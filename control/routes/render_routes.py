@@ -147,15 +147,19 @@ async def render(
     # value actually appears as a niche under a different channel.
     fmt = (req.format or "").strip()
     if fmt:
-        from pipeline.channels import niche_channel_map  # noqa: PLC0415
-        niche_map = niche_channel_map()
-        owning = niche_map.get(fmt)
-        if owning and owning[0] != req.channel:
+        from pipeline.channels import channel_for_niche  # noqa: PLC0415
+        owning = channel_for_niche(fmt)
+        # owning is a Channel object; compare its slug to req.channel.
+        # Pre-fix this used niche_channel_map() which returns
+        # (state_dir, variant_yaml) — state_dir = "channel/niche_subdir"
+        # so a registered niche like 'tifu' ("mystoriesanimated/reddit_tifu",
+        # ...) failed equality against the bare 'mystoriesanimated' slug.
+        if owning and owning.key != req.channel:
             raise HTTPException(
                 status_code=422,
                 detail=(
                     f"niche/format {fmt!r} belongs to channel "
-                    f"{owning[0]!r}, not {req.channel!r}. Either switch "
+                    f"{owning.key!r}, not {req.channel!r}. Either switch "
                     f"the channel or pick a different format. Registered "
                     f"niches for {req.channel!r}: "
                     f"{sorted(ch.niches.keys()) if ch.niches else '(none — channel uses defaults)'}."
