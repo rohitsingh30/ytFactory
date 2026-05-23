@@ -405,6 +405,86 @@ ADR-027).
 
 ---
 
+### O29. `auth_setup.sh` token-refresh after Build SUCCESS (2026-05-23)
+
+- **What:** Expose a `refresh_adc_token` function in
+  `cloud/_shared/auth_setup.sh`. In each `cloud/<svc>/deploy.sh`,
+  call it once after `Build SUCCESS` and before the `gcloud run
+  deploy` step. The current pattern issues a 1-hour token at script
+  start; large builds (z-image-turbo at 50+ min) + slow Cloud Run
+  image imports push past the TTL, the deploy poll fails with
+  `ACCESS_TOKEN_EXPIRED`, and the script exits non-zero even though
+  Cloud Run completes the rollout server-side.
+- **Why:** False-negative on deploy.sh exit code makes the operator
+  doubt the deploy and either re-run (wasting 50 min) or chase a
+  phantom bug. Fix is small + structurally clean.
+- **Effort:** **S** (5-line shell change per script; ~30 min including
+  testing one deploy through).
+- **Where:** `cloud/_shared/auth_setup.sh` + every `cloud/<svc>/deploy.sh`.
+- **Incident:** 2026-05-23 — z-image-turbo deploy died on token
+  expiry mid-poll; rev still shipped. Same risk exists for any
+  large-image deploy.
+
+### O30. Preflight render in every `deploy.sh` post-rollout (2026-05-23)
+
+- **What:** After `gcloud run deploy` returns, fire a minimal
+  preflight that exercises the new behaviour:
+  - **render-worker-v2**: trigger a tiny preflight render via the
+    control plane and tail Cloud Logging for `stage.start` within
+    60s; exit non-zero if absent.
+  - **TTS/ASR servers**: POST a 5-second fixture and verify the
+    response shape includes telemetry-emitted fields (proves
+    `_tel_track_io` actually wired).
+  - **image-z-image-turbo**: POST a 64×64 prompt; verify the
+    response + that `image.gen` event with body capture appears in
+    Cloud Logging.
+- **Why:** Eliminates the "rev-healthy = deploy complete" gap (known-
+  fragility F25). 3-5 min of post-deploy spend; saves hours when
+  the deploy is structurally broken. Template-able as a shared
+  `cloud/_shared/post_deploy_verify.sh`.
+- **Effort:** **M** (~1-2 hours per deploy.sh, but template-able to
+  one shared script + per-service config).
+- **Where:** new `cloud/_shared/post_deploy_verify.sh`; sourced by
+  each `cloud/<svc>/deploy.sh` at the end.
+- **Incident:** 2026-05-23 — declared "all 6 services telemetry-aware
+  ✓" off rev-healthy alone; the actual telemetry path was broken in
+  4/6 services (1 hard, 3 silent). ~3 hours of operator time lost.
+
+### O31. Switch deploy.sh from streaming-log mode to async-poll mode (2026-05-23)
+
+- **What:** Several `cloud/<svc>/deploy.sh` files use `gcloud builds
+  submit` without `--async`. When run under SA-impersonation auth,
+  the impersonated SA may lack `logging.privateLogEntries.list` and
+  the CLI dies with "This tool can only stream logs if you are
+  Viewer/Owner …" — even though the build itself succeeds
+  server-side. The `render-worker-v2/deploy.sh` already uses the
+  `--async + manual polling` pattern and is immune. Backport the
+  same pattern to the other deploy.shes.
+- **Why:** Eliminates the false-negative exit code that comes from
+  log-streaming permission gaps. The build runs the same way either
+  way; only the CLI's visibility into it changes.
+- **Effort:** **S** per script (~20 min × 4 scripts = ~80 min).
+- **Where:** `cloud/asr-whisper/deploy.sh`,
+  `cloud/tts-chatterbox/deploy.sh`,
+  `cloud/tts-indicf5/deploy.sh`,
+  `cloud/editing-agent/deploy.sh`.
+- **Incident:** 2026-05-23 — asr-whisper deploy.sh exited 1; build
+  was SUCCESS server-side.
+
+### O32. `deploy.sh` "Poll URL" output format fix (2026-05-23)
+
+- **What:** Each `cloud/<svc>/deploy.sh` prints a "Poll URL" pointing
+  at the Cloud Build console. The URL uses `?region=...` as a query
+  param; the console requires `;region=...` as a matrix parameter
+  *before* the build ID. The printed URL 404s in the browser.
+- **Why:** Operator clicks the link expecting build progress, gets a
+  console 404. Wasted seconds become wasted minutes when it happens
+  every deploy.
+- **Effort:** **S** (one-line change per deploy.sh; ~5 min × 5 scripts).
+- **Where:** every `cloud/<svc>/deploy.sh`.
+
+---
+
 ## Prioritisation guidance
 
 Per onboarding-qa Q27 ("no channel meaningfully ahead") + Q28 ("MVP =

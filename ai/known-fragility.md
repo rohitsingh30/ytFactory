@@ -598,6 +598,129 @@ writeback enforces 80%.
 
 ---
 
+## F24. Cloud-service Dockerfile per-file COPY drift (2026-05-23)
+
+**Where:** every `cloud/<svc>/Dockerfile` (render-worker-v2,
+image-z-image-turbo, tts-chatterbox, tts-indicf5, asr-whisper,
+editing-agent) uses explicit per-file `COPY` instructions, NOT a
+wholesale `COPY cloud/<svc>/ ./`.
+
+**Why fragile:** Any new `.py` file added to a cloud-service source
+directory is **invisible to Docker** until the Dockerfile is also
+edited. The build/push/deploy pipeline runs to completion against
+the stale Dockerfile and produces an image structurally missing the
+new code. Two failure flavours:
+
+- **Hard fail.** Module imported unconditionally → cold-start
+  `ModuleNotFoundError`. Surfaces immediately. Pattern: commit
+  `4597686` fixed `writeback.py`; 2026-05-23 same bug bit
+  `_stage_envelope.py`.
+- **Silent fail.** Module imported via `try: ...; except: x = None`
+  softener (cf. the 3 TTS/ASR servers' `_tel_track_io` imports).
+  Service starts fine, `/readyz` returns 200, revision goes healthy
+  — but every code path that depended on the module is now a no-op.
+  Body-capture telemetry had been silently dark for some period
+  before discovery on 2026-05-23.
+
+**What trips it:** Every PR that adds a new helper module to a cloud
+service directory. The build is silent about the omission. The
+deploy is silent about the omission. The runtime is silent (the
+softened variant) or noisy (the hard variant).
+
+**Counter-test:** `tests/cloud/test_dockerfile_copy_completeness.py`
+(added 2026-05-23, commit `8345624`). Enumerates every
+`cloud/<svc>/*.py` and asserts each is named in a `COPY` line in
+the matching Dockerfile (skips services that use wholesale
+`COPY cloud/<svc>/ ./`). 8/8 services pass with the
+2026-05-23 fix. Run before every `deploy.sh`:
+
+```
+.venv/bin/pytest tests/cloud/test_dockerfile_copy_completeness.py -q
+```
+
+**Incident chain:**
+- Commit `4597686` (2026-05-XX): writeback.py case fixed without
+  guardrail.
+- 2026-05-23: class repeated across 4 services (1 hard, 3 silent).
+  ~3 hours of operator time lost to a "deploy is complete" claim
+  that was structurally false. Fixed in commit `8345624`; guard
+  test added.
+
+See also: `docs/cloud_service_dockerfile_discipline.md`;
+memory `feedback_humiliation_2026_05_23.md` (the behaviour-side
+correction that the gate-side fix doesn't enforce on its own).
+
+---
+
+## F25. "rev-healthy = deploy complete" assumption (2026-05-23)
+
+**Where:** every `cloud/<svc>/deploy.sh`. After the `gcloud run
+deploy` returns, the script stops. There is no post-deploy
+preflight that fires a real request and checks for the new
+behaviour.
+
+**Why fragile:** `gcloud run services describe` returning
+`Ready=True` proves only that the container started, `/readyz`
+returned 200, and the entrypoint module imported. It does NOT
+prove:
+- That telemetry-specific imports succeeded (try/except softener
+  hides this — F24).
+- That the new files added in recent commits are physically in the
+  image (the F24 bug).
+- That the actual new behaviour the deploy was supposed to ship
+  fires for a real request.
+
+The operator (or LLM) reads rev-healthy as "shipped" and stops
+verifying. Failures the rev-health-check can't see become invisible.
+
+**What trips it:** Any deploy that ships new code paths that
+aren't exercised by `/readyz`. Body-capture telemetry, new
+endpoints, new fields in existing endpoints, new env-var
+consumers — all of these can be silently broken while the rev is
+healthy.
+
+**Counter-test:** None yet automated. Minimum operator discipline:
+deploy is complete only when (1) rev healthy AND (2) a real
+preflight render triggered AND (3) `stage.start` visible in
+Cloud Logging for that job_id AND (4) at least one body-capture
+entry visible for at least one stage.
+
+**Incident:** 2026-05-23 — same chain as F24. See
+`feedback_verify_telemetry_with_preflight.md` (memory) and
+`feedback_humiliation_2026_05_23.md`.
+
+---
+
+## F26. `cloud/_shared/auth_setup.sh` 1-hour token TTL trap (2026-05-23)
+
+**Where:** `cloud/_shared/auth_setup.sh` (token issuance) +
+every `cloud/<svc>/deploy.sh` (which sources it).
+
+**Why fragile:** Token is issued at deploy.sh start. If build +
+deploy together exceeds ~55 min (z-image-turbo can take 50+ min
+for build alone, plus 5-10 min Cloud Run image import), the
+`gcloud run deploy` polling step fails mid-poll with
+`UNAUTHENTICATED ... ACCESS_TOKEN_EXPIRED`. Cloud Run continues the
+rollout server-side (it doesn't care that the deploy.sh polling
+session died), so the rev still becomes healthy — but the script
+reports failure and any post-deploy verification logic in the
+script doesn't run.
+
+**What trips it:** Any large image deploy (z-image-turbo at 40 GiB
+is the canonical case). Worse with the slow Cloud Run side
+import.
+
+**Counter-test:** None. Fix: refresh the impersonated token after
+`Build SUCCESS` and before `gcloud run deploy`.
+
+**Incident:** 2026-05-23 — z-image-turbo 54-min build + slow image
+import exceeded the TTL; the deploy.sh exited non-zero even though
+the rev shipped cleanly.
+
+**Status:** unfixed. Logged in `/ai/improvement-opportunities.md`.
+
+---
+
 ## Cross-cutting pattern
 
 Every entry above shares one root: **error handling is calibrated for
@@ -608,3 +731,11 @@ when the failing piece is recoverable. The attack set items 1–13 in
 onboarding-qa are the structural fix; this doc is the inventory of
 sites that need to flip from "raise on first failure" to "retry the
 failing piece, raise on retry-exhaustion."
+
+**Second cross-cutting pattern (2026-05-23):** deploys are claimed
+"complete" off the wrong evidence (rev-healthy alone). F24 + F25 +
+F26 are three sides of the same operator-discipline failure: the
+quick signal (rev-healthy, build SUCCESS, exit code 0) was treated
+as the full signal. The fix is operator-side: verify with a real
+preflight render before declaring shipped. The gate-side counter-test
+exists for F24 but not yet for F25/F26.
