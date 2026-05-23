@@ -41,6 +41,7 @@ from typing import Optional
 from control.core import jobs as jobs_mod
 from control.core.queue import InMemoryQueue, get_queue
 from control.core.schema import TaskKind, TaskStatus
+from pipeline.observability.event_helpers import safe_track as _track
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +168,30 @@ def _set_stage(timeline: list[dict], key: str, status: str, msg: str | None = No
     return out
 
 
+def _track_sim_stage(
+    event: str,
+    *,
+    job_id: str,
+    stage: str,
+    duration_ms: int | None = None,
+    success: bool = True,
+    metadata: dict | None = None,
+) -> None:
+    payload = {
+        "stage": stage,
+        "mode": "sim",
+        **(metadata or {}),
+    }
+    _track(
+        event,
+        category="render",
+        success=success,
+        duration_ms=duration_ms,
+        job_id=job_id,
+        metadata=payload,
+    )
+
+
 def _advance_one_job(task) -> None:  # task: TaskEnvelope
     """Walk a single job through all stages. Synchronous; called inside the
     worker loop's executor so the event loop stays responsive."""
@@ -177,6 +202,8 @@ def _advance_one_job(task) -> None:  # task: TaskEnvelope
     jobs_mod.mark_stage(job_id, status="rendering", stage="rewrite", timeline=timeline)
 
     for key, _ in STAGES:
+        stage_t0 = time.perf_counter()
+        _track_sim_stage("stage.start", job_id=job_id, stage=key)
         timeline = _set_stage(timeline, key, "running", "sim · running")
         jobs_mod.mark_stage(
             job_id,
@@ -187,6 +214,7 @@ def _advance_one_job(task) -> None:  # task: TaskEnvelope
         # Variable per-stage timing so the UI feels alive.
         per_stage_s = random.uniform(1.4, 3.0) * speed
         time.sleep(per_stage_s)
+        duration_ms = int((time.perf_counter() - stage_t0) * 1000)
         timeline = _set_stage(timeline, key, "done")
         jobs_mod.mark_stage(
             job_id,
@@ -194,6 +222,7 @@ def _advance_one_job(task) -> None:  # task: TaskEnvelope
             stage=key,
             timeline=timeline,
         )
+        _track_sim_stage("stage.end", job_id=job_id, stage=key, duration_ms=duration_ms)
 
     # Done: surface the placeholder mp4 via the preview proxy.
     fields = {

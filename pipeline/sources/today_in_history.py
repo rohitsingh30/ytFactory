@@ -12,11 +12,40 @@ from pathlib import Path
 
 import requests
 
+from pipeline.observability.event_helpers import safe_track as _track
+
 from .base import RawStory, save_raw, slugify
 
 
 USER_AGENT = "ytFactory/0.1 (https://github.com/local; story aggregator)"
 TIMEOUT = 20
+
+
+def _source_attempt(kind: str, ref: str, backend: str) -> None:
+    _track(
+        "source.fetch_attempt",
+        category="http",
+        metadata={"kind": kind, "ref": ref, "backend": backend},
+    )
+
+
+def _source_ok(*, status_code: int, body_chars: int) -> None:
+    _track(
+        "source.fetch_ok",
+        category="http",
+        success=True,
+        metadata={"status_code": status_code, "body_chars": body_chars},
+    )
+
+
+def _source_fallback(*, reason: str, original_status: int | None = None) -> None:
+    _track(
+        "source.fetch_fallback",
+        category="http",
+        success=False,
+        metadata={"fallback_reason": reason, "original_status": original_status},
+    )
+
 
 # Feed types: events, births, deaths, holidays, selected.
 # "selected" is the human-curated set Wikipedia uses for its main page.
@@ -37,8 +66,20 @@ def fetch(
 
     url = f"https://en.wikipedia.org/api/rest_v1/feed/onthisday/{feed_type}/{month:02d}/{day:02d}"
     print(f"[today_in_history] GET {url}")
-    r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-    r.raise_for_status()
+    _source_attempt("today_in_history", f"{feed_type}/{month:02d}/{day:02d}", "wikipedia_rest")
+    try:
+        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
+        r.raise_for_status()
+        _source_ok(status_code=getattr(r, "status_code", 200), body_chars=len(str(getattr(r, "text", "") or "")))
+    except requests.HTTPError as exc:
+        _source_fallback(
+            reason=f"http_{getattr(exc.response, 'status_code', 'unknown')}",
+            original_status=getattr(exc.response, "status_code", None),
+        )
+        raise
+    except requests.RequestException as exc:
+        _source_fallback(reason=type(exc).__name__, original_status=None)
+        raise
     payload = r.json()
 
     out: list[RawStory] = []

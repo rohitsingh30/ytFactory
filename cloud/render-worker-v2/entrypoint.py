@@ -629,6 +629,7 @@ def _preflight() -> list[_PreflightError]:
     tts_urls = [
         ("CLOUDRUN_TTS_CHATTERBOX_URL", "default English TTS"),
         ("CLOUDRUN_TTS_INDICF5_URL",    "Hindi IndicF5 TTS"),
+        ("CLOUDRUN_TTS_INDICPARLER_URL", "legacy Hindi IndicParler TTS"),
     ]
     if not any((os.environ.get(k) or "").strip() for k, _ in tts_urls):
         problems.append((
@@ -2619,7 +2620,7 @@ def _decision_log_from_events(events: list[dict[str, Any]]) -> list[dict[str, An
     return out
 
 
-@stage_envelope("upload", artifact_kind="events_log", artifact_extractor=_extract_events_log_artifact)
+@stage_envelope("upload")
 def _stage_upload_real(job: dict, work_dir: Path) -> None:
     """No-op: actual GCS upload happens after the stage loop in main()
     so we can update Firestore with the URI in one shot. This keeps

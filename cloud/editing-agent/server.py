@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 try:
@@ -79,6 +79,24 @@ except Exception:
 app = FastAPI(title="ytFactory editing-agent", version=str(EDL_VERSION))
 if _OTEL_OK:
     _otel_instrument_fastapi(app)
+
+
+def _trace_id_from_request(request: Request) -> str | None:
+    try:
+        parts = (request.headers.get("traceparent") or "").split("-")
+        if len(parts) >= 4 and len(parts[1]) == 32:
+            return parts[1]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _track_request_event(event: str, request: Request, metadata: dict | None = None) -> None:
+    meta = dict(metadata or {})
+    trace_id = _trace_id_from_request(request)
+    if trace_id:
+        meta["trace_id"] = trace_id
+    _tel.track(event, category="control", metadata=meta)
 
 
 # --------------------------------------------------------------- GCS helpers

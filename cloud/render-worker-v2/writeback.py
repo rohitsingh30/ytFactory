@@ -83,6 +83,37 @@ def _ffprobe_mean_volume_db(local_mp4: Path) -> float | None:
         return None
 
 
+def write_decision_log(
+    job_id: str,
+    decision_log: list[dict],
+    *,
+    update_job=None,
+) -> bool:
+    """Persist ``decision_log`` onto ``jobs/<job_id>``.
+
+    The render worker passes its local ``_update_job`` helper so this module
+    stays easy to unit-test without constructing Firestore clients. If no
+    helper is supplied, fall back to a direct Firestore merge. Never raises.
+    """
+    if not job_id:
+        return False
+    try:
+        if update_job is not None:
+            update_job(job_id, decision_log=decision_log)
+            return True
+        from google.cloud import firestore  # noqa: PLC0415
+        import os  # noqa: PLC0415
+
+        db = firestore.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3"))
+        db.collection("jobs").document(job_id).set(
+            {"decision_log": decision_log},
+            merge=True,
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def verify_mp4_artifact(
     local_mp4: Path,
     duration_target_s: float | int | None,
@@ -101,6 +132,7 @@ def verify_mp4_artifact(
 
 
 __all__ = [
+    "write_decision_log",
     "verify_mp4_artifact",
     # Internal — re-exported so entrypoint can patch them in legacy tests.
     "_ffprobe_streams",

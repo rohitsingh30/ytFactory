@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Protocol, TypeVar
 
 from control.core.schema import HEAVY_KINDS, TaskEnvelope, TaskKind, TaskStatus
+from pipeline.observability.event_helpers import safe_track as _track
 
 _logger = logging.getLogger(__name__)
 _TASKS = "tasks"
@@ -88,6 +89,24 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _track_queue(action: str, *, job_id: str | None, queue_depth: int | None = None) -> None:
+    _track(
+        f"control.queue.{action}",
+        category="control",
+        metadata={
+            "job_id": job_id or "",
+            "queue_depth": queue_depth if queue_depth is not None else -1,
+        },
+    )
+
+
+def _memory_queue_depth(tasks: dict[str, TaskEnvelope]) -> int:
+    try:
+        return sum(1 for t in tasks.values() if t.status == TaskStatus.QUEUED)
+    except Exception:  # noqa: BLE001
+        return -1
+
+
 class Queue(Protocol):
     def enqueue(self, task: TaskEnvelope) -> None: ...
     def lease(self, agent_id: str, caps: Iterable[TaskKind], ttl_s: int) -> TaskEnvelope | None: ...
@@ -109,6 +128,8 @@ class InMemoryQueue:
     def enqueue(self, task: TaskEnvelope) -> None:
         with self._lock:
             self._tasks[task.task_id] = task
+            depth = _memory_queue_depth(self._tasks)
+        _track_queue("enqueue", job_id=task.job_id, queue_depth=depth)
 
     def get(self, task_id: str) -> TaskEnvelope | None:
         return self._tasks.get(task_id)
@@ -131,7 +152,10 @@ class InMemoryQueue:
             task.lease_expires_at = now + timedelta(seconds=ttl_s)
             task.attempts += 1
             task.updated_at = now
-            return task.model_copy()
+            depth = _memory_queue_depth(self._tasks)
+            leased = task.model_copy()
+        _track_queue("claim", job_id=leased.job_id, queue_depth=depth)
+        return leased
 
     def ack(self, task_id: str, agent_id: str, *, ok: bool, output_uri: str | None, error: str | None) -> None:
         with self._lock:
@@ -141,6 +165,7 @@ class InMemoryQueue:
             if task.lease_owner != agent_id:
                 # Stale ack — ignore. The reaper or another agent owns it now.
                 return
+            job_id = task.job_id
             task.updated_at = _utcnow()
             if ok:
                 task.status = TaskStatus.DONE
@@ -154,10 +179,13 @@ class InMemoryQueue:
                     task.status = TaskStatus.QUEUED
                     task.lease_owner = None
                     task.lease_expires_at = None
+            depth = _memory_queue_depth(self._tasks)
+        _track_queue("ack", job_id=job_id, queue_depth=depth)
 
     def reap_expired(self) -> int:
         n = 0
         now = _utcnow()
+        released: list[str] = []
         with self._lock:
             for task in self._tasks.values():
                 if (task.status == TaskStatus.LEASED
@@ -167,7 +195,11 @@ class InMemoryQueue:
                     task.lease_owner = None
                     task.lease_expires_at = None
                     task.updated_at = now
+                    released.append(task.job_id)
                     n += 1
+            depth = _memory_queue_depth(self._tasks)
+        for job_id in released:
+            _track_queue("release", job_id=job_id, queue_depth=depth)
         return n
 
 
@@ -184,12 +216,20 @@ class FirestoreQueue:
         self._db = _fs.Client(project=project or os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod"))
         self._col = self._db.collection(_TASKS)
 
+    def _queued_depth(self) -> int:
+        try:
+            q = self._col.where("status", "==", TaskStatus.QUEUED.value).limit(1000)
+            return sum(1 for _ in q.stream())
+        except Exception:  # noqa: BLE001
+            return -1
+
     def enqueue(self, task: TaskEnvelope) -> None:
         payload = task.model_dump(mode="json")
         firestore_retry(
             lambda: self._col.document(task.task_id).set(payload),
             op_label=f"enqueue task={task.task_id}",
         )
+        _track_queue("enqueue", job_id=task.job_id, queue_depth=self._queued_depth())
 
     def get(self, task_id: str) -> TaskEnvelope | None:
         snap = self._col.document(task_id).get()
@@ -218,23 +258,38 @@ class FirestoreQueue:
             transaction = self._db.transaction()
             claimed = _try_claim(transaction, ref, agent_id, ttl_s)
             if claimed is not None:
+                _track_queue("claim", job_id=claimed.job_id, queue_depth=self._queued_depth())
                 return claimed
         return None
 
     def ack(self, task_id: str, agent_id: str, *, ok: bool, output_uri: str | None, error: str | None) -> None:
         ref = self._col.document(task_id)
+        job_id = ""
+        try:
+            snap = ref.get()
+            if snap.exists:
+                job_id = (snap.to_dict() or {}).get("job_id") or ""
+        except Exception:  # noqa: BLE001
+            pass
         transaction = self._db.transaction()
         _try_ack(transaction, ref, agent_id, ok=ok, output_uri=output_uri, error=error)
+        _track_queue("ack", job_id=job_id, queue_depth=self._queued_depth())
 
     def reap_expired(self) -> int:
         now = _utcnow()
         q = self._col.where("status", "==", TaskStatus.LEASED.value).where("lease_expires_at", "<", now.isoformat())
         n = 0
+        released: list[str] = []
         for snap in q.stream():
             ref = snap.reference
+            job_id = (snap.to_dict() or {}).get("job_id") or ""
             transaction = self._db.transaction()
             if _try_reap(transaction, ref):
+                released.append(job_id)
                 n += 1
+        depth = self._queued_depth()
+        for job_id in released:
+            _track_queue("release", job_id=job_id, queue_depth=depth)
         return n
 
 

@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Iterable
 
+from pipeline.observability.event_helpers import inject_trace_headers, track_http_call
 from pipeline.paths import RESEARCH_DIR
 
 logger = logging.getLogger(__name__)
@@ -77,7 +79,19 @@ def _download(url: str, dest: Path, timeout: float = 15.0) -> bool:
     import requests  # local import keeps module import-time tiny
 
     try:
-        with requests.get(url, stream=True, timeout=timeout) as r:
+        headers: dict[str, str] = {}
+        inject_trace_headers(headers)
+        t0 = time.perf_counter()
+        with requests.get(url, stream=True, timeout=timeout, headers=headers) as r:
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+            track_http_call(
+                service="channel_assets",
+                method="GET",
+                url=url,
+                status_code=getattr(r, "status_code", 200),
+                response_body=getattr(r, "headers", {}).get("content-length") or "",
+                duration_ms=duration_ms,
+            )
             r.raise_for_status()
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_suffix(dest.suffix + ".tmp")
@@ -88,6 +102,13 @@ def _download(url: str, dest: Path, timeout: float = 15.0) -> bool:
             tmp.replace(dest)
         return True
     except Exception as exc:  # noqa: BLE001 — best-effort mirror
+        track_http_call(
+            service="channel_assets",
+            method="GET",
+            url=url,
+            response_body=str(exc),
+            success=False,
+        )
         logger.warning("download failed for %s: %s", url, exc)
         # Drop a partial tmp on failure
         try:

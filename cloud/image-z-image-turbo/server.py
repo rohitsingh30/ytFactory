@@ -74,6 +74,44 @@ if _OTEL_OK:
     _otel_instrument_fastapi(app)
 
 
+def _trace_id_from_request(request: Request) -> str | None:
+    try:
+        traceparent = request.headers.get("traceparent")
+        parts = (traceparent or "").split("-")
+        if len(parts) >= 4 and len(parts[1]) == 32:
+            return parts[1]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _track_request_event(event: str, request: Request, metadata: dict | None = None) -> None:
+    try:
+        from opentelemetry import _logs as _logs_api  # noqa: PLC0415
+        meta = dict(metadata or {})
+        trace_id = _trace_id_from_request(request)
+        if trace_id:
+            meta["trace_id"] = trace_id
+        rec = _logs_api.LogRecord(
+            timestamp=time.time_ns(),
+            observed_timestamp=time.time_ns(),
+            severity_number=_logs_api.SeverityNumber.INFO,
+            severity_text="INFO",
+            body={
+                "event": event,
+                "category": "image",
+                "success": True,
+                "duration_ms": None,
+                "job_id": None,
+                "metadata": meta,
+            },
+            attributes={},
+        )
+        _logs_api.get_logger("ytfactory.event").emit(rec)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 _PIPE = None
 _PIPE_LOCK = threading.Lock()
 _BOOT_T0 = time.monotonic()
@@ -189,7 +227,8 @@ class GenerateIn(BaseModel):
 
 
 @app.get("/readyz")
-def readyz() -> dict:
+def readyz(request: Request) -> dict:
+    _track_request_event("image.readyz", request, {"endpoint": "/readyz"})
     t0 = time.monotonic()
     cold = _PIPE is None
     _pipe()
@@ -205,6 +244,11 @@ def readyz() -> dict:
 
 @app.post("/generate")
 def generate(req: GenerateIn, request: Request) -> JSONResponse:
+    _track_request_event(
+        "image.server",
+        request,
+        {"endpoint": "/generate", "prompt_chars": len(req.prompt or "")},
+    )
     if not req.prompt.strip():
         raise HTTPException(400, "empty prompt")
     traceparent = request.headers.get("traceparent") if request else None
@@ -298,6 +342,14 @@ def generate(req: GenerateIn, request: Request) -> JSONResponse:
         "sha256": sha,
         "png_bytes": len(png),
     }
+    if req.output == "gcs" or len(png) > INLINE_LIMIT_BYTES:
+        payload["output_gcs"] = _upload_to_gcs(
+            png,
+            object_name=f"{req.gcs_object_prefix or 'z-image-turbo/'}"
+                        f"{uuid.uuid4().hex}.png",
+        )
+    else:
+        payload["output_inline"] = base64.b64encode(png).decode("ascii")
     try:
         _tel_track_io(
             "image.server.gen",
@@ -320,14 +372,6 @@ def generate(req: GenerateIn, request: Request) -> JSONResponse:
         )
     except Exception:
         pass
-    if req.output == "gcs" or len(png) > INLINE_LIMIT_BYTES:
-        payload["output_gcs"] = _upload_to_gcs(
-            png,
-            object_name=f"{req.gcs_object_prefix or 'z-image-turbo/'}"
-                        f"{uuid.uuid4().hex}.png",
-        )
-    else:
-        payload["output_inline"] = base64.b64encode(png).decode("ascii")
     return JSONResponse(payload)
 
 

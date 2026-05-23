@@ -67,7 +67,34 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from pipeline.observability.event_helpers import safe_track as _track
+
 logger = logging.getLogger(__name__)
+
+
+def _track_reconcile_action(action: dict[str, str]) -> None:
+    raw = action.get("action", "noop")
+    if raw in {
+        "marked_failed",
+        "marked_cancelled",
+        "marked_succeeded_but_unwritten",
+        "no_execution_ref",
+        "execution_not_found",
+    }:
+        normalized = "dlq"
+    elif raw == "revived":
+        normalized = "revive"
+    else:
+        normalized = "noop"
+    _track(
+        "control.reconcile.action",
+        category="control",
+        metadata={
+            "action": normalized,
+            "job_id": action.get("job_id", ""),
+            "reason": action.get("reason", ""),
+        },
+    )
 
 
 # Default candidacy window: anything older than 2× the worker's
@@ -197,10 +224,11 @@ def reconcile_stuck_jobs(
             job_id, doc, db=db, exec_client=exec_client, dry_run=dry_run,
         )
         summary["actions"].append(action)
+        _track_reconcile_action(action)
+        _track_reconcile_action(action)
         key = action["action"]
         if key in summary:
             summary[key] += 1
-
     logger.info(
         "reconciler: scanned=%d candidates=%d marked_failed=%d "
         "marked_cancelled=%d still_running=%d no_execution_ref=%d "

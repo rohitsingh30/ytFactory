@@ -26,11 +26,40 @@ from pathlib import Path
 
 import requests
 
+from pipeline.observability.event_helpers import safe_track as _track
+
 from .base import RawStory, save_raw, slugify
 
 
 USER_AGENT = "ytFactory/0.1 (https://github.com/local; story aggregator)"
 TIMEOUT = 25
+
+
+def _source_attempt(kind: str, ref: str, backend: str) -> None:
+    _track(
+        "source.fetch_attempt",
+        category="http",
+        metadata={"kind": kind, "ref": ref, "backend": backend},
+    )
+
+
+def _source_ok(*, status_code: int, body_chars: int) -> None:
+    _track(
+        "source.fetch_ok",
+        category="http",
+        success=True,
+        metadata={"status_code": status_code, "body_chars": body_chars},
+    )
+
+
+def _source_fallback(*, reason: str, original_status: int | None = None) -> None:
+    _track(
+        "source.fetch_fallback",
+        category="http",
+        success=False,
+        metadata={"fallback_reason": reason, "original_status": original_status},
+    )
+
 
 # Curated set of pages that produce good 10-20s shorts material.
 # Hub pages (e.g. plain "List_of_unusual_deaths") are useless for entries
@@ -217,9 +246,22 @@ class _EntryExtractor(HTMLParser):
 def _fetch_html(page: str) -> str:
     url = f"https://en.wikipedia.org/wiki/{page}"
     print(f"[wikipedia] GET {url}")
-    r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.text
+    _source_attempt("wikipedia_page", page, "wikipedia_html")
+    try:
+        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
+        r.raise_for_status()
+        body = getattr(r, "text", "")
+        _source_ok(status_code=getattr(r, "status_code", 200), body_chars=len(body or ""))
+        return body
+    except requests.HTTPError as exc:
+        _source_fallback(
+            reason=f"http_{getattr(exc.response, 'status_code', 'unknown')}",
+            original_status=getattr(exc.response, "status_code", None),
+        )
+        raise
+    except requests.RequestException as exc:
+        _source_fallback(reason=type(exc).__name__, original_status=None)
+        raise
 
 
 def _strip_citations(text: str) -> str:

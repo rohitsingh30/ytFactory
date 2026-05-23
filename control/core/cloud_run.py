@@ -28,12 +28,16 @@ all come from env so the same code runs in dev and prod.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Optional
+
+from pipeline.observability.event_helpers import safe_track_io
 
 logger = logging.getLogger(__name__)
 
@@ -96,13 +100,41 @@ def trigger_render_job(job_id: str) -> ExecutionRef:
     if not job_id:
         raise ValueError("job_id is required")
 
+    args = {
+        "job_id": job_id,
+        "project": project_id(),
+        "region": region(),
+        "job_name": job_name(),
+    }
+    t0 = time.perf_counter()
     try:
-        return _trigger_via_sdk(job_id)
-    except ImportError:
-        logger.info(
-            "google-cloud-run not installed; falling back to gcloud CLI"
+        try:
+            ref = _trigger_via_sdk(job_id)
+        except ImportError:
+            logger.info(
+                "google-cloud-run not installed; falling back to gcloud CLI"
+            )
+            ref = _trigger_via_cli(job_id)
+        safe_track_io(
+            "control.cloud_run.trigger",
+            category="control",
+            success=True,
+            duration_ms=int((time.perf_counter() - t0) * 1000),
+            input_text=json.dumps(args, sort_keys=True),
+            output_meta={"job_id": job_id, "execution_id": ref.execution_name},
         )
-        return _trigger_via_cli(job_id)
+        return ref
+    except Exception as exc:
+        safe_track_io(
+            "control.cloud_run.trigger",
+            category="control",
+            success=False,
+            duration_ms=int((time.perf_counter() - t0) * 1000),
+            input_text=json.dumps(args, sort_keys=True),
+            output_text=str(exc),
+            output_meta={"job_id": job_id, "error_type": type(exc).__name__},
+        )
+        raise
 
 
 def _trigger_via_sdk(job_id: str) -> ExecutionRef:

@@ -24,11 +24,39 @@ from pathlib import Path
 
 import requests
 
+from pipeline.observability.event_helpers import safe_track as _track
+
 from .base import RawStory, save_raw, slugify
 
 
 USER_AGENT = "ytFactory/0.1 (https://github.com/local; transcript fetcher)"
 TIMEOUT = 30
+
+
+def _source_attempt(kind: str, ref: str, backend: str) -> None:
+    _track(
+        "source.fetch_attempt",
+        category="http",
+        metadata={"kind": kind, "ref": ref, "backend": backend},
+    )
+
+
+def _source_ok(*, status_code: int = 200, body_chars: int = 0) -> None:
+    _track(
+        "source.fetch_ok",
+        category="http",
+        success=True,
+        metadata={"status_code": status_code, "body_chars": body_chars},
+    )
+
+
+def _source_fallback(*, reason: str, original_status: int | None = None) -> None:
+    _track(
+        "source.fetch_fallback",
+        category="http",
+        success=False,
+        metadata={"fallback_reason": reason, "original_status": original_status},
+    )
 
 
 def _extract_video_id(s: str) -> str:
@@ -44,11 +72,21 @@ def _extract_video_id(s: str) -> str:
 def _fetch_oembed_meta(video_id: str) -> dict:
     """Title + author for the video, no auth required."""
     url = f"https://www.youtube.com/oembed?url=https://youtu.be/{video_id}&format=json"
+    _source_attempt("youtube_oembed", video_id, "oembed")
     try:
         r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
         r.raise_for_status()
+        _source_ok(status_code=getattr(r, "status_code", 200), body_chars=len(str(getattr(r, "text", "") or "")))
         return r.json()
+    except requests.HTTPError as e:
+        _source_fallback(
+            reason=f"http_{getattr(e.response, 'status_code', 'unknown')}",
+            original_status=getattr(e.response, "status_code", None),
+        )
+        print(f"[youtube_video] oembed lookup failed: {e}")
+        return {}
     except Exception as e:
+        _source_fallback(reason=type(e).__name__, original_status=None)
         print(f"[youtube_video] oembed lookup failed: {e}")
         return {}
 
@@ -63,6 +101,7 @@ def _captions_via_youtube_transcript_api(video_id: str, languages: list[str]) ->
     # v1.x API: instance method `fetch()` returning a FetchedTranscript with
     # `.snippets` (list of objects with `.text`). v0.x had a class method
     # `get_transcript` returning list[dict]. Support both.
+    _source_attempt("youtube_transcript", video_id, "youtube_transcript_api")
     try:
         if hasattr(YouTubeTranscriptApi, "get_transcript"):
             chunks = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
@@ -72,9 +111,12 @@ def _captions_via_youtube_transcript_api(video_id: str, languages: list[str]) ->
             transcript = api.fetch(video_id, languages=languages)
             texts = [s.text.replace("\n", " ").strip() for s in transcript.snippets if s.text]
     except Exception as e:
+        _source_fallback(reason=type(e).__name__, original_status=None)
         print(f"[youtube_video] caption fetch failed: {e}")
         return None
-    return " ".join(t for t in texts if t)
+    body = " ".join(t for t in texts if t)
+    _source_ok(status_code=200, body_chars=len(body))
+    return body
 
 
 def _audio_via_yt_dlp(video_id: str, dest: Path) -> Path | None:
@@ -130,6 +172,7 @@ def fetch(
 
     if not transcript and use_whisper_fallback:
         print("[youtube_video] no captions — falling back to yt-dlp + whisper")
+        _source_fallback(reason="captions_unavailable_whisper_fallback", original_status=None)
         audio_cache_dir.mkdir(parents=True, exist_ok=True)
         audio_path = _audio_via_yt_dlp(video_id, audio_cache_dir / f"{video_id}.mp3")
         if audio_path:

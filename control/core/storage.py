@@ -24,6 +24,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Iterator
 
+from pipeline.observability.event_helpers import safe_track as _track
+
 DEFAULT_BUCKET = "ytfactory-prod-artifacts"
 
 
@@ -64,6 +66,18 @@ def _blob(uri: str):
     return _client().bucket(bucket).blob(key)
 
 
+def _track_storage(op: str, *, collection: str, doc_id: str, duration_ms: int) -> None:
+    _track(
+        f"control.storage.{op}",
+        category="control",
+        metadata={
+            "collection": collection,
+            "doc_id": doc_id,
+            "duration_ms": duration_ms,
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Upload / download
 # ---------------------------------------------------------------------------
@@ -71,31 +85,40 @@ def _blob(uri: str):
 
 def upload(local_path: str | Path, uri: str, *, content_type: str | None = None) -> str:
     """Push a local file to GCS. Returns the gs:// URI."""
+    t0 = time.perf_counter()
     blob = _blob(uri)
     if content_type:
         blob.content_type = content_type
     blob.upload_from_filename(str(local_path))
+    _track_storage("upload", collection="gcs", doc_id=uri, duration_ms=int((time.perf_counter() - t0) * 1000))
     return uri
 
 
 def download(uri: str, local_path: str | Path) -> Path:
     """Pull a GCS object to disk. Returns the local Path."""
+    t0 = time.perf_counter()
     p = Path(local_path)
     p.parent.mkdir(parents=True, exist_ok=True)
     _blob(uri).download_to_filename(str(p))
+    _track_storage("download", collection="gcs", doc_id=uri, duration_ms=int((time.perf_counter() - t0) * 1000))
     return p
 
 
 def upload_bytes(data: bytes, uri: str, *, content_type: str | None = None) -> str:
+    t0 = time.perf_counter()
     blob = _blob(uri)
     if content_type:
         blob.content_type = content_type
     blob.upload_from_file(io.BytesIO(data), size=len(data), rewind=True)
+    _track_storage("upload_bytes", collection="gcs", doc_id=uri, duration_ms=int((time.perf_counter() - t0) * 1000))
     return uri
 
 
 def download_bytes(uri: str) -> bytes:
-    return _blob(uri).download_as_bytes()
+    t0 = time.perf_counter()
+    data = _blob(uri).download_as_bytes()
+    _track_storage("download_bytes", collection="gcs", doc_id=uri, duration_ms=int((time.perf_counter() - t0) * 1000))
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -135,15 +158,18 @@ def signed_url(uri: str, *, ttl_s: int = 600, method: str = "GET") -> str:
        cloud render-detail page rendered a black <video> tile for
        every successful Cloud Run render because of this gap.
     """
+    t0 = time.perf_counter()
     blob = _blob(uri)
     expiration = timedelta(seconds=ttl_s)
 
     try:
-        return blob.generate_signed_url(
+        out = blob.generate_signed_url(
             version="v4",
             expiration=expiration,
             method=method,
         )
+        _track_storage("signed_url", collection="gcs", doc_id=uri, duration_ms=int((time.perf_counter() - t0) * 1000))
+        return out
     except AttributeError as e:
         # The SDK raises AttributeError("you need a private key …")
         # for token-only credential types — only on this branch do we
@@ -151,7 +177,9 @@ def signed_url(uri: str, *, ttl_s: int = 600, method: str = "GET") -> str:
         # a real bug, so re-raise.
         if "private key" not in str(e):
             raise
-        return _signed_url_via_iam(blob, expiration=expiration, method=method)
+        out = _signed_url_via_iam(blob, expiration=expiration, method=method)
+        _track_storage("signed_url", collection="gcs", doc_id=uri, duration_ms=int((time.perf_counter() - t0) * 1000))
+        return out
 
 
 def _signed_url_via_iam(blob, *, expiration: timedelta, method: str) -> str:
@@ -204,9 +232,20 @@ def _signed_url_via_iam(blob, *, expiration: timedelta, method: str) -> str:
 
 def list_prefix(uri_prefix: str) -> Iterator[str]:
     """Yield all gs:// URIs under the prefix."""
+    t0 = time.perf_counter()
     bucket, key_prefix = parse_uri(uri_prefix)
-    for blob in _client().list_blobs(bucket, prefix=key_prefix):
-        yield f"gs://{bucket}/{blob.name}"
+    count = 0
+    try:
+        for blob in _client().list_blobs(bucket, prefix=key_prefix):
+            count += 1
+            yield f"gs://{bucket}/{blob.name}"
+    finally:
+        _track_storage(
+            "list_prefix",
+            collection="gcs",
+            doc_id=uri_prefix,
+            duration_ms=int((time.perf_counter() - t0) * 1000),
+        )
 
 
 def delete_prefix(uri_prefix: str, *, dry_run: bool = False) -> list[str]:
@@ -215,6 +254,7 @@ def delete_prefix(uri_prefix: str, *, dry_run: bool = False) -> list[str]:
     Used by the post-upload GC to wipe `jobs/<id>/beats/`, `jobs/<id>/voice.wav`,
     etc. once a Short is on YouTube.
     """
+    t0 = time.perf_counter()
     bucket_name_, key_prefix = parse_uri(uri_prefix)
     bucket = _client().bucket(bucket_name_)
     deleted: list[str] = []
@@ -223,15 +263,19 @@ def delete_prefix(uri_prefix: str, *, dry_run: bool = False) -> list[str]:
         deleted.append(uri)
         if not dry_run:
             bucket.blob(blob.name).delete()
+    _track_storage("delete_prefix", collection="gcs", doc_id=uri_prefix, duration_ms=int((time.perf_counter() - t0) * 1000))
     return deleted
 
 
 def delete_one(uri: str) -> bool:
     """Delete a single object. Returns True if it existed."""
+    t0 = time.perf_counter()
     blob = _blob(uri)
     if not blob.exists():
+        _track_storage("delete_one", collection="gcs", doc_id=uri, duration_ms=int((time.perf_counter() - t0) * 1000))
         return False
     blob.delete()
+    _track_storage("delete_one", collection="gcs", doc_id=uri, duration_ms=int((time.perf_counter() - t0) * 1000))
     return True
 
 

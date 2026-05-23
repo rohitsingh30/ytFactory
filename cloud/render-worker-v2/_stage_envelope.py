@@ -125,7 +125,9 @@ class EventsBuffer:
                         "ts": time.time(),
                         "max": self.MAX_EVENTS,
                     })
-            self._events.append(rec)
+            item = dict(rec)
+            item.setdefault("ts", time.time())
+            self._events.append(item)
         except Exception:  # noqa: BLE001
             pass
 

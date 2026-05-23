@@ -36,6 +36,7 @@ from typing import Optional, Tuple
 from control.core.jobs import _enqueue_render_job
 from control.core.queue import get_queue
 from control.core.schema import HEAVY_KINDS, ShortProposal, TaskStatus
+from pipeline.observability.event_helpers import safe_track as _track
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 SCHEDULER_STATE_DOC = "scheduler_state/main"
@@ -72,6 +73,25 @@ MAX_HEAVY_IN_FLIGHT = int(os.environ.get("YTFACTORY_MAX_HEAVY_IN_FLIGHT", "2"))
 DEDUPE_WINDOW_DAYS = int(os.environ.get("YTFACTORY_TOPIC_DEDUPE_DAYS", "30"))
 
 logger = logging.getLogger(__name__)
+
+
+def _track_schedule_pick(
+    *,
+    channel: str | None,
+    variant: str | None,
+    reason: str,
+    skipped: list[str] | None = None,
+) -> None:
+    _track(
+        "control.schedule.pick",
+        category="control",
+        metadata={
+            "channel": channel or "",
+            "variant": variant or "",
+            "reason": reason,
+            "skipped": skipped or [],
+        },
+    )
 
 
 # ---------- Test-fixture topic detector --------------------------------
@@ -394,6 +414,12 @@ def tick() -> dict:
     """
     in_flight = _count_in_flight_heavy()
     if in_flight >= MAX_HEAVY_IN_FLIGHT:
+        _track_schedule_pick(
+            channel="",
+            variant="auto",
+            reason="pipeline_full",
+            skipped=[],
+        )
         return {
             "action": "skipped",
             "reason": "pipeline_full",
@@ -441,6 +467,12 @@ def tick() -> dict:
             notes="auto-scheduled from narration backlog",
         )
         resp = _enqueue_render_job(proposal)
+        _track_schedule_pick(
+            channel=ch,
+            variant=proposal.format,
+            reason="backlog_available",
+            skipped=tried[:-1],
+        )
         state["last_channel"] = ch
         state["last_slug"] = slug
         state["last_enqueued_at"] = datetime.now(timezone.utc).isoformat()
@@ -454,6 +486,12 @@ def tick() -> dict:
             "tried": tried,
         }
 
+    _track_schedule_pick(
+        channel="",
+        variant="auto",
+        reason="no_unrendered_scripts",
+        skipped=tried,
+    )
     return {
         "action": "skipped",
         "reason": "no_unrendered_scripts",

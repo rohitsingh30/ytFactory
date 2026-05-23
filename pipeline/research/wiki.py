@@ -94,9 +94,9 @@ def _wiki_search(query: str) -> str | None:
             service="wikipedia",
             method="GET",
             url=WIKI_API,
-            status_code=r.status_code,
+            status_code=getattr(r, "status_code", 200),
             request_body=params,
-            response_body=r.text,
+            response_body=getattr(r, "text", ""),
             duration_ms=duration_ms,
         )
         r.raise_for_status()
@@ -151,9 +151,9 @@ def _wiki_extract(title: str) -> str | None:
             service="wikipedia",
             method="GET",
             url=WIKI_API,
-            status_code=r.status_code,
+            status_code=getattr(r, "status_code", 200),
             request_body=params,
-            response_body=r.text,
+            response_body=getattr(r, "text", ""),
             duration_ms=duration_ms,
         )
         r.raise_for_status()

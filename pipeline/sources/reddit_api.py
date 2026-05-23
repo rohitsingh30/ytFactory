@@ -60,6 +60,8 @@ from typing import Any
 
 import requests
 
+from pipeline.observability.event_helpers import safe_track as _track
+
 from .base import RawStory, save_raw, slugify
 
 
@@ -87,6 +89,45 @@ class RedditFetchError(RuntimeError):
     RedditFetchError`` without also catching unrelated ``requests``
     failures elsewhere in their stack.
     """
+
+
+def _source_attempt(kind: str, ref: str, backend: str) -> None:
+    _track(
+        "source.fetch_attempt",
+        category="http",
+        metadata={"kind": kind, "ref": ref, "backend": backend},
+    )
+
+
+def _source_ok(*, status_code: int, body_chars: int) -> None:
+    _track(
+        "source.fetch_ok",
+        category="http",
+        success=True,
+        metadata={"status_code": status_code, "body_chars": body_chars},
+    )
+
+
+def _source_fallback(*, reason: str, original_status: int | None = None) -> None:
+    _track(
+        "source.fetch_fallback",
+        category="http",
+        success=False,
+        metadata={"fallback_reason": reason, "original_status": original_status},
+    )
+
+
+def _decision_source(*, chosen: str, alternatives: list[str], reason: str) -> None:
+    _track(
+        "decision.source",
+        category="decision",
+        metadata={
+            "scope": "source",
+            "chosen": chosen,
+            "alternatives": alternatives,
+            "reason": reason,
+        },
+    )
 
 
 # Reddit ``timeframe`` → human label + seconds offset for the
@@ -180,8 +221,17 @@ def _fetch_via_anon(
         params["t"] = timeframe
 
     print(f"[reddit_api anon] GET {url}  ({listing}/{timeframe}, limit={limit})")
-    r = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-    r.raise_for_status()
+    _source_attempt("reddit_listing", f"{subreddit}/{listing}/{timeframe}", BACKEND_ANON)
+    try:
+        r = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
+        r.raise_for_status()
+        _source_ok(status_code=getattr(r, "status_code", 200), body_chars=len(str(getattr(r, "text", "") or "")))
+    except requests.HTTPError as exc:
+        _source_fallback(
+            reason=f"http_{getattr(exc.response, 'status_code', 'unknown')}",
+            original_status=getattr(exc.response, "status_code", None),
+        )
+        raise
     payload = r.json()
 
     out: list[RawStory] = []
@@ -315,9 +365,15 @@ def _fetch_via_pullpush(
 
     out: list[RawStory] = []
     seen_post_ids: set[str] = set()
-    for window_label, offset in cascade:
+    for idx, (window_label, offset) in enumerate(cascade):
         if len(out) >= limit:
             break
+        if idx > 0:
+            _decision_source(
+                chosen=f"pullpush_window:{window_label}",
+                alternatives=[f"pullpush_window:{cascade[idx - 1][0]}"],
+                reason=f"prior_window_insufficient kept={len(out)} limit={limit}",
+            )
         items = _pullpush_submission_search(
             subreddit=subreddit,
             sort_type=sort_type,
@@ -382,8 +438,18 @@ def _pullpush_submission_search(
     if after_seconds_offset is not None:
         params["after"] = str(int(time.time()) - after_seconds_offset)
 
-    r = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-    r.raise_for_status()
+    ref = f"{subreddit}/{sort_type}/{after_seconds_offset if after_seconds_offset is not None else 'all'}"
+    _source_attempt("reddit_listing", ref, BACKEND_PULLPUSH)
+    try:
+        r = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
+        r.raise_for_status()
+        _source_ok(status_code=getattr(r, "status_code", 200), body_chars=len(str(getattr(r, "text", "") or "")))
+    except requests.HTTPError as exc:
+        _source_fallback(
+            reason=f"http_{getattr(exc.response, 'status_code', 'unknown')}",
+            original_status=getattr(exc.response, "status_code", None),
+        )
+        raise
     payload = r.json()
     if not isinstance(payload, dict):
         return []  # coverage: defensive guard against malformed pullpush payload
@@ -556,8 +622,17 @@ def _fetch_post_via_anon(post_id: str, original_url: str) -> dict[str, Any]:
     """
     url = f"{ANON_BASE_URL}/comments/{post_id}.json"
     print(f"[reddit_api anon] GET {url}  (single post)")
-    r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-    r.raise_for_status()
+    _source_attempt("reddit_url", post_id, BACKEND_ANON)
+    try:
+        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
+        r.raise_for_status()
+        _source_ok(status_code=getattr(r, "status_code", 200), body_chars=len(str(getattr(r, "text", "") or "")))
+    except requests.HTTPError as exc:
+        _source_fallback(
+            reason=f"http_{getattr(exc.response, 'status_code', 'unknown')}",
+            original_status=getattr(exc.response, "status_code", None),
+        )
+        raise
     payload = r.json()
     if not isinstance(payload, list) or not payload:
         raise RedditFetchError(f"unexpected anon post payload shape for {post_id}")  # coverage: defensive guard against malformed reddit payload
@@ -587,6 +662,12 @@ def _fetch_post_via_pullpush(
         # Fallback: keyword-search using the URL slug. Slugs are
         # underscore- or hyphen-separated lowercase tokens that closely
         # mirror the post title.
+        _decision_source(
+            chosen="pullpush_slug_search",
+            alternatives=["pullpush_id_lookup"],
+            reason="pullpush_id_lookup_empty",
+        )
+        _source_fallback(reason="pullpush_id_lookup_empty", original_status=200)
         items = _pullpush_lookup_by_slug(subreddit=subreddit, slug=slug)
 
     if not items:
@@ -594,6 +675,7 @@ def _fetch_post_via_pullpush(
         # archive yet, OR the slug fallback didn't find anything close.
         # Caller (render worker) catches this and degrades to user-typed
         # topic/notes.
+        _source_fallback(reason="pullpush_no_archived_submission", original_status=200)
         raise RedditFetchError(
             f"pullpush has no submission archived for post id {post_id} "
             "(post may be < a few hours old or missing from the archive; "
@@ -613,8 +695,17 @@ def _pullpush_lookup_by_id(post_id: str) -> list[dict[str, Any]]:
     url = f"{PULLPUSH_BASE_URL}/reddit/search/submission/"
     params = {"ids": post_id}
     print(f"[reddit_api pullpush] GET {url}?ids={post_id}")
-    r = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-    r.raise_for_status()
+    _source_attempt("reddit_url", post_id, BACKEND_PULLPUSH)
+    try:
+        r = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
+        r.raise_for_status()
+        _source_ok(status_code=getattr(r, "status_code", 200), body_chars=len(str(getattr(r, "text", "") or "")))
+    except requests.HTTPError as exc:
+        _source_fallback(
+            reason=f"http_{getattr(exc.response, 'status_code', 'unknown')}",
+            original_status=getattr(exc.response, "status_code", None),
+        )
+        raise
     payload = r.json()
     if not isinstance(payload, dict):
         return []  # coverage: defensive guard against malformed pullpush ids payload
@@ -633,8 +724,17 @@ def _pullpush_lookup_by_slug(*, subreddit: str, slug: str) -> list[dict[str, Any
     url = f"{PULLPUSH_BASE_URL}/reddit/search/submission/"
     params = {"subreddit": subreddit, "q": keywords, "size": "5"}
     print(f"[reddit_api pullpush] GET {url}?subreddit={subreddit}&q={keywords[:60]}…")
-    r = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-    r.raise_for_status()
+    _source_attempt("reddit_url", f"{subreddit}/{keywords[:80]}", BACKEND_PULLPUSH)
+    try:
+        r = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
+        r.raise_for_status()
+        _source_ok(status_code=getattr(r, "status_code", 200), body_chars=len(str(getattr(r, "text", "") or "")))
+    except requests.HTTPError as exc:
+        _source_fallback(
+            reason=f"http_{getattr(exc.response, 'status_code', 'unknown')}",
+            original_status=getattr(exc.response, "status_code", None),
+        )
+        raise
     payload = r.json()
     if not isinstance(payload, dict):
         return []  # coverage: defensive guard against malformed pullpush slug payload

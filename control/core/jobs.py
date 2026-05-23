@@ -28,6 +28,8 @@ from typing import Any, Iterable
 
 from pydantic import BaseModel
 
+from pipeline.observability.event_helpers import safe_track as _track
+
 logger = logging.getLogger(__name__)
 
 _JOBS = "jobs"
@@ -47,6 +49,41 @@ class ConfirmResponse(BaseModel):
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _track_job_create(job_id: str, *, channel: str, proposal: dict[str, Any], render_kind: str | None) -> None:
+    variant = (proposal.get("format") or "").strip() if isinstance(proposal, dict) else ""
+    _track(
+        "control.job.create",
+        category="control",
+        metadata={
+            "job_id": job_id,
+            "channel": channel,
+            "format": render_kind or variant,
+            "variant": variant,
+        },
+    )
+
+
+def _track_job_transition(job_id: str, *, old: str | None, new: str, reason: str | None = None) -> None:
+    _track(
+        "control.job.transition",
+        category="control",
+        metadata={
+            "job_id": job_id,
+            "from": old,
+            "to": new,
+            "reason": reason,
+        },
+    )
+
+
+def _old_status(job_id: str) -> str | None:
+    try:
+        doc = get_jobs().get(job_id)
+        return (doc or {}).get("status")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -205,11 +242,20 @@ def create_job(
         slug=slug,
         render_kind=render_kind,
     )
+    _track_job_create(
+        job_id,
+        channel=channel,
+        proposal=proposal,
+        render_kind=render_kind,
+    )
 
 
 def mark_stage(job_id: str, *, status: str, stage: str, **extra: Any) -> None:
     """Advance the job through a stage. extra is merged into the doc."""
+    old = _old_status(job_id)
     get_jobs().update(job_id, status=status, stage=stage, **extra)
+    if old != status:
+        _track_job_transition(job_id, old=old, new=status, reason=stage)
 
 
 def mark_done(
@@ -221,6 +267,7 @@ def mark_done(
     slug: str | None = None,
     render_kind: str | None = None,
 ) -> None:
+    old = _old_status(job_id)
     fields: dict[str, Any] = {"status": STATUS_DONE, "stage": "done", "short_uri": short_uri, "error": None}
     if youtube_url:
         fields["youtube_url"] = youtube_url
@@ -231,6 +278,8 @@ def mark_done(
     if render_kind:
         fields["render_kind"] = render_kind
     get_jobs().update(job_id, **fields)
+    if old != STATUS_DONE:
+        _track_job_transition(job_id, old=old, new=STATUS_DONE, reason="done")
 
 
 def mark_failed(
@@ -249,6 +298,7 @@ def mark_failed(
     kind. Now: callers SHOULD pass slug/render_kind when known so
     the dashboard has enough to triage.
     """
+    old = _old_status(job_id)
     fields: dict[str, Any] = {
         "status": STATUS_FAILED,
         "stage": stage,
@@ -259,6 +309,8 @@ def mark_failed(
     if render_kind:
         fields["render_kind"] = render_kind
     get_jobs().update(job_id, **fields)
+    if old != STATUS_FAILED:
+        _track_job_transition(job_id, old=old, new=STATUS_FAILED, reason=stage)
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:
