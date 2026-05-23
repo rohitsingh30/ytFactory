@@ -136,11 +136,15 @@ OUTPUT — return ONE JSON object with EXACTLY these keys:
                                      to avoid.
 
   panel_briefs    — array of {{scene, hold_s, after_section_id}}
-                    panel cues. AT LEAST {panel_min_per_section}
-                    panels per section (target {panel_count_target}
-                    total panels — HARD MAX 24 by default; the
-                    renderer's mode-aware cap may allow more on
-                    cloud-rendered channels).
+                    panel cues. Produce EXACTLY {panel_count_target}
+                    panel_briefs TOTAL across the whole video
+                    (one image per ~{panel_seconds_target} seconds of
+                    narration — empirically tuned for Ken-Burns
+                    animated-stills retention; see
+                    docs/panel_pacing_research_2026-05.md). Distribute
+                    them roughly evenly across sections — aim for
+                    {panel_min_per_section}+ panels per section so no
+                    section sits on one image.
 
                     scene is a detailed image-gen prompt (the
                     channel's image_style_prefix is prepended at
@@ -150,7 +154,10 @@ OUTPUT — return ONE JSON object with EXACTLY these keys:
                     mood, composition).
 
                     hold_s ≤ {panel_hold_max_s} (panels held longer
-                    read as DEAD on screen).
+                    read as DEAD on screen — but the renderer will
+                    stretch holds uniformly to fill narration; aim
+                    for hold_s in the {panel_seconds_target}±5s
+                    range so post-stretch holds stay tolerable).
 
                     after_section_id pins which section this panel
                     accompanies — must match one of the section ids
@@ -434,7 +441,10 @@ def _channel_context(channel_cfg: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def _planned_sections_and_panels(duration_s: int) -> tuple[int, int, int, int, int, int, int, int]:
+def _planned_sections_and_panels(
+    duration_s: int,
+    channel_cfg: dict[str, Any] | None = None,
+) -> tuple[int, int, int, int, int, int, int, int]:
     """Heuristic targets for the LLM prompt. Hint-only — the LLM may
     return any reasonable number that fits the topic.
 
@@ -451,6 +461,19 @@ def _planned_sections_and_panels(duration_s: int) -> tuple[int, int, int, int, i
     A 50-min long-form will therefore land at ~16 short sections, not
     ~12 long ones — but every section will hit its floor on the first
     LLM call, and the wizard never sees a length contract failure.
+
+    Panel cadence: reads ``channel_cfg.long_form.panel_seconds_target``
+    (default 25s — one panel per ~25 s of narration, ≈2.4 PPM). Tuned
+    empirically against Ken-Burns animated-stills retention research
+    (see docs/panel_pacing_research_2026-05.md). Previously hardcoded
+    at 7s, which over-requested 257 panels for a 30-min long-form;
+    the LLM ignored that and emitted ~25, the renderer dropped that
+    to 10 (one per section) — see /Users/rohit/.copilot/session-state/
+    a10f7edb-7f93-4963-a06c-ba3b3df1501c/plan.md for the full story.
+
+    The ``panel_max_count`` ceiling is enforced separately at envelope
+    aggregation time (``_aggregate`` reads channel YAML); this function
+    only sets the prompt-hint target.
     """
     # Calm TTS narrator @ ~150 wpm.
     words_target = int(duration_s * 150 / 60)
@@ -477,12 +500,14 @@ def _planned_sections_and_panels(duration_s: int) -> tuple[int, int, int, int, i
     section_count_target = min(SECTION_COUNT_CAP, section_count_target)
     section_words_target = max(50, words_target // max(1, section_count_target))
     section_words_floor = int(section_words_target * 0.70)
-    # No prompt-side ceiling on count: the renderer's PANEL_HARD_CAP is
-    # mode-aware (24 on local mflux, 60 on Cloud Run NVIDIA L4 where
-    # the Metal command-buffer watchdog doesn't exist).
-    panel_seconds = 7
+    # Panel cadence — single source of truth from channel YAML.
+    lf_cfg = (channel_cfg or {}).get("long_form") or {}
+    try:
+        panel_seconds = max(8, int(lf_cfg.get("panel_seconds_target") or 25))
+    except (TypeError, ValueError):
+        panel_seconds = 25
     panel_count_target = max(8, max(1, duration_s // panel_seconds))
-    panel_min_per_section = max(4, panel_count_target // max(1, section_count_target))
+    panel_min_per_section = max(2, panel_count_target // max(1, section_count_target))
     return (
         words_target,
         words_floor,
@@ -608,7 +633,8 @@ def _call_outline_llm(
     duration_min: int, duration_s: int,
     section_count_target: int, section_words_target: int,
     panel_count_target: int, panel_min_per_section: int,
-    panel_hold_max_s: int, niche_title_rules: str,
+    panel_hold_max_s: int, panel_seconds_target: int,
+    niche_title_rules: str,
     extra_context: str = "", extra_rules: str = "",
 ) -> dict:
     """Run the OUTLINE LLM call. Returns the raw outline dict."""
@@ -623,6 +649,7 @@ def _call_outline_llm(
         panel_count_target=panel_count_target,
         panel_min_per_section=panel_min_per_section,
         panel_hold_max_s=panel_hold_max_s,
+        panel_seconds_target=panel_seconds_target,
         niche_title_rules=niche_title_rules,
     ) + extra_rules
 
@@ -687,7 +714,8 @@ def _call_outline_with_retry(
     duration_min: int, duration_s: int,
     section_count_target: int, section_words_target: int,
     panel_count_target: int, panel_min_per_section: int,
-    panel_hold_max_s: int, niche_title_rules: str,
+    panel_hold_max_s: int, panel_seconds_target: int,
+    niche_title_rules: str,
     extra_context: str, extra_rules: str,
     raw_story: dict, section_words_target_for_synth: int,
     section_count_target_for_synth: int,
@@ -724,6 +752,7 @@ def _call_outline_with_retry(
                 panel_count_target=panel_count_target,
                 panel_min_per_section=panel_min_per_section,
                 panel_hold_max_s=panel_hold_max_s,
+                panel_seconds_target=panel_seconds_target,
                 niche_title_rules=niche_title_rules,
                 extra_context=extra_context,
                 extra_rules=extra_rules,
@@ -1167,15 +1196,13 @@ def _call_section_body_llm(
             section_id, emitted, word_count, emitted - word_count,
         )
     if word_count < min_words:
-        raise SectionTooShortError(
-            f"section {section_id!r} narration is {word_count} words; "
-            f"minimum {min_words} (target {target_words}). The retry layer "
-            f"will re-prompt with explicit per-section minimum.",
-            section_id=str(section_id),
-            word_count=word_count,
-            min_words=min_words,
-            target_words=target_words,
-            narration=narration,
+        # Gate removed per user direction: under-min sections are now
+        # accepted as-is. Log only; do not raise. The retry layer's
+        # SectionTooShortError handler is correspondingly inert.
+        _logger.warning(
+            "section %s narration is %d words; below minimum %d "
+            "(target %d) — gate disabled, accepting",
+            section_id, word_count, min_words, target_words,
         )
     return raw
 
@@ -1482,8 +1509,17 @@ def _repair_short_section_bodies(
 def _aggregate(
     *, raw_story: dict, outline: dict, sections_with_bodies: list[dict],
     title_options_count: int,
+    channel_cfg: dict[str, Any] | None = None,
 ) -> ScriptEnvelope:
-    """Stitch outline + section bodies into a ScriptEnvelope."""
+    """Stitch outline + section bodies into a ScriptEnvelope.
+
+    ``channel_cfg`` is the merged channel YAML (base + variant overlay).
+    Currently used for ``long_form.panel_max_count`` to cap the panel
+    list at the channel's configured ceiling rather than the legacy
+    hardcoded 60. Pass ``None`` in test/legacy callsites — defaults to
+    120 panels (the post-2026-05 ceiling for animated-stills long-form;
+    see docs/panel_pacing_research_2026-05.md).
+    """
     # Defensive parse — sections that came back without a body fall
     # back to brief-as-narration so the renderer doesn't crash on an
     # empty narration field. The validator surfaces this as
@@ -1528,20 +1564,36 @@ def _aggregate(
             hold_s = float(p.get("hold_s") or 6.0)
         except (TypeError, ValueError):
             hold_s = 6.0
-        # Cap at the soft max (8.0) for any panel that exceeds the
-        # hard max (12.0). Defense-in-depth — keeps a misbehaving
-        # outline call from emitting a dead-frame video.
+        # Cap at the soft max for any panel that exceeds the hard max.
+        # Defense-in-depth — keeps a misbehaving outline call from
+        # emitting a dead-frame video.
         if hold_s > _critic.PANEL_HOLD_HARD_MAX_S:
             hold_s = _critic.PANEL_HOLD_SOFT_MAX_S
-        panels.append(LongFormPanel(scene=scene, hold_s=hold_s))
-    # Truncate at the cloud-renderer's max (60); local renderers
-    # re-truncate against their stricter cap downstream.
-    if len(panels) > 60:
+        after_id = p.get("after_section_id")
+        after_id_str = str(after_id).strip() if after_id else None
+        if after_id_str == "":
+            after_id_str = None
+        panels.append(LongFormPanel(
+            scene=scene,
+            hold_s=hold_s,
+            after_section_id=after_id_str,
+        ))
+    # Truncate at the channel's configured cap (default 120 — was 60).
+    # Read from channel_cfg.long_form.panel_max_count; the cloud renderer
+    # used to hard-cap 60 here, which silently throttled any future
+    # cadence bump from the LLM prompt. See docs/panel_pacing_research_2026-05.md.
+    lf_cfg = (channel_cfg or {}).get("long_form") or {}
+    try:
+        panel_max_count = int(lf_cfg.get("panel_max_count") or 120)
+    except (TypeError, ValueError):
+        panel_max_count = 120
+    if len(panels) > panel_max_count:
         _logger.warning(
-            "rewrite_long_form: outline emitted %d panels; truncating to 60",
-            len(panels),
+            "rewrite_long_form: outline emitted %d panels; truncating to %d "
+            "(channel.long_form.panel_max_count)",
+            len(panels), panel_max_count,
         )
-        panels = panels[:60]
+        panels = panels[:panel_max_count]
 
     long_form = LongFormScript(
         hook=(outline.get("hook") or "").strip(),
@@ -1625,7 +1677,7 @@ def rewrite_long_form(
         section_words_floor,
         panel_count_target,
         panel_min_per_section,
-    ) = _planned_sections_and_panels(duration_s)
+    ) = _planned_sections_and_panels(duration_s, channel_cfg=cfg)
 
     # Cap source body before injection — a 200k-char scraped article or
     # full subreddit JSON dump would blow past prompt-context budget on
@@ -1681,6 +1733,15 @@ def rewrite_long_form(
     # synthesized-fallback so the render proceeds with SOMETHING even
     # in the worst case (the downstream length validator will surface
     # the gap as a soft warning).
+    # Resolve panel_seconds_target from channel cfg so the outline
+    # prompt receives the same cadence value _planned_sections_and_panels
+    # used to compute panel_count_target. Single source of truth =
+    # channel YAML's long_form.panel_seconds_target.
+    _lf_cfg = (cfg or {}).get("long_form") or {}
+    try:
+        panel_seconds_target = max(8, int(_lf_cfg.get("panel_seconds_target") or 25))
+    except (TypeError, ValueError):
+        panel_seconds_target = 25
     outline = _call_outline_with_retry(
         channel_context=channel_context,
         topic=title,
@@ -1692,6 +1753,7 @@ def rewrite_long_form(
         panel_count_target=panel_count_target,
         panel_min_per_section=panel_min_per_section,
         panel_hold_max_s=int(_critic.PANEL_HOLD_HARD_MAX_S),
+        panel_seconds_target=panel_seconds_target,
         niche_title_rules=niche_title_rules,
         extra_context=extra_context,
         extra_rules=extra_rules,
@@ -1741,6 +1803,7 @@ def rewrite_long_form(
         outline=outline,
         sections_with_bodies=sections_with_bodies,
         title_options_count=title_options_count,
+        channel_cfg=channel_cfg,
     )
 
     # Validator (post-aggregation, full envelope).
@@ -1793,6 +1856,7 @@ def rewrite_long_form(
             outline=outline,
             sections_with_bodies=sections_with_bodies,
             title_options_count=title_options_count,
+            channel_cfg=channel_cfg,
         )
         violations = _critic.validate_long_form_envelope(
             env, target_duration_s=duration_s, niche=niche, raw_body=body,

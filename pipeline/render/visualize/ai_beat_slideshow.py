@@ -220,10 +220,10 @@ class AiBeatSlideshow:
         timeline: Timeline,
         work_dir: Path,
     ) -> VisualTrack:
-        try:
-            from pipeline.images.images import generate as _generate_image  # noqa: PLC0415
-        except ImportError:
-            return self._fallback_solid_color(spec, timeline, work_dir)
+        # generate_with_cache wraps pipeline.images.images.generate with
+        # a GCS (prompt+seed+model+W×H+steps)→png cache. Cache miss
+        # falls through to the real generator transparently.
+        from pipeline.images.image_cache import generate_with_cache as _generate_image  # noqa: PLC0415
 
         # Generate one image per Segment.
         images_dir = work_dir / "images"
@@ -268,36 +268,9 @@ class AiBeatSlideshow:
         # 1-2 prompts" case. Below 4 beats the ratio is too noisy
         # (1 collision in 3 beats = 33%) — skip the gate for those
         # short authored fixtures.
-        if (
-            prompts_path
-            and custom_prompts
-            and len(custom_prompts) >= 4
-        ):
-            unique_visuals = {
-                (p.get("key_visual") or "").strip().lower()
-                for p in custom_prompts
-                if isinstance(p, dict)
-            }
-            unique_visuals.discard("")
-            uniqueness_ratio = (
-                len(unique_visuals) / len(custom_prompts)
-                if custom_prompts else 0.0
-            )
-            if uniqueness_ratio < 0.5:
-                raise RenderFailedError(
-                    f"ai_beat_slideshow: prompts.json has "
-                    f"{len(unique_visuals)} unique key_visual values "
-                    f"across {len(custom_prompts)} beats "
-                    f"(ratio={uniqueness_ratio:.0%}; threshold=50%). "
-                    f"Refusing to render a single-image-loop video. "
-                    f"site=pipeline/render/visualize/ai_beat_slideshow.py:"
-                    f"AiBeatSlideshow.produce. "
-                    f"Re-author prompts.json with distinct key_visual "
-                    f"per beat, or fix the worker's "
-                    f"_author_prompts_for_engine LLM prompt to enforce "
-                    f"per-beat scene variety. "
-                    f"path={prompts_path}"
-                )
+        # Prompts uniqueness gate removed per user direction. Accepts
+        # any prompts.json shape regardless of how repeated the
+        # key_visual strings are.
 
         # 2026-05-17 audio/visual-sync fix — re-bind prompts to ASR beats
         # by ``narration_line`` token-overlap BEFORE the count-equality
@@ -411,7 +384,21 @@ class AiBeatSlideshow:
         # snapshots). Default = 9973 matches the dedupe retry constant.
         seed_stride = int(spec.extra.get("image_seed_stride", 9973))
 
-        for i, seg in enumerate(timeline):
+        # Parallel per-beat fan-out — W = ceil(N/4) workers, capped by
+        # the GPU quota / max-instances ceiling. Cloud Run's LB queues
+        # any overflow. Each beat is still a single _generate_image
+        # call (no retry — that gate was removed). Results are placed
+        # back into a positional list so beat ordering is preserved.
+        import math  # noqa: PLC0415
+        from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415
+        n_total = len(timeline)
+        w = max(1, math.ceil(n_total / 4))
+        _logger.info(
+            "ai_beat_slideshow: fan-out W=%d for %d beats (concurrency=1 per instance)",
+            w, n_total,
+        )
+
+        def _gen_one_beat(i: int, seg: "Segment") -> tuple[int, Path | None]:
             png_path = images_dir / f"beat_{i:03d}.png"
             beat = (
                 custom_prompts[i]
@@ -426,90 +413,44 @@ class AiBeatSlideshow:
                 era_anchor_prefix=era_anchor_prefix,
                 mood=mood,
             )
-            # When a beat dict is present, ``_resolve_prompt_for_beat``
-            # used ``build_full_prompt`` which already inlines the style
-            # tokens (legacy ``style_prefix`` OR refined ``style_block``).
-            # Pass ``style_prefix=""`` to ``generate`` so it doesn't
-            # append style a SECOND time at line ~698 of ``images.py``.
-            # When no beat dict, the bare ``Segment.text`` carries no
-            # style yet — pass the configured style so ``generate``
-            # appends it normally. Without this two-mode split the
-            # refiner's ``"Style: X. Mood: Y."`` block was getting a
-            # trailing copy of the legacy style_prefix (rubber-duck
-            # 2026-05-14 finding #2).
+            # When a beat dict is present, _resolve_prompt_for_beat
+            # used build_full_prompt which already inlines the style
+            # tokens (legacy style_prefix OR refined style_block). Pass
+            # style_prefix="" to generate so it doesn't append style a
+            # SECOND time.
             style_for_generate = "" if beat is not None else style_prefix
-            # P4.2 (Q66): per-beat retry. The first attempt uses the
-            # base seed; on either an exception or an image-quality
-            # validator rejection (solid-black / solid-color / etc.),
-            # one retry fires with a much-wider seed and an emphatic
-            # "richer composition" suffix on the prompt. Only after the
-            # retry budget is exhausted does the beat count toward
-            # ``n_failed``.
-            attempts_remaining = 2
-            attempt_idx = 0
-            last_exc: BaseException | None = None
-            beat_ok = False
-            while attempts_remaining > 0:
-                attempt_idx += 1
-                attempts_remaining -= 1
-                if attempt_idx == 1:
-                    attempt_seed = seed_base + i * seed_stride
-                    attempt_prompt = prompt
-                else:
-                    # Retry seed jumps a full stride past the base so
-                    # we land in a different latent neighborhood from
-                    # the failed attempt. The "richer composition"
-                    # suffix is positive-framed (Z-Image-Turbo ignores
-                    # negatives per ADR-024) and keeps the structured
-                    # prompt z-turbo-friendly.
-                    attempt_seed = seed_base + (i + n_total + 1) * seed_stride
-                    attempt_prompt = (
-                        prompt.rstrip(".") +
-                        ". richer composition with full subject in frame, "
-                        "natural lighting, varied textures, clear depth."
-                    )
-                try:
-                    _generate_image(
-                        prompt=attempt_prompt,
-                        style_prefix=style_for_generate,
-                        seed=attempt_seed,
-                        out_path=png_path,
-                        width=spec.output_resolution[0],
-                        height=spec.output_resolution[1],
-                        steps=steps,
-                        provider=provider,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    last_exc = exc
-                    _logger.warning(
-                        "ai_beat_slideshow: beat %d attempt %d raised %s",
-                        i, attempt_idx, exc,
-                    )
-                    continue
-                ok, reason = _image_quality_ok(png_path)
-                if ok:
-                    beat_ok = True
-                    break
-                # Quality validator rejected — record + retry if budget remains.
-                last_exc = RuntimeError(f"image-quality validator rejected: {reason}")
-                _logger.warning(
-                    "ai_beat_slideshow: beat %d attempt %d quality-fail (%s) — "
-                    "%s",
-                    i, attempt_idx, reason,
-                    "retrying with stronger prompt + wider seed" if attempts_remaining else "no retry budget left",
+            attempt_seed = seed_base + i * seed_stride
+            try:
+                _generate_image(
+                    prompt=prompt,
+                    style_prefix=style_for_generate,
+                    seed=attempt_seed,
+                    out_path=png_path,
+                    width=spec.output_resolution[0],
+                    height=spec.output_resolution[1],
+                    steps=steps,
+                    provider=provider,
                 )
-            if not beat_ok:
-                # P4.2: only NOW does this beat count toward the 10% pool.
-                n_failed += 1
-                if first_failure is None and last_exc is not None:
-                    first_failure = last_exc
+            except Exception as exc:  # noqa: BLE001
                 _logger.warning(
-                    "ai_beat_slideshow: beat %d failed after %d attempts — "
-                    "skipping (%d/%d failed so far)",
-                    i, attempt_idx, n_failed, n_total,
+                    "ai_beat_slideshow: beat %d image-gen raised %s — skipping",
+                    i, exc,
                 )
-                continue
-            images.append(png_path)
+                return i, None
+            return i, png_path
+
+        results: list[Path | None] = [None] * n_total
+        with ThreadPoolExecutor(max_workers=w) as pool:
+            futures = [
+                pool.submit(_gen_one_beat, i, seg)
+                for i, seg in enumerate(timeline)
+            ]
+            for fut in as_completed(futures):
+                i, png_path = fut.result()
+                results[i] = png_path
+
+        images = [p for p in results if p is not None]
+        n_failed = n_total - len(images)
 
         # 2026-05-17 static-tail fix (part A): detect duplicate
         # consecutive PNG-byte hashes and re-render the duplicates
@@ -574,39 +515,23 @@ class AiBeatSlideshow:
                         i, exc,
                     )
 
-        # 2026-05-15 fail-loud audit — post-loop gate. Raises when the
-        # per-beat failure rate exceeds the threshold so we don't ship
-        # a slideshow with missing frames that compose pads with the
-        # last image (frozen-frame tail).
-        if n_total > 0:
-            failure_rate = n_failed / n_total
-            if failure_rate > _PER_BEAT_FAILURE_THRESHOLD:
-                raise RenderFailedError(
-                    f"ai_beat_slideshow: {n_failed}/{n_total} per-beat "
-                    f"image-gen failures exceeded 10% threshold "
-                    f"(rate={failure_rate:.0%}). Refusing to ship a "
-                    f"slideshow with frozen-frame padding. "
-                    f"site=pipeline/render/visualize/ai_beat_slideshow.py:"
-                    f"AiBeatSlideshow.produce. "
-                    f"First failure: {first_failure!r}"
-                ) from first_failure
+        # Per-beat failure-rate gate removed per user direction; render
+        # proceeds with whatever images succeeded (frozen-frame padding
+        # accepted).
 
         if not images:
-            _logger.warning("ai_beat_slideshow: 0 images produced — "
-                            "falling back to solid color")
-            return self._fallback_solid_color(spec, timeline, work_dir)
+            raise RenderFailedError(
+                "ai_beat_slideshow: 0 images produced; "
+                "site=pipeline/render/visualize/ai_beat_slideshow.py "
+                "(no fallback path)."
+            )
 
         # Stitch one image per beat into a continuous video. Each image
         # is held for the beat's duration. Bigbang PR adds Ken Burns
         # motion via a ffmpeg zoompan filter; today we use plain
         # framebatch-per-second.
         out_path = work_dir / "slideshow.mp4"
-        try:
-            self._stitch_images(images, timeline, spec, out_path)
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("ai_beat_slideshow: stitch failed (%s) — "
-                            "falling back to solid color", exc)
-            return self._fallback_solid_color(spec, timeline, work_dir)
+        self._stitch_images(images, timeline, spec, out_path)
 
         return VisualTrack(
             video_path=out_path,
@@ -625,21 +550,19 @@ class AiBeatSlideshow:
         spec: Any,
         out_path: Path,
     ) -> None:
-        """Stitch per-beat images into a continuous video WITH Ken Burns motion.
+        """Stitch per-beat images into a continuous video with hard cuts.
 
-        2026-05-17 static-tail fix (part B): even after part-A's
-        hash-dedupe forces visually-distinct PNGs, two beats whose
-        prompts differ slightly can still render as near-identical
-        frames. The canonical defense is MOTION: every held image
-        gets the punch-in-then-drift zoompan from
-        ``pipeline.compose._kenburns_filter`` so the viewer's eye
-        registers "the camera is moving" even on near-clone frames.
-        No two pixel-identical frames > 1s anywhere.
+        2026-05-23: Ken-Burns / zoompan REMOVED (user directive).
+        ``image_to_kenburns_clip`` now produces a STATIC clip (the
+        function name is kept for back-compat). Each PNG is held for
+        its beat window with no zoom, no pan; segments are
+        concat-demuxed with ``-c copy`` (hard cuts, no fade).
 
-        Implementation: render each PNG to a short Ken Burns mp4 via
-        ``image_to_kenburns_clip`` (the same helper compose_hybrid
-        uses), then concat-demuxer the clips with ``-c copy`` (lossless,
-        single pass). Each clip's duration matches its beat window.
+        The retention-defense rationale that drove the previous Ken-Burns
+        path ("no two pixel-identical frames > 1s") now relies on the
+        beat-cadence being tight enough that each still doesn't dwell
+        for long — shorts already hit ~2-3 s/beat via the sentence-per-
+        beat splitter in ``pipeline.beats``.
         """
         from pipeline.compose import Resolution, image_to_kenburns_clip  # noqa: PLC0415
         from pipeline.render.shared.concat_safe import concat_file_line  # noqa: PLC0415
@@ -647,7 +570,7 @@ class AiBeatSlideshow:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         w, h = spec.output_resolution
         res = Resolution(width=w, height=h, fps=spec.output_fps)
-        clips_dir = out_path.parent / "kenburns_clips"
+        clips_dir = out_path.parent / "static_clips"
         clips_dir.mkdir(parents=True, exist_ok=True)
 
         clip_paths: list[Path] = []
@@ -660,8 +583,8 @@ class AiBeatSlideshow:
                 clip_paths.append(clip_p)
             except Exception as exc:  # noqa: BLE001
                 _logger.warning(
-                    "ai_beat_slideshow: ken-burns clip %d failed (%s) — "
-                    "falling back to static frame for this beat",
+                    "ai_beat_slideshow: static clip %d failed (%s) — "
+                    "falling back to inline ffmpeg for this beat",
                     i, exc,
                 )
                 # Fall back to a single static frame so the render
@@ -686,40 +609,6 @@ class AiBeatSlideshow:
             "-c", "copy",
             str(out_path),
         ])
-
-    def _fallback_solid_color(
-        self, spec: Any, timeline: Timeline, work_dir: Path,
-    ) -> VisualTrack:
-        # 2026-05-15 fail-loud audit — solid color is now opt-in via
-        # YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1.
-        from pipeline.render.visualize._fallback import (  # noqa: PLC0415
-            _solid_color_override_enabled,
-        )
-        if not _solid_color_override_enabled():
-            raise RenderFailedError(
-                "ai_beat_slideshow: refusing to return solid-color "
-                "stand-in — set YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1 "
-                "for emergency renders. "
-                "site=pipeline/render/visualize/ai_beat_slideshow.py:"
-                "AiBeatSlideshow._fallback_solid_color"
-            )
-        out_path = work_dir / "slideshow_fallback.mp4"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        duration_s = timeline[-1].end_s if timeline else 1.0
-        w, h = spec.output_resolution
-        run_ffmpeg([
-            "-f", "lavfi", "-t", f"{duration_s:.3f}",
-            "-i", f"color=c=0x141414:s={w}x{h}:r={spec.output_fps}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            str(out_path),
-        ])
-        return VisualTrack(
-            video_path=out_path,
-            duration_s=probe_duration(out_path),
-            extras={"source": "ai_beat_slideshow_fallback"},
-        )
-
 
 register_plugin("visualize", "ai_beat_slideshow", AiBeatSlideshow())
 assert isinstance(AiBeatSlideshow(), VisualProducer)

@@ -120,8 +120,17 @@ def render_long(
 
     # 3. Visuals
     visualize_plugin: VisualProducer = get_plugin("visualize", visualize_name)
+    # The "N visuals" headline used to report len(timeline) — fine for
+    # legacy archival_shotlist channels (one visual per section) but
+    # misleading for longform_panels post-2026-05-23 where the authored
+    # panel list (denser cadence) drives the real count. Report the
+    # authored count when staged; fall back to timeline length otherwise.
+    _authored_panels = (
+        (spec.extra or {}).get("authored_long_form_panels") if spec.extra else None
+    )
+    _n_visuals = len(_authored_panels) if _authored_panels else len(timeline)
     _emit(progress_cb, "images",
-          f"Generating {len(timeline)} visuals via {visualize_name}")
+          f"Generating {_n_visuals} visuals via {visualize_name}")
     visuals: VisualTrack = visualize_plugin.produce(spec, timeline, work_dir)
     _logger.info("render_long: visuals=%s duration=%.2fs",
                  visuals.video_path.name, visuals.duration_s)
@@ -143,9 +152,10 @@ def render_long(
     overlays = _collect_overlays(spec, timeline, audio)
     _logger.info("render_long: overlays=%d elements", len(overlays))
 
-    # P5.2 (Q73): caption density gate — see short_engine for rationale.
-    from pipeline.render.short_engine import _enforce_caption_density  # noqa: PLC0415
-    _enforce_caption_density(spec, overlays, audio.duration_s)
+    # P5.2 (Q73) caption density gate removed in short_engine.py per
+    # user direction (gate functions retired); long_engine follows.
+    # Re-introduce when the new gate strategy (retry-repair, same-stage
+    # only, max 1 retry) is designed.
 
     # 6. Compose (section_video by default)
     compose_plugin: FinalMux = get_plugin("compose", compose_name)

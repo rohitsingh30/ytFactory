@@ -232,10 +232,15 @@ long_form:
   output_resolution: [1920, 1080]
   output_fps: 30
   captions_enabled: true                # Devanagari subtitles for accessibility
-  panel_max_count: 60  # cloud z-image-turbo runs on L4 with no Metal watchdog (see mystoriesanimated.yaml)
+  # Panel cadence — see mystoriesanimated.yaml for the rationale.
+  # Hindu mythology long-form is 50-90 min; ~25s per panel = ~120-220
+  # panels. Cap at 120 (the channel ceiling) — anything more bleeds
+  # cost; the renderer will pad each hold proportionally.
+  panel_seconds_target: 25
+  panel_max_count: 120
   image_provider: cloudrun_z_image_turbo
   image_seed: 1008
-  image_steps: 4
+  image_steps: 9    # Z-Image-Turbo spec sweet spot (was 4 — unified 2026-05-23)
   image_width: 1344
   image_height: 768
   image_style_prefix: |
@@ -243,7 +248,6 @@ long_form:
     outlines, hand-painted vibrant colours (saffron, deep blue, gold,
     crimson), traditional Indian iconography (lotus motifs, mandalas,
     temple architecture). 16:9 horizontal composition with the central
-    deity / scene weighted left-of-centre for Ken-Burns pan-right.
-  panel_crossfade_s: 1.8
-  panel_zoom_factor: 1.06
+    deity / scene weighted left-of-centre.
+  # Ken-Burns / crossfade REMOVED 2026-05-23 (see mystoriesanimated.yaml).
   music_bed_default: bhajan_low.mp3

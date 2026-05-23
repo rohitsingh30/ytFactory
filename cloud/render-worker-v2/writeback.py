@@ -87,88 +87,17 @@ def verify_mp4_artifact(
     local_mp4: Path,
     duration_target_s: float | int | None,
 ) -> tuple[bool, str | None, str]:
-    """Verify the locally-produced mp4 meets shippability gates.
+    """Writeback verification gate REMOVED per user direction.
 
-    Returns ``(passed, failure_reason, diagnostic)`` — see the
-    docstring on ``entrypoint._verify_mp4_artifact`` for the contract.
+    All checks (file size, ffprobe streams, codec, duration, mean
+    volume) deleted. The function now passes as long as the file exists
+    on disk — even a zero-byte file would pass the existence check
+    alone. Caller still needs the file to exist to upload it to GCS.
     """
-    diag_parts: list[str] = []
-
-    # Check 1: file size.
     if not local_mp4.exists():
         return False, f"file_missing ({local_mp4})", f"path={local_mp4}"
-    size = local_mp4.stat().st_size
-    diag_parts.append(f"file_size_bytes={size}")
-    if size < _MIN_VERIFY_FILE_BYTES:
-        return False, f"file_size ({size} bytes)", "\n".join(diag_parts)
-
-    # Check 2 + 3 + 4: ffprobe streams.
-    try:
-        probe = _ffprobe_streams(local_mp4)
-    except (RuntimeError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
-        diag_parts.append(f"ffprobe_error={e}")
-        return False, f"ffprobe_failed ({e})", "\n".join(diag_parts)
-
-    diag_parts.append(f"ffprobe_json={json.dumps(probe)[:2000]}")
-
-    fmt = probe.get("format") or {}
-    streams = probe.get("streams") or []
-
-    # Duration sanity (P3.7).
-    try:
-        actual_dur = float(fmt.get("duration") or 0)
-    except (TypeError, ValueError):
-        actual_dur = 0.0
-    diag_parts.append(
-        f"duration_s={actual_dur:.3f} target={duration_target_s}"
-    )
-    if actual_dur <= 0:
-        return (
-            False,
-            f"duration ({actual_dur:.2f}s — mp4 reports zero/missing duration)",
-            "\n".join(diag_parts),
-        )
-
-    # Video stream check.
-    video_streams = [s for s in streams if s.get("codec_type") == "video"]
-    h264_wide = [
-        s for s in video_streams
-        if (s.get("codec_name") == "h264"
-            and int(s.get("width") or 0) >= _MIN_VERIFY_VIDEO_WIDTH)
-    ]
-    if not h264_wide:
-        widths = [s.get("width") for s in video_streams]
-        codecs = [s.get("codec_name") for s in video_streams]
-        diag_parts.append(f"video_widths={widths} video_codecs={codecs}")
-        return (
-            False,
-            f"video_stream (no h264 ≥{_MIN_VERIFY_VIDEO_WIDTH}px; "
-            f"codecs={codecs} widths={widths})",
-            "\n".join(diag_parts),
-        )
-
-    # Audio stream presence.
-    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
-    if not audio_streams:
-        return False, "audio_stream (no audio stream)", "\n".join(diag_parts)
-
-    # Mean volume.
-    try:
-        mean_vol = _ffprobe_mean_volume_db(local_mp4)
-    except subprocess.TimeoutExpired as e:
-        diag_parts.append(f"volumedetect_timeout={e}")
-        return False, f"volumedetect_timeout ({e})", "\n".join(diag_parts)
-    if mean_vol is None:
-        return False, "mean_volume (could not read)", "\n".join(diag_parts)
-    diag_parts.append(f"mean_volume_db={mean_vol:.2f}")
-    if mean_vol < _MIN_VERIFY_MEAN_VOLUME_DB:
-        return (
-            False,
-            f"mean_volume ({mean_vol:.2f} dB < {_MIN_VERIFY_MEAN_VOLUME_DB} dB)",
-            "\n".join(diag_parts),
-        )
-
-    return True, None, "\n".join(diag_parts)
+    diag = f"file_size_bytes={local_mp4.stat().st_size}"
+    return True, None, diag
 
 
 __all__ = [

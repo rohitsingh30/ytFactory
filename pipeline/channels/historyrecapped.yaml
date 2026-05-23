@@ -338,7 +338,7 @@ long_form:
     no text, no captions on image, no modern objects, no logo
   image_provider: cloudrun_z_image_turbo
   image_seed: 1944       # locks character/scene look across an episode
-  image_steps: 4
+  image_steps: 9         # Z-Image-Turbo spec sweet spot (was 4 — unified 2026-05-23)
   image_width: 1344      # Z-Image-Turbo cap; compose upscales to 1920x1080
   image_height: 768
   beat_target_s: 20      # 18-22s per panel = slow Ken Burns hold

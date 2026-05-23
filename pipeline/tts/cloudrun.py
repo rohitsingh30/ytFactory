@@ -757,38 +757,62 @@ def _synth_cloudrun_chunked(
         if mean_s > 0:
             prosody = [(s / mean_s * speed, p) for (s, p) in prosody]
 
-    parts: list[Path] = []
-    chunk0_path: Path | None = None
     voice_clone = model in _VOICE_CLONE_CAPABLE
-    current_ref = ref_audio_path
-    current_ref_text = ref_audio_text
+    n_chunks = len(chunks)
 
-    for i, chunk_text in enumerate(chunks):
-        chunk_path = chunk_dir / f"chunk_{i:03d}.wav"
-        chunk_speed = prosody[i][0] if prosody else speed
-        _synth_cloudrun(
-            model=model, text=chunk_text, ref_audio_path=current_ref,
-            ref_audio_text=current_ref_text, out_path=chunk_path,
-            speed=chunk_speed, seed=seed, description=description,
-        )
-        parts.append(chunk_path)
-        if i == 0:
-            chunk0_path = chunk_path
-            if voice_clone and chunk0_path is not None:
-                current_ref = str(chunk0_path)
-                # P4.4 (2026-05-23, Q71): when swapping the ref audio to
-                # chunk-0's OWN output for timbre anchoring, the
-                # ref_audio_text MUST swap to chunk-0's text too. Leaving
-                # the original caller's ref_text here paired the new
-                # WAV with a transcript of a DIFFERENT WAV — the audio
-                # vs text mismatch is exactly what made IndicF5 emit
-                # Hindi gibberish on chunks 1+.
-                current_ref_text = chunk_text
+    # Step 1 — render chunk-0 ALONE (its WAV anchors the voice-clone
+    # timbre for chunks 1..N when the model supports it).
+    chunk0_path = chunk_dir / "chunk_000.wav"
+    chunk0_speed = prosody[0][0] if prosody else speed
+    _synth_cloudrun(
+        model=model, text=chunks[0], ref_audio_path=ref_audio_path,
+        ref_audio_text=ref_audio_text, out_path=chunk0_path,
+        speed=chunk0_speed, seed=seed, description=description,
+    )
 
-        # Insert silence after this chunk if prosody asks for one.
+    # Step 2 — fan out chunks 1..N-1 in parallel. Each uses chunk-0's
+    # output as its ref WAV when voice_clone is set; otherwise uses the
+    # caller's original ref. Fire ALL remaining chunks concurrently so
+    # the Cloud Run LB can saturate both `concurrency=2 × max-instances=2`
+    # slots (= up to 4 in-flight TTS requests at peak). The LB queues
+    # any overflow naturally.
+    if n_chunks > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415
+        anchored_ref = str(chunk0_path) if voice_clone else ref_audio_path
+        anchored_ref_text = chunks[0] if voice_clone else ref_audio_text
+
+        def _gen_chunk(i: int) -> tuple[int, Path]:
+            chunk_path = chunk_dir / f"chunk_{i:03d}.wav"
+            chunk_speed = prosody[i][0] if prosody else speed
+            _synth_cloudrun(
+                model=model, text=chunks[i], ref_audio_path=anchored_ref,
+                ref_audio_text=anchored_ref_text, out_path=chunk_path,
+                speed=chunk_speed, seed=seed, description=description,
+            )
+            return i, chunk_path
+
+        chunk_paths: list[Path | None] = [None] * n_chunks
+        chunk_paths[0] = chunk0_path
+        # max_workers = remaining chunks; ThreadPoolExecutor fires them
+        # all, Cloud Run's LB handles queuing past 4 in-flight slots.
+        n_remaining = n_chunks - 1
+        with ThreadPoolExecutor(max_workers=n_remaining) as pool:
+            futures = [pool.submit(_gen_chunk, i) for i in range(1, n_chunks)]
+            for fut in as_completed(futures):
+                i, path = fut.result()
+                chunk_paths[i] = path
+    else:
+        chunk_paths = [chunk0_path]
+
+    # Step 3 — assemble parts in chunk order, interleaving silences.
+    parts: list[Path] = []
+    for i, cp in enumerate(chunk_paths):
+        if cp is None:
+            raise RuntimeError(f"_synth_cloudrun_chunked: chunk {i} missing")
+        parts.append(cp)
         if prosody:
             _, pause = prosody[i]
-            if pause > 0.05 and i < len(chunks) - 1:
+            if pause > 0.05 and i < n_chunks - 1:
                 sil_path = chunk_dir / f"silence_{i:03d}.wav"
                 _make_silence_wav(pause, sil_path)
                 parts.append(sil_path)
@@ -820,11 +844,6 @@ def _synth_cloudrun_indicf5(
     Kokoro is preset-voice (no clone), so the fallback loses voice
     identity but stays in Hindi.
     """
-    if not ref_audio_text:
-        raise ValueError(
-            "cloudrun_indicf5 requires ref_audio_text "
-            "(transcript of the ref WAV; used for prosody anchoring)"
-        )
     try:
         return _synth_cloudrun_chunked(
             model="indicf5", text=text, ref_audio_path=ref_audio_path,

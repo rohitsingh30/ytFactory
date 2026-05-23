@@ -97,6 +97,14 @@ class LongFormPanel:
 
     hold_s: float = 30.0
 
+    after_section_id: str | None = None
+    """ID of the ``LongFormSection`` this panel accompanies. Authored by
+    the LLM in ``panel_briefs[]``; the renderer uses it to group panels
+    inside each section's timeline window so visuals stay aligned with
+    the narration's section boundaries (chapter cards, lower-thirds).
+    ``None`` means "sequential allocation" — the renderer assigns the
+    panel to whichever section is currently playing."""
+
 
 @dataclass
 class LongFormScript:
@@ -275,7 +283,18 @@ class ScriptEnvelope:
             ],
         }
         if lf.panels:
-            d["panels"] = [{"scene": p.scene, "hold_s": p.hold_s} for p in lf.panels]
+            d["panels"] = [
+                {
+                    "scene": p.scene,
+                    "hold_s": p.hold_s,
+                    **(
+                        {"after_section_id": p.after_section_id}
+                        if p.after_section_id
+                        else {}
+                    ),
+                }
+                for p in lf.panels
+            ]
         if lf.sources:
             d["sources"] = list(lf.sources)
         if lf.shotlist_hints:

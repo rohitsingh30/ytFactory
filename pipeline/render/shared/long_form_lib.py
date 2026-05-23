@@ -639,7 +639,7 @@ def _adjust_panel_holds_to_dur(
             p["hold_s"] = float(p.get("hold_s", 20)) * scale
 
 
-def _assemble_panel_kenburns(
+def _assemble_panel_static(
     *,
     panel_pngs: list[Path],
     panels: list[dict[str, Any]],
@@ -647,11 +647,24 @@ def _assemble_panel_kenburns(
     out_w: int,
     out_h: int,
     fps: int,
-    crossfade_s: float,
-    zoom_factor: float,
 ) -> Path:
-    """Build per-panel Ken-Burns segments and xfade-concat into
-    ``video.mp4``. Extracted from :func:`build_image_panels_video`."""
+    """Build per-panel static-still segments and hard-cut concat them
+    into ``video.mp4``.
+
+    2026-05-23 (user directive): replaces the legacy
+    ``_assemble_panel_kenburns`` which used a zoompan filter + xfade
+    chain. That path was the largest CPU sink in long-form rendering
+    (~118s wall per 125s segment on Cloud Run CPU because zoompan
+    re-encodes every output frame from a single input) and was the
+    direct cause of the 60-min Cloud Run task-timeout failures on
+    long-form jobs. Static loops render at ~30-50× realtime; concat
+    demuxer with ``-c copy`` adds essentially zero wall.
+
+    No motion, no crossfade. The pipeline-side compensation is denser
+    panel cadence (more panels at shorter holds) so static stills
+    don't dwell long enough to register as "frozen video" — see
+    docs/panel_pacing_research_2026-05.md.
+    """
     seg_dir = cache_dir / "panel_segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
 
@@ -660,58 +673,73 @@ def _assemble_panel_kenburns(
             f"panel_pngs ({len(panel_pngs)}) and panels ({len(panels)}) length mismatch"
         )
 
-    seg_paths: list[tuple[Path, float]] = []
+    seg_paths: list[Path] = []
     for i, (png, p) in enumerate(zip(panel_pngs, panels)):
         hold_s = float(p.get("hold_s", 20))
         seg = seg_dir / f"seg_{i:03d}.mp4"
         if not seg.exists() or seg.stat().st_size < 4096:
-            n_frames = max(1, int(round(hold_s * fps)))
-            ramp = (zoom_factor - 1.0) / max(1, n_frames - 1)
-            zp = (
-                f"fps={fps},"
-                f"scale={out_w*2}:{out_h*2}:flags=lanczos,"
-                f"zoompan=z='min(zoom+{ramp:.6f},{zoom_factor:.4f})':"
-                f"d=1:s={out_w}x{out_h}:fps={fps},format=yuv420p"
+            # Scale-and-crop so the panel fills the target frame at
+            # the channel's output resolution, no letterboxing.
+            vf = (
+                f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+                f"crop={out_w}:{out_h},"
+                f"fps={fps},setsar=1,format=yuv420p"
             )
-            print(f"[seg ] {i+1}/{len(panels)} {hold_s:.1f}s zoom→{zoom_factor:.2f} ({n_frames}f) → {seg.name}")
+            print(f"[seg ] {i+1}/{len(panels)} {hold_s:.1f}s static → {seg.name}")
             _ffmpeg([
-                "-loop", "1", "-t", f"{hold_s}", "-i", str(png),
-                "-filter_complex", zp,
+                "-loop", "1", "-t", f"{hold_s:.3f}", "-i", str(png),
+                "-vf", vf,
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-pix_fmt", "yuv420p", str(seg),
+                "-pix_fmt", "yuv420p", "-an",
+                str(seg),
             ])
-        seg_paths.append((seg, hold_s))
+        seg_paths.append(seg)
 
     video_path = cache_dir / "video.mp4"
     if len(seg_paths) == 1:
-        _ffmpeg(["-i", str(seg_paths[0][0]), "-c", "copy", str(video_path)])
+        _ffmpeg(["-i", str(seg_paths[0]), "-c", "copy", str(video_path)])
         return video_path
 
-    inputs: list[str] = []
-    for seg, _ in seg_paths:
-        inputs += ["-i", str(seg)]
-
-    flt_parts: list[str] = []
-    cur_label = "[0:v]"
-    cumtime = seg_paths[0][1] - crossfade_s
-    for i in range(1, len(seg_paths)):
-        out_label = f"[v{i}]"
-        flt_parts.append(
-            f"{cur_label}[{i}:v]xfade=transition=fade:"
-            f"duration={crossfade_s:.3f}:offset={cumtime:.3f}{out_label}"
-        )
-        cur_label = out_label
-        cumtime += seg_paths[i][1] - crossfade_s
-    flt = ";".join(flt_parts)
-
-    print(f"[xfade] {len(seg_paths)} panels → {video_path.name} (crossfade={crossfade_s}s)")
-    _ffmpeg(inputs + [
-        "-filter_complex", flt,
-        "-map", cur_label,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-pix_fmt", "yuv420p", str(video_path),
+    # Concat demuxer with -c copy — lossless, near-instant. Hard cuts
+    # between panels; no fade, no dissolve. All segs are at the same
+    # codec/res/fps so concat copy is safe.
+    concat_list = cache_dir / "panel_segments_concat.txt"
+    concat_list.write_text(
+        "\n".join(f"file '{seg.resolve()}'" for seg in seg_paths)
+    )
+    print(f"[concat] {len(seg_paths)} panels → {video_path.name} (hard cuts)")
+    _ffmpeg([
+        "-f", "concat", "-safe", "0", "-i", str(concat_list),
+        "-c", "copy", str(video_path),
     ])
     return video_path
+
+
+# Back-compat alias — the legacy name still resolves so anything that
+# imports ``_assemble_panel_kenburns`` (tests, snapshots) keeps working,
+# but the body is the new static + concat implementation.
+def _assemble_panel_kenburns(
+    *,
+    panel_pngs: list[Path],
+    panels: list[dict[str, Any]],
+    cache_dir: Path,
+    out_w: int,
+    out_h: int,
+    fps: int,
+    crossfade_s: float = 0.0,  # noqa: ARG001 — ignored; back-compat only
+    zoom_factor: float = 1.0,  # noqa: ARG001 — ignored; back-compat only
+) -> Path:
+    """Back-compat shim. ``crossfade_s`` / ``zoom_factor`` are ignored.
+    Delegates to :func:`_assemble_panel_static`.
+    """
+    return _assemble_panel_static(
+        panel_pngs=panel_pngs,
+        panels=panels,
+        cache_dir=cache_dir,
+        out_w=out_w,
+        out_h=out_h,
+        fps=fps,
+    )
 
 
 @obs.traced("video_panels.long_form", category="render",
@@ -728,13 +756,17 @@ def build_image_panels_video(
     out_w: int = 1920,
     out_h: int = 1080,
     fps: int = 30,
-    crossfade_s: float = 1.5,
-    zoom_factor: float = 1.08,
+    crossfade_s: float = 0.0,  # noqa: ARG001 — ignored; back-compat only
+    zoom_factor: float = 1.0,  # noqa: ARG001 — ignored; back-compat only
 ) -> Path:
-    """Path B render: comic-illustrated panels via Z-Image-Turbo + Ken Burns.
+    """Path B render: comic-illustrated panels via Z-Image-Turbo, hard cuts.
+
+    2026-05-23: Ken Burns + xfade removed (see
+    :func:`_assemble_panel_static`). ``crossfade_s`` / ``zoom_factor``
+    kwargs are kept for back-compat with callers / tests but ignored.
 
     Backwards-compatible thin wrapper that runs the two extracted halves
-    (:func:`_generate_panel_stills` then :func:`_assemble_panel_kenburns`)
+    (:func:`_generate_panel_stills` then :func:`_assemble_panel_static`)
     sequentially. The orchestrator's parallel path (long-form ``main``)
     calls the halves directly with a :class:`StageOverlap` between them
     so stills generation overlaps with TTS chunked synthesis.
@@ -749,15 +781,13 @@ def build_image_panels_video(
         image_height=image_height,
         cache_dir=cache_dir,
     )
-    return _assemble_panel_kenburns(
+    return _assemble_panel_static(
         panel_pngs=panel_pngs,
         panels=panels,
         cache_dir=cache_dir,
         out_w=out_w,
         out_h=out_h,
         fps=fps,
-        crossfade_s=crossfade_s,
-        zoom_factor=zoom_factor,
     )
 
 

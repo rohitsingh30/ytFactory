@@ -251,15 +251,6 @@ def render_short(
     overlays = _collect_overlays(spec, timeline, audio)
     _logger.info("render_short: overlays=%d elements", len(overlays))
 
-    # P5.2 (Q73): caption density gate. When captions are enabled the
-    # caption layer (layer 40) must cover ≥ 80% of the narrated audio
-    # window. Pre-fix, a broken caption producer silently emitted zero
-    # elements and the render shipped without captions; the hard-fail
-    # in word_caption_pngs.py (2026-05-15 audit) catches the import
-    # case, but a producer that returns an empty list without raising
-    # (out-of-band font, malformed timeline, etc.) used to slip through.
-    _enforce_caption_density(spec, overlays, audio.duration_s)
-
     # 6. Compose
     _emit(progress_cb, "compose", "Stitching video with ffmpeg")
     mp4_path = compose_plugin.mux(visuals, audio, overlays, music_path, spec, out_path)
@@ -273,55 +264,10 @@ def render_short(
     return mp4_path
 
 
-# ---------------------------------------------------------------------------
-# Caption density gate (P5.2, Q73)
-# ---------------------------------------------------------------------------
-
-
-# Minimum fraction of the narrated audio window the caption layer must
-# cover. 80% allows a 1-2 s lead-in / closer hold to be caption-free
-# without flagging the render. Drop with care: every 10% below this
-# is roughly 6 s of un-captioned narration in a 60 s Short.
-_CAPTION_COVERAGE_MIN_FRAC = 0.80
-
-
-def _enforce_caption_density(spec: Any, overlays: list, audio_duration_s: float) -> None:
-    """Raise ``RenderFailedError`` when captions are enabled but the
-    rendered caption-layer elements cover < 80% of the audio window.
-
-    Caption-layer is layer 40 per ``pipeline.render.contracts.OverlayElement``
-    layer convention. When ``spec.captions_enabled`` is False, the gate
-    is skipped (operator opted out — no regression is possible).
-    """
-    captions_enabled = bool(getattr(spec, "captions_enabled", True))
-    if not captions_enabled or audio_duration_s <= 0:
-        return
-    caption_elements = [e for e in overlays if getattr(e, "layer", 0) == 40]
-    if not caption_elements:
-        from pipeline.render.contracts import RenderFailedError  # noqa: PLC0415
-        raise RenderFailedError(
-            "caption_density_gate: zero layer-40 caption elements but "
-            "spec.captions_enabled=True — refusing to ship a captionless "
-            "mp4. site=pipeline/render/short_engine.py:_enforce_caption_density."
-        )
-    covered_s = sum(
-        max(0.0, float(e.end_s) - float(e.start_s))
-        for e in caption_elements
-    )
-    coverage_frac = covered_s / float(audio_duration_s)
-    if coverage_frac < _CAPTION_COVERAGE_MIN_FRAC:
-        from pipeline.render.contracts import RenderFailedError  # noqa: PLC0415
-        raise RenderFailedError(
-            f"caption_density_gate: caption coverage {coverage_frac:.0%} "
-            f"({covered_s:.1f}s / {audio_duration_s:.1f}s) below "
-            f"{_CAPTION_COVERAGE_MIN_FRAC:.0%} minimum. "
-            f"n_caption_elements={len(caption_elements)}. "
-            f"site=pipeline/render/short_engine.py:_enforce_caption_density."
-        )
-    _logger.info(
-        "caption_density_gate: coverage=%.0f%% (%.1fs / %.1fs, %d elements)",
-        coverage_frac * 100, covered_s, audio_duration_s, len(caption_elements),
-    )
+# Gate functions removed per user direction (this session). Caption
+# density + audio duration enforcement deleted; the render proceeds
+# regardless of producer output shape. Re-introduce when the new gate
+# strategy (retry-repair, same-stage only, max 1 retry) is designed.
 
 
 # ---------------------------------------------------------------------------
@@ -537,23 +483,18 @@ def _collect_overlays(
     out: list[OverlayElement] = []
 
     # Captions — picked by spec.captions_layout when captions enabled.
-    # 2026-05-15: when captions_enabled is True, RAISE on failure.
+    # Gate removed (user direction): producer failure no longer raises;
+    # the render proceeds with whatever overlays the producer emitted.
     if spec.captions_enabled:
         cap_name = _captions_plugin_for_layout(spec.captions_layout)
         try:
             cap_plugin: OverlayProducer = get_plugin("overlays", cap_name)
             out.extend(cap_plugin.produce(spec, timeline, audio))
-        except RenderFailedError:
-            # Plugin already raised the fail-loud signal — propagate.
-            raise
         except Exception as exc:  # noqa: BLE001
-            raise RenderFailedError(
-                f"captions overlay ({cap_name!r}) failed but "
-                f"spec.captions_enabled=True — refusing to ship a "
-                f"captions-less render. "
-                f"site=pipeline/render/short_engine.py:_collect_overlays "
-                f"(captions branch). Original cause: {exc!r}"
-            ) from exc
+            _logger.warning(
+                "captions overlay (%s) failed: %s — proceeding without captions",
+                cap_name, exc,
+            )
 
     # Lower-thirds — only if spec.lower_thirds is True. Opt-in flag, so
     # keep warn-and-skip per the 2026-05-15 audit rule.

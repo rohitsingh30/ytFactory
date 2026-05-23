@@ -192,9 +192,13 @@ def emit_artifact(
         blob.content_type = content_type or _guess_content_type(local)
         blob.upload_from_filename(str(local))
     except Exception as exc:  # noqa: BLE001
-        _logger.warning(
-            "emit_artifact: GCS upload failed for kind=%s job=%s path=%s: %s",
-            kind, job_id, local, exc,
+        # Gap #7: GCS upload failure is non-blocking (render still
+        # produced an mp4) but must surface as ERROR so IAM/bucket
+        # regressions don't sit silently in WARNING streams.
+        _logger.error(
+            "emit_artifact: GCS upload failed for kind=%s job=%s "
+            "path=%s: %s [%s]",
+            kind, job_id, local, exc, type(exc).__name__,
         )
         return None
 
@@ -358,9 +362,12 @@ def _update_firestore_artifact(
                 merge=True,
             )
     except Exception as exc:  # noqa: BLE001
-        _logger.warning(
-            "emit_artifact: Firestore update failed for kind=%s job=%s: %s",
-            kind, job_id, exc,
+        # Gap #7: Firestore update failure is non-blocking but escalated
+        # to ERROR so dashboard-write regressions surface.
+        _logger.error(
+            "emit_artifact: Firestore update failed for kind=%s "
+            "job=%s: %s [%s]",
+            kind, job_id, exc, type(exc).__name__,
         )
 
 

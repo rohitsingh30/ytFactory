@@ -177,24 +177,31 @@ long_form:
   # Image panels — z-image-turbo on cloud, same provider Shorts uses.
   # archival_shotlist would be wrong for this channel (no footage
   # source to draw from).
-  # 60 panels for a 30-min long-form (one per ~30s, well under the
-  # ~7s panel_seconds prompt density) is the validated cloud cap. The
-  # pipeline.render.long_form code-side default is also 60 for
-  # cloudrun_* providers; this YAML just makes the per-channel
-  # ceiling explicit.
-  panel_max_count: 60
+  #
+  # Panel cadence (single source of truth — read by both
+  # _planned_sections_and_panels at rewrite time AND _aggregate's
+  # truncate). Empirically tuned against Ken-Burns animated-stills
+  # retention research (see docs/panel_pacing_research_2026-05.md):
+  # ~25s per panel = ~2.4 PPM for a 30-min long-form → ~72 panels.
+  # Previously hardcoded at 7s/panel in code (asked LLM for 257; got
+  # 25; renderer dropped to 10) — the headline bug behind the
+  # 60-min-Cloud-Run-timeout failures on this channel.
+  panel_seconds_target: 25
+  panel_max_count: 120
   image_provider: cloudrun_z_image_turbo
   image_seed: 4242
-  image_steps: 4
+  image_steps: 9    # Z-Image-Turbo spec sweet spot (was 4 — unified 2026-05-23)
   image_width: 1344
   image_height: 768
   image_style_prefix: |
     Flat 2D crayon-style children's drawing with thick black outlines and
     soft pastel fill colors (warm beige, dusty pink, mustard yellow,
     light blue). Round-headed simple cartoon shapes. 16:9 horizontal
-    composition with subject centred for Ken-Burns motion.
-  panel_crossfade_s: 1.5
-  panel_zoom_factor: 1.08
+    composition with subject centred.
+  # Ken-Burns / crossfade REMOVED 2026-05-23 — static stills + hard
+  # cuts only. zoompan was the largest CPU sink in long-form rendering
+  # (~118s wall per 125s segment on Cloud Run CPU) and the direct
+  # cause of jobs hitting the 3600s Cloud Run task timeout.
   music_bed_default: ambient_low.mp3
   # Animated channel — no support-asks. (historyrecapped uses
   # ask_cadence_s: 1080 for periodic LIKE/SUB asks; that breaks the

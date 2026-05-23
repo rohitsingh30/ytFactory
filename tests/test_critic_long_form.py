@@ -206,21 +206,34 @@ def test_check_panel_holds_passes_at_default():
     assert critic.check_panel_holds(panels) == []
 
 
-def test_check_panel_holds_hard_fails_at_30s():
-    """C5 — every panel in the rendered video had hold_s=30.0."""
-    panels = [{"scene": "x", "hold_s": 30.0} for _ in range(10)]
+def test_check_panel_holds_hard_fails_above_60s():
+    """C5 — caps raised 2026-05-23 (Ken-Burns removed). 90s exceeds the
+    new 60s hard ceiling and must hard-fail.
+    """
+    panels = [{"scene": "x", "hold_s": 90.0} for _ in range(10)]
     out = critic.check_panel_holds(panels)
     assert len(out) == 1
     assert out[0].severity == "hard"
     assert out[0].code == "panel_hold_too_long"
 
 
-def test_check_panel_holds_soft_warns_at_10s():
-    panels = [{"scene": "x", "hold_s": 10.0} for _ in range(10)]
+def test_check_panel_holds_soft_warns_at_50s():
+    """C5 — 50s exceeds the new 45s soft cap but is under the 60s hard
+    cap; must soft-warn.
+    """
+    panels = [{"scene": "x", "hold_s": 50.0} for _ in range(10)]
     out = critic.check_panel_holds(panels)
     assert len(out) == 1
     assert out[0].severity == "soft"
     assert out[0].code == "panel_hold_borderline"
+
+
+def test_check_panel_holds_accepts_25s_baseline():
+    """C5 — 25s is the new channel-YAML cadence default
+    (long_form.panel_seconds_target). Must NOT fire.
+    """
+    panels = [{"scene": "x", "hold_s": 25.0} for _ in range(10)]
+    assert critic.check_panel_holds(panels) == []
 
 
 def test_check_panel_holds_no_panels_no_op():
@@ -300,6 +313,10 @@ def test_validate_long_form_envelope_catches_job_0c05c335_violations():
     fires the HARD length violation rather than the older SOFT warn.
     The other three CLASS-OF-BUG violations (niche, panel_hold,
     stock_anecdote) still hard-fail as before.
+
+    2026-05-23: ``panel_hold_too_long`` cap raised from 12s to 60s
+    (Ken-Burns removed). Bumped fixture hold_s 30 → 90 so the panel
+    cap still fires.
     """
     env = {
         "long_form": {
@@ -313,7 +330,7 @@ def test_validate_long_form_envelope_catches_job_0c05c335_violations():
             "sections": [_make_section(c, i) for i, c in enumerate(
                 [321, 306, 276, 269, 247, 264, 222, 218, 212, 215]
             )],
-            "panels": [{"scene": "x", "hold_s": 30.0} for _ in range(24)],
+            "panels": [{"scene": "x", "hold_s": 90.0} for _ in range(24)],
         }
     }
     out = critic.validate_long_form_envelope(env, target_duration_s=1800, niche="r/nosleep")

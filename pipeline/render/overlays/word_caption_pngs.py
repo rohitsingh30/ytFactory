@@ -74,31 +74,13 @@ class WordCaptionPngs:
             # under pipeline.render.overlays.* and removes this delegation.
             from pipeline.captions import render_word_caption  # noqa: PLC0415
         except ImportError as exc:
-            # 2026-05-15 fail-loud audit: when captions_enabled is True
-            # the import-failure path RAISES; when captions_enabled is
-            # False we still return [] silently (user explicitly opted
-            # out, no caption regression is possible). Pre-fix this
-            # caught ImportError + WARN-logged + return [] regardless
-            # — shipped 8/10 cloud shorts with ZERO captions in the
-            # 2026-05-15 canary batch (job f1e319a3) because the WARN
-            # was buried under hundreds of other log lines.
-            captions_enabled = bool(getattr(spec, "captions_enabled", True))
-            if captions_enabled:
-                raise RenderFailedError(
-                    f"word_caption_pngs: pipeline.captions."
-                    f"render_word_caption import failed but "
-                    f"spec.captions_enabled=True — refusing to ship a "
-                    f"captions-less render. "
-                    f"site=pipeline/render/overlays/word_caption_pngs.py:"
-                    f"WordCaptionPngs.produce. "
-                    f"Check Docker COPY rules / requirements.txt for "
-                    f"missing Pillow dep. Original cause: {exc!r}"
-                ) from exc
+            # Gate removed per user direction: import failure no longer
+            # raises. Render proceeds without captions regardless of
+            # spec.captions_enabled.
             import logging as _logging  # noqa: PLC0415
             _logging.getLogger(__name__).warning(
                 "word_caption_pngs: pipeline.captions.render_word_caption "
-                "import failed (%s) and spec.captions_enabled is False "
-                "— captions skipped per spec.", exc,
+                "import failed (%s) — captions skipped.", exc,
             )
             return []
 

@@ -227,7 +227,16 @@ def render_long_form(
             },
         )
     except Exception as exc:  # noqa: BLE001
-        _logger.warning("emit_artifact(envelope/script) failed: %s", exc)
+        # Gap #7: artifact emission failures are non-blocking for the
+        # render (we can still produce the mp4), BUT must surface as
+        # ERROR not WARNING so operators see them. Pre-fix these were
+        # buried under hundreds of WARNING lines and IAM/GCS regressions
+        # went undetected for days (dashboard "live preview" went dark
+        # silently).
+        _logger.error(
+            "emit_artifact(envelope/script) failed: %s [%s]",
+            exc, type(exc).__name__,
+        )
 
     # Stage C: invoke the engine in-process via render_via_engines.
     #
@@ -348,7 +357,13 @@ def render_long_form(
                 job_id=job_id, kind="panels", local_path=img, index=idx,
             )
     except Exception as exc:  # noqa: BLE001
-        _logger.warning("emit_artifact(long-form narration/beats/panels) failed: %s", exc)
+        # Gap #7: escalate to ERROR so operators see artifact emission
+        # failures. See the matching block ~line 229 for context.
+        _logger.error(
+            "emit_artifact(long-form narration/beats/panels) failed: "
+            "%s [%s]",
+            exc, type(exc).__name__,
+        )
 
     # Live artifact preview (Slice 4): emit the canonical long-form mp4
     # the moment it lands so the dashboard's render-detail page can

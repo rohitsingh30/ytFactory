@@ -27,11 +27,13 @@ from pipeline.render.shared.ffmpeg_helpers import probe_duration
 
 
 class LongformPanels:
-    """One Flux panel per ~30-60 s of narration with Ken Burns motion.
+    """One Flux panel per ~25 s of narration, static held + hard cuts.
 
-    Today's impl wraps the existing
-    :func:`pipeline.render.long_form.build_image_panels_video` helper.
-    The bigbang PR moves the body inline.
+    2026-05-23: Ken-Burns / zoompan / xfade REMOVED (user directive).
+    Static stills only; the panel-count cadence in
+    ``_planned_sections_and_panels`` was bumped from 7s/panel (target
+    257 panels for 30 min — never honored) to 25s/panel (target ~72)
+    so the lack of motion doesn't dwell too long per still.
     """
 
     def produce(
@@ -79,7 +81,7 @@ class LongformPanels:
         # — note it RETURNS the out path (writes to cache_dir/video.mp4)
         # and doesn't accept ``out_path`` as a kwarg. We post-move the
         # produced video to our requested out_path below.
-        panels = self._panels_from_timeline(timeline)
+        panels = self._panels_from_timeline(timeline, spec)
         if not panels:
             return self._fallback_solid_color(
                 spec, timeline, work_dir,
@@ -162,31 +164,68 @@ class LongformPanels:
             extras={"source": "longform_panels", "n_panels": len(panels)},
         )
 
-    def _panels_from_timeline(self, timeline: Timeline) -> list[dict]:
-        # 2026-05-15 — include hold_s so _assemble_panel_kenburns can
-        # size each clip to the timeline segment. Pre-fix this only
-        # passed scene + start_s/end_s; the kenburns helper read
-        # panel.get("hold_s", 20) which defaulted to 20s per panel —
-        # for a 23min render that's 1380s of visuals vs 1431s narration,
-        # close enough to look fine ONLY if the helper's
-        # _adjust_panel_holds_to_dur ran (it does on the main path).
-        # Defensive: pass the real per-segment hold derived from
-        # timeline so even if downstream skips the adjust step the
-        # visuals match the narration timing.
-        #
-        # 2026-05-15 (P2) — derive a non-empty scene fallback when
-        # ``seg.text`` is empty. ``_generate_panel_stills`` raises
-        # ValueError("panel N missing 'scene' field") on the first
-        # empty-scene panel, which trips the outer ``except Exception``
-        # → solid color for the whole render. This bit the cosmos
-        # hubble long-form (job f37bb01a) when asr_anchors emitted
-        # text="" because the script's section bodies live in
-        # ``sec.text`` (not ``sec.body``). asr_anchors now reads the
-        # text alias too — but other future schema drift (visual_brief
-        # only, summary only, etc) would re-surface this same crash;
-        # this fallback makes the helper robust to any seg.text=""
-        # regardless of root cause. Fallback uses anchor_id so the
-        # generated panel is at least loosely thematic to that section.
+    def _panels_from_timeline(self, timeline: Timeline, spec: Any = None) -> list[dict]:
+        """Resolve the panel list to render.
+
+        Priority order (2026-05-23 fix for the headline panel-count bug):
+
+        1. ``spec.extra["authored_long_form_panels"]`` — the LLM-authored
+           ``panel_briefs[]`` staged by ``populate_render_extras``. This
+           is the canonical path: 30-min long-form → ~72 panels at ~25s
+           each, instead of the pre-fix 10 panels at ~125s each (which
+           tanked retention AND timed out the Cloud Run task).
+           ``hold_s`` here is the LLM's authored guess; downstream
+           ``_adjust_panel_holds_to_dur`` scales the holds uniformly
+           to match the narrated duration.
+
+        2. Per-section fallback — one panel per timeline segment, scene
+           derived from ``seg.text`` (or ``"Establishing scene for
+           <anchor_id>"`` if text is empty). Activated only when
+           ``authored_long_form_panels`` is absent — preserves the
+           pre-fix behavior for legacy envelopes that ship without
+           authored panels (e.g. hand-rolled narrations).
+
+        Notes on the older multi-line backstory below (kept for grep
+        when the next regression hits):
+
+        2026-05-15 — include hold_s so _assemble_panel_kenburns can
+        size each clip to the timeline segment. Pre-fix this only
+        passed scene + start_s/end_s; the kenburns helper read
+        panel.get("hold_s", 20) which defaulted to 20s per panel.
+
+        2026-05-15 (P2) — derive a non-empty scene fallback when
+        ``seg.text`` is empty. ``_generate_panel_stills`` raises
+        ValueError("panel N missing 'scene' field") on the first
+        empty-scene panel, which trips the outer ``except Exception``
+        → solid color for the whole render. asr_anchors now reads
+        the text alias too — this fallback is belt-and-braces.
+        """
+        authored = None
+        if spec is not None and getattr(spec, "extra", None):
+            authored = spec.extra.get("authored_long_form_panels")
+        if authored:
+            out: list[dict] = []
+            for p in authored:
+                scene = (p.get("scene") or "").strip()
+                if not scene:
+                    continue
+                try:
+                    hold_s = float(p.get("hold_s") or 0.0)
+                except (TypeError, ValueError):
+                    hold_s = 0.0
+                # Floor at 0.5s — _adjust_panel_holds_to_dur expects
+                # positive holds; some LLM outputs emit hold_s=0.
+                if hold_s < 0.5:
+                    hold_s = 6.0
+                entry: dict = {"scene": scene, "hold_s": hold_s}
+                after = p.get("after_section_id")
+                if after:
+                    entry["after_section_id"] = after
+                out.append(entry)
+            if out:
+                return out
+
+        # Per-section fallback.
         out = []
         for i, seg in enumerate(timeline):
             hold_s = max(0.5, seg.end_s - seg.start_s)
@@ -207,55 +246,14 @@ class LongformPanels:
         self, spec: Any, timeline: Timeline, work_dir: Path,
         cause: BaseException | None = None,
     ) -> VisualTrack:
-        """Last-resort solid-color stand-in for longform_panels.
-
-        2026-05-15 fail-loud audit
-        --------------------------
-
-        Pre-audit this silently produced a #141414 stand-in when
-        ``build_image_panels_video`` failed (image-gen API down, helper
-        kwarg drift, empty timeline). That was the LAST link in the
-        chain ``archival_shotlist → longform_panels → solid color``
-        that made every cosmosdecoded / historyrecapped long-form
-        render ship as 26 min of black even after the upstream
-        fallbacks dispatched here.
-
-        Now: raises :class:`RenderFailedError` unless
-        ``YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1`` is set in the env.
-        See ``docs/post-audit-2026-05-15.md`` for the audit summary.
-        """
-        from pipeline.render.shared.ffmpeg_helpers import run_ffmpeg  # noqa: PLC0415
-        from pipeline.render.visualize._fallback import (  # noqa: PLC0415
-            _solid_color_override_enabled,
-        )
+        """Solid-color fallback REMOVED per user direction. Raises."""
         from pipeline.render.contracts import RenderFailedError  # noqa: PLC0415
-
-        if not _solid_color_override_enabled():
-            raise RenderFailedError(
-                f"longform_panels: refusing to return solid-color "
-                f"stand-in — set YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1 "
-                f"for emergency renders. "
-                f"site=pipeline/render/visualize/longform_panels.py:"
-                f"LongformPanels._fallback_solid_color. "
-                f"Original cause: {cause!r}"
-            ) from cause
-
-        out_path = work_dir / "panels_fallback.mp4"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        duration_s = timeline[-1].end_s if timeline else 1.0
-        w, h = spec.output_resolution
-        run_ffmpeg([
-            "-f", "lavfi", "-t", f"{duration_s:.3f}",
-            "-i", f"color=c=0x141414:s={w}x{h}:r={spec.output_fps}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            str(out_path),
-        ])
-        return VisualTrack(
-            video_path=out_path,
-            duration_s=probe_duration(out_path),
-            extras={"source": "longform_panels_fallback"},
-        )
+        raise RenderFailedError(
+            f"longform_panels: image-gen failed and no solid-color "
+            f"fallback path remains. "
+            f"site=pipeline/render/visualize/longform_panels.py:"
+            f"_fallback_solid_color. Cause: {cause!r}"
+        ) from cause
 
 
 register_plugin("visualize", "longform_panels", LongformPanels())

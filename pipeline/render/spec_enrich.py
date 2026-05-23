@@ -94,6 +94,57 @@ def populate_render_extras(spec: RenderSpec, script: dict[str, Any]) -> None:
     _populate_era_anchor_prefix(spec, script)
     _populate_character_description(spec, script)
     _populate_character_descriptions(spec, script)
+    _populate_authored_long_form_panels(spec, script)
+
+
+def _populate_authored_long_form_panels(
+    spec: RenderSpec, script: dict[str, Any]
+) -> None:
+    """Stage the script's authored ``panels[]`` into
+    ``spec.extra["authored_long_form_panels"]`` so the
+    ``longform_panels`` visualize plugin can pick them up.
+
+    Why this exists: pre-2026-05-23 the long-form ``longform_panels``
+    plugin iterated the per-section ``timeline`` and emitted ONE panel
+    per timeline segment, ignoring the LLM-authored ``script.panels[]``
+    entirely. For a 30-min long-form that meant 10 panels @ ~125s
+    Ken-Burns each — the headline panel-count bug. The plugin now
+    reads this key when present and falls back to per-section
+    behavior only when it's empty/missing.
+
+    The visualize-plugin protocol (``produce(spec, timeline, work_dir)``)
+    doesn't pass ``script``; this enricher bridges the gap. Same
+    pattern used by ``_populate_character_description`` etc.
+
+    Idempotent: never overwrites a pre-existing key.
+    """
+    if "authored_long_form_panels" in spec.extra:
+        return
+    panels = script.get("panels")
+    if not isinstance(panels, list) or not panels:
+        return
+    cleaned: list[dict[str, Any]] = []
+    for p in panels:
+        if not isinstance(p, dict):
+            continue
+        scene = (p.get("scene") or "").strip()
+        if not scene:
+            continue
+        try:
+            hold_s = float(p.get("hold_s") or 0.0)
+        except (TypeError, ValueError):
+            hold_s = 0.0
+        entry: dict[str, Any] = {"scene": scene, "hold_s": hold_s}
+        after = p.get("after_section_id")
+        if after:
+            entry["after_section_id"] = str(after)
+        cleaned.append(entry)
+    if cleaned:
+        spec.extra["authored_long_form_panels"] = cleaned
+        _logger.info(
+            "spec_enrich: staged %d authored long-form panels into spec.extra",
+            len(cleaned),
+        )
 
 
 def _populate_era_anchor_prefix(spec: RenderSpec, script: dict[str, Any]) -> None:

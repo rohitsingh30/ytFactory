@@ -190,11 +190,30 @@ ESSAY_DRIFT_OPENERS: tuple[tuple[str, str], ...] = (
 
 # ---------- panel hold cap ------------------------------------------------
 
-# A long-form panel held for >12 s without animation reads as dead.
-# Channel default before 2026-05-13 was 30 s — every render had 30 s
-# of pixel-identical frames. Fix: cap hard at 12 s, soft-warn at 8 s.
-PANEL_HOLD_HARD_MAX_S = 12.0
-PANEL_HOLD_SOFT_MAX_S = 8.0
+# Hard/soft caps on AUTHORED ``panel.hold_s`` — the LLM-emitted value
+# before the renderer's :func:`pipeline.render.shared.long_form_lib.
+# _adjust_panel_holds_to_dur` pads/scales holds to match narration
+# duration. The post-stretch hold can legitimately exceed these caps
+# (and the renderer does NOT re-validate); these are sanity gates on
+# the LLM not emitting absurd authored values like ``hold_s=300``
+# that suggest the model misunderstood the prompt.
+#
+# 2026-05-23: bumped from 12s/8s to 60s/45s. Rationale:
+#   * Ken-Burns motion was REMOVED (user directive — see
+#     pipeline/render/shared/long_form_lib.py::_assemble_panel_static)
+#     so the "panels >12s without animation read as dead" rationale
+#     for the old cap no longer applies. With hard cuts between
+#     stills the empirical hard floor on static-still hold is ~45s
+#     (research: panel_pacing_research_2026-05.md, citing
+#     YouTube retention dips + Bordwell ASL ranges).
+#   * The pipeline-side compensation is denser panel cadence
+#     (channel YAML's ``long_form.panel_seconds_target`` defaults to
+#     25s); with that target hit, post-stretch holds land at ~20-30s
+#     and stay well inside the new soft cap.
+#   * The hard 60s cap still catches LLM outputs that ignore the
+#     prompt and emit one hold_s=600 panel for the whole video.
+PANEL_HOLD_HARD_MAX_S = 60.0
+PANEL_HOLD_SOFT_MAX_S = 45.0
 
 
 # ---------- length contract ----------------------------------------------
@@ -465,15 +484,19 @@ def _section_target_words(section: Any) -> int | None:
 
 
 def check_panel_holds(panels: Sequence[Any]) -> list[Violation]:
-    """C5 — panel hold cap.
+    """C5 — panel hold cap (AUTHORED holds only).
 
-    Hard-fail if any panel.hold_s > PANEL_HOLD_HARD_MAX_S (12 s).
-    Soft-warn if any panel.hold_s > PANEL_HOLD_SOFT_MAX_S (8 s).
+    Hard-fail if any panel.hold_s > ``PANEL_HOLD_HARD_MAX_S`` (60 s).
+    Soft-warn if any panel.hold_s > ``PANEL_HOLD_SOFT_MAX_S`` (45 s).
 
-    Note: this validates the PANEL emission. The renderer also caps
-    per-panel hold at compose time as a defense-in-depth gate — but
-    we want the rewriter to learn to emit short holds, not paper over
-    long ones.
+    Note: this validates the AUTHORED ``hold_s`` value (LLM emission),
+    not the post-stretch value the renderer uses. The renderer's
+    ``_adjust_panel_holds_to_dur`` pads/scales holds proportionally to
+    fill narration — by design the post-stretch hold can exceed these
+    caps. The cap exists to catch model misunderstandings like one
+    ``hold_s=600`` panel for the whole video; tighter empirical
+    cadence shaping happens via channel YAML's
+    ``long_form.panel_seconds_target``.
     """
     if not panels:
         return []
@@ -486,8 +509,9 @@ def check_panel_holds(panels: Sequence[Any]) -> list[Violation]:
             message=(
                 f"{len(over_hard)} panel(s) have hold_s > {PANEL_HOLD_HARD_MAX_S}s "
                 f"(worst: panel {over_hard[0][0]} = {over_hard[0][1]:.1f}s). "
-                f"Long-form panels held >12s without movement read as dead. "
-                f"Cap at {PANEL_HOLD_SOFT_MAX_S}s and emit more panels."
+                f"Authored holds >{PANEL_HOLD_HARD_MAX_S}s suggest the LLM "
+                f"misunderstood the prompt — emit more panels at shorter "
+                f"holds (target {PANEL_HOLD_SOFT_MAX_S}s)."
             ),
         )]
     over_soft = [(i, h) for i, h in enumerate(holds) if h > PANEL_HOLD_SOFT_MAX_S]

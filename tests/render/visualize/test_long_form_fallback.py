@@ -85,123 +85,14 @@ class FallbackDispatchesToLongformPanelsTest(unittest.TestCase):
         self.assertTrue(captured["called"])
         self.assertEqual(track.extras["source"], "longform_panels")
 
-    def test_recursion_guard_returns_solid_color_when_already_falling_back(self):
-        # 2026-05-15 fail-loud audit: the solid-color path now raises
-        # RenderFailedError by default; this test exercises the env-
-        # override path so the existing recursion-guard behaviour is
-        # still pinned.
-        import os
-        spec = _spec(extra={"_test_already_falling_back": True})
-        timeline = _timeline()
-
-        with TemporaryDirectory() as tmp:
-            wd = Path(tmp)
-            with patch.dict(
-                os.environ, {"YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK": "1"},
-            ), patch(
-                "pipeline.render.visualize._fallback.get_plugin",
-            ) as get_plugin_mock, patch(
-                "pipeline.render.visualize._fallback.run_ffmpeg",
-            ) as run_ffmpeg_mock, patch(
-                "pipeline.render.visualize._fallback.probe_duration",
-                return_value=60.0,
-            ):
-                track = _fallback_to_longform_panels(
-                    spec, timeline, wd,
-                    sentinel_kwarg="_test_already_falling_back",
-                    color="0x141414",
-                    label="test_fallback",
-                )
-
-        self.assertFalse(get_plugin_mock.called)
-        self.assertTrue(run_ffmpeg_mock.called)
-        self.assertEqual(track.extras["source"], "test_fallback")
-
-    def test_longform_panels_failure_falls_through_to_solid_color(self):
-        # 2026-05-15 fail-loud audit: pin the override path. Without the
-        # env flag this RAISES (see FailLoudFallback tests).
-        import os
-        spec = _spec()
-        timeline = _timeline()
-        plugin_mock = MagicMock()
-        plugin_mock.produce.side_effect = RuntimeError("image-gen API down")
-
-        with TemporaryDirectory() as tmp:
-            wd = Path(tmp)
-            with patch.dict(
-                os.environ, {"YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK": "1"},
-            ), patch(
-                "pipeline.render.visualize._fallback.get_plugin",
-                return_value=plugin_mock,
-            ), patch(
-                "pipeline.render.visualize._fallback.run_ffmpeg",
-            ) as run_ffmpeg_mock, patch(
-                "pipeline.render.visualize._fallback.probe_duration",
-                return_value=60.0,
-            ):
-                track = _fallback_to_longform_panels(
-                    spec, timeline, wd,
-                    sentinel_kwarg="_test_already_falling_back",
-                    color="0x141414",
-                    label="test_fallback",
-                )
-
-        self.assertTrue(plugin_mock.produce.called)
-        self.assertTrue(run_ffmpeg_mock.called)
-        self.assertEqual(track.extras["source"], "test_fallback")
-
-    def test_color_param_threaded_through_to_ffmpeg(self):
-        # Override path only — the default path raises.
-        import os
-        spec = _spec(extra={"_test_already_falling_back": True})
-        timeline = _timeline()
-
-        with TemporaryDirectory() as tmp:
-            wd = Path(tmp)
-            with patch.dict(
-                os.environ, {"YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK": "1"},
-            ), patch(
-                "pipeline.render.visualize._fallback.run_ffmpeg",
-            ) as run_ffmpeg_mock, patch(
-                "pipeline.render.visualize._fallback.probe_duration",
-                return_value=60.0,
-            ):
-                _fallback_to_longform_panels(
-                    spec, timeline, wd,
-                    sentinel_kwarg="_test_already_falling_back",
-                    color="0xff00ff",
-                    label="my_label",
-                )
-
-        cmd = run_ffmpeg_mock.call_args[0][0]
-        cmd_str = " ".join(cmd)
-        self.assertIn("0xff00ff", cmd_str)
-
-    def test_empty_timeline_uses_default_duration(self):
-        # Override path only — the default path raises.
-        import os
-        spec = _spec(extra={"_test_already_falling_back": True})
-        timeline: Timeline = []
-
-        with TemporaryDirectory() as tmp:
-            wd = Path(tmp)
-            with patch.dict(
-                os.environ, {"YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK": "1"},
-            ), patch(
-                "pipeline.render.visualize._fallback.run_ffmpeg",
-            ) as run_ffmpeg_mock, patch(
-                "pipeline.render.visualize._fallback.probe_duration",
-                return_value=1.0,
-            ):
-                track = _fallback_to_longform_panels(
-                    spec, timeline, wd,
-                    sentinel_kwarg="_test_already_falling_back",
-                    color="0x141414",
-                    label="empty_timeline",
-                )
-
-        self.assertEqual(track.extras["source"], "empty_timeline")
-        self.assertTrue(run_ffmpeg_mock.called)
+    # 4 tests that exercised the now-deleted solid-color override path
+    # (test_recursion_guard_returns_solid_color, test_longform_panels_
+    # failure_falls_through_to_solid_color, test_color_param_threaded_
+    # through_to_ffmpeg, test_empty_timeline_uses_default_duration)
+    # have been removed. The solid-color fallback was deleted per user
+    # direction 2026-05-23 — _fallback.py now raises on longform_panels
+    # failure with no fallback path. The recursion guard still raises
+    # (covered by FailLoudFallback tests).
 
     def test_frozen_spec_extra_doesnt_crash_helper(self):
         """When ``spec.extra =`` raises (frozen dataclass / read-only
@@ -732,46 +623,12 @@ class LongformPanelsProduceSuccessPathTest(unittest.TestCase):
         self.assertEqual(produced_path_holder["kwargs"]["image_width"], 1920)
         self.assertEqual(produced_path_holder["kwargs"]["image_height"], 1080)
 
-    def test_helper_failure_falls_back_to_solid_color(self):
-        # 2026-05-15 fail-loud audit: solid-color is now opt-in.
-        import os
-        from pipeline.render.visualize.longform_panels import LongformPanels
-
-        spec = self._spec_with_extra()
-        timeline = _timeline()
-
-        with TemporaryDirectory() as tmp:
-            wd = Path(tmp)
-            with patch.dict(
-                os.environ, {"YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK": "1"},
-            ), patch(
-                "pipeline.render.shared.long_form_lib.build_image_panels_video",
-                side_effect=RuntimeError("image-gen API down"),
-            ), patch(
-                "pipeline.render.visualize.longform_panels.probe_duration",
-                return_value=60.0,
-            ):
-                track = LongformPanels().produce(spec, timeline, wd)
-
-        # Falls back to solid color (override path).
-        self.assertEqual(track.extras["source"], "longform_panels_fallback")
-
-    def test_empty_timeline_falls_back_to_solid_color(self):
-        # 2026-05-15 fail-loud audit: solid-color is now opt-in.
-        import os
-        from pipeline.render.visualize.longform_panels import LongformPanels
-
-        spec = self._spec_with_extra()
-        with TemporaryDirectory() as tmp:
-            wd = Path(tmp)
-            with patch.dict(
-                os.environ, {"YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK": "1"},
-            ), patch(
-                "pipeline.render.visualize.longform_panels.probe_duration",
-                return_value=1.0,
-            ):
-                track = LongformPanels().produce(spec, [], wd)
-        self.assertEqual(track.extras["source"], "longform_panels_fallback")
+    # 2 tests that exercised the removed solid-color fallback
+    # (test_helper_failure_falls_back_to_solid_color and
+    # test_empty_timeline_falls_back_to_solid_color) have been removed.
+    # Solid-color fallback was deleted per user direction 2026-05-23 —
+    # LongformPanels._fallback_solid_color now raises with no env
+    # override.
 
 
 if __name__ == "__main__":

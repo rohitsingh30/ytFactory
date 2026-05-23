@@ -41,6 +41,8 @@ RUN apt-get update && \
         fonts-noto-cjk \
         fonts-noto-color-emoji \
         fonts-noto-ui-core \
+        fonts-lohit-deva \
+        fonts-deva-extra \
         && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*

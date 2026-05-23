@@ -12,6 +12,15 @@ stories". Sentence count is image count (one beat per sentence per
 beats.py). The prior 50-80 word ceiling forced 5-8 sentences max
 even when the prompt asked for 8-12; bumping to 110-160 words
 removes that bottleneck and produces 10-15 beats / images.
+
+Cadence note (2026-05-23): for a 22-32s short, 10-15 beats →
+~2-3 s per image. That sits in the empirically-validated sweet
+spot for narrated Shorts (research/2026-05 — see
+docs/panel_pacing_research_2026-05.md: 7-10 PPM body / 25 PPM hook
+for short-form storytime). The cadence is shorter than long-form's
+~25 s/panel because Shorts viewers swipe; long-form viewers stay.
+Both formats now run static stills with hard cuts (no Ken Burns)
+since 2026-05-23.
 """
 
 from __future__ import annotations

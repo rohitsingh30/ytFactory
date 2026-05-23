@@ -364,14 +364,18 @@ def test_aggregator_drops_panels_with_empty_scene():
 
 
 def test_aggregator_caps_panel_hold_at_renderer_max():
-    """Panels with hold_s > PANEL_HOLD_HARD_MAX_S (12s) are clamped
-    to PANEL_HOLD_SOFT_MAX_S (8s) — defense-in-depth so a misbehaving
-    outline can't ship a dead-frame video."""
+    """Panels with hold_s > PANEL_HOLD_HARD_MAX_S are clamped to
+    PANEL_HOLD_SOFT_MAX_S — defense-in-depth so a misbehaving outline
+    can't ship absurdly long static stills.
+
+    2026-05-23: caps raised (Ken-Burns removed) — HARD 60s, SOFT 45s.
+    A panel emitting hold_s=90 hits the cap and gets clamped to 45.
+    """
     raw_story = {"slug": "x", "title": "T", "body": "Source"}
     outline = _make_outline(n_sections=3, n_panels=5)
-    # Override all panels to 30s
+    # Override all panels to 90s (above the new 60s hard cap)
     for p in outline["panel_briefs"]:
-        p["hold_s"] = 30.0
+        p["hold_s"] = 90.0
 
     def _mock(prompt, **kwargs):
         if kwargs.get("stage") == "rewrite_long_form_outline":
@@ -384,11 +388,34 @@ def test_aggregator_caps_panel_hold_at_renderer_max():
             target_duration_s=600,
         )
 
-    assert all(p.hold_s <= 12.0 for p in env.long_form.panels)
+    assert all(p.hold_s <= 60.0 for p in env.long_form.panels)
 
 
-def test_aggregator_truncates_panels_at_60():
-    """Cloud-renderer ceiling is 60. Outline emitting 75 → truncate."""
+def test_aggregator_truncates_panels_at_channel_default():
+    """Channel YAML's ``long_form.panel_max_count`` controls truncation.
+    Default (no override) is 120 (was 60 pre-2026-05-23).
+    """
+    raw_story = {"slug": "x", "title": "T", "body": "Source"}
+    outline = _make_outline(n_sections=3, n_panels=150)
+
+    def _mock(prompt, **kwargs):
+        if kwargs.get("stage") == "rewrite_long_form_outline":
+            return outline
+        return _make_section_body(words=450)
+
+    with patch.object(_rlf._llm, "call_claude_cli", side_effect=_mock):
+        env = _rlf.rewrite_long_form(
+            raw_story, channel_cfg={"niche": "r/nosleep"},
+            target_duration_s=600,
+        )
+
+    assert len(env.long_form.panels) == 120
+
+
+def test_aggregator_truncates_panels_at_channel_override():
+    """Channel YAML can override the cap: ``long_form.panel_max_count: 30``
+    truncates to 30, regardless of the 120 default.
+    """
     raw_story = {"slug": "x", "title": "T", "body": "Source"}
     outline = _make_outline(n_sections=3, n_panels=75)
 
@@ -399,11 +426,15 @@ def test_aggregator_truncates_panels_at_60():
 
     with patch.object(_rlf._llm, "call_claude_cli", side_effect=_mock):
         env = _rlf.rewrite_long_form(
-            raw_story, channel_cfg={"niche": "r/nosleep"},
+            raw_story,
+            channel_cfg={
+                "niche": "r/nosleep",
+                "long_form": {"panel_max_count": 30},
+            },
             target_duration_s=600,
         )
 
-    assert len(env.long_form.panels) == 60
+    assert len(env.long_form.panels) == 30
 
 
 def test_aggregator_preserves_section_order():

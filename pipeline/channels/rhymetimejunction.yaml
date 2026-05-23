@@ -322,10 +322,13 @@ long_form:
   output_resolution: [1920, 1080]
   output_fps: 30
   captions_enabled: true
-  panel_max_count: 60  # cloud z-image-turbo runs on L4 with no Metal watchdog (see mystoriesanimated.yaml)
+  # Panel cadence — see mystoriesanimated.yaml for the rationale.
+  # Rhyme channel is 30-60 min; ~25s per panel = ~72-144 panels.
+  panel_seconds_target: 25
+  panel_max_count: 120
   image_provider: cloudrun_z_image_turbo
   image_seed: 7777
-  image_steps: 4
+  image_steps: 9    # Z-Image-Turbo spec sweet spot (was 4 — unified 2026-05-23)
   image_width: 1344
   image_height: 768
   image_style_prefix: |
@@ -333,7 +336,6 @@ long_form:
     Laddu (yellow puffy ball), Jalebi (curly-spiral orange), Tuk-Tuk
     (red autorickshaw with eyes), Dadi (smiling grandmother). Bright
     primary colours, sky-blue background, soft sunlight. 16:9
-    horizontal composition with mascots centred for gentle Ken-Burns.
-  panel_crossfade_s: 1.5
-  panel_zoom_factor: 1.10
+    horizontal composition with mascots centred.
+  # Ken-Burns / crossfade REMOVED 2026-05-23 (see mystoriesanimated.yaml).
   music_bed_default: upbeat.mp3
