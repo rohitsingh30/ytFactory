@@ -71,7 +71,7 @@
     <key>CLOUDSDK_CONFIG</key>
     <string>/Users/rohit/.config/gcloud</string>
     <key>GOOGLE_CLOUD_PROJECT</key>
-    <string>ytfactory-prod-v2</string>
+    <string>ytfactory-prod-v3</string>
   </dict>
 </dict>
 </plist>

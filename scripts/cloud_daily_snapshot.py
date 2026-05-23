@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--quiet", action="store_true",
                    help="Only log warnings and above.")
     p.add_argument("--cost-days", type=int, default=30)
-    p.add_argument("--project", default="ytfactory-prod-v2")
+    p.add_argument("--project", default="ytfactory-prod-v3")
     p.add_argument("--billing-account-id",
                    help="Override BILLING_ACCOUNT_ID env (BigQuery export table suffix).")
     p.add_argument(

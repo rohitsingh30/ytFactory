@@ -1,16 +1,7 @@
 #!/usr/bin/env bash
 # Warm one or more ytfactory-tts-* Cloud Run services BEFORE a render.
-# Pays the Chatterbox / F5 / Higgs / IndicF5 cold-load up-front so the
-# render's stage-1 TTS hits a warm container at sub-second per chunk.
-#
-# Why this exists (2026-05-07): the doolittle-raid-1942 render learned
-# the hard way that Chatterbox cold-start (~264s after the assign=True
-# patch — see memory feedback_load_state_dict_assign_true.md) exceeds
-# the default 180s CLOUDRUN_TTS_TIMEOUT, triggering local F5-TTS
-# fallback at ~300 wpm where the channel needs ~165 wpm. The mp4 came
-# in at 36s instead of the [50, 60] band. Warming up-front avoids the
-# trigger entirely. Keep CLOUDRUN_TTS_TIMEOUT=300 in .env as belt-and-
-# suspenders.
+# Pays the Chatterbox / IndicF5 cold-load up-front so the render's
+# stage-1 TTS hits a warm container at sub-second per chunk.
 #
 # Designed to run from:
 #   - laptop manually before a batch:    `./cloud/warm_tts_services.sh chatterbox`
@@ -24,13 +15,12 @@
 # Usage:
 #   ./warm_tts_services.sh                      # warms chatterbox only (default — English Shorts)
 #   ./warm_tts_services.sh chatterbox           # explicit
-#   ./warm_tts_services.sh f5                   # warms F5-TTS (long-form English)
 #   ./warm_tts_services.sh indicf5              # warms IndicF5 (Hindi)
 #   ./warm_tts_services.sh chatterbox indicf5   # warms both in parallel
 
 set -euo pipefail
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
 
 # bash 3.2 (macOS default) doesn't have associative arrays; use case.
@@ -39,7 +29,7 @@ url_for() {
   local key="$1"
   local var
   case "$key" in
-    chatterbox|f5|higgs|cosyvoice|indicparler|indicf5)
+    chatterbox|indicf5)
       var="CLOUDRUN_TTS_$(echo "$key" | tr 'a-z' 'A-Z')_URL"
       printenv "$var" 2>/dev/null && return 0
       # Fallback to .env file lookup if not in shell env.

@@ -102,7 +102,6 @@ def render_long(
     _emit(progress_cb, "tts",
           f"Synthesizing chunked narration ({audio_name})")
     audio: AudioResult = audio_plugin.synth(spec, script, work_dir)
-    _drop_f5_after_audio(spec, label="long stage-1 TTS")
     _logger.info("render_long: audio=%s duration=%.2fs chunks=%s",
                  audio.narration_path.name, audio.duration_s,
                  len(audio.chunk_timings) if audio.chunk_timings else 0)
@@ -143,6 +142,10 @@ def render_long(
     # 5. Overlays
     overlays = _collect_overlays(spec, timeline, audio)
     _logger.info("render_long: overlays=%d elements", len(overlays))
+
+    # P5.2 (Q73): caption density gate — see short_engine for rationale.
+    from pipeline.render.short_engine import _enforce_caption_density  # noqa: PLC0415
+    _enforce_caption_density(spec, overlays, audio.duration_s)
 
     # 6. Compose (section_video by default)
     compose_plugin: FinalMux = get_plugin("compose", compose_name)
@@ -270,18 +273,3 @@ def _extract_sections(script: dict[str, Any], timeline: Timeline) -> list[Sectio
 
 
 __all__ = ["render_long"]
-
-
-def _drop_f5_after_audio(spec: RenderSpec, *, label: str) -> None:
-    """Free F5-TTS-MLX weights after the audio stage when the renderer
-    used local F5. Same guard the legacy renderers wired into stage
-    boundaries — keeps 1.35 GB from leaking into the visualize/mux
-    Metal context. No-op on cloud TTS providers."""
-    provider = (spec.voice_provider or "").lower()
-    if "f5" not in provider:
-        return
-    try:
-        from pipeline.preflight import reset_mlx_state  # noqa: PLC0415
-        reset_mlx_state(drop_f5=True, label=label)
-    except Exception:
-        pass

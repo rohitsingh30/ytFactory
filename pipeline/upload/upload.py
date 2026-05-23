@@ -159,7 +159,7 @@ def _gcs_storage_client():
     # coverage: real GCS client construction needs cloud + auth; integration-only
     try:
         return storage.Client(
-            project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2"),
+            project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3"),
         )
     except Exception:  # noqa: BLE001 — broad: auth / network / quota all OK to skip
         return None
@@ -232,10 +232,14 @@ def _latest_publish_for_account(project_root: Path, account: str) -> datetime | 
         return _latest_publish_for_account_gcs(bucket, account)
 
     latest: datetime | None = None
-    # Glob shape: ``<channel>/**/uploads/*.json`` — recursive into each
-    # channel root so niched uploads (mystoriesanimated/<niche>/uploads/)
-    # are covered alongside flat ones.
-    for chan_dir in project_root.iterdir():
+    # Post-2026-05-23 (R10) channel artifact roots live under
+    # ``<project_root>/data/<channel>/`` not ``<project_root>/<channel>/``.
+    # Iterate the data root if it exists, else fall through to the
+    # legacy in-place iteration for test fixtures that build their own
+    # project_root without the data/ layer.
+    data_root = project_root / "data"
+    channel_roots = list(data_root.iterdir()) if data_root.is_dir() else list(project_root.iterdir())
+    for chan_dir in channel_roots:
         if not chan_dir.is_dir() or not (chan_dir / "config.yaml").exists():
             continue
         for record_path in chan_dir.rglob("uploads/*.json"):
@@ -428,7 +432,7 @@ def _persist_token(account: str, blob_json: str, tp: Path) -> None:
     project = (
         os.environ.get("GOOGLE_CLOUD_PROJECT")
         or os.environ.get("GCP_PROJECT")
-        or "ytfactory-prod-v2"
+        or "ytfactory-prod-v3"
     )
     client = secretmanager.SecretManagerServiceClient()
     parent = f"projects/{project}/secrets/{secret_id}"
@@ -1428,116 +1432,6 @@ def get_channel_sub_count(account: str = "default") -> int:
     return int(raw)
 
 
-def _part2_pending_path(project_root: Path, channel_dir: str, slug: str) -> Path:
-    """Per-channel ``part2_pending/<slug>.json`` sidecar location.
-
-    Lives under the channel root (per-channel ``cache/<slug>/`` would
-    pull this into the regenerable bucket — bad). The
-    ``part2_pending/`` subdir is itself a "channel-wide" concept
-    (cliffhanger Part-2 jobs queued for fulfilment). Migrated from the
-    legacy ``data/intermediate/<channel_dir>/part2_pending/`` location
-    in the 2026-05-05 layout cleanup; legacy reads in
-    ``pipeline.part2_watcher`` fall back to the old path during the
-    transition window.
-    """
-    from pipeline.paths import RenderPaths  # noqa: PLC0415
-
-    paths = RenderPaths.from_channel_dir(channel_dir, project_root=project_root)
-    return paths.root / "part2_pending" / f"{slug}.json"
-
-
-def _find_cast_path_for_sidecar(project_root: Path, channel_dir: str, slug: str) -> str | None:
-    """Path to the per-story cast.json, if one exists. Returned as a
-    project-root-relative string so the sidecar stays portable.
-
-    Tries the new per-channel layout first (``<channel>/[<niche>/]/cast/<slug>.json``),
-    then falls back to the legacy ``data/intermediate/<channel_dir>/cast/<slug>.json``
-    location for renders authored before the 2026-05-05 layout cleanup.
-    """
-    from pipeline.paths import RenderPaths  # noqa: PLC0415
-
-    paths = RenderPaths.from_channel_dir(channel_dir, project_root=project_root)
-    candidates = [
-        paths.cast_for(slug),
-        project_root / "data" / "intermediate" / channel_dir / "cast" / f"{slug}.json",
-    ]
-    for cast in candidates:
-        if cast.exists():
-            try:
-                return str(cast.relative_to(project_root))
-            except ValueError:
-                return str(cast)
-    return None
-
-
-def write_part2_pending(
-    *,
-    project_root: Path,
-    channel_yaml: dict,
-    channel_dir: str,
-    slug: str,
-    upload_record: dict,
-    script: dict,
-    raw: dict | None,
-    account: str,
-) -> Path | None:
-    """If this Part-1 upload opts into the cliffhanger Part-2 flow, drop
-    a pending sidecar so pipeline/part2_watcher.py can fire Part 2 once
-    the subscriber threshold is met.
-
-    Returns the sidecar path, or None if the channel doesn't opt in.
-    Failures fetching the sub baseline are non-fatal: they log and skip
-    the sidecar (Part 2 won't auto-render, but Part 1 still ships).
-    """
-    if not channel_yaml.get("cliffhanger"):
-        return None
-    part2_channel = channel_yaml.get("part2_channel")
-    if not part2_channel:
-        return None  # cliffhanger but no Part-2 channel wired — silent skip
-
-    trigger = channel_yaml.get("part2_trigger") or {}
-    subs_delta = int(trigger.get("subs_delta", 100))
-    window_days = int(trigger.get("window_days", 7))
-
-    try:
-        baseline_subs = get_channel_sub_count(account)
-    except Exception as e:
-        # Non-fatal: log and bail. The Part-1 upload itself is fine.
-        print(
-            f"[upload] part2_pending skipped for {slug!r}: failed to read "
-            f"baseline sub count ({e}). Re-auth with the youtube.readonly "
-            f"scope or run pipeline/part2_watcher.py --rebaseline to fix."
-        )
-        return None
-
-    now = datetime.now(timezone.utc)
-    expires_at = now.timestamp() + window_days * 86400
-    sidecar = {
-        "slug": slug,
-        "video_id": upload_record.get("video_id"),
-        "video_url": upload_record.get("url"),
-        "uploaded_at": now.isoformat(),
-        "window_expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(),
-        "account": account,
-        "baseline_subs": baseline_subs,
-        "threshold_subs_delta": subs_delta,
-        "part1_channel_dir": channel_dir,
-        "part2_channel": part2_channel,
-        "part1_narration": (script or {}).get("narration") or "",
-        "raw_story": raw,  # full raw_story dict; Part-2 rewrite reads from this
-        "cast_path": _find_cast_path_for_sidecar(project_root, channel_dir, slug),
-    }
-    out = _part2_pending_path(project_root, channel_dir, slug)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(sidecar, indent=2))
-    print(
-        f"[upload] part2_pending: {out.relative_to(project_root)} "
-        f"(baseline={baseline_subs} subs, fires at +{subs_delta}, "
-        f"window={window_days}d)"
-    )
-    return out
-
-
 def write_upload_record(
     project_root: Path, channel_dir: str, slug: str, record: dict
 ) -> Path:
@@ -1565,14 +1459,14 @@ def _mirror_record_to_gcs(local_path: Path, project_root: Path, record: dict) ->
     if os.environ.get("YTFACTORY_DASHBOARD_GCS_SYNC", "1") == "0":
         return
     try:
-        # Resolve via ``sys.modules`` so test mocks of
-        # ``control.storage`` (via ``patch.dict("sys.modules", ...)``)
-        # are honoured. The ``from control import storage`` idiom would
-        # otherwise read the package attr and skip sys.modules.
+        # Post-2026-05-23 the legacy ``control.storage`` shim is gone;
+        # everything reads + writes through ``control.core.storage``.
+        # The sys.modules dance is kept so test mocks of the canonical
+        # path via ``patch.dict("sys.modules", ...)`` still apply.
         import importlib  # noqa: PLC0415
         import sys  # noqa: PLC0415
-        _gcs = sys.modules.get("control.storage") or importlib.import_module(
-            "control.storage"
+        _gcs = sys.modules.get("control.core.storage") or importlib.import_module(
+            "control.core.storage"
         )
         rel_key = _gcs.upload_record_rel_key(local_path, project_root)
         uri = _gcs.upload_record_uri(rel_key)
@@ -1581,13 +1475,9 @@ def _mirror_record_to_gcs(local_path: Path, project_root: Path, record: dict) ->
             uri,
             content_type="application/json",
         )
-        # Reader lives in `control.core.storage` (cached); writer is
-        # `control.storage` (no cache). Bust the reader-side cache
-        # explicitly so the new record appears within one poll cycle.
         try:
-            from control.core import storage as _gcs_canon  # noqa: PLC0415
-            _gcs_canon.bust_upload_records_cache()
-        except (ImportError, AttributeError):
+            _gcs.bust_upload_records_cache()
+        except AttributeError:
             pass
         print(f"[upload] mirrored record → {uri}")
     except Exception as e:
@@ -1849,22 +1739,12 @@ def _upload_short_impl(
     write_upload_record(project_root, channel_dir, slug, record)
     print(f"[upload] ✓ {record['url']}  (record: {channel_dir}/uploads/{slug}.json)")
 
-    # Cliffhanger Part-1 → drop a pending sidecar so the Part-2 watcher
-    # can auto-render the finale once subscribers cross the threshold.
-    # Non-fatal on errors; Part-1 upload above already succeeded.
-    try:
-        write_part2_pending(
-            project_root=project_root,
-            channel_yaml=channel_yaml,
-            channel_dir=channel_dir,
-            slug=slug,
-            upload_record=record,
-            script=script,
-            raw=raw,
-            account=account,
-        )
-    except Exception as e:
-        print(f"[upload] part2_pending write failed (non-fatal): {e}")
+    # F24 (2026-05-23): the Part-2 cliffhanger writer/watcher pair was
+    # half-built (writer wrote sidecars on every Part-1 upload, but no
+    # daemon ever invoked the watcher to consume them). Cliffhanger
+    # Part-2 production is now MANUAL — operator picks an
+    # ``aita_cliffhanger_part2_*`` variant + runs the standard render
+    # flow when they decide a Part-1 has earned the follow-up.
 
     # Cross-channel engagement: every sibling channel likes the new
     # video + one anonymous Playwright tab plays it muted to register a

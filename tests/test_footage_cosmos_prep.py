@@ -583,7 +583,7 @@ class TestPrepShotlist(unittest.TestCase):
         self.td.cleanup()
 
     def _write_shotlist(self, channel, slug, data):
-        sl_dir = self.root / channel / "shotlist"
+        sl_dir = self.root / "data" / channel / "shotlist"
         sl_dir.mkdir(parents=True)
         (sl_dir / f"{slug}.json").write_text(json.dumps(data))
 
@@ -631,7 +631,7 @@ class TestPrepShotlist(unittest.TestCase):
         }
         self._write_shotlist("cosmosdecoded", "test-slug", shotlist)
         # Create the destination file so it's "already there"
-        dest = self.root / "cosmosdecoded" / "footage" / "long_sources" / "clip01.mp4"
+        dest = self.root / "data" / "cosmosdecoded" / "footage" / "long_sources" / "clip01.mp4"
         dest.parent.mkdir(parents=True)
         dest.touch()
 
@@ -784,7 +784,7 @@ class TestPrepShotlist(unittest.TestCase):
             "aspect": "16:9",
         }
         self._write_shotlist("cosmosdecoded", "force-slug", shotlist)
-        dest = self.root / "cosmosdecoded" / "footage" / "long_sources" / "clip01.mp4"
+        dest = self.root / "data" / "cosmosdecoded" / "footage" / "long_sources" / "clip01.mp4"
         dest.parent.mkdir(parents=True)
         dest.touch()
 
@@ -816,7 +816,7 @@ class TestPrepShotlist(unittest.TestCase):
         import pipeline.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             result = prep_mod.prep_shotlist("cosmosdecoded", "windows-slug")
-        sources_dir = self.root / "cosmosdecoded" / "footage" / "sources"
+        sources_dir = self.root / "data" / "cosmosdecoded" / "footage" / "sources"
         self.assertTrue(sources_dir.exists())
 
     @patch("subprocess.run")
@@ -878,7 +878,7 @@ class TestMain(unittest.TestCase):
             ],
             "aspect": "16:9",
         }
-        sl_dir = self.root / "cosmosdecoded" / "shotlist"
+        sl_dir = self.root / "data" / "cosmosdecoded" / "shotlist"
         sl_dir.mkdir(parents=True)
         (sl_dir / "main-slug.json").write_text(json.dumps(shotlist))
 
@@ -904,7 +904,7 @@ class TestMain(unittest.TestCase):
             ],
             "aspect": "16:9",
         }
-        sl_dir = self.root / "cosmosdecoded" / "shotlist"
+        sl_dir = self.root / "data" / "cosmosdecoded" / "shotlist"
         sl_dir.mkdir(parents=True)
         (sl_dir / "err-slug.json").write_text(json.dumps(shotlist))
 

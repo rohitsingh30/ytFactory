@@ -2,7 +2,7 @@
 
 **2026-05-09 — laptop nuclear cleanup.** The canonical instance of
 this app runs as the ``ytfactory-web`` Cloud Run SERVICE in
-asia-southeast1 (project ``ytfactory-prod-v2``). Running locally on
+asia-southeast1 (project ``ytfactory-prod-v3``). Running locally on
 :8765 is for **dev iteration only**. Skills now POST to the cloud
 service by default (see ``pipeline.cloud.skill_dispatch.WEBSITE_URL``); set
 ``YTFACTORY_WEBSITE_URL=http://localhost:8765`` to redirect to a
@@ -750,7 +750,7 @@ def emit(job: Job, event: StageEvent) -> None:
 # already prints. We translate them into typed StageEvents so the
 # frontend can render rich progress without changing the pipeline.
 
-_RE_TTS_START = re.compile(r"^\[1/4\] TTS(?:\s*\(([^)]+)\))?")  # captures provider e.g. "kokoro" / "f5_tts"
+_RE_TTS_START = re.compile(r"^\[1/4\] TTS(?:\s*\(([^)]+)\))?")  # captures provider e.g. "kokoro" / "cloudrun_chatterbox"
 _RE_TTS_CACHED = re.compile(r"^\[1/4\] TTS cached")
 _RE_BEATS_START = re.compile(r"^\[2/4\] (\S+).+timestamps")
 _RE_BEATS_CACHED = re.compile(r"^\[2/4\] beats cached")
@@ -824,13 +824,8 @@ def parse_stdout_line(line: str) -> tuple[str, str, str, dict] | None:
     if m:
         # Reflect the actual provider make_shorts.py prints; falls back
         # to "TTS" if the provider tag is missing (older log format).
-        # f5_tts here typically means a cloned voice was bound for this
-        # slug — surface that distinction in the UI so picking a clone
-        # vs a Kokoro voice doesn't both label as "Kokoro".
         provider = (m.group(1) or "").strip().lower()
-        if provider == "f5_tts":
-            label = "Synthesising voice (F5-TTS, cloned)"
-        elif provider == "kokoro":
+        if provider == "kokoro":
             label = "Synthesising voice (Kokoro)"
         elif provider:
             label = f"Synthesising voice ({provider})"
@@ -1176,7 +1171,7 @@ async def run_job(job: Job) -> None:
 
     # If the user picked a YouTube-cloned voice, bind it to this slug now
     # by copying the cached ref into the channel's voices/<slug>.{wav,json}.
-    # make_shorts._find_voice_path will discover it and force f5_tts.
+    # make_shorts._find_voice_path will discover and use it.
     # If the user picked a Kokoro voice instead (no clone), unlink any
     # stale binding from a prior render so the picker isn't silently
     # overridden by leftover state.
@@ -2696,7 +2691,7 @@ async def overview() -> dict:
     for env_key, label in (
         ("CLOUDRUN_TTS_CHATTERBOX_URL", "chatterbox"),
         ("CLOUDRUN_TTS_INDICF5_URL", "indicf5"),
-        ("CLOUDRUN_IMAGE_FLUX2_KLEIN_URL", "flux2-klein"),
+        ("CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL", "z-image-turbo"),
     ):
         url = os.environ.get(env_key)
         services.append({
@@ -2858,7 +2853,7 @@ def _dashboard_gcs_client():
     by project so a multi-project dev env still works.
     """
     global _DASHBOARD_GCS_CLIENT, _DASHBOARD_GCS_CLIENT_PROJECT
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3")
     with _DASHBOARD_GCS_CLIENT_LOCK:
         if (
             _DASHBOARD_GCS_CLIENT is None
@@ -3277,7 +3272,7 @@ async def _warm_voice_sample(voice: dict, sample_path: Path) -> None:
 # and surfaces in the UI as another voice card. When a job is submitted
 # with options.voice_clone_id, run_job copies the ref into
 # data/intermediate/<channel>/voices/<slug>.{wav,json} so make_shorts
-# auto-picks the f5_tts override (same path the per-story cast uses).
+# auto-picks the voice-clone override (same path the per-story cast uses).
 
 WEB_CLONES_DIR = PROJECT_ROOT / "data" / "cache" / "voice_clones" / "web"
 
@@ -3873,9 +3868,9 @@ async def create_script_job(payload: dict) -> dict:
 
 CLOUDRUN_JOB_NAME = os.environ.get("YTFACTORY_CLOUDRUN_JOB", "ytfactory-render-worker-v2")
 CLOUDRUN_JOB_REGION = os.environ.get("YTFACTORY_CLOUDRUN_REGION", "asia-southeast1")
-CLOUDRUN_JOB_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+CLOUDRUN_JOB_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3")
 CLOUDRUN_ARTIFACTS_BUCKET = os.environ.get(
-    "YTFACTORY_BUCKET", "ytfactory-prod-v2-artifacts"
+    "YTFACTORY_BUCKET", "ytfactory-prod-v3-artifacts"
 )
 
 

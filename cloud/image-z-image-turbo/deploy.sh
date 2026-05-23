@@ -95,9 +95,4 @@ URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="
 echo ""
 echo "==> Deployed: ${URL}"
 echo "Set on the laptop:"
-case "${SERVICE}" in
-  ytfactory-image-flux2-klein)    echo "  export CLOUDRUN_IMAGE_FLUX2_KLEIN_URL=${URL}" ;;
-  ytfactory-image-z-image-turbo)  echo "  export CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL=${URL}" ;;
-  ytfactory-image-qwen)           echo "  export CLOUDRUN_IMAGE_QWEN_URL=${URL}" ;;
-  ytfactory-image-hidream)        echo "  export CLOUDRUN_IMAGE_HIDREAM_URL=${URL}" ;;
-esac
+echo "  export CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL=${URL}"

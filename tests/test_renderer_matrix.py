@@ -125,14 +125,27 @@ def test_spec_builds_without_raising(
 # ---------------------------------------------------------------------------
 
 
+_LONG_FORM_OPT_OUT_CHANNELS = frozenset({
+    # scrollpulse is Shorts-only by design (brain-rot Reddit + gameplay
+    # split-screen format per Q22). Listing it here keeps the parametrize
+    # loop honest without forcing a long_form: cfg block into a YAML
+    # whose format doesn't have one.
+    "scrollpulse",
+})
+
+
 @pytest.mark.parametrize("channel", _all_channels())
 def test_every_channel_supports_long_form(channel: str) -> None:
-    """Slice-2 contract: long-form must work on every channel.
+    """Slice-2 contract: long-form must work on every channel that
+    SUPPORTS it. ``_LONG_FORM_OPT_OUT_CHANNELS`` lists Shorts-only
+    channels (e.g. scrollpulse) that explicitly skip this gate.
 
     Spec must resolve to (long_form, 16:9, valid visual_mode) without
     raising and with a non-empty long_form: cfg block on the channel
     YAML so the long-form renderer can find its TTS / image / etc
     settings."""
+    if channel in _LONG_FORM_OPT_OUT_CHANNELS:
+        pytest.skip(f"{channel} is Shorts-only by design")
     spec = build_spec(
         {"channel": channel, "format": "", "length_s": 1800},
         channel_yaml_path=_channel_yaml(channel),
@@ -229,10 +242,10 @@ def test_phantom_niche_surfaces_a_note(channel: str) -> None:
 
 
 def test_orchestrator_rejects_short_kind_with_clear_error() -> None:
-    """Slice 2 contract: ``video.render`` raises ``NotImplementedError``
-    on kind=short so the worker keeps using its existing rewrite/cast/
-    compose stages. Silently delegating to a no-op would be worse than
-    a clear "use the worker's path" error."""
+    """Post-2026-05-23 (task #17): the legacy ``video.render`` shim is
+    DELETED. ``render_via_engines`` is now the canonical entry — it
+    handles both short + long-form via ``pick_engine(spec)``. This
+    test stays as a doc-test, asserting the symbol no longer exists."""
     from pipeline.render import video as _video
 
     spec = build_spec(
@@ -241,8 +254,10 @@ def test_orchestrator_rejects_short_kind_with_clear_error() -> None:
         variant_yaml_path=_variant_yaml("mystoriesanimated", "aita_animated"),
     )
     assert spec.kind == RenderKind.SHORT
-    with pytest.raises(NotImplementedError):
-        _video.render(spec, proposal={}, work_dir=Path("/tmp"), job_id="x")
+    assert not hasattr(_video, "render"), (
+        "legacy video.render() shim should be removed — callers must "
+        "use render_via_engines or render_long_form directly"
+    )
 
 
 def test_orchestrator_accepts_long_form_dispatch() -> None:

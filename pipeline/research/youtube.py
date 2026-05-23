@@ -85,7 +85,7 @@ def _gcs_blob(bucket: str, key: str):
     """
     from google.cloud import storage  # noqa: PLC0415
 
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3")
     client = storage.Client(project=project)
     return client.bucket(bucket).blob(key)
 
@@ -220,7 +220,7 @@ def _list_cached_accounts() -> list[str]:
         try:
             from google.cloud import storage  # noqa: PLC0415
 
-            project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+            project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3")
             client = storage.Client(project=project)
             prefix = f"{_CACHE_KEY_PREFIX}/"
             out: list[str] = []

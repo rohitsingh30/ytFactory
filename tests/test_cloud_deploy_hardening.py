@@ -77,12 +77,16 @@ class TestWeightsMountIsReadonly(unittest.TestCase):
                 if vm and "readonly=true" in vm.group(0):
                     continue
                 offenders.append(f"{f.relative_to(REPO_ROOT)}: missing readonly=true")
-        self.assertGreaterEqual(
-            checked, 1, "expected at least one weights mount in cloud/*/deploy.sh",
-        )
+        # Post-2026-05-23 (task #47): zero is now acceptable. The only
+        # production image service (z-image-turbo) bakes its weights
+        # into the Docker image per CLAUDE.md Cost Guardrail #5 — no
+        # weights mounts are required anywhere. The gate STAYS: if a
+        # future bench/prod service does mount a weights volume, it
+        # MUST be readonly=true. We just don't require ≥1 mount to
+        # exist any more.
         self.assertEqual(
             offenders, [],
-            "weights mounts must be readonly=true:\n" + "\n".join(offenders),
+            "weights mounts (when present) must be readonly=true:\n" + "\n".join(offenders),
         )
 
 
@@ -189,8 +193,7 @@ class TestNoLeakyArgSecrets(unittest.TestCase):
     via ARG. ARG values are baked into the image layer history,
     visible to anyone with image-pull access via `docker history`.
     BuildKit's ``RUN --mount=type=secret,id=...`` is the correct
-    mechanism — see cloud/tts-indicparler/Dockerfile for the
-    canonical pattern."""
+    mechanism."""
 
     def test_no_dockerfile_uses_leaky_arg_for_secrets(self) -> None:
         offenders: list[str] = []
@@ -264,16 +267,11 @@ class TestOtelCopyLandsBeforeCmd(unittest.TestCase):
         )
 
 
-# Audit S1.21 — per-service runtime-SA mapping. Pre-fix every Cloud Run
-# service ran as a single ``tts-runner@`` SA (least-privilege violation:
-# a compromised image-flux2-klein container had full TTS bucket access).
-# Post-fix each service category gets its own SA — see
-# docs/iam_per_service.md for the full rationale + role grants.
+# Audit S1.21 — per-service runtime-SA mapping. Each Cloud Run service
+# category gets its own SA — see docs/iam_per_service.md for the full
+# rationale + role grants.
 EXPECTED_RUNTIME_SA = {
     # service-dir-name (relative to cloud/) -> per-service SA prefix
-    # Post 2026-05-16 cost-optimization sweep — see
-    # docs/cost_optimized_deploy.md. Dropped service mappings preserved
-    # in git history.
     "tts-chatterbox":      "tts-runner",
     "tts-indicf5":         "tts-runner",
     "image-z-image-turbo": "image-runner",
@@ -284,7 +282,6 @@ EXPECTED_RUNTIME_SA = {
     "clone-video-worker":  "web-runner",
     "web-next":            "web-next-runner",
     "weights-staging":     "weights-runner",
-    "cobalt-api":          "cobalt-runner",
     "stats-refresh":       "stats-refresh-runner",
 }
 
@@ -418,7 +415,7 @@ IAM_DOC = REPO_ROOT / "docs" / "iam_per_service.md"
 # Match role lines in the doc's per-SA fenced code block. Examples
 # the regex matches:
 #   "roles/datastore.user                    # Firestore: ..."
-#   "roles/storage.objectAdmin    on gs://ytfactory-prod-v2-state"
+#   "roles/storage.objectAdmin    on gs://ytfactory-prod-v3-state"
 _DOC_ROLE_RE = re.compile(r"^\s*(roles/[a-zA-Z0-9._-]+)\b", re.MULTILINE)
 
 

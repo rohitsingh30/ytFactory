@@ -19,17 +19,22 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-# Legacy route modules at control/<file>.py — kept wired for backward
-# compatibility with any caller still hitting the old paths.
-from control.agent_routes import router as agent_router
+# All routers from control/routes/ — the canonical location.
+# Production server (web/server.py) uses the same set; dev + prod now
+# share the same route surface.
+#
+# chat_routes is the only one that still lives at control/chat_routes.py
+# because it owns shared helpers (_enqueue_render_job, ConfirmResponse)
+# that control/scheduler.py + control/render_routes.py depend on.
+# A future cleanup pass moves chat_routes to control/routes/ once those
+# cross-imports are migrated.
 from control.chat_routes import router as chat_router
-from control.dashboard_routes import router as dashboard_router
-from control.niche_routes import router as niche_router
-from control.scheduler_routes import router as scheduler_router
 
-# Newer route modules at control/routes/<file>.py — these have the
-# canonical /api/render, /api/jobs/*, /api/channels/*, /api/health
-# surface that the e2e test + the Next.js UI consume.
+from control.routes.agent_routes import router as agent_router
+from control.routes.dashboard_routes import router as dashboard_router
+from control.routes.niche_routes import router as niche_router
+from control.routes.scheduler_routes import router as scheduler_router
+
 from control.routes.channels_routes import router as channels_router_v2
 from control.routes.cloud_routes import router as cloud_router_v2
 from control.routes.music_routes import router as music_router_v2

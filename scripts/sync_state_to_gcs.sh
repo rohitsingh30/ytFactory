@@ -22,7 +22,7 @@ if [[ "${YTFACTORY_STATE_SYNC_DISABLE:-}" == "1" ]]; then
 fi
 
 REPO="${YTFACTORY_REPO:-/Users/rohit/ytFactory}"
-BUCKET="${YTFACTORY_STATE_BUCKET:-ytfactory-prod-v2-state}"
+BUCKET="${YTFACTORY_STATE_BUCKET:-ytfactory-prod-v3-state}"
 CHANNELS=(mystoriesanimated cosmosdecoded historyrecapped hindutavaanimated sportsrecapped scrollpulse rhymetimejunction)
 
 cd "$REPO"

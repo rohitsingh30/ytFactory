@@ -54,28 +54,24 @@ via ``contextvars.copy_context()``.
 GPU contention gate
 -------------------
 
-Cloud-bound TTS (``cloudrun_chatterbox``, ``cloudrun_f5``,
-``cloudrun_indicf5``, …) and cloud-bound image-gen
-(``cloudrun_flux2_klein``, …) hit physically distinct L4 GPUs in
-``asia-southeast1`` — overlap is free.
+Cloud-bound TTS (``cloudrun_chatterbox``, ``cloudrun_indicf5``) and
+cloud-bound image-gen (``cloudrun_z_image_turbo``) hit physically
+distinct L4 GPUs in ``asia-southeast1`` — overlap is free.
 
-Local providers (``f5_tts`` / ``kokoro`` / ``mflux`` /
-``z_image_turbo``) all dispatch to the same Metal command queue on
-M2 Max. Concurrent diffusion + TTS triples per-step latency and can
-trigger Metal command-buffer timeouts (see
-``docs/long_form_model_inventory.md`` and the dual-save memory
-``feedback_gpu_one_render_at_a_time.md``). :func:`gpu_safe_to_overlap`
-returns ``False`` whenever EITHER provider is local-GPU; the
-orchestrator must then fall back to sequential.
+Local providers (``kokoro`` / ``mflux`` / ``z_image_turbo``) all
+dispatch to the same Metal command queue on M2 Max. Concurrent
+diffusion + TTS triples per-step latency and can trigger Metal
+command-buffer timeouts. :func:`gpu_safe_to_overlap` returns ``False``
+whenever EITHER provider is local-GPU; the orchestrator must then
+fall back to sequential.
 
 The cloud-providers can technically degrade to local fallback
 mid-render (see ``pipeline.tts.cloudrun._synth_cloudrun_*`` /
 ``pipeline.images_cloudrun._materialise_png``), at which point the
 overlap could re-introduce contention. We accept that risk — fallback
-is a rare event, the F5 reset_mlx_state hook (long-form stage-1
-boundary) bounds the damage, and the alternative ("disable cloud
-overlap entirely whenever fallback could conceivably trigger") leaves
-all the low-risk wins on the table. Set
+is rare and the alternative ("disable cloud overlap entirely whenever
+fallback could conceivably trigger") leaves all the low-risk wins on
+the table. Set
 ``YTFACTORY_DISABLE_STAGE_OVERLAP=1`` to globally force sequential if
 debugging suggests overlap is the trigger of a regression.
 

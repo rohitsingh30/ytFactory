@@ -12,10 +12,8 @@ The short engine sets ``spec.voice_provider``. Today's values:
 
 - ``cloudrun_chatterbox``  (English, default for shorts on every
   channel except mystoriesanimated/tifu)
-- ``cloudrun_indicparler`` (Hindi, descriptive voices)
 - ``cloudrun_indicf5``     (Hindi, AI4Bharat F5-tuned, voice clone)
-- ``f5_tts``               (laptop fallback)
-- ``kokoro``               (laptop fallback for Hindi)
+- ``kokoro``               (laptop fallback)
 
 This module's :class:`TtsSingle` doesn't reach into the providers
 itself — it delegates to :func:`pipeline.audio.synthesize` which
@@ -72,7 +70,7 @@ class TtsSingle:
     ) -> AudioResult:
         # Deferred import to avoid loading the heavy TTS provider
         # graph at engine-import time. ``pipeline.audio`` pulls in
-        # kokoro / f5_tts / chatterbox model loaders transitively and
+        # kokoro / chatterbox model loaders transitively and
         # those allocate Metal contexts on import.
         from pipeline.audio import synthesize  # noqa: PLC0415
 

@@ -19,30 +19,32 @@
     <!-- Trigger when any of these top-level dirs change. macOS launchd -->
     <!-- watches recursively. Sync runs the full per-channel sweep, so -->
     <!-- watching the channel roots is enough. -->
+    <!-- Post-2026-05-23 (task #46): channel artifact roots live under  -->
+    <!-- data/<channel>/ per pipeline/paths.py::RenderPaths.            -->
     <key>WatchPaths</key>
     <array>
-        <string>/Users/rohit/ytFactory/mystoriesanimated/narrations</string>
-        <string>/Users/rohit/ytFactory/mystoriesanimated/cast</string>
-        <string>/Users/rohit/ytFactory/mystoriesanimated/uploads</string>
-        <string>/Users/rohit/ytFactory/cosmosdecoded/narrations</string>
-        <string>/Users/rohit/ytFactory/cosmosdecoded/cast</string>
-        <string>/Users/rohit/ytFactory/cosmosdecoded/shotlist</string>
-        <string>/Users/rohit/ytFactory/cosmosdecoded/uploads</string>
-        <string>/Users/rohit/ytFactory/historyrecapped/narrations</string>
-        <string>/Users/rohit/ytFactory/historyrecapped/cast</string>
-        <string>/Users/rohit/ytFactory/historyrecapped/shotlist</string>
-        <string>/Users/rohit/ytFactory/historyrecapped/uploads</string>
-        <string>/Users/rohit/ytFactory/hindutavaanimated/narrations</string>
-        <string>/Users/rohit/ytFactory/hindutavaanimated/cast</string>
-        <string>/Users/rohit/ytFactory/hindutavaanimated/uploads</string>
-        <string>/Users/rohit/ytFactory/sportsrecapped/narrations</string>
-        <string>/Users/rohit/ytFactory/sportsrecapped/cast</string>
-        <string>/Users/rohit/ytFactory/sportsrecapped/uploads</string>
-        <string>/Users/rohit/ytFactory/scrollpulse/narrations</string>
-        <string>/Users/rohit/ytFactory/scrollpulse/cast</string>
-        <string>/Users/rohit/ytFactory/scrollpulse/uploads</string>
-        <string>/Users/rohit/ytFactory/rhymetimejunction/narrations</string>
-        <string>/Users/rohit/ytFactory/rhymetimejunction/uploads</string>
+        <string>/Users/rohit/ytFactory/data/mystoriesanimated/narrations</string>
+        <string>/Users/rohit/ytFactory/data/mystoriesanimated/cast</string>
+        <string>/Users/rohit/ytFactory/data/mystoriesanimated/uploads</string>
+        <string>/Users/rohit/ytFactory/data/cosmosdecoded/narrations</string>
+        <string>/Users/rohit/ytFactory/data/cosmosdecoded/cast</string>
+        <string>/Users/rohit/ytFactory/data/cosmosdecoded/shotlist</string>
+        <string>/Users/rohit/ytFactory/data/cosmosdecoded/uploads</string>
+        <string>/Users/rohit/ytFactory/data/historyrecapped/narrations</string>
+        <string>/Users/rohit/ytFactory/data/historyrecapped/cast</string>
+        <string>/Users/rohit/ytFactory/data/historyrecapped/shotlist</string>
+        <string>/Users/rohit/ytFactory/data/historyrecapped/uploads</string>
+        <string>/Users/rohit/ytFactory/data/hindutavaanimated/narrations</string>
+        <string>/Users/rohit/ytFactory/data/hindutavaanimated/cast</string>
+        <string>/Users/rohit/ytFactory/data/hindutavaanimated/uploads</string>
+        <string>/Users/rohit/ytFactory/data/sportsrecapped/narrations</string>
+        <string>/Users/rohit/ytFactory/data/sportsrecapped/cast</string>
+        <string>/Users/rohit/ytFactory/data/sportsrecapped/uploads</string>
+        <string>/Users/rohit/ytFactory/data/scrollpulse/narrations</string>
+        <string>/Users/rohit/ytFactory/data/scrollpulse/cast</string>
+        <string>/Users/rohit/ytFactory/data/scrollpulse/uploads</string>
+        <string>/Users/rohit/ytFactory/data/rhymetimejunction/narrations</string>
+        <string>/Users/rohit/ytFactory/data/rhymetimejunction/uploads</string>
     </array>
     <key>StandardOutPath</key>
     <string>/tmp/ytfactory-state-sync.out</string>
@@ -62,7 +64,7 @@
         <key>CLOUDSDK_CONFIG</key>
         <string>/Users/rohit/.config/gcloud</string>
         <key>GOOGLE_CLOUD_PROJECT</key>
-        <string>ytfactory-prod-v2</string>
+        <string>ytfactory-prod-v3</string>
     </dict>
 </dict>
 </plist>

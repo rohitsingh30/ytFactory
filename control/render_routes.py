@@ -10,11 +10,11 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from control import jobs as jobs_mod
-from control import rate_limit
+from control.core import jobs as jobs_mod
+from control.core import rate_limit
 from control.chat_routes import ConfirmResponse, _enqueue_render_job
-from control.queue import get_queue
-from control.schema import ShortProposal, TaskStatus
+from control.core.queue import get_queue
+from control.core.schema import ShortProposal, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ async def get_job(job_id: str) -> JobView:
     short_uri = doc.get("short_uri")
     if short_uri and doc.get("status") == jobs_mod.STATUS_DONE:
         try:
-            from control import storage  # noqa: PLC0415 — lazy
+            from control.core import storage  # noqa: PLC0415 — lazy
             short_signed = storage.signed_url(short_uri, ttl_s=600, method="GET")
         except Exception:  # noqa: BLE001
             logger.warning("signed_url failed for %s", short_uri, exc_info=True)
@@ -129,7 +129,7 @@ async def cancel_job(job_id: str) -> CancelResponse:
     q = get_queue()
 
     # In-memory queue: walk the dict directly. Firestore: query.
-    from control.queue import InMemoryQueue, FirestoreQueue, _TASKS  # noqa: PLC0415
+    from control.core.queue import InMemoryQueue, FirestoreQueue, _TASKS  # noqa: PLC0415
     if isinstance(q, InMemoryQueue):
         for t in list(q._tasks.values()):  # type: ignore[attr-defined]
             if t.job_id == job_id and t.status == TaskStatus.QUEUED:
@@ -172,7 +172,7 @@ async def health() -> dict:
     Useful for debugging "why isn't my agent picking up tasks" without
     cracking open the Cloud Run logs.
     """
-    from control.agent_routes import get_last_seen  # noqa: PLC0415
+    from control.routes.agent_routes import get_last_seen  # noqa: PLC0415
     import time
 
     now = time.time()

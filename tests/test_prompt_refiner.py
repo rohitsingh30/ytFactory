@@ -60,6 +60,43 @@ def _install_strip(test_self, behaviour=None):
 # Pure helpers
 
 
+class RefinerCalibrationTest(unittest.TestCase):
+    """P4.1: pin that the refiner is calibrated for Z-Image-Turbo, not
+    FLUX.2 klein. The previous calibration emitted 4-10-word noun
+    phrases that underspecified z-turbo and let it default to
+    product-photo backgrounds. Regression-guard so a future revert to
+    klein vocabulary breaks loudly."""
+
+    def test_system_prompt_targets_z_image_turbo(self):
+        sys_text = pr._REFINER_SYSTEM.lower()
+        self.assertIn("z-image-turbo", sys_text,
+                      "refiner system prompt must declare Z-Image-Turbo as target")
+        # Klein-specific tokens must not appear (BFL, qwen3, flux2, klein
+        # would all signal the old calibration is back).
+        self.assertNotIn("flux.2 [klein]", sys_text)
+        self.assertNotIn("flux.2 klein", sys_text)
+        self.assertNotIn("qwen3", sys_text)
+
+    def test_system_prompt_targets_80_to_250_word_range(self):
+        """Z-turbo's optimal prompt length is ~80-250 words — the system
+        prompt must explicitly aim there (4-10-word refined_visual from
+        the klein era would crash z-turbo into floating-object product
+        photos)."""
+        sys_text = pr._REFINER_SYSTEM
+        # The new system prompt must mention z-turbo's word-count sweet
+        # spot somewhere in the calibration guidance.
+        self.assertTrue(
+            "80-250" in sys_text or "80 to 250" in sys_text,
+            "system prompt must declare z-turbo's 80-250-word sweet spot",
+        )
+
+    def test_refiner_version_bumped_off_v1(self):
+        """Bumping ``REFINER_VERSION`` invalidates cached refined-* fields
+        from the klein era; v1 is the klein-era version, anything else
+        signals z-turbo calibration is live."""
+        self.assertNotEqual(pr.REFINER_VERSION, "v1")
+
+
 class ShotRotationTest(unittest.TestCase):
     def test_returns_canonical_shot_for_beat_zero(self):
         self.assertEqual(

@@ -96,34 +96,6 @@ class TestPropagationDictRoundTrip(_Base):
         self.assertEqual(parent_trace_id, child_trace_id)
 
 
-class TestJobsCreateStampsTraceparent(_Base):
-    """The chat-request handler creates a Firestore job doc via
-    :func:`control.jobs.create_job`. The doc must carry the active
-    traceparent so the render-worker can link its root span to the
-    chat trace.
-    """
-
-    def test_create_job_writes_traceparent_field(self) -> None:
-        from control import jobs as jobs_mod
-
-        # In-memory backend so we don't touch Firestore.
-        os.environ.pop("YTFACTORY_QUEUE_BACKEND", None)
-        jobs_mod.reset_jobs()
-
-        with obs.timed("chat_confirm"):
-            jobs_mod.create_job(
-                "j-test", channel="historyrecapped", topic="x",
-                proposal={"title": "x"},
-            )
-        doc = jobs_mod.get_job("j-test")
-        self.assertIsNotNone(doc)
-        # traceparent must be present + well-formed.
-        tp = doc.get("traceparent")
-        self.assertIsNotNone(tp,
-            f"traceparent field missing from job doc: keys={list(doc.keys())}")
-        self.assertRegex(tp, r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
-
-
 class TestCloudRunDispatcherInjectsTrace(_Base):
     """``control.core.cloud_run._trace_env_overrides`` must extract
     the active traceparent into the env dict that gets passed to

@@ -17,10 +17,11 @@ os.environ["YTFACTORY_QUEUE_BACKEND"] = "memory"
 
 import httpx  # noqa: E402
 
-from control import chat_routes, chat_service as cs_module, jobs as jobs_mod, rate_limit  # noqa: E402
+from control import chat_routes, chat_service as cs_module
+from control.core import jobs as jobs_mod, rate_limit  # noqa: E402
 from control.chat_service import _extract_proposal, ChatResult  # noqa: E402
-from control.queue import get_queue, reset_queue  # noqa: E402
-from control.schema import ShortProposal, TaskKind, TaskStatus  # noqa: E402
+from control.core.queue import get_queue, reset_queue  # noqa: E402
+from control.core.schema import ShortProposal, TaskKind, TaskStatus  # noqa: E402
 
 
 def _make_app():

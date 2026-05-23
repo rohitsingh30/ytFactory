@@ -128,11 +128,12 @@ class TtsChunkedKwargContractTest(unittest.TestCase):
 
 
 class RefAudioTextResolutionTest(unittest.TestCase):
-    """Pin _ref_audio_text fallback. F5 providers (f5_tts / cloudrun_f5)
-    require the reference WAV's transcript; chatterbox / kokoro don't.
-    The helper returns the value from ``spec.tts.ref_text`` when set,
-    None otherwise — we let synth_long_narration's own runtime check
-    raise a clear error if the picked provider needs it."""
+    """Pin _ref_audio_text fallback. Voice-clone providers like
+    cloudrun_indicf5 require the reference WAV's transcript;
+    chatterbox / kokoro don't. The helper returns the value from
+    ``spec.tts.ref_text`` when set, None otherwise — we let
+    synth_long_narration's own runtime check raise a clear error if
+    the picked provider needs it."""
 
     def _spec_with_ref(self, ref_text: Any) -> Any:
         from unittest.mock import MagicMock

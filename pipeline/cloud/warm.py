@@ -40,17 +40,10 @@ WARM_IMAGE = REPO_ROOT / "cloud" / "warm_image_services.sh"
 # argument. Anything not in the table is silently skipped.
 _TTS_PROVIDER_TO_TARGET: dict[str, str] = {
     "cloudrun_chatterbox": "chatterbox",
-    "cloudrun_f5": "f5",
-    "cloudrun_higgs": "higgs",
-    "cloudrun_cosyvoice": "cosyvoice",
-    "cloudrun_indicparler": "indicparler",
     "cloudrun_indicf5": "indicf5",
 }
 _IMAGE_PROVIDER_TO_TARGET: dict[str, str] = {
-    "cloudrun_flux2_klein": "flux",
     "cloudrun_z_image_turbo": "zimage",
-    "cloudrun_qwen_image": "qwen",
-    "cloudrun_hidream": "hidream",
 }
 
 
@@ -101,11 +94,11 @@ def _resolve_channel_yaml(channel: str) -> Optional[Path]:
         return p
     # Try variant under repo first.
     if "/" in channel:
-        candidate = REPO_ROOT / channel
+        candidate = REPO_ROOT / "data" / channel
         if candidate.is_file():
             return candidate
     # Channel slug → main config.
-    candidate = REPO_ROOT / channel / "config.yaml"
+    candidate = REPO_ROOT / "data" / channel / "config.yaml"
     if candidate.is_file():
         return candidate
     return None
@@ -338,9 +331,9 @@ def warm_async_http(channel: Optional[str] = None) -> threading.Thread:
         try:
             from pipeline.images.images import warmup as _img_warmup  # noqa: PLC0415
             for target in image_targets:
-                # _IMAGE_PROVIDER_TO_TARGET maps "cloudrun_flux2_klein" → "flux";
-                # images.warmup expects the channel YAML's image_provider STRING
-                # (e.g. "cloudrun_flux2_klein"). Reverse-map.
+                # _IMAGE_PROVIDER_TO_TARGET maps a provider key (e.g.
+                # "cloudrun_z_image_turbo") to a short label (e.g. "zimage").
+                # images.warmup expects the full provider key. Reverse-map.
                 provider = next(
                     (k for k, v in _IMAGE_PROVIDER_TO_TARGET.items() if v == target),
                     None,

@@ -3,7 +3,7 @@
 Skills used to ``Read`` / ``Edit`` / ``Write`` channel JSON files
 (<channel>/narrations/<slug>.json, cast/<slug>.json, etc.) on the
 laptop filesystem. The launchd ``state-sync`` plist mirrored those to
-``gs://ytfactory-prod-v2-state``. Post-2026-05-09 cloud cutover, the
+``gs://ytfactory-prod-v3-state``. Post-2026-05-09 cloud cutover, the
 laptop has zero data: skills hit the cloud state API instead, the
 website is the only writer, and the plist is retired.
 

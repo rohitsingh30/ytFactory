@@ -303,7 +303,7 @@ class ShortEngineOverlappedPathBoundaryEventsTest(_BaseEngineProgressTest):
                 "captions_enabled": False,
                 "music_policy": "none",
                 "voice_provider": "cloudrun_chatterbox",
-                "image_provider": "cloudrun_flux2_klein",
+                "image_provider": "cloudrun_z_image_turbo",
                 "audio_plugin": "audio_from_fixture",
                 "timeline_plugin": "timeline_from_fixture",
                 "visualize_plugin": "visuals_from_fixture",

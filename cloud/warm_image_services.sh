@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Warm one or more ytfactory-image-* Cloud Run services BEFORE a
-# render window. Pays the ~5-7 min FLUX (or ~15-25 min Z-Image)
-# cold-load up-front so the actual render's stage-3 hits a warm
-# container at sub-second per image.
+# Warm the production image Cloud Run service (Z-Image-Turbo) BEFORE
+# a render window. Pays the ~15-25 min cold-load up-front so the
+# actual render's stage-3 hits a warm container at sub-second per
+# image.
 #
 # Designed to run from:
 #   - laptop manually right before a render: `./cloud/warm_image_services.sh`
@@ -13,27 +13,31 @@
 # instantly with `cold_loaded: false`.
 #
 # Usage:
-#   ./warm_image_services.sh                 # warms FLUX only (default)
-#   ./warm_image_services.sh flux            # explicit
-#   ./warm_image_services.sh zimage          # warms Z-Image only
-#   ./warm_image_services.sh flux zimage     # warms both in parallel
+#   ./warm_image_services.sh                 # warms Z-Image-Turbo (the only production image model)
+#   ./warm_image_services.sh zimage          # explicit
 
 set -euo pipefail
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
 
 # bash 3.2 (macOS default) doesn't have associative arrays; use case.
+# URL resolved via gcloud at call time (avoids hardcoding host hashes).
 url_for() {
   case "$1" in
-    flux)   echo "https://ytfactory-image-flux2-klein-767262167641.${REGION}.run.app" ;;
-    zimage) echo "https://ytfactory-image-z-image-turbo-767262167641.${REGION}.run.app" ;;
-    *)      echo "" ;;
+    zimage)
+      gcloud run services describe ytfactory-image-z-image-turbo \
+        --project="${PROJECT}" --region="${REGION}" \
+        --format="value(status.url)" 2>/dev/null
+      ;;
+    *)
+      echo ""
+      ;;
   esac
 }
 
 if [[ $# -eq 0 ]]; then
-  TARGETS=(flux)
+  TARGETS=(zimage)
 else
   TARGETS=("$@")
 fi
@@ -43,7 +47,7 @@ warm_one() {
   local url
   url="$(url_for "$key")"
   if [[ -z "$url" ]]; then
-    echo "warm: unknown key $key (valid: flux zimage)" >&2
+    echo "warm: unknown key $key (valid: zimage)" >&2
     return 1
   fi
   local token

@@ -499,7 +499,7 @@ async def list_jobs(
     else:
         try:
             from google.cloud import firestore  # noqa: PLC0415
-            db = firestore.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2"))
+            db = firestore.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3"))
             stream = db.collection("jobs").order_by("created_at", direction=firestore.Query.DESCENDING).limit(500).stream()
             for snap in stream:
                 d = snap.to_dict() or {}
@@ -765,7 +765,7 @@ async def get_queue_state() -> QueueResponse:
         # blip on the active query shouldn't hide what just shipped.
         try:
             from google.cloud import firestore  # noqa: PLC0415
-            db = firestore.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2"))
+            db = firestore.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3"))
         except Exception as exc:  # noqa: BLE001
             logger.warning("firestore client init failed", exc_info=True)
             warnings["queued"] = _summarise_firestore_error(exc)

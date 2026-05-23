@@ -5,7 +5,7 @@ JSON is strict (rejects unknown top-level keys), so we can't inline
 comments. Apply the policy via:
 
 ```bash
-gsutil lifecycle set scripts/gcs_lifecycle.json gs://ytfactory-prod-v2-artifacts
+gsutil lifecycle set scripts/gcs_lifecycle.json gs://ytfactory-prod-v3-artifacts
 ```
 
 ## Rule order matters

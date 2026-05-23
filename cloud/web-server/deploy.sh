@@ -89,6 +89,32 @@ gcloud builds submit . \
 #     this, control/routes/dashboard_routes.py reports
 #     "YOUTUBE_API_KEY not set" and stats are blank).
 
+# Resolve live Cloud Run URLs at deploy time. Hardcoding host hashes is
+# brittle — they change when a service is recreated. `gcloud run services
+# describe` returns the current canonical URL.
+_resolve_url() {
+  local svc="$1"
+  gcloud run services describe "${svc}" \
+    --project="${PROJECT}" --region="${REGION}" \
+    --format="value(status.url)" 2>/dev/null
+}
+WEB_NEXT_URL="$(_resolve_url ytfactory-web-next)"
+TTS_CHATTERBOX_URL="$(_resolve_url ytfactory-tts-chatterbox)"
+TTS_INDICF5_URL="$(_resolve_url ytfactory-tts-indicf5)"
+IMAGE_Z_IMAGE_TURBO_URL="$(_resolve_url ytfactory-image-z-image-turbo)"
+ASR_URL="$(_resolve_url ytfactory-asr-whisper)"
+for pair in "ytfactory-web-next:${WEB_NEXT_URL}" \
+            "ytfactory-tts-chatterbox:${TTS_CHATTERBOX_URL}" \
+            "ytfactory-tts-indicf5:${TTS_INDICF5_URL}" \
+            "ytfactory-image-z-image-turbo:${IMAGE_Z_IMAGE_TURBO_URL}" \
+            "ytfactory-asr-whisper:${ASR_URL}"; do
+  name="${pair%%:*}"; url="${pair#*:}"
+  if [ -z "${url}" ]; then
+    echo "ERROR: could not resolve Cloud Run URL for ${name}" >&2
+    exit 1
+  fi
+done
+
 echo "==> Deploying ${SERVICE} to Cloud Run"
 gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
@@ -104,7 +130,7 @@ gcloud run deploy "${SERVICE}" \
   --port=8080 \
   --allow-unauthenticated \
   --set-secrets="^|^AZURE_OPENAI_API_KEY=azure-openai-key:latest|YTFACTORY_CLIENT_SECRET=ytfactory-oauth-client:latest|YTFACTORY_WEB_OAUTH_CLIENT=ytfactory-web-oauth-client:latest|YTFACTORY_SESSION_SECRET=ytfactory-session-secret:latest|YTFACTORY_AGENT_TOKEN=ytfactory-agent-token:latest|YOUTUBE_API_KEY=youtube-api-key:latest|/secrets/youtube-channel-ids/value=youtube-channel-ids:latest" \
-  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=${PROJECT}-artifacts|YTFACTORY_STATE_BUCKET=${PROJECT}-state|YTFACTORY_QUEUE_BACKEND=firestore|YTFACTORY_SIM_WORKER=0|YTFACTORY_RENDER_BACKEND=cloudrun|YTFACTORY_CLOUDRUN_JOB=ytfactory-render-worker-v2|YTFACTORY_CLOUDRUN_REGION=${REGION}|YTFACTORY_COOKIE_SECURE=1|YTFACTORY_ADMIN_DOMAINS=docx.co.in|YTFACTORY_ADMIN_EMAILS=sanimated219@gmail.com|YTFACTORY_PUBLIC_FRONTEND_URL=https://ytfactory-web-next-e67vyhiy6a-as.a.run.app|YTFACTORY_AUTH_REDIRECT_URI=https://ytfactory-web-next-e67vyhiy6a-as.a.run.app/api/auth/google/callback|CLOUDRUN_TTS_CHATTERBOX_URL=https://tts-chatterbox-639721195500.${REGION}.run.app|CLOUDRUN_TTS_INDICF5_URL=https://ytfactory-tts-indicf5-639721195500.${REGION}.run.app|CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL=https://ytfactory-image-z-image-turbo-639721195500.${REGION}.run.app|CLOUDRUN_ASR_URL=https://ytfactory-asr-whisper-639721195500.${REGION}.run.app|AZURE_OPENAI_ENDPOINT=https://testshoffer.openai.azure.com|AZURE_OPENAI_API_VERSION=2025-04-01-preview|AZURE_OPENAI_MODEL=gpt-5.3-chat|AZURE_OPENAI_TOKEN_PARAM=max_completion_tokens"
+  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=${PROJECT}-artifacts|YTFACTORY_STATE_BUCKET=${PROJECT}-state|YTFACTORY_QUEUE_BACKEND=firestore|YTFACTORY_SIM_WORKER=0|YTFACTORY_RENDER_BACKEND=cloudrun|YTFACTORY_CLOUDRUN_JOB=ytfactory-render-worker-v2|YTFACTORY_CLOUDRUN_REGION=${REGION}|YTFACTORY_COOKIE_SECURE=1|YTFACTORY_ADMIN_DOMAINS=docx.co.in|YTFACTORY_ADMIN_EMAILS=sanimated219@gmail.com|YTFACTORY_PUBLIC_FRONTEND_URL=${WEB_NEXT_URL}|YTFACTORY_AUTH_REDIRECT_URI=${WEB_NEXT_URL}/api/auth/google/callback|CLOUDRUN_TTS_CHATTERBOX_URL=${TTS_CHATTERBOX_URL}|CLOUDRUN_TTS_INDICF5_URL=${TTS_INDICF5_URL}|CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL=${IMAGE_Z_IMAGE_TURBO_URL}|CLOUDRUN_ASR_URL=${ASR_URL}|AZURE_OPENAI_ENDPOINT=https://testshoffer.openai.azure.com|AZURE_OPENAI_API_VERSION=2025-04-01-preview|AZURE_OPENAI_MODEL=gpt-5.3-chat|AZURE_OPENAI_TOKEN_PARAM=max_completion_tokens"
 # AZURE_OPENAI_ENDPOINT/API_VERSION/MODEL are non-secret triplet
 # REQUIRED for chat_service.py and niche_specs_routes.py to talk to
 # Azure (control/chat_service.py:96-105 + control/routes/niche_specs_routes.py:148-151

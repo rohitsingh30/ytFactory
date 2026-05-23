@@ -378,7 +378,7 @@ Return ONLY a JSON object (no prose, no markdown fences):
 
 
 # Part-2 prompt for the cliffhanger format. Auto-rendered by
-# pipeline/part2_watcher.py once Part-1 hits its subscriber threshold.
+# F24 (2026-05-23): Part-2 watcher deleted; this rewriter is now manual-only.
 # Uses the SAME _SHARED_CRAFT_RULES as Part 1 (subtitle shape, prosody,
 # TTS quirks — all the bits that don't depend on story structure) but
 # completely overrides OPENING / SPICY / closer behavior because the
@@ -728,7 +728,7 @@ def rewrite_part2(
 ) -> Script:
     """Author the Part-2 finale of a cliffhanger short.
 
-    Called by pipeline/part2_watcher.py once a Part-1 video crosses its
+    Manual invocation (the Part-2 watcher daemon was deleted 2026-05-23 per F24).
     ``part2_trigger.subs_delta`` threshold. Takes the original full
     story plus the Part-1 narration so the LLM can continue from the
     cut without repeating scenes.

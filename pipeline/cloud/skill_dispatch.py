@@ -5,7 +5,7 @@ Skills (the AI authoring layer — `/make-mystories-short`,
 directly. That coupled every skill invocation to whatever shell env
 the skill happened to land in (PYTHONPATH, cwd, gcloud account, …),
 which broke at every project migration. The 2026-05-09
-``ytfactory-prod`` → ``ytfactory-prod-v2`` cutover surfaced this once
+``ytfactory-prod`` → ``ytfactory-prod-v3`` cutover surfaced this once
 too often.
 
 The website-native pattern instead lets the skill POST a render
@@ -62,7 +62,7 @@ from typing import Any
 # To opt back into a local dev instance:
 #   YTFACTORY_WEBSITE_URL=http://localhost:8765
 #   PYTHONPATH=. .venv/bin/uvicorn web.server:app --port 8765
-DEFAULT_WEBSITE_URL = "https://ytfactory-web-7hwnzw7lya-as.a.run.app"
+DEFAULT_WEBSITE_URL = ""
 WEBSITE_URL = os.environ.get("YTFACTORY_WEBSITE_URL", DEFAULT_WEBSITE_URL)
 DEFAULT_POLL_S = float(os.environ.get("YTFACTORY_DISPATCH_POLL_S", "5"))
 DEFAULT_TIMEOUT_S = float(os.environ.get("YTFACTORY_DISPATCH_TIMEOUT_S", "7200"))

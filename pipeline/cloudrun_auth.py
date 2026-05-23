@@ -1,23 +1,17 @@
 """Shared Cloud Run ID-token helper for ytFactory clients.
 
 Used by:
-- `pipeline.tts.cloudrun` (6 TTS services)
-- `pipeline.images_cloudrun` (2 image services: cloudrun_flux2_klein,
-  cloudrun_z_image_turbo; future cloudrun_qwen_image, cloudrun_hidream)
+- `pipeline.tts.cloudrun` (chatterbox + indicf5)
+- `pipeline.images_cloudrun` (cloudrun_z_image_turbo)
 
-Why per-audience cache (vs the original global single-token cache that
-used to live in `pipeline.tts.cloudrun`):
+Why per-audience cache:
 
 A Google ID token issued for one Cloud Run service URL is **only**
 valid against that URL's audience. With a single global cache, when a
-Short calls (a) `cloudrun_chatterbox` then (b) `cloudrun_flux2_klein`,
-the cached `--audiences=<chatterbox-url>` token gets reused against
-the FLUX URL → Cloud Run rejects with 401 "audience claim mismatch".
-The original TTS code escaped this only because every TTS variant
-within a single render typically targeted the same TTS service URL —
-the multi-service multi-audience case never came up.
-
-Image services break that assumption. Audience-keyed cache fixes it.
+Short calls (a) `cloudrun_chatterbox` then (b) `cloudrun_z_image_turbo`,
+the cached token from one URL would get reused against the other →
+Cloud Run rejects with 401 "audience claim mismatch". Audience-keyed
+cache prevents this.
 
 Token TTL is 50 min (Google ID tokens are valid 60 min; we refresh
 early to absorb clock skew between laptop and Cloud Run frontend).

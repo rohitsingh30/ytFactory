@@ -105,9 +105,9 @@ class ClassifyRendererLineTests(unittest.TestCase):
 
     def test_image_start(self):
         event = self.ep._classify_renderer_line(
-            "[3/4] cloudrun_flux2_klein: generating 22 images"
+            "[3/4] cloudrun_z_image_turbo: generating 22 images"
         )
-        self.assertEqual(event, ("images", "Generating 22 images via cloudrun_flux2_klein"))
+        self.assertEqual(event, ("images", "Generating 22 images via cloudrun_z_image_turbo"))
 
     def test_image_per_beat_progress(self):
         self.assertEqual(
@@ -323,7 +323,7 @@ class TailRendererLogTests(unittest.TestCase):
             seen = self._run_tailer(log_path, [
                 "[1/4] TTS (cloudrun_chatterbox)",
                 "    22 beats, total 58.4s",
-                "[3/4] cloudrun_flux2_klein: generating 22 images",
+                "[3/4] cloudrun_z_image_turbo: generating 22 images",
                 "    [1/22] beat=00",
                 "    [2/22] beat=01",
                 "[4/4] ffmpeg compose 9:16",
@@ -332,7 +332,7 @@ class TailRendererLogTests(unittest.TestCase):
         self.assertEqual(seen, [
             "Synthesizing narration (cloudrun_chatterbox)",
             "Aligned 22 beats — 58.4s of audio",
-            "Generating 22 images via cloudrun_flux2_klein",
+            "Generating 22 images via cloudrun_z_image_turbo",
             "Image 1 of 22",
             "Image 2 of 22",
             "Stitching video with ffmpeg",
@@ -422,7 +422,7 @@ class TailRendererLogTests(unittest.TestCase):
     def test_holds_back_partial_trailing_line(self):
         # A half-written substep marker (no trailing newline yet) must
         # NOT be classified — wait for the renderer to flush the
-        # newline. Otherwise a marker like '[3/4] cloudrun_flux2_kl'
+        # newline. Otherwise a marker like '[3/4] cloudrun_z_image_tur'
         # would emit a confusingly-truncated msg.
         with self._tmp_log() as log_path:
             seen: list[str] = []
@@ -436,7 +436,7 @@ class TailRendererLogTests(unittest.TestCase):
             t.start()
             time.sleep(0.05)
             with log_path.open("ab") as fh:
-                fh.write(b"[3/4] cloudrun_flux2_klein: generating 22 ima")  # no newline
+                fh.write(b"[3/4] cloudrun_z_image_turbo: generating 22 ima")  # no newline
             time.sleep(0.15)
             self.assertEqual(seen, [], "tailer should withhold partial lines")
             with log_path.open("ab") as fh:
@@ -444,7 +444,7 @@ class TailRendererLogTests(unittest.TestCase):
             time.sleep(0.2)
             stop.set()
             t.join(timeout=2)
-            self.assertEqual(seen, ["Generating 22 images via cloudrun_flux2_klein"])
+            self.assertEqual(seen, ["Generating 22 images via cloudrun_z_image_turbo"])
 
     # --- helpers --------------------------------------------------
 
@@ -935,7 +935,7 @@ class StdoutProgressProxyTests(unittest.TestCase):
         proxy, _, events = self._make_pair()
         proxy.write("[1/4] TTS (cloudrun_chatterbox)\n")
         proxy.write("[2/4] faster_whisper aligning timestamps\n")
-        proxy.write("[3/4] cloudrun_flux2_klein: generating 22 images\n")
+        proxy.write("[3/4] cloudrun_z_image_turbo: generating 22 images\n")
         proxy.write("[4/4] ffmpeg compose 9:16\n")
         stages = [s for s, _ in events]
         self.assertEqual(stages, ["tts", "asr", "images", "compose"])

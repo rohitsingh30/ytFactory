@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Build + push + deploy a single-model TTS service to Cloud Run GPU L4.
+# Build + push + deploy the Chatterbox TTS service to Cloud Run GPU L4.
 # Usage:
-#   ./deploy.sh <service-name> [tag]
+#   ./deploy.sh [service-name] [tag]
 # Example:
-#   ./deploy.sh ytfactory-tts-higgs v1
 #   ./deploy.sh ytfactory-tts-chatterbox
 
 set -euo pipefail
@@ -17,7 +16,7 @@ source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 SERVICE="${1:-tts-chatterbox}"  # Audit D3.22 — default to dir name; pass arg only to override
 TAG="${2:-$(date +%Y%m%d-%H%M%S)}"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE}:${TAG}"
@@ -63,9 +62,4 @@ URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="
 echo ""
 echo "==> Deployed: ${URL}"
 echo "Set on the laptop:"
-case "${SERVICE}" in
-  ytfactory-tts-higgs)        echo "  export CLOUDRUN_TTS_HIGGS_URL=${URL}" ;;
-  ytfactory-tts-chatterbox)   echo "  export CLOUDRUN_TTS_CHATTERBOX_URL=${URL}" ;;
-  ytfactory-tts-cosyvoice)    echo "  export CLOUDRUN_TTS_COSYVOICE_URL=${URL}" ;;
-  *)                          echo "  export CLOUDRUN_TTS_URL=${URL}" ;;
-esac
+echo "  export CLOUDRUN_TTS_CHATTERBOX_URL=${URL}"

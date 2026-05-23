@@ -289,8 +289,13 @@ class RenderPaths:
         (config.yaml, learnings/, scripts/, branding/, music/, songs/,
         emoji/, variants/, footage/, footage_plan/) live here regardless
         of whether the channel uses niches.
+
+        Post-2026-05-23 (task #46): channel artifact roots live under
+        ``<project_root>/data/<channel>/`` instead of the legacy
+        ``<project_root>/<channel>/``. Nothing is generated at the repo
+        root any more. The layout below the channel root is unchanged.
         """
-        return self.project_root / self.channel
+        return self.project_root / "data" / self.channel
 
     @property
     def root(self) -> Path:
@@ -428,9 +433,6 @@ class RenderPaths:
 
     def upload_record_for(self, slug: str) -> Path:
         return self.uploads / f"{slug}.json"
-
-    def x_upload_record_for(self, slug: str) -> Path:
-        return self.uploads / f"{slug}.x.json"
 
     def short_for(self, slug: str) -> Path:
         return self.shorts / f"{slug}.mp4"

@@ -322,7 +322,7 @@ long_form:
   output_resolution: [1920, 1080]
   output_fps: 30
   captions_enabled: true
-  panel_max_count: 60  # bumped 2026-05-13 — cloudrun_flux2_klein has no Metal watchdog (see mystoriesanimated.yaml)
+  panel_max_count: 60  # cloud z-image-turbo runs on L4 with no Metal watchdog (see mystoriesanimated.yaml)
   image_provider: cloudrun_z_image_turbo
   image_seed: 7777
   image_steps: 4

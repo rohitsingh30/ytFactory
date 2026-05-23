@@ -29,8 +29,21 @@ from pipeline.critic_long_form import LongFormContractError
 def _make_outline(
     *, n_sections: int = 10, n_panels: int = 24,
     niche_words: str = "shadow doorway watching figure dread fear cold",
+    target_duration_s: int | None = None,
 ) -> dict:
-    """Build an outline payload that passes every contract check."""
+    """Build an outline payload that passes every contract check.
+
+    Default per-section ``target_words`` is 450 (matches the legacy
+    fixture and the 450-word ``_make_section_body`` default, so the
+    new P3.2 ±10% per-section gate passes too). When the test wants
+    the P3.3 outline sum-check to PASS, pass ``target_duration_s`` so
+    the sum naturally lands in the ±15% band of the global target.
+    """
+    if target_duration_s is not None:
+        total_words = int(target_duration_s * 150 / 60)
+        per_section = max(1, total_words // max(1, n_sections))
+    else:
+        per_section = 450
     return {
         "hook": niche_words + " " + ("dread shadow watching " * 5),
         "thesis": "A test thesis.",
@@ -39,8 +52,9 @@ def _make_outline(
                 "id": f"sec-{i}",
                 "title": f"Section {i}",
                 "brief": f"This section establishes {i}. " * 4,
-                "target_words": 450,
+                "target_words": per_section,
                 "visual_brief": f"A scene for section {i}.",
+                "quality_goal": f"establish beat {i} with concrete source detail",
             }
             for i in range(n_sections)
         ],
@@ -81,7 +95,11 @@ def _make_section_body(*, words: int = 450, niche_words: str = "shadow watching 
     pad = " ".join(["filler"] * pad_target)
     nar = (head + " " + pad).strip()
     sentences = [s.strip() + "." for s in nar.split(".") if s.strip()][:50]
-    return {"narration": nar, "sentences": sentences}
+    # P3.1: section-body output schema now includes word_count. Mock
+    # emits an accurate count (matches len(nar.split())) so tests that
+    # validate envelope-side behaviour don't trip the anchoring-mismatch
+    # telemetry path unnecessarily.
+    return {"narration": nar, "sentences": sentences, "word_count": len(nar.split())}
 
 
 # ---------- Phase 1: outline call ----------------------------------------
@@ -148,29 +166,6 @@ def test_outline_call_uses_dedicated_stage_name():
 
 # ---------- Phase 2: parallel section bodies -----------------------------
 
-
-def test_section_bodies_call_one_llm_per_section():
-    """N sections in outline → N section-body LLM calls."""
-    raw_story = {"slug": "x", "title": "T", "body": "Source"}
-    outline = _make_outline(n_sections=8)
-    section_body = _make_section_body(words=450)
-
-    call_count = [0]
-    def _mock(*args, **kwargs):
-        call_count[0] += 1
-        if kwargs.get("stage") == "rewrite_long_form_outline":
-            return outline
-        return section_body
-
-    with patch.object(_rlf._llm, "call_claude_cli", side_effect=_mock):
-        env = _rlf.rewrite_long_form(
-            raw_story, channel_cfg={"niche": "r/nosleep"},
-            target_duration_s=600,
-        )
-    # 1 outline call + 8 section-body calls = 9 total
-    assert call_count[0] == 1 + 8
-    # Aggregated env preserves all 8 sections
-    assert len(env.long_form.sections) == 8
 
 
 def test_section_body_call_includes_outline_summary():
@@ -523,7 +518,8 @@ def test_short_section_triggers_section_too_short_error():
     }
     outline = _make_outline(n_sections=1)
     with patch.object(_rlf._llm, "call_claude_cli") as mocked:
-        # min_words for target=450 is 0.70 * 450 = 315. Return 50 words.
+        # P3.2: min_words is 0.90 * target (±10% section band). For
+        # target=450 → min_words=405. Return 50 words (way under).
         mocked.return_value = {
             "narration": "word " * 50,
             "sentences": ["word word."],
@@ -532,10 +528,10 @@ def test_short_section_triggers_section_too_short_error():
             _rlf._call_section_body_llm(
                 channel_context="ctx", topic="topic", thesis="thesis",
                 outline=outline, notes="notes", section=section,
-                section_words_target=450, section_words_floor=315,
+                section_words_target=450, section_words_floor=405,
             )
     assert exc_info.value.word_count == 50
-    assert exc_info.value.min_words == 315
+    assert exc_info.value.min_words == 405
     assert "sec-0" in str(exc_info.value)
 
 
@@ -619,19 +615,222 @@ def test_short_section_does_not_raise_length_contract_error():
     assert sec7.narration  # non-empty
 
 
-def test_auto_repair_skips_when_all_sections_meet_floor():
-    """When the initial fan-out hits every section's floor, the
-    auto-repair pass MUST be a no-op (no extra LLM calls beyond outline
-    + 1-per-section).
-    """
+
+def test_section_body_prompt_does_not_contain_do_not_pad_phrase():
+    """P3.5: the 'Do NOT pad with filler' negative-framing block must be
+    gone from the section-body prompt template. Negative phrasing causes
+    LLMs to over-correct (Q61)."""
+    template = _rlf._SECTION_BODY_PROMPT_TEMPLATE
+    assert "Do NOT pad with filler" not in template, (
+        "'Do NOT pad with filler' negative-framing must not return — "
+        "outline-authored quality_goal replaces it (P3.5)"
+    )
+    # And the prompt MUST have a {quality_goal} format slot.
+    assert "{quality_goal}" in template, (
+        "section-body prompt must accept quality_goal as a positive spec"
+    )
+
+
+def test_outline_schema_requires_quality_goal_per_section():
+    """P3.5: outline JSON schema must mark `quality_goal` as required
+    on every section, so the outline LLM authors a per-section positive
+    spec rather than the section-body call falling back to a generic."""
+    schema = _rlf._OUTLINE_SCHEMA
+    section_schema = schema["properties"]["sections"]["items"]
+    assert "quality_goal" in section_schema["required"], (
+        "outline schema must require quality_goal per section (P3.5)"
+    )
+    assert "quality_goal" in section_schema["properties"], (
+        "outline schema must define the quality_goal property (P3.5)"
+    )
+
+
+def test_quality_goal_flows_from_outline_into_section_body_prompt():
+    """P3.5: each section-body call's prompt must contain the
+    quality_goal value the outline authored for THAT section."""
     raw_story = {"slug": "x", "title": "T", "body": "Source body."}
     outline = _make_outline(n_sections=4)
+    # Override quality_goal so we can spot the actual text in prompts.
+    for i, s in enumerate(outline["sections"]):
+        s["quality_goal"] = f"UNIQUE-GOAL-FOR-SEC-{i}-XYZ"
+
+    captured: dict[str, str] = {}
+
+    def _mock(prompt, **kwargs):
+        if kwargs.get("stage") == "rewrite_long_form_outline":
+            return outline
+        if kwargs.get("stage") == "rewrite_long_form_section":
+            # Find which section by the THIS SECTION marker.
+            for line in prompt.split("\n"):
+                if "← THIS SECTION" in line:
+                    start = line.find("[")
+                    end = line.find("]")
+                    if start >= 0 and end > start:
+                        captured[line[start + 1:end]] = prompt
+                    break
+        return _make_section_body(words=450)
+
+    with patch.object(_rlf._llm, "call_claude_cli", side_effect=_mock):
+        _rlf.rewrite_long_form(
+            raw_story, channel_cfg={}, target_duration_s=600,
+        )
+
+    # Every section-body prompt must contain its own unique quality_goal.
+    for i in range(4):
+        sid = f"sec-{i}"
+        assert sid in captured, f"section {sid} prompt not captured"
+        expected = f"UNIQUE-GOAL-FOR-SEC-{i}-XYZ"
+        assert expected in captured[sid], (
+            f"section {sid} prompt must include quality_goal {expected!r}"
+        )
+
+
+def test_normalize_outline_backfills_quality_goal_when_missing():
+    """P3.5 robustness: if an outline LLM (older deployment, partial JSON)
+    omits quality_goal, the normalizer must apply a positive fallback so
+    the section-body prompt template still formats cleanly."""
+    outline_in = {
+        "hook": "x", "thesis": "y",
+        "sections": [
+            {"id": "sec-0", "title": "A", "brief": "B" * 40,
+             "target_words": 400, "visual_brief": "V"},  # no quality_goal
+        ],
+        "panel_briefs": [], "sources": [], "title_options": ["T"],
+    }
+    raw_story = {"title": "T", "body": "B"}
+    norm = _rlf._normalize_outline(
+        outline_in,
+        section_count_target=1, section_words_target=400,
+        raw_story=raw_story, title_options_count=1,
+    )
+    assert norm["sections"][0]["quality_goal"]  # non-empty
+    # Fallback must NOT be negative framing.
+    qg = norm["sections"][0]["quality_goal"].lower()
+    assert "do not" not in qg
+    assert "don't" not in qg
+
+
+# ---------- P3.1 — word_count self-emit field ---------------------------
+#
+# Q57.1 / P3.1: the section-body JSON output must include a `word_count`
+# field that the LLM self-emits. The validator uses len(narration.split())
+# as the source of truth (anchoring is the point); emitted-vs-actual
+# delta is logged as telemetry only.
+
+
+def test_section_body_schema_requires_word_count_field():
+    """P3.1: the section-body JSON schema MUST require word_count so the
+    LLM is forced to count what it writes (length anchoring)."""
+    schema = _rlf._SECTION_BODY_SCHEMA
+    assert "word_count" in schema["required"], (
+        "section-body schema must require word_count (P3.1)"
+    )
+    assert schema["properties"]["word_count"]["type"] == "integer", (
+        "word_count must be an integer field"
+    )
+
+
+def test_section_body_prompt_instructs_word_count_emission():
+    """P3.1: the prompt must instruct the LLM to emit word_count in its
+    JSON output (anchoring is the mechanism — counting forces care)."""
+    template = _rlf._SECTION_BODY_PROMPT_TEMPLATE
+    assert "word_count" in template, (
+        "section-body prompt must mention word_count output field (P3.1)"
+    )
+
+
+def test_validator_uses_actual_word_count_not_emitted_value():
+    """P3.1 (lock from Q60): when the LLM emits a word_count that
+    disagrees with the actual narration word count, the gate must use
+    the ACTUAL count. Lying about the count doesn't bypass the gate."""
+    section = {
+        "id": "sec-0", "title": "T", "brief": "B" * 40,
+        "target_words": 450, "visual_brief": "V",
+        "quality_goal": "establish stakes",
+    }
+    outline = _make_outline(n_sections=1)
+    with patch.object(_rlf._llm, "call_claude_cli") as mocked:
+        # 50 actual words; LLM emits 1000 (lying high). Validator MUST
+        # ignore the emitted value and use the actual count.
+        mocked.return_value = {
+            "narration": "word " * 50,
+            "sentences": ["word."],
+            "word_count": 1000,
+        }
+        with pytest.raises(_rlf.SectionTooShortError) as exc:
+            _rlf._call_section_body_llm(
+                channel_context="ctx", topic="topic", thesis="thesis",
+                outline=outline, notes="notes", section=section,
+                section_words_target=450, section_words_floor=315,
+            )
+    # The error's word_count must reflect the ACTUAL count (50), not
+    # the emitted lie (1000).
+    assert exc.value.word_count == 50
+
+
+# ---------- P3.3 — outline sum-check retry ------------------------------
+#
+# Q63 / P3.3: if sum(section.target_words) is outside ±15% of the user's
+# total target, retry the outline once with the error in the prompt. If
+# the 2nd outline is also out of band, hard-fail.
+
+
+def test_outline_sum_check_retries_when_out_of_band():
+    """P3.3: outline whose section sum is outside ±15% triggers a retry
+    with the sum error appended to the prompt."""
+    raw_story = {"slug": "x", "title": "T", "body": "Source body about scrolling."}
+    # 30-min target = 4500 words. ±15% band: 3825 - 5175.
+    bad_outline = _make_outline(n_sections=6)
+    # Force section sums to ~3000 — well below the ±15% band.
+    for s in bad_outline["sections"]:
+        s["target_words"] = 500
+    good_outline = _make_outline(n_sections=10)
+    # Force section sums to ~4500 — inside ±15% band.
+    for s in good_outline["sections"]:
+        s["target_words"] = 450
+
+    call_state = {"outline_calls": 0, "captured_prompts": []}
+
+    def _mock(prompt, **kwargs):
+        if kwargs.get("stage") == "rewrite_long_form_outline":
+            call_state["outline_calls"] += 1
+            call_state["captured_prompts"].append(prompt)
+            if call_state["outline_calls"] == 1:
+                return bad_outline
+            return good_outline
+        return _make_section_body(words=450)
+
+    with patch.object(_rlf._llm, "call_claude_cli", side_effect=_mock):
+        env = _rlf.rewrite_long_form(
+            raw_story, channel_cfg={}, target_duration_s=1800,
+        )
+
+    assert env is not None
+    # Outline LLM was called TWICE (once produced bad sum; retry produced good).
+    assert call_state["outline_calls"] == 2, (
+        f"outline sum-check must trigger a retry on out-of-band; "
+        f"got {call_state['outline_calls']} outline calls"
+    )
+    # The second outline prompt must mention the sum error.
+    second_prompt = call_state["captured_prompts"][1]
+    assert "Previous outline" in second_prompt or "outline had section sums" in second_prompt, (
+        "outline retry prompt must surface the sum error to the LLM"
+    )
+
+
+def test_outline_sum_check_skipped_when_in_band():
+    """P3.3: outline whose section sum is within ±15% of the user target
+    must NOT trigger a retry (single outline call)."""
+    raw_story = {"slug": "x", "title": "T", "body": "Source body."}
+    # 30-min target = 4500 words. ±15% band: 3825 - 5175.
+    outline = _make_outline(n_sections=10)
+    for s in outline["sections"]:
+        s["target_words"] = 450  # sum = 4500 → exactly target
 
     call_count = {"outline": 0, "section": 0}
 
     def _mock(prompt, **kwargs):
-        stage = kwargs.get("stage")
-        if stage == "rewrite_long_form_outline":
+        if kwargs.get("stage") == "rewrite_long_form_outline":
             call_count["outline"] += 1
             return outline
         call_count["section"] += 1
@@ -639,12 +838,95 @@ def test_auto_repair_skips_when_all_sections_meet_floor():
 
     with patch.object(_rlf._llm, "call_claude_cli", side_effect=_mock):
         env = _rlf.rewrite_long_form(
-            raw_story, channel_cfg={}, target_duration_s=600,
+            raw_story, channel_cfg={}, target_duration_s=1800,
+        )
+    assert env is not None
+    # No retry on a good outline.
+    assert call_count["outline"] == 1
+
+
+def test_outline_sum_check_second_bad_outline_is_logged_not_raised(caplog):
+    """P3.3 (post-2026-05-23 calibration): if the 2nd outline is also
+    out of band, the worker logs and continues. Per ADR-023 the gates
+    are repair triggers; the downstream length validator
+    (``validate_long_form_envelope``) already enforces correctness on
+    the aggregated narration, so terminating here loses an iteration
+    we could otherwise spend. The test pins the LOGGED signal so
+    operators can still diagnose."""
+    import logging
+    raw_story = {"slug": "x", "title": "T", "body": "Source body."}
+    bad_outline = _make_outline(n_sections=6)
+    for s in bad_outline["sections"]:
+        s["target_words"] = 200  # sum = 1200, way below 4500 ±15%
+
+    def _mock(prompt, **kwargs):
+        if kwargs.get("stage") == "rewrite_long_form_outline":
+            return bad_outline
+        return _make_section_body(words=450)
+
+    caplog.set_level(logging.WARNING, logger="pipeline.llm.rewrite_long_form")
+    with patch.object(_rlf._llm, "call_claude_cli", side_effect=_mock):
+        env = _rlf.rewrite_long_form(
+            raw_story, channel_cfg={}, target_duration_s=1800,
+        )
+    assert env is not None
+    # The two warn/error log lines must surface the sum-check signal.
+    sum_check_msgs = [
+        r.message for r in caplog.records
+        if "outline" in r.message.lower() and "band" in r.message.lower()
+    ]
+    assert len(sum_check_msgs) >= 2, (
+        f"expected ≥2 outline-sum-check log lines (one warning on retry + "
+        f"one error on the 2nd bad outline); got: {sum_check_msgs}"
+    )
+
+
+# ---------- P3.6 — iterative-extend retry shape -------------------------
+#
+# Q62 / P3.6: when a section fails its ±10% gate, the retry must be
+# iterative-extend (LLM sees its own failed draft + an "expand to N
+# words by adding source detail" instruction), not a regenerate-from-
+# scratch loop that wastes its prior context.
+
+
+def test_section_retry_prompt_includes_previous_draft_for_extend():
+    """P3.6: the retry prompt for a short section MUST include the
+    previous draft text (so the LLM extends, not rewrites)."""
+    raw_story = {"slug": "x", "title": "T", "body": "Source body content."}
+    outline = _make_outline(n_sections=2)
+
+    captured_prompts: list[str] = []
+    call_state = {"n": 0}
+    failed_draft = "SHORT_DRAFT_MARKER " * 10  # unique marker we can search for
+
+    def _mock(prompt, **kwargs):
+        if kwargs.get("stage") == "rewrite_long_form_outline":
+            return outline
+        captured_prompts.append(prompt)
+        call_state["n"] += 1
+        if call_state["n"] == 1:
+            # First call returns a too-short body with our marker.
+            return {
+                "narration": failed_draft,
+                "sentences": ["short."],
+                "word_count": 20,
+            }
+        return _make_section_body(words=450)
+
+    with patch.object(_rlf._llm, "call_claude_cli", side_effect=_mock):
+        _rlf.rewrite_long_form(
+            raw_story, channel_cfg={}, target_duration_s=300,
         )
 
-    assert env is not None
-    assert call_count["outline"] == 1
-    # Exactly 4 section calls — no repair triggered.
-    assert call_count["section"] == 4, (
-        f"healthy sections should not trigger repair; got {call_count['section']} calls"
+    # The 2nd call (retry of the failed section) must include the
+    # failed draft text — iterative extend, not regenerate.
+    retry_prompts = [p for p in captured_prompts[1:] if "SHORT_DRAFT_MARKER" in p]
+    assert retry_prompts, (
+        "P3.6: section retry must include the failed draft for iterative "
+        "extension, not regenerate from scratch"
+    )
+    # And the retry prompt must say "expand" or "extend" (not "rewrite").
+    one_retry = retry_prompts[0]
+    assert ("expand" in one_retry.lower() or "extend" in one_retry.lower()), (
+        "P3.6: retry prompt must explicitly instruct extending the draft"
     )

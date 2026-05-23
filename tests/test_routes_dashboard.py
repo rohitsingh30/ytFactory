@@ -15,7 +15,7 @@ import httpx
 from fastapi import FastAPI
 
 from tests._helpers import PROJECT_ROOT
-import control.dashboard_routes as dr
+import control.routes.dashboard_routes as dr
 
 
 SCRATCH = PROJECT_ROOT / "tests" / "_scratch_routes_dashboard"
@@ -86,7 +86,7 @@ class EnumerateUploadsTest(DashboardBase):
 
         gcs_rows = [("chan", "dup", {"video_id": "gcsdup"}), ("chan", "dup", {"video_id": "gcsdup2"}), ("gcschan", "gcslug", {"video_id": "gcsvid"}), ("bad", "no", {})]
         with patch.object(dr, "PROJECT_ROOT", SCRATCH), \
-             patch("control.storage.list_upload_records", return_value=gcs_rows):
+             patch("control.core.storage.list_upload_records", return_value=gcs_rows):
             rows = dr._enumerate_uploads()
         keys = {(c, s, v) for c, s, v, _ in rows}
         self.assertIn(("gcschan", "gcslug", "gcsvid"), keys)
@@ -99,13 +99,13 @@ class EnumerateUploadsTest(DashboardBase):
 
     def test_gcs_error_and_empty_sources(self) -> None:
         with patch.object(dr, "PROJECT_ROOT", SCRATCH), \
-             patch("control.storage.list_upload_records", side_effect=RuntimeError("no gcs")):
+             patch("control.core.storage.list_upload_records", side_effect=RuntimeError("no gcs")):
             rows = dr._enumerate_uploads()
         self.assertEqual(rows, [])
         self.assertIn("gcs:err(RuntimeError)", dr._LAST_ENUMERATE_SOURCE or "")
 
         with patch.object(dr, "PROJECT_ROOT", SCRATCH), \
-             patch("control.storage.list_upload_records", return_value=[]):
+             patch("control.core.storage.list_upload_records", return_value=[]):
             rows = dr._enumerate_uploads()
         self.assertEqual(rows, [])
         self.assertEqual(dr._LAST_ENUMERATE_SOURCE, "empty")

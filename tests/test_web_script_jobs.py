@@ -126,7 +126,7 @@ class ParseProgressTests(unittest.TestCase):
         self._write(
             "[1/4] TTS cached\n"
             "[2/4] beats cached\n"
-            "[3/4] cloudrun_flux2_klein: generating 11 images (custom prompts)…\n"
+            "[3/4] cloudrun_z_image_turbo: generating 11 images (custom prompts)…\n"
         )
         out = server._parse_script_job_progress(str(self.log))
         self.assertEqual(out["phase"], "images")
@@ -139,7 +139,7 @@ class ParseProgressTests(unittest.TestCase):
         lines = [
             "[1/4] TTS cached",
             "[2/4] beats cached",
-            "[3/4] cloudrun_flux2_klein: generating 11 images (custom prompts)…",
+            "[3/4] cloudrun_z_image_turbo: generating 11 images (custom prompts)…",
             "[image-done] beat 0 of 11",
             "[image-done] beat 1 of 11",
             "[image-done] beat 2 of 11",
@@ -159,7 +159,7 @@ class ParseProgressTests(unittest.TestCase):
         self._write(
             "[1/4] TTS cached\n"
             "[2/4] beats cached\n"
-            "[3/4] cloudrun_flux2_klein: generating 11 images\n"
+            "[3/4] cloudrun_z_image_turbo: generating 11 images\n"
             "[image-done] beat 10 of 11\n"
             "[4/4] ffmpeg compose (slideshow)…\n"
         )
@@ -178,7 +178,7 @@ class ParseProgressTests(unittest.TestCase):
         self._write(
             "[1/4] TTS cached\n"
             "[2/4] beats cached\n"
-            "[3/4] cloudrun_flux2_klein: generating 11 images\n"
+            "[3/4] cloudrun_z_image_turbo: generating 11 images\n"
             "Traceback (most recent call last):\n"
         )
         out = server._parse_script_job_progress(str(self.log), state="failed")
@@ -192,9 +192,9 @@ class ParseProgressTests(unittest.TestCase):
         lines = [
             "[1/4] TTS cached",
             "[2/4] beats cached",
-            "[3/4] cloudrun_flux2_klein: generating 11 images",
+            "[3/4] cloudrun_z_image_turbo: generating 11 images",
             "[image-done] beat 10 of 11",
-            "[3/4] cloudrun_flux2_klein: generating 3 images",
+            "[3/4] cloudrun_z_image_turbo: generating 3 images",
             "[image-done] beat 0 of 3",
         ]
         self._write("\n".join(lines))
@@ -219,7 +219,7 @@ class GetScriptJobProgressIntegrationTests(unittest.TestCase):
         self.log.write_text(
             "[1/4] TTS cached\n"
             "[2/4] beats cached\n"
-            "[3/4] cloudrun_flux2_klein: generating 11 images\n"
+            "[3/4] cloudrun_z_image_turbo: generating 11 images\n"
             "[image-done] beat 4 of 11\n"
         )
         self.job_id = "ittest" + str(int(time.time()))[-4:]

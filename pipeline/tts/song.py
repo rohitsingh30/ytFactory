@@ -3,7 +3,7 @@
 Used by rhymetimejunction (and any future channel that opts into sung
 audio via ``audio_provider: sunoapi`` or ``external_song`` in its
 config.yaml). NOT used for narration — narration goes through one of
-the TTS providers (kokoro, f5_tts, chatterbox, styletts2, indic_parler).
+the TTS providers (kokoro, chatterbox, styletts2).
 
 Two helpers:
 

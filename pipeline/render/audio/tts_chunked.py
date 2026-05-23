@@ -154,10 +154,9 @@ class TtsChunked:
     def _ref_audio_text(self, spec: Any) -> str | None:
         """Return the spoken transcript of the ref WAV at ``voice_id``.
 
-        Required by ``synth_long_narration`` when provider is in
-        ``("f5_tts", "cloudrun_f5")`` — the F5 model needs the
-        reference audio's text to condition cloning. Pulled from
-        ``spec.tts.ref_text`` when present (the channel YAML's
+        Required by ``synth_long_narration`` when provider expects a
+        voice-clone reference transcript (e.g. cloudrun_indicf5).
+        Pulled from ``spec.tts.ref_text`` when present (the channel YAML's
         ``long_form.tts_ref_text`` flows through build_spec into
         the optional TtsConfig field). When the YAML doesn't declare
         one, return ``None`` and let the underlying function raise

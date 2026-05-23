@@ -92,6 +92,30 @@ AZURE_OPENAI_API_VERSION="${AZURE_OPENAI_API_VERSION:-2025-04-01-preview}"
 AZURE_OPENAI_MODEL="${AZURE_OPENAI_MODEL:-gpt-5.3-chat}"
 AZURE_OPENAI_TOKEN_PARAM="${AZURE_OPENAI_TOKEN_PARAM:-max_completion_tokens}"
 
+# Resolve live Cloud Run URLs at deploy time. Hardcoding host hashes is
+# brittle — they change when a service is recreated. `gcloud run services
+# describe` returns the current canonical URL.
+_resolve_url() {
+  local svc="$1"
+  gcloud run services describe "${svc}" \
+    --project="${PROJECT}" --region="${REGION}" \
+    --format="value(status.url)" 2>/dev/null
+}
+TTS_CHATTERBOX_URL="$(_resolve_url ytfactory-tts-chatterbox)"
+TTS_INDICF5_URL="$(_resolve_url ytfactory-tts-indicf5)"
+IMAGE_Z_IMAGE_TURBO_URL="$(_resolve_url ytfactory-image-z-image-turbo)"
+ASR_URL="$(_resolve_url ytfactory-asr-whisper)"
+for pair in "ytfactory-tts-chatterbox:${TTS_CHATTERBOX_URL}" \
+            "ytfactory-tts-indicf5:${TTS_INDICF5_URL}" \
+            "ytfactory-image-z-image-turbo:${IMAGE_Z_IMAGE_TURBO_URL}" \
+            "ytfactory-asr-whisper:${ASR_URL}"; do
+  name="${pair%%:*}"; url="${pair#*:}"
+  if [ -z "${url}" ]; then
+    echo "ERROR: could not resolve Cloud Run URL for ${name}" >&2
+    exit 1
+  fi
+done
+
 echo "==> Creating/updating Cloud Run JOB ${JOB}"
 gcloud run jobs deploy "${JOB}" \
   --image="${IMAGE}" \
@@ -103,7 +127,7 @@ gcloud run jobs deploy "${JOB}" \
   --max-retries=0 \
   --task-timeout=3600 \
   --update-secrets="AZURE_OPENAI_API_KEY=azure-openai-key:latest" \
-  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=ytfactory-prod-v3-artifacts|CLOUDRUN_TTS_CHATTERBOX_URL=https://tts-chatterbox-e67vyhiy6a-as.a.run.app|CLOUDRUN_TTS_INDICF5_URL=https://ytfactory-tts-indicf5-e67vyhiy6a-as.a.run.app|CLOUDRUN_TTS_INDICPARLER_URL=https://ytfactory-tts-indicparler-e67vyhiy6a-as.a.run.app|CLOUDRUN_IMAGE_FLUX2_KLEIN_URL=https://ytfactory-image-flux2-klein-e67vyhiy6a-as.a.run.app|CLOUDRUN_IMAGE_QWEN_IMAGE_URL=https://ytfactory-image-qwen-e67vyhiy6a-as.a.run.app|CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL=https://ytfactory-image-z-image-turbo-e67vyhiy6a-as.a.run.app|CLOUDRUN_IMAGE_FLUX2_DEV_URL=https://ytfactory-image-flux2-dev-e67vyhiy6a-as.a.run.app|CLOUDRUN_ASR_URL=https://ytfactory-asr-whisper-e67vyhiy6a-as.a.run.app|CLOUDRUN_TTS_DISABLE_FALLBACK=1|CLOUDRUN_IMAGE_DISABLE_FALLBACK=1|YTFACTORY_RENDER_MODE=real|YTFACTORY_LLM_BACKEND=azure_openai|AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}|AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}|AZURE_OPENAI_MODEL=${AZURE_OPENAI_MODEL}|AZURE_OPENAI_TOKEN_PARAM=${AZURE_OPENAI_TOKEN_PARAM}|YTFACTORY_ASR_PROVIDER=faster_whisper|YTFACTORY_PROMPT_REFINER=1|LOG_LEVEL=INFO"
+  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=ytfactory-prod-v3-artifacts|CLOUDRUN_TTS_CHATTERBOX_URL=${TTS_CHATTERBOX_URL}|CLOUDRUN_TTS_INDICF5_URL=${TTS_INDICF5_URL}|CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL=${IMAGE_Z_IMAGE_TURBO_URL}|CLOUDRUN_ASR_URL=${ASR_URL}|CLOUDRUN_TTS_DISABLE_FALLBACK=1|CLOUDRUN_IMAGE_DISABLE_FALLBACK=1|YTFACTORY_RENDER_MODE=real|YTFACTORY_LLM_BACKEND=azure_openai|AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}|AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}|AZURE_OPENAI_MODEL=${AZURE_OPENAI_MODEL}|AZURE_OPENAI_TOKEN_PARAM=${AZURE_OPENAI_TOKEN_PARAM}|YTFACTORY_ASR_PROVIDER=faster_whisper|YTFACTORY_PROMPT_REFINER=1|LOG_LEVEL=INFO"
 
 # Audit T1.11 — was --set-secrets="AZURE_OPENAI_API_KEY=...".
 # --set-secrets is REPLACE-not-merge, so any subsequent

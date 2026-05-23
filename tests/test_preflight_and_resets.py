@@ -12,7 +12,6 @@ These tests cover:
 - power_check no-ops on non-Darwin platforms
 - power_check no-ops when pmset is missing
 - reset_mlx_state never raises even if MLX / audio modules aren't loaded
-- reset_mlx_state actually calls audio.reset_f5_state when drop_f5=True
 - Each renderer's main() / render() calls power_check
 - Each renderer's main() / render() calls reset_mlx_state after TTS
 """
@@ -95,8 +94,7 @@ class PowerCheckTests(unittest.TestCase):
 
 class ResetMlxStateTests(unittest.TestCase):
     """``reset_mlx_state`` is a hygiene call. It must never raise even if
-    pipeline.audio.audio / pipeline.images / mlx aren't importable. And when
-    they ARE importable, it must actually drop the F5 singleton.
+    pipeline.images / mlx aren't importable.
 
     All tests stub out mlx.core so the real Metal device is never
     touched (avoids nanobind re-registration warnings under repeated
@@ -123,20 +121,12 @@ class ResetMlxStateTests(unittest.TestCase):
             except Exception as e:  # noqa: BLE001
                 self.fail(f"reset_mlx_state should not raise: {e}")
 
-    def test_drop_f5_is_now_a_noop(self):
-        # 2026-05-09 (laptop nuclear cleanup): the F5-MLX singleton was
-        # removed when local TTS providers were ripped out. drop_f5 stays
-        # in the signature for back-compat but does nothing.
-        preflight.reset_mlx_state(drop_f5=True, label="noop-test")
-        # No assertion — function should just complete without raising
-        # and without calling any non-existent reset_f5_state.
-
     def test_calls_image_reset_when_available(self):
         from pipeline.images import images as _img
         # If reset_image_state isn't defined yet (Tier-3 hasn't shipped),
         # add a stub via patch.object — but use create=True to allow it.
         with patch.object(_img, "reset_image_state", MagicMock(), create=True) as mock_reset:
-            preflight.reset_mlx_state(drop_f5=False, drop_image=True)
+            preflight.reset_mlx_state(drop_image=True)
         mock_reset.assert_called_once()
 
     def test_skips_image_reset_when_function_missing(self):
@@ -147,7 +137,7 @@ class ResetMlxStateTests(unittest.TestCase):
         if had_attr:
             delattr(_img, "reset_image_state")
         try:
-            preflight.reset_mlx_state(drop_f5=False, drop_image=True)
+            preflight.reset_mlx_state(drop_image=True)
         finally:
             if had_attr and original is not None:
                 _img.reset_image_state = original  # type: ignore[attr-defined]
@@ -166,27 +156,6 @@ class RendererPreflightWiringTests(unittest.TestCase):
         from pipeline.render import __main__ as engine_main
         src = self._read(engine_main)
         self.assertIn("power_check(", src)
-
-
-class RendererF5ResetWiringTests(unittest.TestCase):
-    """Each engine that may use F5-TTS-MLX must drop the singleton at the
-    audio-stage boundary so 1.35 GB doesn't leak into video/mux."""
-
-    def _read(self, mod) -> str:
-        with open(mod.__file__) as f:
-            return f.read()
-
-    def test_short_engine_drops_f5_at_stage_boundary(self):
-        from pipeline.render import short_engine
-        src = self._read(short_engine)
-        self.assertIn("reset_mlx_state(drop_f5=True", src)
-        self.assertIn("short stage-1 TTS", src)
-
-    def test_long_engine_drops_f5_at_stage_boundary(self):
-        from pipeline.render import long_engine
-        src = self._read(long_engine)
-        self.assertIn("reset_mlx_state(drop_f5=True", src)
-        self.assertIn("long stage-1 TTS", src)
 
 
 if __name__ == "__main__":

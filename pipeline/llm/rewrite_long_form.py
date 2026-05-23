@@ -104,7 +104,8 @@ OUTPUT — return ONE JSON object with EXACTLY these keys:
 
   sections        — array of {section_count_target} section STUBS
                     (one per ~3 minutes of narration). Each stub is
-                    {{id, title, brief, target_words, visual_brief}}:
+                    {{id, title, brief, target_words, visual_brief,
+                    quality_goal}}:
                       id           — kebab-case slug, unique
                       title        — short chapter label (≤ 80 chars)
                       brief        — 2-3 sentence summary of WHAT
@@ -119,6 +120,20 @@ OUTPUT — return ONE JSON object with EXACTLY these keys:
                       visual_brief — ONE sentence describing what the
                                      camera / illustration should
                                      show for THIS section.
+                      quality_goal — ONE short phrase capturing what
+                                     GOOD looks like for THIS section
+                                     specifically — what emotional /
+                                     narrative beat it must land
+                                     ("escalate tension", "reveal
+                                     the twist", "humanise the
+                                     victim", "deliver the punchline",
+                                     "set the stakes concretely").
+                                     Authored per-section, not
+                                     templated — this becomes a
+                                     POSITIVE specification handed
+                                     to the body-writer LLM so it
+                                     knows what to AIM for, not what
+                                     to avoid.
 
   panel_briefs    — array of {{scene, hold_s, after_section_id}}
                     panel cues. AT LEAST {panel_min_per_section}
@@ -229,13 +244,17 @@ _OUTLINE_SCHEMA: dict = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["id", "title", "brief"],
+                "required": ["id", "title", "brief", "quality_goal"],
                 "properties": {
                     "id":           {"type": "string", "minLength": 1, "maxLength": 80},
                     "title":        {"type": "string", "minLength": 1, "maxLength": 120},
                     "brief":        {"type": "string", "minLength": 30, "maxLength": 2000},
                     "target_words": {"type": ["integer", "null"]},
                     "visual_brief": {"type": ["string", "null"]},
+                    # Outline-authored per-section positive spec for the
+                    # body call. Replaces the old negative "Do NOT pad
+                    # with filler" framing (Q61). Short phrase / clause.
+                    "quality_goal": {"type": "string", "minLength": 3, "maxLength": 200},
                 },
             },
         },
@@ -299,35 +318,46 @@ YOUR SECTION ({section_id}):
   Title:        {section_title}
   Visual brief: {visual_brief}
 
-  MANDATORY WORD COUNT: write between {min_words} and {max_words}
-  words for this section. Target {target_words}.
-  ★ The post-call validator REJECTS any narration below {min_words}
-    words. A rejected section is re-prompted, costing latency and
-    LLM budget. Hit the minimum on the first attempt.
-  ★ Do NOT pad with filler ("as we've seen", "in conclusion",
-    rhetorical questions, restating the section title). Add MORE
-    concrete material from the source: specific names, dates,
-    numbers, locations, quotes, sensory detail, cause-and-effect
-    chains. Length comes from substance, not stuffing.
+  Quality goal for THIS section: {quality_goal}
+  ★ This is the POSITIVE specification — what success looks like
+    for this section specifically. Aim for it; build every sentence
+    in service of it.
+
+  Target word count: {target_words} words. Acceptable range:
+  {min_words}-{max_words} words.
+  ★ Length comes from substance. Anchor in concrete source material:
+    specific names, dates, numbers, locations, direct quotes, sensory
+    detail, cause-and-effect chains. The more grounded the section,
+    the more naturally it reaches the target.
 {emphasis_block}
   Directorial brief from the outline:
   {section_brief}
 
 OUTPUT — return ONE JSON object with EXACTLY these keys:
 
-  narration — string. The actual prose the narrator reads. NO
-              chapter prefixes ("Section 3:" / "Chapter:"). Plain
-              prose. Vary sentence length naturally. End on a small
-              open loop pulling viewers into the next section
-              (unless this is the final section — then close with
-              the arc payoff plus a binary-opinion CTA the closer
-              can attach to).
+  narration  — string. The actual prose the narrator reads. NO
+               chapter prefixes ("Section 3:" / "Chapter:"). Plain
+               prose. Vary sentence length naturally. End on a small
+               open loop pulling viewers into the next section
+               (unless this is the final section — then close with
+               the arc payoff plus a binary-opinion CTA the closer
+               can attach to).
 
-  sentences — array of strings. The same narration, split into
-              individual sentences (for caption alignment). Each
-              array element should be ONE complete sentence,
-              roughly 5-25 words. Keep punctuation; the renderer
-              uses these as caption cue boundaries.
+  sentences  — array of strings. The same narration, split into
+               individual sentences (for caption alignment). Each
+               array element should be ONE complete sentence,
+               roughly 5-25 words. Keep punctuation; the renderer
+               uses these as caption cue boundaries.
+
+  word_count — integer. The number of words in `narration` (split
+               on whitespace). EMIT this AFTER writing the
+               narration: literally count the words you just wrote
+               and put the integer here. This anchors length —
+               counting forces the model to attend to length while
+               writing. The validator uses len(narration.split())
+               as the source of truth; if your emitted count
+               disagrees, that's logged as telemetry but is not
+               a failure mode. What matters is that you counted.
 
 CRAFT RULES (same as outline — applied to body):
 
@@ -349,7 +379,7 @@ preface, no markdown fence. Just the object.
 _SECTION_BODY_SCHEMA: dict = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["narration", "sentences"],
+    "required": ["narration", "sentences", "word_count"],
     "properties": {
         "narration": {"type": "string", "minLength": 50},
         "sentences": {
@@ -357,6 +387,13 @@ _SECTION_BODY_SCHEMA: dict = {
             "minItems": 1,
             "items": {"type": "string", "minLength": 1},
         },
+        # P3.1 / Q57.1 / Q60: LLM self-emits its own count of the
+        # narration body. Anchoring mechanism — counting forces the
+        # model to attend to length while writing. Validator uses the
+        # ACTUAL count (len(narration.split())) as truth; emitted-vs-
+        # actual delta is logged as telemetry only (no hard fail on
+        # mismatch — the act of emitting IS the fix).
+        "word_count": {"type": "integer", "minimum": 0},
     },
 }
 
@@ -613,6 +650,37 @@ def _call_outline_llm(
 # output tokens).
 _OUTLINE_MAX_RETRIES = 2
 
+# P3.3 (Q63): sum-check tolerance — if the outline's
+# sum(section.target_words) is outside ±15% of the user's total
+# target, retry the outline ONCE with the error appended to the
+# prompt. If the 2nd outline is also out of band, hard-fail (the
+# downstream length validator would catch it but at much higher cost
+# — wasted N section LLM calls before failing).
+_OUTLINE_SUM_TOLERANCE_FRAC = 0.15
+
+
+def _outline_section_sum(outline: dict) -> int:
+    """Return sum(section.target_words) for the outline, ignoring
+    sections whose ``target_words`` field is missing or unparsable."""
+    total = 0
+    for s in outline.get("sections") or []:
+        try:
+            total += int(s.get("target_words") or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _outline_sum_in_band(outline: dict, target_words: int) -> bool:
+    """True iff ``sum(section.target_words)`` is within ±15% of
+    ``target_words``. ``target_words=0`` short-circuits to True (no
+    band to enforce; legacy behaviour)."""
+    if target_words <= 0:
+        return True
+    total = _outline_section_sum(outline)
+    band = _OUTLINE_SUM_TOLERANCE_FRAC * target_words
+    return abs(total - target_words) <= band
+
 
 def _call_outline_with_retry(
     *, channel_context: str, topic: str, notes: str,
@@ -623,6 +691,7 @@ def _call_outline_with_retry(
     extra_context: str, extra_rules: str,
     raw_story: dict, section_words_target_for_synth: int,
     section_count_target_for_synth: int,
+    total_words_target: int = 0,
 ) -> dict:
     """Call ``_call_outline_llm`` with retry on transient failures,
     content-filter rejections, and pathologically empty results.
@@ -632,8 +701,16 @@ def _call_outline_with_retry(
     rather than aborting. The downstream length validator will surface
     the gap as a soft warning — the user sees a watchable video and
     a clear ``synthesized_outline_fallback`` log line in the trace.
+
+    P3.3 (Q63): after a successful outline returns, check
+    ``sum(section.target_words)`` vs ``total_words_target``. If
+    outside ±15%, retry ONCE with the error appended to ``extra_rules``.
+    If the second outline is also out of band, raise — two bad
+    outlines in a row is a structural signal worth surfacing instead
+    of wasting N section-body calls.
     """
     last_err: str | None = None
+    sum_check_used = False
     for attempt in range(1 + _OUTLINE_MAX_RETRIES):
         try:
             outline = _call_outline_llm(
@@ -684,6 +761,46 @@ def _call_outline_with_retry(
             _logger.warning(
                 "outline LLM returned empty sections (attempt %d/%d); retrying",
                 attempt + 1, _OUTLINE_MAX_RETRIES + 1,
+            )
+            continue
+
+        # P3.3 (Q63): sum-check. ONE retry on out-of-band with the
+        # error appended to extra_rules. A 2nd out-of-band outline is
+        # accepted with a logger.error — the downstream critic
+        # (`validate_long_form_envelope`) catches length violations
+        # via the per-section + total bands authoritatively, so the
+        # outline shape becoming-best-effort here loses nothing the
+        # downstream gate doesn't re-detect. Per ADR-023 the gates are
+        # repair triggers, not termination — preferring the outline
+        # we have over hard-failing the whole render keeps the system
+        # forward-progressing.
+        if total_words_target > 0 and not _outline_sum_in_band(outline, total_words_target):
+            section_sum = _outline_section_sum(outline)
+            delta_pct = ((section_sum - total_words_target) / total_words_target) * 100
+            if sum_check_used:
+                _logger.error(
+                    "outline section sum out of ±15%% band on retry too: "
+                    "sum=%d target=%d delta=%+.1f%% — accepting outline "
+                    "and relying on the downstream length validator.",
+                    section_sum, total_words_target, delta_pct,
+                )
+                return outline
+            sum_check_used = True
+            sum_error_block = (
+                f"\n\nIMPORTANT — previous outline had section sums totaling "
+                f"{section_sum} words against the user-requested total of "
+                f"{total_words_target} words ({delta_pct:+.1f}% off). "
+                f"Reallocate target_words across sections so the sum is "
+                f"within ±15% (range: "
+                f"{int(total_words_target * (1 - _OUTLINE_SUM_TOLERANCE_FRAC))}-"
+                f"{int(total_words_target * (1 + _OUTLINE_SUM_TOLERANCE_FRAC))} words). "
+                f"Keep the same section_count_target; redistribute weight."
+            )
+            extra_rules = (extra_rules or "") + sum_error_block
+            _logger.warning(
+                "outline sum-check OUT OF BAND (sum=%d target=%d delta=%+.1f%%); "
+                "retrying with sum error in prompt",
+                section_sum, total_words_target, delta_pct,
             )
             continue
 
@@ -741,6 +858,10 @@ def _synthesize_outline(
             "brief": brief_chunks[i],
             "target_words": section_words_target,
             "visual_brief": None,
+            # Synthesized fallback — generic positive spec. The body
+            # LLM still gets a non-empty quality_goal so the prompt
+            # template formats correctly.
+            "quality_goal": "deliver a substantive, source-anchored beat",
         }
         for i in range(section_count_target)
     ]
@@ -803,11 +924,25 @@ def _normalize_outline(
             tw = word_floor_per_section
         elif tw > word_ceil_per_section:
             tw = word_ceil_per_section
+        # quality_goal — outline-authored per Q61/P3.5. If the LLM
+        # didn't emit one (older deployments, partial JSON repair),
+        # fall back to a generic positive spec so the body-prompt
+        # template still formats correctly. Logged at info so
+        # dashboards can flag stale outlines that rely on the fallback.
+        quality_goal = (s.get("quality_goal") or "").strip()
+        if not quality_goal:
+            quality_goal = "deliver a substantive, source-anchored beat"
+            _logger.info(
+                "_normalize_outline: section %s missing quality_goal; "
+                "applying generic positive-spec fallback",
+                sid,
+            )
         normalized_sections.append({
             **s,
             "id": sid,
             "title": stitle,
             "target_words": tw,
+            "quality_goal": quality_goal,
         })
 
     if len(normalized_sections) > section_count_cap:
@@ -896,23 +1031,44 @@ def _count_words(text: str | None) -> int:
 
 
 def _emphasis_block_for_retry(
-    *, prev_word_count: int, min_words: int, target_words: int
+    *, prev_word_count: int, min_words: int, target_words: int,
+    prev_short_draft: str = "",
 ) -> str:
     """Build the retry-only emphasis block injected into the section-body
     prompt when the previous attempt under-delivered.
 
-    Returns an empty string on the first attempt (no retry context yet).
+    P3.6 (Q62) — iterative-extend: when ``prev_short_draft`` is supplied
+    the block includes the failed draft verbatim with an explicit
+    instruction to EXTEND it (add detail), not REWRITE from scratch.
+    That preserves the LLM's prior context investment instead of
+    discarding it. Returns an empty string on the first attempt (no
+    retry context yet).
     """
     if prev_word_count <= 0:
         return ""
-    return (
+    block = (
         "\n  ⚠ RETRY NOTICE — your previous attempt for this section was "
         f"{prev_word_count} words. The minimum is {min_words}; the target "
         f"is {target_words}. You MUST write more substantive narration "
         "this time — add concrete source-anchored detail (specific names, "
         "dates, places, sensory description, cause-and-effect). Do not "
-        "restate what you already wrote; expand it.\n"
+        "restate what you already wrote; expand it."
     )
+    draft = (prev_short_draft or "").strip()
+    if draft:
+        # Iterative-extend payload (P3.6) — feed the failed draft back
+        # in so the LLM extends rather than re-rolling from scratch.
+        block += (
+            "\n  ⚠ ITERATIVE-EXTEND — previous draft below; EXTEND it by "
+            f"adding source detail until the body reaches {target_words} "
+            "words (±10%). Keep the existing sentences verbatim where they "
+            "work; weave new sentences in between them. Do not rewrite. Do "
+            "not paraphrase. Extend.\n  PREVIOUS DRAFT:\n  ---\n  "
+            + draft.replace("\n", "\n  ")
+            + "\n  ---"
+        )
+    block += "\n"
+    return block
 
 
 def _call_section_body_llm(
@@ -921,6 +1077,7 @@ def _call_section_body_llm(
     section_words_target: int, section_words_floor: int,
     extra_context: str = "",
     prev_short_word_count: int = 0,
+    prev_short_draft: str = "",
 ) -> dict:
     """Run ONE section-body LLM call. Returns the raw section-body dict
     with ``{narration, sentences}``.
@@ -938,11 +1095,20 @@ def _call_section_body_llm(
     section_title = section.get("title", "")
     section_brief = section.get("brief", "")
     visual_brief = section.get("visual_brief") or "(no specific visual brief)"
+    # Outline-authored positive specification for this section. Empty
+    # string is a benign fallback (renders as "(no specific quality
+    # goal)" so the prompt template still formats).
+    quality_goal = (section.get("quality_goal") or
+                    "deliver a substantive, source-anchored beat").strip()
     target_words = int(section.get("target_words") or section_words_target)
-    # Sectioned word range — narrower than the channel-wide range to
-    # discourage one section from sprawling and crowding others.
-    min_words = max(40, int(target_words * 0.70))
-    max_words = max(80, int(target_words * 1.30))
+    # P3.2 (Q59): per-section ±10% of section target. Matches the
+    # post-rewrite gate so the LLM is asked for the band the validator
+    # checks — no asymmetry between "what we instruct" and "what we
+    # accept". Floor at 40 / 80 so very short sections (intro/outro
+    # under tight target_words) don't collapse the band to zero.
+    from pipeline.critic_long_form import SECTION_TOLERANCE_FRAC  # noqa: PLC0415
+    min_words = max(40, int(target_words * (1.0 - SECTION_TOLERANCE_FRAC)))
+    max_words = max(80, int(target_words * (1.0 + SECTION_TOLERANCE_FRAC)))
 
     outline_summary = _outline_summary_for_section_call(outline, section_id)
 
@@ -950,6 +1116,7 @@ def _call_section_body_llm(
         prev_word_count=prev_short_word_count,
         min_words=min_words,
         target_words=target_words,
+        prev_short_draft=prev_short_draft,
     )
 
     prompt = _SECTION_BODY_PROMPT_TEMPLATE.format(
@@ -961,6 +1128,7 @@ def _call_section_body_llm(
         section_id=section_id,
         section_title=section_title,
         visual_brief=visual_brief,
+        quality_goal=quality_goal,
         target_words=target_words,
         min_words=min_words,
         max_words=max_words,
@@ -985,7 +1153,19 @@ def _call_section_body_llm(
         raise RuntimeError(
             f"_call_section_body_llm: section {section_id!r} returned empty narration"
         )
+    # P3.1 / Q60: actual word count is the source of truth. Emitted
+    # count is anchoring telemetry only — log the delta when present
+    # so dashboards can spot persistent miscounting (a real-world
+    # signal that the LLM is hallucinating its self-count, distinct
+    # from the length issue itself).
     word_count = _count_words(narration)
+    emitted = raw.get("word_count")
+    if isinstance(emitted, int) and emitted != word_count:
+        _logger.info(
+            "section %s emitted word_count=%d but actual=%d (delta=%+d) — "
+            "validator uses actual (P3.1 anchoring telemetry)",
+            section_id, emitted, word_count, emitted - word_count,
+        )
     if word_count < min_words:
         raise SectionTooShortError(
             f"section {section_id!r} narration is {word_count} words; "
@@ -1038,8 +1218,11 @@ def _generate_all_section_bodies(
     def _attempt(section: dict) -> tuple[dict, dict | None, str | None]:
         last_err: str | None = None
         # Carries forward across attempts so a retry knows the prior
-        # under-delivered word count and can show the LLM the gap.
+        # under-delivered word count AND the previous draft text
+        # (P3.6 iterative-extend — feed the failed draft back so the
+        # LLM extends rather than re-rolls from scratch).
         prev_short_word_count = 0
+        prev_short_draft = ""
         # Best body so far — if every attempt under-delivers we keep
         # the longest one rather than falling back to the directorial
         # brief (which is usually ~30-60 words and guaranteed to fail
@@ -1056,11 +1239,13 @@ def _generate_all_section_bodies(
                     section_words_floor=section_words_floor,
                     extra_context=extra_context,
                     prev_short_word_count=prev_short_word_count,
+                    prev_short_draft=prev_short_draft,
                 )
                 return section, body, None
             except SectionTooShortError as exc:
                 last_err = f"SectionTooShortError: {exc}"
                 prev_short_word_count = exc.word_count
+                prev_short_draft = exc.narration
                 if exc.word_count > best_short_count:
                     best_short_body = {
                         "narration": exc.narration,
@@ -1166,13 +1351,19 @@ def _repair_short_section_bodies(
     Order is preserved. Sections whose repair call ALSO under-delivers
     keep their best-of result (per the inner ``_attempt`` fallback).
     """
+    from pipeline.critic_long_form import SECTION_TOLERANCE_FRAC  # noqa: PLC0415
     needs_repair: list[tuple[int, dict]] = []
     for idx, s in enumerate(sections_with_bodies):
         body = s.get("_body") or {}
         narration = body.get("narration") if isinstance(body, dict) else ""
         target_words = int(s.get("target_words") or section_words_target)
-        min_words = max(40, int(target_words * 0.70))
-        if _count_words(narration) < min_words:
+        min_words = max(40, int(target_words * (1.0 - SECTION_TOLERANCE_FRAC)))
+        max_words = max(80, int(target_words * (1.0 + SECTION_TOLERANCE_FRAC)))
+        actual = _count_words(narration)
+        # P3.2: repair when section is outside the symmetric band, not
+        # only when under the floor — over-long sections need trimming
+        # too (currently surfaced via length_over_delivered_hard).
+        if actual < min_words or actual > max_words:
             needs_repair.append((idx, s))
 
     if not needs_repair:
@@ -1186,7 +1377,7 @@ def _repair_short_section_bodies(
 
     def _repair_one(section: dict) -> tuple[dict | None, str | None]:
         target_words = int(section.get("target_words") or section_words_target)
-        min_words = max(40, int(target_words * 0.70))
+        min_words = max(40, int(target_words * (1.0 - SECTION_TOLERANCE_FRAC)))
         # Seed the prompt with the current short word count so the
         # emphasis block in the section-body prompt fires loudly.
         prev_body = section.get("_body") or {}
@@ -1200,7 +1391,9 @@ def _repair_short_section_bodies(
         last_err: str | None = None
         best_body = prev_body if isinstance(prev_body, dict) and prev_narration else None
         best_count = prev_count if prev_narration else 0
-        # Two repair attempts — each pass shows the LLM the gap explicitly.
+        prev_draft_text = prev_narration if prev_narration else ""
+        # Two repair attempts — each pass shows the LLM the gap explicitly
+        # AND feeds back the previous draft for iterative-extend (P3.6).
         for attempt in range(2):
             try:
                 body = _call_section_body_llm(
@@ -1211,11 +1404,13 @@ def _repair_short_section_bodies(
                     section_words_floor=section_words_floor,
                     extra_context=extra_context,
                     prev_short_word_count=prev_count,
+                    prev_short_draft=prev_draft_text,
                 )
                 return body, None
             except SectionTooShortError as exc:
                 last_err = f"SectionTooShortError: {exc}"
                 prev_count = exc.word_count
+                prev_draft_text = exc.narration
                 if exc.word_count > best_count:
                     best_body = {
                         "narration": exc.narration,
@@ -1303,12 +1498,20 @@ def _aggregate(
         narration = (body.get("narration") or s.get("brief") or "").strip()
         if not narration:
             continue
+        # P3.2: thread per-section target_words from the outline so the
+        # validator can apply its ±10% per-section gate against the
+        # section's OWN target (not the symmetric-around-mean rule).
+        try:
+            target_words = int(s.get("target_words")) if s.get("target_words") is not None else None
+        except (TypeError, ValueError):
+            target_words = None
         sections.append(LongFormSection(
             id=sid,
             title=stitle,
             narration=narration,
             target_s=None,  # audio length wins; the rewriter no longer hints target_s
             visual_brief=(s.get("visual_brief") or None),
+            target_words=target_words,
         ))
 
     # Panels — from the outline's panel_briefs[]. Defensive about
@@ -1495,6 +1698,7 @@ def rewrite_long_form(
         raw_story=raw_story,
         section_words_target_for_synth=section_words_target,
         section_count_target_for_synth=section_count_target,
+        total_words_target=words_target,  # P3.3 — sum-check tolerance
     )
     # Defensive normalization — even after retry the LLM can return a
     # bloated section list, missing hook/thesis, or per-section
@@ -1553,10 +1757,17 @@ def rewrite_long_form(
     # giving up. Tonal / source-fidelity / banned-anecdote violations
     # are NOT repairable here (they need different prompts, not longer
     # ones) and continue to hard-fail.
+    # P3.2 introduced over/under split for total length violations.
+    # All length-class hard codes are repairable via the iterative
+    # extend retry (P3.6); both directions of section-target miss
+    # are repairable too.
     _LENGTH_REPAIRABLE_CODES = {
         "section_degradation_hard",
+        "section_degradation_soft",
         "length_under_delivered_hard",
         "length_under_delivered_soft",
+        "length_over_delivered_hard",
+        "length_over_delivered_soft",
     }
     hard = [v for v in violations if v.severity == "hard"]
     length_hard = [v for v in hard if v.code in _LENGTH_REPAIRABLE_CODES]

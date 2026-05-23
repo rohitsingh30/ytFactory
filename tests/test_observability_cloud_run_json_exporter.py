@@ -145,10 +145,10 @@ class TestRenderLogRecord(unittest.TestCase):
             trace_id=0x1234567890abcdef1234567890abcdef,
             span_id=0xfedcba0987654321,
         )
-        payload = render_log_record(rec, project_id="ytfactory-prod-v2")
+        payload = render_log_record(rec, project_id="ytfactory-prod-v3")
         self.assertEqual(
             payload["logging.googleapis.com/trace"],
-            "projects/ytfactory-prod-v2/traces/"
+            "projects/ytfactory-prod-v3/traces/"
             "1234567890abcdef1234567890abcdef",
         )
         self.assertEqual(
@@ -279,10 +279,8 @@ class TestLockstepWithCloudShared(unittest.TestCase):
     # Used both for grep discovery AND for the iteration loop below.
     PER_SERVICE_DIRS = (
         "clone-video-worker", "editing-agent",
-        "image-flux2-klein", "image-hidream", "image-qwen",
         "image-z-image-turbo", "render-worker-v2",
-        "tts-chatterbox", "tts-cosyvoice", "tts-f5", "tts-higgs",
-        "tts-indicf5", "tts-indicparler", "web-server",
+        "tts-chatterbox", "tts-indicf5", "web-server",
     )
 
     def _read_helper(self, path):

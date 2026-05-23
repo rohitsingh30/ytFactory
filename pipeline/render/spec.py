@@ -428,8 +428,8 @@ class RenderSpec:
     # -- Audio -------------------------------------------------------------
     audio_mode: AudioMode = AudioMode.VOICE
     voice_provider: str | None = None
-    """e.g. ``cloudrun_chatterbox``, ``cloudrun_indicparler``,
-    ``f5_tts``, ``kokoro``. None = use channel YAML default."""
+    """e.g. ``cloudrun_chatterbox``, ``cloudrun_indicf5``,
+    ``kokoro``. None = use channel YAML default."""
 
     voice_id: str | None = None
     """Voice ref WAV path OR bare voice id. None = channel default."""
@@ -462,6 +462,12 @@ class RenderSpec:
     music_policy: MusicPolicy = MusicPolicy.DUCKED_LOOP
     lower_thirds: bool = False
     chapter_cards: bool = False
+    closer_panel: bool = False
+    """When True, the engine activates the ``closer_panel`` overlay
+    producer (P5.1). The panel is a CTA card composed of the channel
+    YAML's ``closer_format`` string, layered at the tail of the
+    timeline for ``closer_hold_s`` seconds. Off by default so renders
+    that don't want one don't pay the PNG render cost."""
     overlay_timeline: bool = False
     """When True, engine activates the ``anchored_footage`` overlay
     producer (foreground match-clips + b-roll filler — the

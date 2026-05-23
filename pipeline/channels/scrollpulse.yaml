@@ -1,0 +1,110 @@
+# ScrollPulse — brain-rot Reddit-thread + split-screen gameplay overlay
+# Shorts, uploaded to the ScrollPulse YouTube channel.
+#
+# Format per Q21-Q23 (cofounder onboarding):
+#   - Auto-pull top Reddit threads (AITA / AskReddit / TIFU /
+#     MaliciousCompliance / Showerthoughts / etc — round-robin).
+#   - Split-screen visual: top 60% = Reddit-style thread card (post +
+#     top comments) with word-level captions; bottom 40% = a randomly
+#     picked Subway-Surfers / Minecraft-parkour gameplay loop.
+#   - Audio: TTS narration of the thread (no Suno song).
+#
+# Render pipeline support: the visual_mode below (`split_screen_reddit_gameplay`)
+# requires a matching VisualProducer plugin (TODO — see `pipeline/render/visualize/`).
+# Until that lands the channel renders fall back to the AI-image-gen path; the
+# YAML is structurally complete so the wizard + scheduler can already see the
+# channel.
+
+name: ScrollPulse
+source_adapter: reddit_thread
+
+# ---- TTS ---------------------------------------------------------------
+# Chatterbox — same voice as MyStoriesAnimated. Sarah ref keeps the
+# narration tone consistent across the Reddit-story family.
+tts_provider: cloudrun_chatterbox
+tts_voice: pipeline/voice_refs/sarah.wav
+tts_speed: 0.95
+
+# ---- Visual ------------------------------------------------------------
+# Brain-rot split-screen format: not AI image-gen. The renderer composites
+# a Reddit thread card (post title + top N comments, orange r/ pill, dark
+# theme) over a Subway-Surfers / Minecraft-parkour gameplay loop. The
+# gameplay loops live at `data/scrollpulse/gameplay_loops/*.mp4` (pulled
+# via scripts/pull_backgrounds.py, gitignored).
+#
+# Image-gen knobs below are kept for engine-fallback compatibility — the
+# canonical render path SHOULD pick the split-screen producer. The flat
+# placeholder style is what you get if it falls through.
+visual_mode: split_screen_reddit_gameplay
+image_provider: cloudrun_z_image_turbo
+image_style_prefix: |
+  Vertical 9:16 phone-shot composition split horizontally. Upper sixty
+  percent shows an authentic Reddit thread card on a dark slate
+  background: orange r/subreddit pill at the top, post title in large
+  white sans-serif, post body in lighter grey body text, then a thread
+  divider and the top two reply comments each in their own indented
+  card. Lower forty percent shows a vibrant fast-paced video-game
+  gameplay loop with bright saturated colors and crisp arcade rendering:
+  side-scrolling endless runner or first-person parkour, no logos, no
+  UI overlay. The two layers stay sharply separated by a one-pixel slate
+  divider line. The whole frame is unmarked and unbranded — no logos,
+  no labels, no watermarks, no usernames. Word-level caption pills are
+  composited by post-processing after diffusion, never baked into the
+  panel.
+
+# Default character — Reddit threads don't have a single "narrator" in
+# the AITA sense, but the renderer needs SOMETHING to inherit when a
+# thread doesn't carry its own cast.json. Use a neutral on-camera-feeling
+# voice persona that the diffusion model can render if it falls back to
+# the AI-image path.
+character_description: |
+  An on-screen narrator persona, age twenty-eight, neutral medium
+  athletic build, short layered dark brown hair, dressed in a soft
+  charcoal hoodie with a small undecorated front pocket. Calm
+  expressive face, warm brown eyes, even skin tone, no jewelry, no
+  visible logos. Shown from the shoulders up against a soft warm-grey
+  off-focus background. Posture relaxed and conversational.
+
+opening_image_directives:
+  required_tokens: ["reddit", "thread", "card", "gameplay", "split-screen"]
+
+image_seed: 42
+image_steps: 9
+image_width: 768
+image_height: 1344
+
+# Pacing knobs — brain-rot Shorts are faster cut than animated AITA.
+beat_target_s: 1.6
+beat_max_s: 2.4
+duration_target_s: [15, 60]
+output_resolution: [1080, 1920]
+
+closer_format: "FOLLOW @scrollpulse for more"
+closer_hold_s: 0.8
+
+# ---- Upload (YouTube) --------------------------------------------------
+upload:
+  account: scrollpulse
+  privacy: private              # flip to unlisted/public after smoke
+  made_for_kids: false
+  category_id: "24"             # Entertainment
+  auto_upload: false
+  tags:
+    - reddit
+    - reddit thread
+    - askreddit
+    - aita
+    - shorts
+    - brain rot
+    - storytime
+  description_template: |
+    {script.hook}
+
+    📖 Original thread: {raw.url}
+    From r/{raw.metadata.subreddit}.
+
+    ━━━━━━━━━━━━━━━━━━━━
+    🔔 Follow for more thread reactions.
+    ━━━━━━━━━━━━━━━━━━━━
+
+    #shorts #reddit #askreddit #brainrot #shortvideo

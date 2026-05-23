@@ -54,7 +54,7 @@
 # project + bucket grants; per-secret grants exit 0 too).
 #
 # Required env (defaults match prod):
-#   GCP_PROJECT       ytfactory-prod-v2
+#   GCP_PROJECT       ytfactory-prod-v3
 #   WEB_RUNTIME_SA    web-runner@${GCP_PROJECT}.iam.gserviceaccount.com
 # ============================================================================
 

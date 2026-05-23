@@ -217,8 +217,8 @@ voices:
       channel describes their voice as "a digital replica of a
       professional voice actor" — i.e. it is itself a TTS output from
       a commercial voice-clone service (likely ElevenLabs or HeyGen),
-      not a natural human recording. We use this 10s anchor as the F5
-      reference for the cloudrun_f5 zero-shot pipeline.
+      not a natural human recording. We use this 10s anchor as the
+      F5 / Chatterbox reference for the cloud zero-shot pipeline.
 
       LICENSING / RISK: cloning a TTS-output voice may violate the
       upstream provider's TOS (ElevenLabs terms forbid using output to

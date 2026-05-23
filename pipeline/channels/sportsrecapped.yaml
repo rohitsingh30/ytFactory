@@ -174,14 +174,8 @@ upload:
 # See learnings/long_form_doc_format.md
 long_form_doc:
   # Voice — Kokoro am_michael (intense male narrator, ~300 MB local
-  # model, zero API cost). Switched from F5-TTS-MLX 2026-05-04 because
-  # theo.wav (channel default narrator clone ref) was lost in the
-  # recovery wipe and sarah.wav is tonally wrong for sports-doc
-  # register. Kokoro also matches the user's "least memory" preference
-  # (~300 MB vs F5's ~1.5 GB) and doesn't need a voice-clone ref.
-  # Switch back to f5_tts + theo.wav once theo is re-clipped from a
-  # shipped Short. tts_speed 0.98 matches the Shorts default; sports
-  # doc wants ~155 wpm, not 135 wpm sleep cadence (post_atempo 1.0).
+  # model, zero API cost). tts_speed 0.98 matches the Shorts default;
+  # sports doc wants ~155 wpm, not 135 wpm sleep cadence (post_atempo 1.0).
   tts_provider: kokoro
   tts_voice: am_michael
   tts_speed: 0.98

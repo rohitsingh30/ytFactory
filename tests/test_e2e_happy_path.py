@@ -175,14 +175,6 @@ class HappyPathE2ETest(unittest.TestCase):
         # Sim worker is the dev default; it must be running.
         self.assertEqual(h.get("sim_worker", {}).get("running"), True)
 
-    @unittest.skip(
-        "pre-existing failure: hindutavaanimated channel not present "
-        "in /api/channels output (likely added/renamed in a recent "
-        "rotation update). Skipped 2026-05-14 to unblock Phase 6 "
-        "coverage gate (pytest -x halts before scheduler dedupe tests "
-        "run). Fix in a separate commit by either updating the assertion "
-        "or restoring the channel to the rotation."
-    )
     def test_channels_listed(self):
         d = _get_json("/api/channels")
         # 7 production channels as of 2026-05-09. Use >=7 so adding a

@@ -12,8 +12,7 @@ Also pins the per-beat fallback contract: if **any** of the three refined
 fields is missing/empty, that beat falls back to the legacy
 ``(key_visual, scene, style_prefix)`` path.
 
-Reference: ``pipeline/images/prompt_refiner.py``,
-``data/research/flux2_prompting_2026-05-14.md``.
+Reference: ``pipeline/images/prompt_refiner.py``.
 """
 
 from __future__ import annotations

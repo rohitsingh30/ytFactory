@@ -13,7 +13,7 @@ Env vars:
 * ``CLOUDRUN_EDITING_AGENT_DISABLE_FALLBACK`` — set to ``1`` to
   hard-error instead of falling back. Use in canary.
 * ``YTFACTORY_BUCKET`` — GCS bucket for input/output staging
-  (defaults to ``ytfactory-prod-v2-artifacts``).
+  (defaults to ``ytfactory-prod-v3-artifacts``).
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ def _timeout_s() -> int:
 
 
 def _bucket() -> str:
-    return os.environ.get("YTFACTORY_BUCKET", "ytfactory-prod-v2-artifacts")
+    return os.environ.get("YTFACTORY_BUCKET", "ytfactory-prod-v3-artifacts")
 
 
 # --- GCS helpers (lazy-import google-cloud-storage so laptop fallback
@@ -71,7 +71,7 @@ def _bucket() -> str:
 def _gcs_client():
     from google.cloud import storage  # noqa: PLC0415
 
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3")
     return storage.Client(project=project)
 
 

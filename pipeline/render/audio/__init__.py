@@ -4,11 +4,9 @@ Each module here implements the AudioSynthesizer Protocol. The
 short_engine + long_engine pick which one based on
 ``spec.audio_mode`` + ``spec.voice_provider``:
 
-* ``cloudrun_chatterbox`` (and other ``cloudrun_*``) → :mod:`.tts_single`
+* ``cloudrun_chatterbox`` / ``cloudrun_indicf5`` → :mod:`.tts_single`
   for short, :mod:`.tts_chunked` for long.
-* ``f5_tts`` / ``kokoro`` (laptop fallbacks) → same dispatch via the
-  same modules — they share a common provider abstraction inside
-  :mod:`pipeline.tts`.
+* ``kokoro`` (laptop fallback) → same dispatch via the same modules.
 * ``audio_mode == song`` → :mod:`.song_suno`.
 
 Adding a new audio backend = add a new module here that registers a

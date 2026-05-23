@@ -1,11 +1,11 @@
 """Cloud Run GPU image-gen provider — talks to the
 ``ytfactory-image-*`` Cloud Run services in asia-southeast1.
 
-Counterpart to ``cloud/image-flux2-klein/server.py`` (and a future
-``cloud/_bench/image-z-image-turbo/server.py``). Same function signature as
-``pipeline.images.images._generate_z_image_turbo`` etc. so the dispatcher in
-``pipeline.images.images.generate`` can swap any local provider for a
-``cloudrun_<model>`` provider by changing the provider string only.
+Counterpart to ``cloud/image-z-image-turbo/server.py``. Same function
+signature as ``pipeline.images.images._generate_z_image_turbo`` so the
+dispatcher in ``pipeline.images.images.generate`` can swap the local
+provider for the ``cloudrun_z_image_turbo`` provider by changing the
+provider string only.
 
 **Key divergence from the TTS client (`pipeline.tts.cloudrun`):
 render-level circuit breaker.** Each Short renders ~30 images on the
@@ -32,12 +32,8 @@ events for images, simple POST→JSON for tts), NOT about TCP behaviour.
 
 Env vars:
 
-* ``CLOUDRUN_IMAGE_FLUX2_KLEIN_URL`` — the FLUX.2 [klein] 4B service
-  URL (e.g. ``https://ytfactory-image-flux2-klein-...run.app``).
 * ``CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL`` — the Z-Image-Turbo 6B service
-  URL. Optional today (Z-Image cloud cold-load reliability still
-  WIP, see memory/feedback_zimage_cloudrun_coldload_stall.md and
-  P3.5 todo).
+  URL (sole production image model).
 * ``CLOUDRUN_IMAGE_TIMEOUT`` — per-call HTTP timeout in seconds.
   Default 900 (15 min, generous because a cold instance pays
   ~5-7 min cold-load before responding to /generate).
@@ -75,9 +71,7 @@ def _service_url(model: str) -> str:
 
     Each image model lives in its own Cloud Run service (separate
     container, separate dep tree, separate quota slot), so we route
-    per-model. Post-2026-05-16 cost-optimization cleanup: only
-    z_image_turbo remains. flux2_klein / flux2_dev / qwen_image /
-    hidream were removed (see docs/cost_optimized_deploy.md).
+    per-model. Today only ``z_image_turbo`` is in production.
     """
     per_model = {
         "z_image_turbo": "CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL",
@@ -380,32 +374,19 @@ def _generate_cloudrun(
 #   - Ronaldinho jerseys: fake "FCO" Barcelona crest, "CHCASYQUEB"
 #     across the chest.
 #
-# FLUX.2 klein is GUIDANCE-DISTILLED, so the standard
-# ``negative_prompt`` parameter is a no-op (the server explicitly
-# documents this — see cloud/image-flux2-klein/server.py:173-177).
-# But distilled models DO parse in-prompt instructions, so we append
-# an anti-text suffix to every positive prompt. Other cloud providers
-# (z_image_turbo, qwen_image, hidream) accept the same suffix without
-# harm even when their server-side ``negative_prompt`` does work.
+# Z-Image-Turbo is guidance-distilled (CFG=0), so the standard
+# ``negative_prompt`` parameter is a no-op. But distilled models parse
+# in-prompt instructions, so we prepend an anti-text directive to every
+# positive prompt.
 #
 # Per-channel override: a channel YAML can set
 # ``image.anti_text_suffix: ""`` to disable (e.g. for a "screenshot
 # of a tweet" channel where text IS the content).
-
-# 2026-05-15 — POSITIVE-FRAMING PREFIX for FLUX.2 klein.
 #
-# FLUX.2 klein is guidance-distilled (CFG=1) and left-weighted — earlier
-# tokens get more attention. Negations ("no readable text") are linguistic-
-# only on distilled models and lose to training-data attractors when placed
-# at the SUFFIX (lowest cross-attention weight). Per fal.ai's official klein
-# prompting guide + BFL docs, use POSITIVE surface framing at the FRONT.
-#
-# Audit evidence (2026-05-15): suffix-position negations failed across 17
-# baghdad-mongols Shorts (book pages stamped "RSOHB MONGCOLAN ENTRR H BAGDOAL"),
-# 16 mystoriesanimated AITA Shorts (speech bubbles "Friednd lisa, fctumlty"),
-# and 15 sportsrecapped Shorts (jerseys "LADAL GMERIN").
-#
-# Sources: docs.bfl.ml/guides/prompting_guide_flux2, fal.ai/learn/devs/flux-2-klein-prompt-guide
+# Distilled models are left-weighted — earlier tokens get more
+# attention. Negations ("no readable text") are linguistic-only and
+# lose to training-data attractors when placed at the SUFFIX. Use
+# POSITIVE surface framing at the FRONT.
 
 ANTI_TEXT_PREFIX = (
     "Clean surface, unmarked, blank jersey, smooth fabric, plain backgrounds, "
@@ -420,15 +401,12 @@ ANTI_TEXT_SUFFIX = ANTI_TEXT_PREFIX
 def _append_anti_text_suffix(prompt: str, *, model: str) -> str:
     """Apply the positive-framing anti-text directive to a prompt.
 
-    For guidance-distilled / left-weighted models (FLUX.2 klein,
-    z_image_turbo, qwen_image, hidream), this PREPENDS the positive
-    framing because suffix position has near-zero cross-attention
-    weight on these models (see ANTI_TEXT_PREFIX comment for the
-    audit evidence + 2026 BFL/fal.ai sources).
+    For guidance-distilled / left-weighted models (z_image_turbo),
+    this PREPENDS the positive framing because suffix position has
+    near-zero cross-attention weight on these models.
 
-    Function name kept for backward-compat with callers like
-    ``_generate_cloudrun_flux2_klein`` at line 340. The behaviour
-    is now "prepend positive framing", not "append negation".
+    Function name kept for backward-compat; the behaviour is
+    "prepend positive framing", not "append negation".
 
     Idempotent: if the prefix substring is already present anywhere
     in the prompt, returns unchanged.
@@ -455,10 +433,7 @@ def _generate_cloudrun_z_image_turbo(
 ) -> Path:
     """Z-Image-Turbo 6B via Cloud Run.
 
-    Local fallback removed 2026-05-09 (laptop nuclear cleanup). Other
-    cloud image models (flux2_klein, flux2_dev, qwen_image, hidream)
-    removed 2026-05-16 in the cost-optimization sweep — see
-    docs/cost_optimized_deploy.md.
+    Local fallback removed 2026-05-09 (laptop nuclear cleanup).
     """
     return _generate_cloudrun(
         model="z_image_turbo", prompt=prompt, seed=seed,

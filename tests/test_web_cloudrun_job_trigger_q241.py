@@ -38,14 +38,14 @@ class TestTriggerCloudrunJob(unittest.IsolatedAsyncioTestCase):
         with patch("control.core.cloud_run.execute_job_async", mock_run):
             name = await _server._trigger_cloudrun_job(
                 "ytfactory-render-worker-v2",
-                "ytfactory-prod-v2",
+                "ytfactory-prod-v3",
                 "asia-southeast1",
                 {"FOO": "bar"},
             )
         self.assertEqual(name, "projects/p/locations/r/jobs/j/executions/abc")
         mock_run.assert_called_once_with(
             "ytfactory-render-worker-v2",
-            project="ytfactory-prod-v2",
+            project="ytfactory-prod-v3",
             region="asia-southeast1",
             env_overrides={"FOO": "bar"},
         )

@@ -50,18 +50,18 @@ class FlatChannelLayoutTest(unittest.TestCase):
 
     def test_per_slug_subdirs_at_channel_root(self):
         p = RenderPaths.for_channel("historyrecapped")
-        self.assertEqual(p.narrations, p.project_root / "historyrecapped" / "narrations")
-        self.assertEqual(p.shorts,     p.project_root / "historyrecapped" / "shorts")
-        self.assertEqual(p.uploads,    p.project_root / "historyrecapped" / "uploads")
-        self.assertEqual(p.cache,      p.project_root / "historyrecapped" / "cache")
+        self.assertEqual(p.narrations, p.project_root / "data" / "historyrecapped" / "narrations")
+        self.assertEqual(p.shorts,     p.project_root / "data" / "historyrecapped" / "shorts")
+        self.assertEqual(p.uploads,    p.project_root / "data" / "historyrecapped" / "uploads")
+        self.assertEqual(p.cache,      p.project_root / "data" / "historyrecapped" / "cache")
 
     def test_channel_wide_subdirs_at_channel_root(self):
         # config_yaml, learnings, scripts all live directly under the channel dir.
         p = RenderPaths.for_channel("cosmosdecoded")
-        self.assertEqual(p.config_yaml, p.project_root / "cosmosdecoded" / "config.yaml")
-        self.assertEqual(p.learnings,   p.project_root / "cosmosdecoded" / "learnings")
-        self.assertEqual(p.scripts,     p.project_root / "cosmosdecoded" / "scripts")
-        self.assertEqual(p.branding,    p.project_root / "cosmosdecoded" / "branding")
+        self.assertEqual(p.config_yaml, p.project_root / "data" / "cosmosdecoded" / "config.yaml")
+        self.assertEqual(p.learnings,   p.project_root / "data" / "cosmosdecoded" / "learnings")
+        self.assertEqual(p.scripts,     p.project_root / "data" / "cosmosdecoded" / "scripts")
+        self.assertEqual(p.branding,    p.project_root / "data" / "cosmosdecoded" / "branding")
 
     def test_channel_dir_string_is_just_channel(self):
         self.assertEqual(RenderPaths.for_channel("cosmosdecoded").channel_dir, "cosmosdecoded")
@@ -74,13 +74,13 @@ class NichedChannelLayoutTest(unittest.TestCase):
         p = RenderPaths.for_channel("mystoriesanimated", "reddit_amitheasshole")
         self.assertEqual(
             p.root,
-            p.project_root / "mystoriesanimated" / "reddit_amitheasshole",
+            p.project_root / "data" / "mystoriesanimated" / "reddit_amitheasshole",
         )
         self.assertEqual(p.niche, "reddit_amitheasshole")
 
     def test_per_slug_subdirs_nest_under_niche(self):
         p = RenderPaths.for_channel("mystoriesanimated", "reddit_amitheasshole")
-        base = p.project_root / "mystoriesanimated" / "reddit_amitheasshole"
+        base = p.project_root / "data" / "mystoriesanimated" / "reddit_amitheasshole"
         self.assertEqual(p.narrations, base / "narrations")
         self.assertEqual(p.uploads,    base / "uploads")
         self.assertEqual(p.shorts,     base / "shorts")
@@ -91,10 +91,10 @@ class NichedChannelLayoutTest(unittest.TestCase):
         p = RenderPaths.for_channel("mystoriesanimated", "reddit_amitheasshole")
         # config / learnings / scripts / branding all live under channel_root,
         # NOT under the niche sub-dir.
-        self.assertEqual(p.config_yaml, p.project_root / "mystoriesanimated" / "config.yaml")
-        self.assertEqual(p.learnings,   p.project_root / "mystoriesanimated" / "learnings")
-        self.assertEqual(p.scripts,     p.project_root / "mystoriesanimated" / "scripts")
-        self.assertEqual(p.branding,    p.project_root / "mystoriesanimated" / "branding")
+        self.assertEqual(p.config_yaml, p.project_root / "data" / "mystoriesanimated" / "config.yaml")
+        self.assertEqual(p.learnings,   p.project_root / "data" / "mystoriesanimated" / "learnings")
+        self.assertEqual(p.scripts,     p.project_root / "data" / "mystoriesanimated" / "scripts")
+        self.assertEqual(p.branding,    p.project_root / "data" / "mystoriesanimated" / "branding")
 
     def test_footage_is_channel_wide(self):
         # Multiple niches share the same yt-dlp source mp4s; footage must
@@ -102,11 +102,11 @@ class NichedChannelLayoutTest(unittest.TestCase):
         p = RenderPaths.for_channel("sportsrecapped", "ranked")
         self.assertEqual(
             p.footage_sources,
-            p.project_root / "sportsrecapped" / "footage" / "sources",
+            p.project_root / "data" / "sportsrecapped" / "footage" / "sources",
         )
         self.assertEqual(
             p.footage_long_sources,
-            p.project_root / "sportsrecapped" / "footage" / "long_sources",
+            p.project_root / "data" / "sportsrecapped" / "footage" / "long_sources",
         )
 
     def test_channel_dir_string_compounds_when_niched(self):
@@ -120,11 +120,10 @@ class SlugHelpersTest(unittest.TestCase):
     def test_flat_channel_slug_paths(self):
         p = RenderPaths.for_channel("historyrecapped")
         slug = "battle-of-britain-few"
-        root = p.project_root / "historyrecapped"
+        root = p.project_root / "data" / "historyrecapped"
         self.assertEqual(p.narration_for(slug), root / "narrations" / f"{slug}.json")
         self.assertEqual(p.raw_for(slug),       root / "raw" / f"{slug}.json")
         self.assertEqual(p.upload_record_for(slug), root / "uploads" / f"{slug}.json")
-        self.assertEqual(p.x_upload_record_for(slug), root / "uploads" / f"{slug}.x.json")
         self.assertEqual(p.short_for(slug),     root / "shorts" / f"{slug}.mp4")
         self.assertEqual(p.short_thumb_for(slug), root / "shorts" / f"{slug}.thumb.png")
         self.assertEqual(p.long_form_for(slug), root / "long_form" / f"{slug}.mp4")
@@ -137,7 +136,7 @@ class SlugHelpersTest(unittest.TestCase):
     def test_niched_channel_slug_paths(self):
         p = RenderPaths.for_channel("mystoriesanimated", "reddit_amitheasshole")
         slug = "amitheasshole-aita-for-something"
-        base = p.project_root / "mystoriesanimated" / "reddit_amitheasshole"
+        base = p.project_root / "data" / "mystoriesanimated" / "reddit_amitheasshole"
         self.assertEqual(p.narration_for(slug), base / "narrations" / f"{slug}.json")
         self.assertEqual(p.upload_record_for(slug), base / "uploads" / f"{slug}.json")
         self.assertEqual(p.short_for(slug),     base / "shorts" / f"{slug}.mp4")

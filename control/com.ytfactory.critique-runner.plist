@@ -63,7 +63,7 @@
         <!-- Default Firestore project (matches the runner's hardcoded
              fallback in scripts/critique_runner.py). -->
         <key>GOOGLE_CLOUD_PROJECT</key>
-        <string>ytfactory-prod-v2</string>
+        <string>ytfactory-prod-v3</string>
     </dict>
 </dict>
 </plist>

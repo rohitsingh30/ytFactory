@@ -27,8 +27,8 @@ CLOUD_DIR = REPO_ROOT / "cloud"
 
 # Only services that actually run on a GPU (L4) need the GPU-specific
 # rules. CPU-only services like render-worker-v2, web-server, web-next,
-# editing-agent, cobalt-api, clone-video-worker, stats-refresh,
-# weights-staging follow different cost dynamics.
+# editing-agent, clone-video-worker, stats-refresh
+# follow different cost dynamics.
 GPU_SERVICES = (
     "image-z-image-turbo",
     "tts-chatterbox",

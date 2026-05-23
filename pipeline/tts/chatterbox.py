@@ -1,7 +1,7 @@
 """Chatterbox provider — Resemble AI emotional voice cloning (MIT).
 
-Channel ``tts_voice`` is the path to a 5-15s reference WAV (same convention
-as f5_tts). ``ref_audio_text`` is NOT required by Chatterbox.
+Channel ``tts_voice`` is the path to a 5-15s reference WAV.
+``ref_audio_text`` is NOT required by Chatterbox.
 
 ~3 GB checkpoint download on first use; MPS-accelerated on Apple Silicon.
 Beat ElevenLabs in 2026 blind A/B (63.75% preference) and has built-in

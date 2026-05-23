@@ -24,7 +24,7 @@
 #
 # Manual seed (B3 in the plan):
 #   gcloud run jobs execute ytfactory-stats-refresh \
-#     --project ytfactory-prod-v2 --region asia-southeast1 --wait
+#     --project ytfactory-prod-v3 --region asia-southeast1 --wait
 # ============================================================================
 
 set -euo pipefail
@@ -35,7 +35,7 @@ set -euo pipefail
 # file feedback_gcloud_reauth_use_adc_bypass.md for the full why.
 source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
 JOB="ytfactory-stats-refresh"

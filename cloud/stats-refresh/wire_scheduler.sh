@@ -23,7 +23,7 @@ set -euo pipefail
 # application-default login` covers every wire-up script.
 source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
 JOB="ytfactory-stats-refresh"
 SCHEDULE_NAME="ytfactory-stats-refresh-cron"

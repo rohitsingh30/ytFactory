@@ -12,7 +12,7 @@ Each Cloud Run service in ``cloud/<service>/`` ships a copy of
   ``cloud/_shared/sync.sh --check`` (drift detection).
 
 This test does NOT exercise the real GCP exporters — that's reserved
-for P8's deploy smoke test against ``ytfactory-prod-v2``.
+for P8's deploy smoke test against ``ytfactory-prod-v3``.
 """
 from __future__ import annotations
 

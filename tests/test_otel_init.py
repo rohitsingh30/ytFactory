@@ -30,10 +30,8 @@ finds nothing and reports the per-service copies as uncovered. Keep
 this list in sync with ``cloud/_shared/sync.sh::SERVICES``.
 
 Per-service dirs covered: ``clone-video-worker``, ``editing-agent``,
-``image-flux2-klein``, ``image-hidream``, ``image-qwen``,
 ``image-z-image-turbo``, ``render-worker-v2``, ``tts-chatterbox``,
-``tts-cosyvoice``, ``tts-f5``, ``tts-higgs``, ``tts-indicf5``,
-``tts-indicparler``, ``web-server``.
+``tts-indicf5``, ``web-server``.
 """
 from __future__ import annotations
 

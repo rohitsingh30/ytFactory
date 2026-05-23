@@ -121,7 +121,7 @@ class TestPreflight(unittest.TestCase):
         from pipeline import preflight
         # Both MLX and images absent — should be a no-op
         with patch.dict("sys.modules", {"mlx.core": None, "pipeline.images.images": None}):
-            preflight.reset_mlx_state(drop_f5=True, drop_image=True, label="test")
+            preflight.reset_mlx_state(drop_image=True, label="test")
 
     def test_reset_mlx_with_drop_image_and_images_module(self):
         """When pipeline.images has reset_image_state, it's called."""
@@ -278,34 +278,7 @@ class TestPowerCheck(unittest.TestCase):
 
 
 class TestResetMlxStateDrop(unittest.TestCase):
-    """Cover drop_f5 and drop_image success paths (lines 112, 119-122)."""
-
-    def test_drop_f5_success(self):
-        """drop_f5=True calls audio.reset_f5_state() when it succeeds."""
-        from pipeline import preflight
-        import types, sys as _sys, pipeline as _pkg
-        fake_audio = types.ModuleType("pipeline.audio")
-        called = []
-        fake_audio.reset_f5_state = lambda: called.append(1)  # type: ignore[assignment]
-        orig_mod = _sys.modules.get("pipeline.audio")
-        orig_attr = getattr(_pkg, "audio", None)
-        _sys.modules["pipeline.audio"] = fake_audio  # type: ignore[assignment]
-        setattr(_pkg, "audio", fake_audio)
-        try:
-            preflight.reset_mlx_state(drop_f5=True)
-        finally:
-            if orig_mod is None:
-                _sys.modules.pop("pipeline.audio", None)
-            else:
-                _sys.modules["pipeline.audio"] = orig_mod
-            if orig_attr is None:
-                try:
-                    delattr(_pkg, "audio")
-                except AttributeError:
-                    pass
-            else:
-                setattr(_pkg, "audio", orig_attr)
-        self.assertEqual(called, [1])
+    """Cover drop_image success path."""
 
     def test_drop_image_success(self):
         """drop_image=True calls images.reset_image_state() when present."""

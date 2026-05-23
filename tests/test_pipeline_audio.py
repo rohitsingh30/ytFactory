@@ -433,20 +433,6 @@ class TestAudioSynthesizeDispatcher(unittest.TestCase):
             _audio.synthesize(**self._BASE, provider="cloudrun_indicf5", ref_audio_text="x")
         m.assert_called_once()
 
-    # ---- dropped providers (post 2026-05-16 cost-optimization sweep) --------
-
-    def test_dropped_cloudrun_providers_rejected(self):
-        # f5, higgs, cosyvoice, indicparler removed; all azure_* removed.
-        for dropped in (
-            "cloudrun_f5", "cloudrun_higgs", "cloudrun_cosyvoice",
-            "cloudrun_indicparler",
-            "azure_f5", "azure_higgs", "azure_cosyvoice",
-            "azure_chatterbox", "azure_indicparler", "azure_indicf5",
-        ):
-            with self.assertRaises(ValueError, msg=f"provider={dropped}") as ctx:
-                _audio.synthesize(**self._BASE, provider=dropped, ref_audio_text="x")
-            self.assertIn("unknown TTS provider", str(ctx.exception))
-
     # ---- unknown provider ---------------------------------------------------
 
     def test_unknown_provider_raises(self):

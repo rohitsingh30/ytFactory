@@ -54,14 +54,9 @@ BASELINE_PATH = Path(__file__).resolve().parents[2] / "data" / "_bench" / "cloud
 # Per-service hard ceilings on cold-load time (seconds). Anything above
 # trips yellow even if the call succeeded. Sourced from docs/cloudrun_*.md.
 DEFAULT_WARM_S_MAX: dict[str, float] = {
-    "flux2-klein": 420.0,  # 5-7 min FLUX cold spec
-    "z-image-turbo": 1500.0,  # 15-25 min, currently WIP
-    "chatterbox": 300.0,  # CLOUDRUN_TTS_TIMEOUT
-    "f5": 240.0,
-    "higgs": 360.0,
+    "z-image-turbo": 1500.0,  # 15-25 min cold; baked-weights production model
+    "chatterbox": 300.0,
     "indicf5": 240.0,
-    "indicparler": 240.0,
-    "cosyvoice": 300.0,
 }
 
 # Per-call HTTP timeout for /readyz. Health is a fast probe — if it

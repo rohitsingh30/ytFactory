@@ -1,10 +1,9 @@
-"""Cloud Run GPU TTS provider — talks to ``ytfactory-tts`` Cloud Run
-service in asia-southeast1.
+"""Cloud Run GPU TTS provider — talks to ``ytfactory-tts-*`` Cloud Run
+services in asia-southeast1.
 
-This is the laptop-side counterpart of ``cloud/tts/server.py``. Same
-function signatures as ``pipeline.tts.f5._synth_f5_tts`` etc. so the
-dispatcher in ``pipeline.audio.synthesize`` can swap any local ``f5_tts``
-call for ``cloudrun_f5`` by changing the provider string only.
+The dispatcher in ``pipeline.audio.synthesize`` routes
+``cloudrun_chatterbox`` and ``cloudrun_indicf5`` provider strings to
+the corresponding ``_synth_cloudrun_*`` wrappers below.
 
 **Auto-fallback to local.** If the cloud service is unreachable (DNS
 fail, 5xx, timeout >120 s), the call transparently falls back to the
@@ -19,16 +18,10 @@ endpoint) for Cloud Run to accept it.
 
 Env vars:
 
-* ``CLOUDRUN_TTS_URL`` — required. The full Cloud Run service URL,
-  e.g. ``https://ytfactory-tts-767262167641.asia-southeast1.run.app``.
-  Set in the laptop's ``.env`` (sourced by the renderer entrypoints).
-* ``CLOUDRUN_TTS_COSYVOICE_URL`` — optional. Separate URL for the
-  ``ytfactory-tts-cosyvoice`` Cloud Run service (CosyVoice 2 lives in
-  its own image — see ``cloud/tts-cosyvoice/`` for why). If set, the
-  ``cloudrun_cosyvoice`` provider routes here instead of
-  ``CLOUDRUN_TTS_URL``. If unset, requests fall through to
-  ``CLOUDRUN_TTS_URL`` (which today returns 400 for cosyvoice — useful
-  to detect mis-configuration during rollout).
+* ``CLOUDRUN_TTS_CHATTERBOX_URL`` — Cloud Run service URL for the
+  English chatterbox provider.
+* ``CLOUDRUN_TTS_INDICF5_URL`` — Cloud Run service URL for the
+  Hindi IndicF5 provider.
 * ``CLOUDRUN_TTS_TIMEOUT`` — optional. Per-call timeout in seconds.
   Default 180. Long-form chunks rarely need >30 s on L4 warm; the
   large headroom covers cold-start image-pull + model-load (~40 s)
@@ -75,10 +68,7 @@ from pipeline import telemetry as _tlm  # noqa: E402
 def _service_url(*, model: str | None = None) -> str:
     """Return the Cloud Run service URL for a given model.
 
-    Each model lives in its own Cloud Run service. Post 2026-05-16
-    cost-optimization sweep only chatterbox + indicf5 remain (see
-    docs/cost_optimized_deploy.md). f5 / higgs / cosyvoice / indicparler
-    were removed; restore from git history if revival is needed.
+    Each model lives in its own Cloud Run service.
 
     * chatterbox  → CLOUDRUN_TTS_CHATTERBOX_URL
     * indicf5     → CLOUDRUN_TTS_INDICF5_URL
@@ -192,9 +182,8 @@ def warmup(provider: str) -> "threading.Thread | None":
     guarantee cold-load completed instead of racing it.
 
     `provider` is the channel YAML's tts_provider, e.g.
-    ``cloudrun_chatterbox`` / ``cloudrun_indicparler`` /
-    ``cloudrun_indicf5``. Returns None when the provider isn't a
-    cloudrun_* one.
+    ``cloudrun_chatterbox`` / ``cloudrun_indicf5``. Returns None when
+    the provider isn't a cloudrun_* one.
     """
     import threading  # noqa: PLC0415
     if not provider.startswith("cloudrun_"):
@@ -447,16 +436,7 @@ def _synth_cloudrun(
     description: str | None = None,
 ) -> Path:
     """Generic Cloud Run dispatcher used by every cloudrun_<model>
-    wrapper below. ref_audio_text required for f5/cosyvoice; optional
-    for the rest (matches each model's local-side contract).
-
-    Audit Q2.17 — ``description`` lands in its own top-level payload
-    field so description-driven models (Indic Parler) actually receive
-    the per-render voice description from the channel YAML. Pre-fix
-    the indicparler wrapper piggybacked the description in
-    ``ref_text``, but the server reads ``req.description`` so every
-    Hindi render silently used the hardcoded
-    "calm devotional Indian female voice" default."""
+    wrapper below."""
     payload = {
         "model": model,
         "text": text,
@@ -500,10 +480,7 @@ def _synth_cloudrun(
 # the model would otherwise drift.
 
 # Voice-clone capability: which cloud models swap their ref to the
-# previous chunk's output to keep timbre locked. Indic Parler is
-# description-driven, not clone-driven, so it stays on the original
-# (empty) ref for every chunk. Higgs is left out for the same reason
-# — it's prompt-driven not clone-anchored.
+# previous chunk's output to keep timbre locked.
 _VOICE_CLONE_CAPABLE = {"indicf5", "chatterbox"}
 
 # Per-model safe-envelope for one /synth call. Exceeding this empirically
@@ -784,13 +761,14 @@ def _synth_cloudrun_chunked(
     chunk0_path: Path | None = None
     voice_clone = model in _VOICE_CLONE_CAPABLE
     current_ref = ref_audio_path
+    current_ref_text = ref_audio_text
 
     for i, chunk_text in enumerate(chunks):
         chunk_path = chunk_dir / f"chunk_{i:03d}.wav"
         chunk_speed = prosody[i][0] if prosody else speed
         _synth_cloudrun(
             model=model, text=chunk_text, ref_audio_path=current_ref,
-            ref_audio_text=ref_audio_text, out_path=chunk_path,
+            ref_audio_text=current_ref_text, out_path=chunk_path,
             speed=chunk_speed, seed=seed, description=description,
         )
         parts.append(chunk_path)
@@ -798,6 +776,14 @@ def _synth_cloudrun_chunked(
             chunk0_path = chunk_path
             if voice_clone and chunk0_path is not None:
                 current_ref = str(chunk0_path)
+                # P4.4 (2026-05-23, Q71): when swapping the ref audio to
+                # chunk-0's OWN output for timbre anchoring, the
+                # ref_audio_text MUST swap to chunk-0's text too. Leaving
+                # the original caller's ref_text here paired the new
+                # WAV with a transcript of a DIFFERENT WAV — the audio
+                # vs text mismatch is exactly what made IndicF5 emit
+                # Hindi gibberish on chunks 1+.
+                current_ref_text = chunk_text
 
         # Insert silence after this chunk if prosody asks for one.
         if prosody:
@@ -849,7 +835,7 @@ def _synth_cloudrun_indicf5(
     except CloudRunUnavailable as e:
         logger.warning(
             "cloudrun_indicf5 unavailable (%s); falling back to local "
-            "Kokoro hf_alpha (per laptop-fallback policy 2026-05-06)", e,
+            "Kokoro hf_alpha", e,
         )
         def _fb():
             from pipeline.tts.kokoro import _synth_kokoro  # noqa: PLC0415
@@ -873,37 +859,11 @@ def _synth_cloudrun_chatterbox(
     Chunked through ``_synth_cloudrun_chunked`` for long-form prosody
     + voice-clone-anchored timbre across chunks.
 
-    On cloud failure, fall back to **local F5-TTS** (NOT local Chatterbox).
-
-    Why F5 instead of local Chatterbox:
-      * User policy 2026-05-06: "for laptop we keep F5 for all" — local
-        Chatterbox is too slow on M2 Max MPS (~6-13× real-time) for
-        production use. F5-MLX is the canonical laptop TTS.
-      * The fallback exists to keep renders unblocked during a Cloud Run
-        outage; voice quality match is acceptable degradation.
-      * Local Chatterbox provider remains available via explicit
-        ``tts_provider: chatterbox`` in a YAML, but is not the cloud
-        fallback target.
-
-    Local F5 ignores ``ref_audio_text`` for chunked synthesis — the
-    contract still passes through.
+    Cloud failure propagates ``CloudRunUnavailable`` to the caller.
     """
-    try:
-        return _synth_cloudrun_chunked(
-            model="chatterbox", text=text, ref_audio_path=ref_audio_path,
-            ref_audio_text=ref_audio_text, out_path=out_path,
-            speed=speed, seed=seed,
-            narration_prosody=narration_prosody,
-        )
-    except CloudRunUnavailable as e:
-        logger.warning(
-            "cloudrun_chatterbox unavailable (%s); falling back to local F5-TTS "
-            "(per laptop-fallback policy 2026-05-06)", e,
-        )
-        def _fb():
-            from pipeline.tts.f5 import _synth_f5_tts  # noqa: PLC0415
-            return _synth_f5_tts(
-                text=text, ref_audio_path=ref_audio_path,
-                ref_audio_text=ref_audio_text, out_path=out_path, speed=speed,
-            )
-        return _local_fallback_or_raise(e, "cloudrun_chatterbox", _fb)
+    return _synth_cloudrun_chunked(
+        model="chatterbox", text=text, ref_audio_path=ref_audio_path,
+        ref_audio_text=ref_audio_text, out_path=out_path,
+        speed=speed, seed=seed,
+        narration_prosody=narration_prosody,
+    )

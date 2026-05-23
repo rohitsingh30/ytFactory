@@ -16,7 +16,7 @@ source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 SERVICE="ytfactory-asr-whisper"
 TAG="${1:-$(date +%Y%m%d-%H%M%S)}"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
 # Reuse the existing ytfactory-tts artifact registry repo because the
 # operator account doesn't have artifactregistry.repositories.create

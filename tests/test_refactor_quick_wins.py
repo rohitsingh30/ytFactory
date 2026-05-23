@@ -3,14 +3,9 @@
 * ``pipeline/probe.py`` — memoized ffprobe duration helper that
   replaces 5+ ad-hoc subprocess call sites
 * ``pipeline.images.images.reset_image_state()`` — drops _PIPE / _FLUX_PIPE
-  / _ZIMAGE_PIPE singletons (former mirror of the now-removed
-  ``audio.reset_f5_state()``)
+  / _ZIMAGE_PIPE singletons.
 * libx264 ``-threads 3`` on parallel-fanned encodes — keeps the
   4-worker fanout from oversubscribing on M2 Max (12 perf cores)
-
-Note: the F5RefCacheLruTests class tested the local ``pipeline.tts.f5``
-LRU cache. Local TTS providers were removed 2026-05-09 (laptop nuclear
-cleanup) so that class is gone too.
 """
 from __future__ import annotations
 
@@ -111,9 +106,9 @@ class ProbeDurationTests(unittest.TestCase):
 
 
 class ResetImageStateTests(unittest.TestCase):
-    """``reset_image_state`` mirrors ``audio.reset_f5_state``: drops
-    the diffusion singletons + clears Metal cache. Best-effort —
-    must never raise even if MLX isn't loaded."""
+    """``reset_image_state`` drops the diffusion singletons + clears
+    Metal cache. Best-effort — must never raise even if MLX isn't
+    loaded."""
 
     def setUp(self):
         # Defensive getattr: when the full test suite runs earlier tests
@@ -158,10 +153,6 @@ class ResetImageStateTests(unittest.TestCase):
         images._FLUX_PIPE = None
         images._ZIMAGE_PIPE = None
         images.reset_image_state()  # no raise
-
-
-# F5RefCacheLruTests removed 2026-05-09 — pipeline.tts.f5 was deleted in
-# the laptop nuclear cleanup. The bounded LRU lived inside that module.
 
 
 class Libx264ThreadsCapWiringTests(unittest.TestCase):

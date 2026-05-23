@@ -1,25 +1,24 @@
-"""LLM prompt-refiner pre-step for FLUX.2 [klein].
+"""LLM prompt-refiner pre-step for Z-Image-Turbo (sole production image model).
 
 Why this exists
 ---------------
 
-FLUX.2 [klein] 4B uses a Qwen3 8B text encoder and is guidance-distilled
-(``guidance_scale`` is permanently clamped to 1.0). That means **there is
-no classifier-free-guidance** and therefore **no negative-prompt mechanism**
-at the model level — every "no X" instruction in our prompts is linguistic-
-only and loses to training-data attractors (speech bubbles fill with
-gibberish, the word "trap" pulls in YouTube tutorial UI, etc.).
+Z-Image-Turbo (6B S3-DiT, CFG-distilled, ``guidance_scale=0.0``) ignores
+negative prompts entirely — every "no X" instruction in our prompts is
+linguistic-only and loses to training-data attractors. The model wants
+**rich, positive, structured prompts** in the 80-250-word sweet spot.
+Short 4-10-word noun phrases (the previous FLUX.2 klein calibration)
+underspecify: z-turbo fills the gaps with whatever its training data
+correlates most strongly with the few tokens it got — generic product-
+photo backgrounds, blank rooms, floating-object compositions.
 
-The DALL-E 3 playbook closes that gap by inserting an LLM rewriting step
-*before* the diffusion call. That's what this module does: takes the
-authored ``{key_visual, scene}`` per beat plus channel context and emits a
-structured set of FLUX-optimised fields.
-
-The refiner does **not** own the final prompt string. Render-time
+This module closes that gap by taking the authored ``{key_visual, scene}``
+per beat plus channel context and emitting structured z-turbo-optimised
+fields. The refiner does **not** own the final prompt string. Render-time
 invariants — era anchor, character description / cast lock, kit lock —
 remain code-owned in ``pipeline/images/images.py::build_full_prompt``.
-The refiner only owns the visual description, the shot type, the lighting,
-and the BFL-format style/mood block.
+The refiner only owns the subject description, the environment, the
+lighting, and the style/medium/mood block.
 
 Output schema (per beat)
 ------------------------
@@ -66,11 +65,6 @@ Failure modes
 - LLM never sees attractor words from the narration: every input is run
   through :func:`sanitize_attractors` before being shown to the model.
 
-Reference
----------
-
-``data/research/flux2_prompting_2026-05-14.md`` — the research report this
-module implements.
 """
 
 from __future__ import annotations
@@ -83,13 +77,15 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 
-REFINER_VERSION = "v1"
+REFINER_VERSION = "v2-zturbo"  # 2026-05-23 P4.1: bumped from v1 (klein) to
+# v2-zturbo so cached refined-* fields from the klein era auto-invalidate
+# at render time via the input-hash mismatch in ``refined_fields_for_render``.
 
-# Camera rotation per beat — BFL composition vocabulary, verified to elicit
-# distinct latents on FLUX.2 [klein]. Cycling through forces visual
-# diversity across the rolling 3-beat window (the author-side _SYSTEM
-# Rule 10 already instructs the LLM to vary composition, but it doesn't
-# inject explicit shot tokens — this rotation does).
+# Camera rotation per beat — composition vocabulary that elicits distinct
+# latents on Z-Image-Turbo. Cycling through forces visual diversity across
+# the rolling 3-beat window (the author-side _SYSTEM Rule 10 already
+# instructs the LLM to vary composition, but it doesn't inject explicit
+# shot tokens — this rotation does).
 #
 # The exact wording matters: BFL docs (prompting_unified_reference.md,
 # Composition Techniques) recommend "wide shot", "medium shot",
@@ -207,20 +203,24 @@ def compute_input_hash(
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
-# The refiner system prompt. Kept deliberately short (~50 lines vs the
-# 180-line author _SYSTEM block) so the LLM doesn't forget rules and the
-# output schema stays predictable. One job: take the authored fields and
-# produce structured FLUX-optimised output.
+# The refiner system prompt — calibrated 2026-05-23 for Z-Image-Turbo
+# (P4.1, Q67-Q69). Replaces the prior FLUX.2 klein calibration whose 4-10
+# word ``refined_visual`` underspecified z-turbo and let it default to
+# generic product-photo backgrounds. Z-turbo wants 80-250 words structured
+# across the (Shot+Subject / Age+Appearance / Clothing+Palette /
+# Environment / Lighting / Mood / Style+Medium / Safety) slots.
 _REFINER_SYSTEM = """\
-You are a FLUX.2 [klein] prompt specialist. You receive an authored beat
-({key_visual, scene}) and channel context. Rewrite the visual fields to
-maximise instruction-following on FLUX.2 [klein] 4B.
+You are a Z-Image-Turbo prompt specialist. You receive an authored beat
+({key_visual, scene}) plus channel context (style, mood, era anchor,
+character description). Rewrite the visual fields to maximise
+instruction-following on the 6B S3-DiT Z-Image-Turbo diffusion model.
 
 MODEL CONTEXT — IMPORTANT:
-FLUX.2 [klein] uses Qwen3 8B text encoder + guidance_scale=1.0 clamped.
-There is NO classifier-free guidance, so "no X" instructions are
-linguistic-only and lose to training-data attractors. Convert every
-negation to a POSITIVE construction. Examples:
+Z-Image-Turbo is CFG-distilled at ``guidance_scale=0.0``. There is NO
+classifier-free guidance, so negative prompts are IGNORED at the model
+level — every "no X" instruction is linguistic-only and loses to
+training-data attractors. Convert every negation to a POSITIVE
+construction. Examples:
   - "no hat" → "bareheaded"
   - "not smiling" → "neutral expression"
   - "no people" → "empty scene"
@@ -228,13 +228,19 @@ negation to a POSITIVE construction. Examples:
 The ONE exception is the canonical "no readable text in image" anti-text
 prefix — keep it verbatim because the pipeline depends on the exact wording.
 
+Z-Image-Turbo behaves best at 80-250 words of densely-described visual
+detail. Below ~60 words it under-specifies and falls back to generic
+product-photo composition. Above ~300 words the later tokens lose
+weight. Aim for ~120-180 words of combined output across the three
+fields.
+
 OUTPUT — a JSON array of objects, one per input beat, in beat order. Each
 object MUST have exactly these three fields and no others:
 
   {
-    "refined_visual": "<polished concrete noun phrase, 4-10 words>",
-    "refined_scene":  "no readable text in image. <SHOT_TYPE>, <LIGHTING>, <posture/action>, <setting>",
-    "style_block":    "Style: <copy provided style>. Mood: <copy provided mood>."
+    "refined_visual":  "<dense subject description, 30-60 words, structured: shot type + subject + age band + appearance + clothing + signature props>",
+    "refined_scene":   "no readable text in image. <environment description, 40-80 words: setting + props + spatial composition + atmosphere + LIGHTING tokens>",
+    "style_block":     "Style: <medium + technique + 2-4 visual qualities>. Mood: <2-4 mood adjectives + emotional register>."
   }
 
 PER-BEAT RULES (a beat failing any rule has its slot replaced with {} by
@@ -245,37 +251,52 @@ the caller, and that beat falls back to the legacy non-refined path):
    downstream idempotence depends on the exact wording.
 
 2. Inject EXACTLY ONE shot_type from the rotation the user message gives
-   you. Do not invent shot types. Do not skip.
+   you, at the START of refined_visual. Do not invent shot types. Do
+   not skip.
 
-3. Inject EXACTLY ONE lighting description (warm golden-hour backlight,
-   harsh overhead noon sun, soft diffused window light, cold blue
-   moonlight, neon storefront glow, fluorescent office overhead, etc.).
-   Vary across beats — the same lighting two beats in a row defeats the
-   purpose.
+3. Inject AT LEAST ONE high-impact LIGHTING token into refined_scene.
+   Z-Image-Turbo lighting vocabulary that lands cleanly: "soft diffused
+   daylight", "cinematic warm key light from the left", "noir
+   high-contrast side lighting", "rim lighting against a dark
+   background", "golden-hour backlight", "harsh overhead noon sun",
+   "cold blue moonlight wash", "neon storefront glow", "fluorescent
+   office overhead", "candlelit warm tungsten". Vary across beats —
+   repeating the same lighting two beats in a row defeats the purpose.
 
 4. NEVER write any of: speech bubble, thought bubble, comic panel,
    chalkboard, whiteboard, computer screen showing text, phone screen
    showing text, sign, billboard, poster, label, license plate, name tag,
    certificate, invitation, contract, receipt, scoreboard, clock face
    with numbers, YouTube logo, Subscribe button, Like button, thumbs-up
-   button, bell icon, play button, video UI. Convey emotion via POSTURE
-   and FACIAL EXPRESSION only.
+   button, bell icon, play button, video UI. Convey emotion via POSTURE,
+   FACIAL EXPRESSION, and ENVIRONMENT only.
 
 5. NEVER render metaphors literally. "rocket of a shot" → "hard-struck
    ball". "thunderbolt" → "powerful strike". The same applies to all
    sports / action figurative language.
 
 6. ONE main subject per beat. The user message gives you a canonical
-   character_description — preserve it in spirit (do not invent new
-   physical traits) but do not re-describe the character explicitly in
-   refined_scene; the renderer prepends the canonical description.
+   character_description — the renderer prepends it verbatim at compose
+   time, so DO NOT re-describe the character's age/build/hair/clothing
+   in refined_visual. Use only the SHOT + ACTION + SUBJECT-relative
+   posture. If the story introduces a SECONDARY character, describe
+   that secondary character concretely once in refined_visual.
 
-7. Keep refined_scene under 60 words total. Front-load the shot_type and
-   lighting after the anti-text prefix.
+7. Use POSITIVE constructions exclusively. Replace every "no X" or
+   "without Y" with the positive equivalent. The anti-text prefix
+   (rule 1) is the only exception.
 
-8. style_block: copy the provided style + mood EXACTLY into the template
-   "Style: <s>. Mood: <m>." Do not paraphrase. If either is missing, use
-   "neutral" as the placeholder.
+8. style_block: build "Style: ..." from the provided style (medium /
+   technique / 2-4 visual qualities) and "Mood: ..." from the provided
+   mood (2-4 adjectives + emotional register). If either input is
+   missing, expand to a neutral-but-rich placeholder ("Style: warm
+   hand-drawn 2D illustration with confident ink line work and visible
+   watercolor brush texture. Mood: calm, observational, lightly
+   melancholic.").
+
+9. Total word count across the three fields should land at ~120-180
+   words. Aim higher for cinematic beats, lower for static establishing
+   shots — but never below ~80 words combined.
 
 Return ONLY the JSON array. No prose, no markdown, no commentary.
 """

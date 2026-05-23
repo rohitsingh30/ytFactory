@@ -11,13 +11,9 @@
 # weight download from HF + first-call torch.compile JIT).
 # Warm: ~3-6s for a 15s chunk (RTF ~0.20-0.30 expected on L4).
 #
-# Why a SEPARATE service from cloud/tts-f5/:
-#   * tts-f5 installs `f5-tts==1.1.20` from PyPI (SWivid upstream)
-#   * tts-indicf5 installs IndicF5's own `f5_tts` package (their fork
-#     from github.com/ai4bharat/IndicF5) — DIFFERENT module with the
-#     SAME name. Cannot coexist in one image.
-#   * Same `nvidia/cuda:12.4.0-runtime-ubuntu22.04` base + same torch
-#     2.4.1+cu124 pin so the build pattern matches.
+# Installs IndicF5's own `f5_tts` package (fork from
+# github.com/ai4bharat/IndicF5). Base: nvidia/cuda:12.4.0-runtime-
+# ubuntu22.04 + torch 2.4.1+cu124.
 
 FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
 
@@ -80,10 +76,6 @@ RUN python -m pip install --force-reinstall --no-deps \
 # Their requirements.txt has wandb / bitsandbytes / matplotlib that
 # we already pinned in our requirements.txt (or skipped). --no-deps
 # avoids pulling in conflicting versions.
-#
-# IMPORTANT: this fork ships a package named `f5_tts` (same name as
-# SWivid's PyPI `f5-tts` package, but different code). The two cannot
-# coexist; that's why this service is separated from cloud/tts-f5/.
 RUN python -m pip install --no-deps \
         "git+https://github.com/ai4bharat/IndicF5.git@main"
 
@@ -96,10 +88,9 @@ RUN python -m pip install --no-deps \
 RUN python -c "import f5_tts; from f5_tts.infer.utils_infer import infer_process, load_model, load_vocoder, preprocess_ref_audio_text; from f5_tts.model import DiT; from transformers import PreTrainedModel, PretrainedConfig, AutoConfig, AutoModel; import vocos; import pydub; import soundfile; import torchdiffeq; import x_transformers; print('IMPORT_SMOKE_OK')"
 
 # --- HF weight pre-pull SKIPPED ---
-# Runtime download on first /readyz instead of bake-in. Same trade-off
-# as cloud/tts-higgs/: smaller image (~5 GB vs ~7 GB) builds + pushes
-# in ~10 min cleanly; first /readyz pays a one-time ~30-60s weight
-# download (1.4 GB).
+# Runtime download on first /readyz instead of bake-in. Smaller image
+# (~5 GB) builds + pushes in ~10 min cleanly; first /readyz pays a
+# one-time ~30-60s weight download (1.4 GB).
 
 WORKDIR /app
 COPY server.py ./

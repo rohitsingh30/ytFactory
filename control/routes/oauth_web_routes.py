@@ -284,7 +284,7 @@ def _firestore_doc(account: str):
         return None
     try:
         from google.cloud import firestore  # noqa: PLC0415
-        db = firestore.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2"))
+        db = firestore.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3"))
         return db.collection("oauth_tokens").document(account)
     except Exception:  # noqa: BLE001
         logger.warning("firestore client unavailable, falling back to disk", exc_info=True)

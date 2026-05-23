@@ -16,7 +16,7 @@ set -euo pipefail
 # file feedback_gcloud_reauth_use_adc_bypass.md for the full why.
 source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"  # same Artifact Registry repo as the other services
 SERVICE="ytfactory-editing-agent"
@@ -49,7 +49,7 @@ gcloud run deploy "${SERVICE}" \
   --max-instances=4 \
   --timeout=900 \
   --no-allow-unauthenticated \
-  --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT},YTFACTORY_BUCKET=ytfactory-prod-v2-artifacts,LOG_LEVEL=INFO,IMAGE_SHA=${TAG}"
+  --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT},YTFACTORY_BUCKET=ytfactory-prod-v3-artifacts,LOG_LEVEL=INFO,IMAGE_SHA=${TAG}"
 
 URL="$(gcloud run services describe "${SERVICE}" \
   --project="${PROJECT}" --region="${REGION}" \

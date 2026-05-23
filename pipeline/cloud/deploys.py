@@ -125,8 +125,8 @@ def _read_prep(short: str) -> list[PrepStatus]:
     """Read ``cloud/<bare>/.deploy_prep/`` for the playbook markers.
 
     ``bare`` is the directory name under ``cloud/`` — same as ``short``
-    for image-* / tts-* services, and the bare ``cobalt-api`` /
-    ``web-server`` etc for infra. We try both.
+    for image-* / tts-* services, and the bare ``web-server`` etc for
+    infra. We try both.
     """
     candidates = [
         CLOUD_DIR / short,
@@ -154,7 +154,7 @@ def _read_prep(short: str) -> list[PrepStatus]:
 
 def collect(
     *,
-    project: str = "ytfactory-prod-v2",
+    project: str = "ytfactory-prod-v3",
     services: Optional[list[Service]] = None,
 ) -> list[DeployRow]:
     """Snapshot last build + prep status for every service we own."""

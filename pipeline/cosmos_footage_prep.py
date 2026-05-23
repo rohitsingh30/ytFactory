@@ -262,7 +262,7 @@ def _entries_from_shotlist(shotlist: dict) -> tuple[list[dict], str]:
 
 def prep_shotlist(channel: str, slug: str, *, force: bool = False) -> PrepResult:
     """Fetch every source_url + Ken Burns convert every still_ken_burns. Idempotent."""
-    chan_dir = REPO_ROOT / channel
+    chan_dir = REPO_ROOT / "data" / channel
     shotlist_path = chan_dir / "shotlist" / f"{slug}.json"
     if not shotlist_path.exists():
         raise SystemExit(f"missing shotlist: {shotlist_path}")

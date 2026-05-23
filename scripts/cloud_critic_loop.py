@@ -23,7 +23,7 @@ Usage
 Env knobs:
 
     GOOGLE_CLOUD_PROJECT
-        Firestore project; defaults to ``ytfactory-prod-v2``.
+        Firestore project; defaults to ``ytfactory-prod-v3``.
     YTFACTORY_CLOUD_CRITIC_INTERVAL_S
         Poll interval. Floors at 60 s; default 60.
     YTFACTORY_CLOUD_CRITIC_CACHE
@@ -64,8 +64,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--project-id",
-        default=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2"),
-        help="GCP project hosting Firestore (default: ytfactory-prod-v2).",
+        default=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3"),
+        help="GCP project hosting Firestore (default: ytfactory-prod-v3).",
     )
     parser.add_argument(
         "--interval-s", type=int,

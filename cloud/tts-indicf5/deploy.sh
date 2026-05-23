@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Build + push + deploy ytfactory-tts-indicf5 to Cloud Run GPU L4.
-# Mirrors cloud/tts-higgs/deploy.sh but pinned to this service name +
-# indicf5's heavier resource profile (24Gi mem, 8 vCPU — the deployed
+# IndicF5's heavier resource profile (24Gi mem, 8 vCPU — the deployed
 # version 7 spec captured 2026-05-06).
 
 set -euo pipefail
@@ -15,7 +14,7 @@ source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 TAG="${1:-$(date +%Y%m%d-%H%M%S)}"
 SERVICE="ytfactory-tts-indicf5"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
 REPO="ytfactory-tts"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/tts-indicf5:${TAG}"

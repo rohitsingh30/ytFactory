@@ -199,34 +199,45 @@ PANEL_HOLD_SOFT_MAX_S = 8.0
 
 # ---------- length contract ----------------------------------------------
 
-# Calm narrator at ~150 wpm. Targets:
-#  - integrated word count must be ≥ HARD_FLOOR_FRAC of expected
-#    (e.g. 0.50 * expected = "must deliver at least 50% of requested length")
-#  - no individual section may be < HARD_SECTION_FLOOR_FRAC of mean
-#    (catches the tired-by-the-end LLM degradation pattern observed
-#    on job 0c05c335 — sections 0-3 hit 65%, sections 6-9 hit 48%)
+# Calm narrator at ~150 wpm. Per-section gate at ±10% of section
+# target; total gate at ±15% of user's total target.
 #
-# Soft floors below trigger warnings but allow the render to proceed.
+# 2026-05-22 (P3.2 / Q59) — tightened from the 2026-05-13 calibration
+# (HARD_FLOOR_FRAC=0.50, HARD_SECTION_FLOOR_FRAC=0.40 — both
+# symmetric-only on the LOW side, both too loose). The earlier
+# rationale (single-shot output couldn't reliably hit higher floors)
+# is obsolete now that the STORM-pattern fan-out gives each section
+# call its own ~700-token budget. With the per-section gates working
+# correctly, total length naturally lands inside ±15%; the gate is a
+# repair trigger that the iterative-extend retry resolves.
 #
-# 2026-05-13 calibration note: the original 0.85 hard floor (chosen as
-# the "shippable length" threshold) blocked EVERY long-form render
-# because Azure GPT-5.3 single-shot output for a 30-min request
-# physically lands around 55-65% of target words (verified on job
-# 0947ea51bfc94066904ba4f4d6b90770: 2631 / 4500 = 58%). The proper
-# fix is section-by-section generation (in flight) but in the
-# meantime we lower the hard floor to 0.50 so a real-world
-# under-delivery doesn't block the entire pipeline. The soft warn at
-# 0.85 still fires so dashboards surface the gap. Override either
-# threshold via YTFACTORY_LONG_FORM_HARD_FLOOR_FRAC /
-# YTFACTORY_LONG_FORM_SOFT_FLOOR_FRAC env vars without a code edit.
-HARD_FLOOR_FRAC = float(os.environ.get("YTFACTORY_LONG_FORM_HARD_FLOOR_FRAC", "0.50"))
-SOFT_FLOOR_FRAC = float(os.environ.get("YTFACTORY_LONG_FORM_SOFT_FLOOR_FRAC", "0.85"))
-HARD_SECTION_FLOOR_FRAC = float(
-    os.environ.get("YTFACTORY_LONG_FORM_HARD_SECTION_FLOOR_FRAC", "0.40")
+# Gate philosophy (Q51/Q64): gates STAY. They are repair triggers,
+# not termination signals. Gate fires → retry the failing piece
+# (per-section iterative-extend in P3.6). The retry IS the fix.
+#
+# Override via env without a code edit:
+#   YTFACTORY_LONG_FORM_TOTAL_TOL_FRAC      (default 0.15 = ±15%)
+#   YTFACTORY_LONG_FORM_SECTION_TOL_FRAC    (default 0.10 = ±10%)
+TOTAL_TOLERANCE_FRAC = float(
+    os.environ.get("YTFACTORY_LONG_FORM_TOTAL_TOL_FRAC", "0.15")
 )
-SOFT_SECTION_FLOOR_FRAC = float(
-    os.environ.get("YTFACTORY_LONG_FORM_SOFT_SECTION_FLOOR_FRAC", "0.65")
+SECTION_TOLERANCE_FRAC = float(
+    os.environ.get("YTFACTORY_LONG_FORM_SECTION_TOL_FRAC", "0.10")
 )
+# Soft-warn floor for total length — lighter band than the hard gate
+# so dashboards can surface borderline renders without blocking them.
+# Soft band is total_tolerance_frac doubled (e.g. ±15% hard → ±30% soft).
+SOFT_TOTAL_TOLERANCE_FRAC = float(
+    os.environ.get("YTFACTORY_LONG_FORM_SOFT_TOTAL_TOL_FRAC",
+                   str(TOTAL_TOLERANCE_FRAC * 2.0))
+)
+# Back-compat shims — old callers (tests, dashboards) may still
+# reference these names. Derive from the new tolerance constants so
+# there's one source of truth.
+HARD_FLOOR_FRAC = max(0.0, 1.0 - TOTAL_TOLERANCE_FRAC)
+SOFT_FLOOR_FRAC = max(0.0, 1.0 - SOFT_TOTAL_TOLERANCE_FRAC)
+HARD_SECTION_FLOOR_FRAC = max(0.0, 1.0 - SECTION_TOLERANCE_FRAC)
+SOFT_SECTION_FLOOR_FRAC = max(0.0, 1.0 - SECTION_TOLERANCE_FRAC * 1.5)
 WORDS_PER_MINUTE = 150
 
 
@@ -329,12 +340,23 @@ def check_word_count(
     sections: Sequence[Any],
     target_duration_s: int | float,
 ) -> list[Violation]:
-    """C2/C3/C4 — length disrespect + per-section degradation.
+    """C2/C3/C4 — length disrespect + per-section length gate.
 
-    Hard-fail if total word count is < HARD_FLOOR_FRAC * expected_words.
-    Hard-fail if any section's word count is < HARD_SECTION_FLOOR_FRAC
-    of the mean (catches the tired-by-the-end LLM pattern).
-    Soft-warn at the SOFT thresholds.
+    Gates (P3.2 / Q59):
+    * **Total** narration must be within ±TOTAL_TOLERANCE_FRAC (±15%
+      default) of user's target. Outside that band → hard.
+    * **Per-section** word count must be within
+      ±SECTION_TOLERANCE_FRAC (±10% default) of THAT section's
+      ``target_words`` (when the outline emitted one). Falls back to
+      the mean-of-sections target when target_words is absent so
+      pre-2026-05-22 envelopes still validate.
+
+    Soft warnings fire at doubled band widths (±30% total, ±15%
+    per-section) so dashboards can flag borderline renders without
+    blocking them.
+
+    Returns multiple per-section violations when several sections
+    miss the band (each is a separate retry target).
     """
     if not sections:
         return [Violation(
@@ -347,52 +369,99 @@ def check_word_count(
         return []
     counts = [_word_count(_section_text(s)) for s in sections]
     total = sum(counts)
-    mean = total / len(counts)
+    mean = total / len(counts) if counts else 0.0
     violations: list[Violation] = []
-    if total < HARD_FLOOR_FRAC * expected:
+
+    # ---- total length gate (symmetric ±TOTAL_TOLERANCE_FRAC) -----------
+    total_low = (1.0 - TOTAL_TOLERANCE_FRAC) * expected
+    total_high = (1.0 + TOTAL_TOLERANCE_FRAC) * expected
+    soft_low = (1.0 - SOFT_TOTAL_TOLERANCE_FRAC) * expected
+    soft_high = (1.0 + SOFT_TOTAL_TOLERANCE_FRAC) * expected
+    if total < total_low or total > total_high:
+        # Distinguish under vs over so the retry layer can react
+        # specifically (under → iterative-extend; over → tighten).
+        code = ("length_under_delivered_hard" if total < total_low
+                else "length_over_delivered_hard")
         violations.append(Violation(
-            code="length_under_delivered_hard",
+            code=code,
             severity="hard",
             message=(
-                f"narration delivered {total} words, expected ≥{int(HARD_FLOOR_FRAC * expected)} "
-                f"({int(target_duration_s)}s @ 150wpm = {expected} words target). "
-                f"Delivery: {total/expected:.0%}. The rewrite under-delivered "
-                f"badly enough to ship a much shorter video than requested."
+                f"narration delivered {total} words; target {expected} "
+                f"({int(target_duration_s)}s @ 150wpm), allowed band "
+                f"{int(total_low)}–{int(total_high)} (±{TOTAL_TOLERANCE_FRAC:.0%}). "
+                f"Delivery: {total/expected:.0%}."
             ),
         ))
-    elif total < SOFT_FLOOR_FRAC * expected:
+    elif total < soft_low or total > soft_high:
+        code = ("length_under_delivered_soft" if total < soft_low
+                else "length_over_delivered_soft")
         violations.append(Violation(
-            code="length_under_delivered_soft",
+            code=code,
             severity="soft",
             message=(
-                f"narration delivered {total} words ({total/expected:.0%} of "
-                f"{expected} target). Watchable but shorter than promised."
+                f"narration delivered {total} words "
+                f"({total/expected:.0%} of {expected} target); "
+                f"outside soft band ±{SOFT_TOTAL_TOLERANCE_FRAC:.0%}."
             ),
         ))
-    if mean > 0:
-        worst_idx, worst_words = min(enumerate(counts), key=lambda x: x[1])
-        worst_frac = worst_words / mean
-        if worst_frac < HARD_SECTION_FLOOR_FRAC:
+
+    # ---- per-section length gate (symmetric ±SECTION_TOLERANCE_FRAC) ---
+    for idx, (section, actual) in enumerate(zip(sections, counts)):
+        # Prefer section-authored target_words (outline-driven); fall
+        # back to mean when absent (pre-P3.2 envelopes).
+        sec_target_raw = _section_target_words(section)
+        if sec_target_raw and sec_target_raw > 0:
+            sec_target = float(sec_target_raw)
+        elif mean > 0:
+            sec_target = mean
+        else:
+            continue
+        sec_low = (1.0 - SECTION_TOLERANCE_FRAC) * sec_target
+        sec_high = (1.0 + SECTION_TOLERANCE_FRAC) * sec_target
+        sec_soft_low = (1.0 - SECTION_TOLERANCE_FRAC * 1.5) * sec_target
+        sec_soft_high = (1.0 + SECTION_TOLERANCE_FRAC * 1.5) * sec_target
+        if actual < sec_low or actual > sec_high:
             violations.append(Violation(
                 code="section_degradation_hard",
                 severity="hard",
                 message=(
-                    f"section {worst_idx} contains {worst_words} words; mean "
-                    f"section is {mean:.0f} words — that's {worst_frac:.0%} "
-                    f"of mean. The LLM degraded mid-rewrite (tired-by-the-end "
-                    f"pattern). Re-rewrite with explicit per-section minimum."
+                    f"section {idx} contains {actual} words; target "
+                    f"{int(sec_target)}, allowed band "
+                    f"{int(sec_low)}–{int(sec_high)} "
+                    f"(±{SECTION_TOLERANCE_FRAC:.0%}). "
+                    f"Re-prompt with iterative-extend to land in band."
                 ),
             ))
-        elif worst_frac < SOFT_SECTION_FLOOR_FRAC:
+        elif actual < sec_soft_low or actual > sec_soft_high:
             violations.append(Violation(
                 code="section_degradation_soft",
                 severity="soft",
                 message=(
-                    f"section {worst_idx} is {worst_frac:.0%} of mean — "
-                    f"some pacing imbalance"
+                    f"section {idx} is {actual} words vs target "
+                    f"{int(sec_target)} — outside soft band "
+                    f"±{SECTION_TOLERANCE_FRAC * 1.5:.0%}"
                 ),
             ))
     return violations
+
+
+def _section_target_words(section: Any) -> int | None:
+    """Pull `target_words` from either a LongFormSection or a legacy dict.
+
+    Defensive about every observed shape; returns None when absent so
+    the caller can fall back to mean-of-sections (pre-P3.2 envelopes).
+    """
+    if section is None:
+        return None
+    tw = getattr(section, "target_words", None)
+    if tw is None and isinstance(section, dict):
+        tw = section.get("target_words")
+    if tw is None:
+        return None
+    try:
+        return int(tw)
+    except (TypeError, ValueError):
+        return None
 
 
 def check_panel_holds(panels: Sequence[Any]) -> list[Violation]:
@@ -756,8 +825,11 @@ __all__ = [
     "NICHE_TONAL_LEXICON",
     "PANEL_HOLD_HARD_MAX_S",
     "PANEL_HOLD_SOFT_MAX_S",
+    "SECTION_TOLERANCE_FRAC",
     "SOFT_FLOOR_FRAC",
     "SOFT_SECTION_FLOOR_FRAC",
+    "SOFT_TOTAL_TOLERANCE_FRAC",
+    "TOTAL_TOLERANCE_FRAC",
     "Violation",
     "WORDS_PER_MINUTE",
     "check_niche_contract",

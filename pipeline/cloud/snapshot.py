@@ -22,7 +22,7 @@ sole backend.
 
 The laptop snapshot cron (see ``control/com.ytfactory.cloud-snapshot.plist``)
 sets the bucket env so daily runs ship to GCS too — and prod's web service
-(``YTFACTORY_STATE_BUCKET=ytfactory-prod-v2-state`` already wired) reads
+(``YTFACTORY_STATE_BUCKET=ytfactory-prod-v3-state`` already wired) reads
 from GCS without any code or env change. This is the entire prod path
 for the Cloud panel: laptop cron writes → GCS → prod reads.
 
@@ -81,7 +81,7 @@ def _gcs_blob(bucket: str, key: str):
     """Lazy-imports ``google-cloud-storage`` so laptop dev doesn't need it."""
     from google.cloud import storage  # noqa: PLC0415
 
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3")
     client = storage.Client(project=project)
     return client.bucket(bucket).blob(key)
 
@@ -162,7 +162,7 @@ def snapshot_cost(days: int = 30, billing_account_id: Optional[str] = None) -> P
     return _write_snapshot("cost", payload)
 
 
-def snapshot_deploys(project: str = "ytfactory-prod-v2") -> Path:
+def snapshot_deploys(project: str = "ytfactory-prod-v3") -> Path:
     """List recent gcloud builds + prep status, persist today's snapshot."""
     rows = deploys.collect(project=project)
     payload = {
@@ -178,7 +178,7 @@ def snapshot_deploys(project: str = "ytfactory-prod-v2") -> Path:
 def snapshot_all(
     *,
     cost_days: int = 30,
-    project: str = "ytfactory-prod-v2",
+    project: str = "ytfactory-prod-v3",
     billing_account_id: Optional[str] = None,
 ) -> dict[str, str]:
     """Run all three snapshots — what the cron + Refresh button call."""
@@ -252,7 +252,7 @@ def _latest_from_gcs(kind: str, bucket: str) -> Optional[dict[str, Any]]:
         logger.warning("latest_snapshot(%s): google-cloud-storage missing, can't read GCS", kind)
         return None
 
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3")
     try:
         client = storage.Client(project=project)
         prefix = f"{_GCS_KEY_PREFIX}/{_GCS_KIND_TO_DIRNAME[kind]}/"

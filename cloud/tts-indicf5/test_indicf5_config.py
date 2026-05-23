@@ -15,8 +15,7 @@ ToS accepted (set automatically from ~/.cache/huggingface/token in
 local + on Cloud Run via build-time secret).
 
 Run:
-    /tmp/higgs-validate/bin/python -m pytest \\
-        cloud/tts-indicf5/test_indicf5_config.py -v
+    .venv/bin/python -m pytest cloud/tts-indicf5/test_indicf5_config.py -v
 """
 from __future__ import annotations
 

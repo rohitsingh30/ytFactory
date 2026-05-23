@@ -172,9 +172,7 @@ def _split_into_chunks(text: str, target_chars: int = 380) -> list[str]:
 # ---------- per-chunk TTS adapters ----------------------------------------
 # `synth_long_narration` is the shared chunked+resumable+atempo'd long-form
 # narration synth used by historyrecapped (sleep), sportsrecapped
-# (sports docs), and any future long-form channel. The historyrecapped
-# RENDERER rejects tts_provider != f5_tts upstream (strict-F5 rule), so the
-# shared function can support multiple providers without violating it.
+# (sports docs), and any future long-form channel.
 
 
 def _f5_chunk(
@@ -183,20 +181,15 @@ def _f5_chunk(
     ref_audio_text: str,
     out_wav: Path,
     speed: float = 0.95,
-    provider: str = "f5_tts",
+    provider: str = "cloudrun_chatterbox",
 ) -> None:
     """Single TTS chunk → wav. Routes by ``provider`` to the matching
     backend in ``pipeline.audio.synthesize``:
 
-    * ``f5_tts`` / ``cloudrun_f5`` — F5-TTS (local MLX or Cloud Run L4).
-      Both produce the same voice character because cloud uses the same
-      checkpoint + flow-matching params (see docs/cloudrun_tts.md and
-      cloud/tts-f5/models/f5.py).
-    * ``cloudrun_chatterbox`` — Chatterbox via Cloud Run L4. Picked as
-      the canonical long-form English provider on 2026-05-10 after
-      ``ytfactory-tts-f5`` was retired in favour of
-      ``ytfactory-tts-chatterbox``. Conditions on the ref-WAV embedding
+    * ``cloudrun_chatterbox`` — Chatterbox via Cloud Run L4. Canonical
+      long-form English provider. Conditions on the ref-WAV embedding
       only — ``ref_audio_text`` is ignored.
+    * ``kokoro`` — Kokoro 82M laptop fallback.
 
     Name retained for backward compat (sports_doc.py and tests import
     ``_f5_chunk``); a future refactor can rename to ``_synth_chunk``.
@@ -379,49 +372,33 @@ def synth_long_narration(
     join_silence_s: float = 0.4,
     speed: float = 0.80,
     ref_audio_text: str | None = None,
-    provider: str = "f5_tts",
+    provider: str = "cloudrun_chatterbox",
 ) -> tuple[Path, list[Path]]:
     """Chunked TTS + atempo. Returns (final narration.wav, list of chunk wavs).
 
     Resumable: skips chunks whose stretched wav already exists.
 
     Providers:
-      * ``f5_tts`` (default, historyrecapped sleep) — local MLX zero-shot
-        voice clone. ``voice_id`` is the path to a 5-15s reference WAV;
-        ``ref_audio_text`` is its transcript (required). The model is
-        held in a singleton at pipeline/audio.py to avoid the 1.35GB
-        checkpoint re-load.
-      * ``cloudrun_f5`` — same model, hosted on Cloud Run GPU L4.
-        Eligible for parallel chunk dispatch (see CHUNK_PARALLEL_WORKERS
-        below) — Cloud Run scales to N independent L4 instances, so
-        chunks render concurrently rather than serially. Auto-falls
-        back to local f5_tts on cloud failure (handled inside
-        pipeline.tts.cloudrun).
-      * ``cloudrun_chatterbox`` — Chatterbox via Cloud Run GPU L4.
-        Same fan-out / prewarm / fallback semantics as cloudrun_f5
-        (single shared cloud-TTS infra in pipeline.tts.cloudrun).
-        Does NOT use ``ref_audio_text`` — Chatterbox conditions on
-        the ref-WAV embedding only. ``voice_id`` is still the path
-        to the 5-15s ref WAV (e.g. ``pipeline/voice_refs/sarah.wav``).
-        Picked as the canonical long-form English provider on
-        2026-05-10 after ``ytfactory-tts-f5`` was retired in favour
-        of ``ytfactory-tts-chatterbox``.
+      * ``cloudrun_chatterbox`` (default) — Chatterbox via Cloud Run GPU L4.
+        Canonical long-form English provider. Eligible for parallel
+        chunk dispatch (see CHUNK_PARALLEL_WORKERS below) — Cloud Run
+        scales to N independent L4 instances, so chunks render
+        concurrently rather than serially. Does NOT use
+        ``ref_audio_text`` — Chatterbox conditions on the ref-WAV
+        embedding only. ``voice_id`` is the path to the 5-15s
+        ref WAV (e.g. ``pipeline/voice_refs/sarah.wav``).
+      * ``cloudrun_indicf5`` — AI4Bharat IndicF5 via Cloud Run.
+        Voice-clone; ``ref_audio_text`` REQUIRED.
       * ``kokoro`` (sportsrecapped long-form doc) — Kokoro 82M
         voice catalogue. ``voice_id`` is a Kokoro voice id (e.g.
         ``am_michael``). ``ref_audio_text`` is unused. Local-only;
         not parallelised (Kokoro is fast enough that the fan-out
         coordination overhead exceeds the savings).
     """
-    if provider in ("f5_tts", "cloudrun_f5") and not ref_audio_text:
-        raise RuntimeError(
-            "long-form F5 (local or cloud) requires `tts_ref_text` in "
-            "long_form config (the spoken transcript of the ref WAV at "
-            "tts_voice)"
-        )
-    if provider not in ("f5_tts", "cloudrun_f5", "cloudrun_chatterbox", "kokoro"):
+    if provider not in ("cloudrun_chatterbox", "cloudrun_indicf5", "kokoro"):
         raise RuntimeError(
             f"synth_long_narration: unsupported provider {provider!r}. "
-            "Supported: f5_tts, cloudrun_f5, cloudrun_chatterbox, kokoro."
+            "Supported: cloudrun_chatterbox, cloudrun_indicf5, kokoro."
         )
 
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -433,7 +410,7 @@ def synth_long_narration(
     # MUST stay serial (shared M2 Max GPU; concurrent MLX/Metal ops
     # serialise + fragment unified memory — see
     # docs/long_form_model_inventory.md "Parallelism" section).
-    is_cloud = provider in ("cloudrun_f5", "cloudrun_chatterbox")
+    is_cloud = provider == "cloudrun_chatterbox"
     parallel_workers = 0
     if is_cloud:
         parallel_workers = int(os.environ.get(
@@ -450,9 +427,7 @@ def synth_long_narration(
         try:
             from pipeline.tts.cloudrun import _service_url, _get_id_token
             import urllib.request
-            # Map provider → cloudrun.py model alias for the URL lookup.
-            _model_alias = "chatterbox" if provider == "cloudrun_chatterbox" else "f5"
-            url = _service_url(model=_model_alias)
+            url = _service_url(model="chatterbox")
             token = _get_id_token(url)
             req = urllib.request.Request(
                 url=f"{url}/readyz",

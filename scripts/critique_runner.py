@@ -25,7 +25,7 @@ Env knobs (all optional):
     YTFACTORY_CRITIQUE_REMOTE / _BRANCH
         Override the push remote / branch.
     GOOGLE_CLOUD_PROJECT
-        Firestore project — defaults to ``ytfactory-prod-v2``.
+        Firestore project — defaults to ``ytfactory-prod-v3``.
 
 The runner refuses to start if the working tree has uncommitted
 changes (the agent's diff has to be isolated). Stash or commit your
@@ -51,7 +51,7 @@ from pipeline.critique import runner as runner_mod  # noqa: E402
 def _firestore_client():
     from google.cloud import firestore  # noqa: PLC0415
     return firestore.Client(
-        project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2"),
+        project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3"),
     )
 
 

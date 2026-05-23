@@ -230,7 +230,7 @@ def _state_bucket() -> str | None:
 
 def _gcs_client():
     from google.cloud import storage  # noqa: PLC0415
-    return storage.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2"))
+    return storage.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3"))
 
 
 def _uploaded_slugs(channel_dir: Path) -> set[str]:

@@ -77,8 +77,8 @@ class _PreflightEnvMixin:
 
     def _real_mode_env(self, **overrides):
         env = self._clean_env()
-        env["GOOGLE_CLOUD_PROJECT"] = "ytfactory-prod-v2"
-        env["YTFACTORY_BUCKET"] = "ytfactory-prod-v2-artifacts"
+        env["GOOGLE_CLOUD_PROJECT"] = "ytfactory-prod-v3"
+        env["YTFACTORY_BUCKET"] = "ytfactory-prod-v3-artifacts"
         env["YTFACTORY_RENDER_MODE"] = "real"
         env["YTFACTORY_LLM_BACKEND"] = "azure_openai"
         env["AZURE_OPENAI_ENDPOINT"] = "https://test.openai.azure.com"

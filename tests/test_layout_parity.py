@@ -177,7 +177,7 @@ class VariantYamlsCoveredTest(unittest.TestCase):
 
 
 # NICHE_CHANNEL_NicheDirsExistTest deleted 2026-05-10 — niche state
-# moved to gs://ytfactory-prod-v2-state/<channel>/<niche>/. The chan_dir
+# moved to gs://ytfactory-prod-v3-state/<channel>/<niche>/. The chan_dir
 # string in NICHE_CHANNEL is now a GCS-relative key, not a laptop dir.
 # Skills + render code access it via pipeline.utils.state_client, never via
 # direct filesystem reads. Was: every NICHE_CHANNEL entry's channel_dir

@@ -32,7 +32,7 @@
 #   2 = unexpected env / arg error.
 #
 # Required env (defaults match prod):
-#   GCP_PROJECT       ytfactory-prod-v2
+#   GCP_PROJECT       ytfactory-prod-v3
 #   WEB_RUNTIME_SA    web-runner@${GCP_PROJECT}.iam.gserviceaccount.com
 #
 # Memory: feedback_web_runner_iam_silent_post_deploy_500.md

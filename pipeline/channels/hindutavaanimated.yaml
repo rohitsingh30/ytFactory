@@ -27,17 +27,6 @@ source_adapter: manual
 # ---- TTS ---------------------------------------------------------------
 # Kokoro hf_alpha (Hindi female, Apache 2.0, local).
 #
-# Indic Parler-TTS history (2026-05-04 → 2026-05-04 same day):
-# Briefly defaulted to indic_parler for Hindi. Reverted within hours
-# because parler-tts (the underlying library) hasn't been updated for
-# transformers ≥ 4.49 — its Config API depends on a removed
-# `PreTrainedConfig` attribute, and our venv requires transformers 4.49+
-# for diffusers 0.38 (image-gen). Holding parler-tts' transformers pin
-# would break image-gen for the whole repo. So Hindi is back on Kokoro
-# until parler-tts ships a maintenance release OR we wire a different
-# Hindi TTS lib. Indic Parler code stays in pipeline/audio.py for
-# anyone willing to set up a separate venv.
-#
 # ---- TTS ---------------------------------------------------------------
 # Voice matrix bench (2026-05-07) confirmed IndicF5 wins ALL 4 Hindi cells
 # (composite 95-99 vs Indic Parler 84-88, Higgs 77-92, Kokoro 43-65).
@@ -57,10 +46,8 @@ source_adapter: manual
 # scripts/pull_hindi_voices.py for selection criteria.
 #
 # Long-form / Sanskrit history (kept for context):
-#   2026-05-04: Briefly tried indic_parler — broken in default venv
-#     (parler-tts requires transformers <4.49, our venv needs 4.49+).
 #   2026-05-04 → 2026-05-06: Defaulted to local Kokoro hf_alpha.
-#   2026-05-06: Migrated to cloud Hindi (cloudrun_indicparler/indicf5).
+#   2026-05-06: Migrated to cloud Hindi (cloudrun_indicf5).
 #   2026-05-07: Voice matrix bench → cloudrun_indicf5 wins all cells.
 #     Voice matrix replaced the legacy single bench voice with a
 #     3-ref rotation under pipeline/voice_refs/hindi-female-storyteller-{
@@ -245,7 +232,7 @@ long_form:
   output_resolution: [1920, 1080]
   output_fps: 30
   captions_enabled: true                # Devanagari subtitles for accessibility
-  panel_max_count: 60  # bumped 2026-05-13 — cloudrun_flux2_klein has no Metal watchdog (see mystoriesanimated.yaml)
+  panel_max_count: 60  # cloud z-image-turbo runs on L4 with no Metal watchdog (see mystoriesanimated.yaml)
   image_provider: cloudrun_z_image_turbo
   image_seed: 1008
   image_steps: 4

@@ -20,7 +20,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from control import storage  # noqa: E402
+from control.core import storage  # noqa: E402
 
 
 def main() -> int:

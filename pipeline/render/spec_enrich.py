@@ -93,6 +93,7 @@ def populate_render_extras(spec: RenderSpec, script: dict[str, Any]) -> None:
 
     _populate_era_anchor_prefix(spec, script)
     _populate_character_description(spec, script)
+    _populate_character_descriptions(spec, script)
 
 
 def _populate_era_anchor_prefix(spec: RenderSpec, script: dict[str, Any]) -> None:
@@ -216,6 +217,119 @@ def _populate_character_description(spec: RenderSpec, script: dict[str, Any]) ->
         "spec_enrich: resolved character_description (%d chars) from %s",
         len(description), cast_path,
     )
+
+
+def _populate_character_descriptions(spec: RenderSpec, script: dict[str, Any]) -> None:
+    """P4.3 (Q70): pluralised structured-cast reader.
+
+    Reads ``<channel>/cast/<slug>.json`` and stashes a list of structured
+    per-character spec strings at ``spec.extra["character_descriptions"]``.
+    Each entry pairs a stable ``role`` token (``narrator`` /
+    ``<secondary_name>``) with a single dense sentence assembled from the
+    structured fields W2's cast LLM authors:
+
+      "{age} {hair}, {build}, wearing {clothing}{ , holding signature_prop}."
+
+    Beat-prompt assembly (``pipeline.images.images.build_full_prompt`` /
+    ``pipeline.images.prompt_refiner._build_user_prompt``) consumes
+    ``character_descriptions[0]`` for the canonical narrator
+    description (back-compat with ``character_description``) and the
+    rest for in-scene secondary characters.
+
+    Idempotent: skips when ``character_descriptions`` is already
+    populated. Falls through silently when there's no cast.json /
+    structured fields aren't present (older channels without W2's
+    P4.3 cast schema).
+    """
+    if "character_descriptions" in spec.extra:
+        return
+
+    slug = (script.get("slug") or "").strip()
+    if not slug:
+        return
+
+    try:
+        paths = RenderPaths.from_channel_dir(spec.channel)
+    except ValueError:
+        return
+
+    cast_path = paths.cast_for(slug)
+    try:
+        cast = json.loads(cast_path.read_text())
+    except FileNotFoundError:
+        return
+    except (json.JSONDecodeError, OSError):
+        return
+
+    if not isinstance(cast, dict):
+        return
+
+    descriptions: list[dict[str, str]] = []
+
+    narrator = cast.get("narrator")
+    if isinstance(narrator, dict):
+        spec_str = _assemble_structured_spec(narrator)
+        if spec_str:
+            descriptions.append({"role": "narrator", "spec": spec_str})
+
+    secondaries = cast.get("secondary") or cast.get("supporting") or []
+    if isinstance(secondaries, list):
+        for entry in secondaries:
+            if not isinstance(entry, dict):
+                continue
+            spec_str = _assemble_structured_spec(entry)
+            if spec_str:
+                role = (entry.get("name") or entry.get("role") or "supporting").strip()
+                descriptions.append({"role": role, "spec": spec_str})
+
+    if descriptions:
+        spec.extra["character_descriptions"] = descriptions
+        # R3 (2026-05-23): the plural list is the structured-fields output
+        # but every downstream consumer today (``ai_beat_slideshow``,
+        # ``images.build_full_prompt``) reads the singular
+        # ``spec.extra["character_description"]``. Without this back-fill
+        # the structured cast work (P4.3) would be dead data. Singular
+        # populator runs FIRST and is idempotent; this only fires if it
+        # didn't set anything (no narrator description in the older
+        # ``cast["narrator"]["description"]`` slot).
+        if "character_description" not in spec.extra:
+            narrator_spec = descriptions[0].get("spec", "")
+            if narrator_spec:
+                spec.extra["character_description"] = narrator_spec
+        _logger.info(
+            "spec_enrich: resolved %d character_descriptions from %s",
+            len(descriptions), cast_path,
+        )
+
+
+def _assemble_structured_spec(entry: dict[str, Any]) -> str:
+    """Build one dense sentence from W2's structured cast fields.
+
+    Honors only the fields that are non-empty strings; falls back to
+    a stripped freeform ``description`` when none of the structured
+    fields are present (channel YAMLs that pre-date P4.3).
+    """
+    fields = {
+        k: (entry.get(k) or "").strip()
+        for k in ("age", "hair", "build", "clothing", "signature_prop")
+    }
+    if not any(fields.values()):
+        # Older shape — fall back to the freeform description verbatim.
+        desc = (entry.get("description") or "").strip()
+        return desc
+    parts: list[str] = []
+    if fields["age"]:
+        parts.append(fields["age"])
+    if fields["hair"]:
+        parts.append(fields["hair"])
+    if fields["build"]:
+        parts.append(fields["build"])
+    head = ", ".join(parts)
+    if fields["clothing"]:
+        head += f", wearing {fields['clothing']}"
+    if fields["signature_prop"]:
+        head += f", carrying {fields['signature_prop']}"
+    return head + "."
 
 
 def _extract_description(cast: dict[str, Any]) -> str | None:

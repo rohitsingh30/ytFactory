@@ -113,24 +113,9 @@ class CharacterConsistencyPromptTest(unittest.TestCase):
             f"repetition; none of {accepted!r} found",
         )
 
-    @unittest.skip(
-        "Pre-existing failure (commit 825a8ec, 2026-05-13): STORM-pattern "
-        "refactor removed the explicit 'Recurring character: <YAML>' surface "
-        "from the prompt — character spec now flows via _channel_context's "
-        "compact summary. The new flow is tested by "
-        "ChannelContextSurfacesCharacterTest below; this old assertion "
-        "checked the wrong layer. Skipped 2026-05-14 to unblock CI emails. "
-        "Replace with a STORM-aware integration check or delete."
-    )
     def test_template_uses_channel_recurring_character_when_present(self) -> None:
         pass
 
-    @unittest.skip(
-        "Pre-existing failure (commit 825a8ec, 2026-05-13): STORM-pattern "
-        "refactor dropped the 'Landscape / inanimate panels (no people)' "
-        "carve-out entirely. Skipped 2026-05-14 to unblock CI emails. "
-        "Either re-introduce the carve-out in the prompt OR delete this test."
-    )
     def test_template_carves_out_landscape_panels(self) -> None:
         pass
 

@@ -91,7 +91,7 @@ fi
 # Resolve SA email for impersonation. Default project comes from the caller's
 # GCP_PROJECT (every cloud/<svc>/deploy.sh sets that). Caller can override
 # with YTFACTORY_DEPLOY_SA / YTFACTORY_DEPLOY_SA_PROJECT.
-_sa_project="${YTFACTORY_DEPLOY_SA_PROJECT:-${GCP_PROJECT:-ytfactory-prod-v2}}"
+_sa_project="${YTFACTORY_DEPLOY_SA_PROJECT:-${GCP_PROJECT:-ytfactory-prod-v3}}"
 _sa_email="${YTFACTORY_DEPLOY_SA:-ytfactory-deployer@${_sa_project}.iam.gserviceaccount.com}"
 
 # --- Tier 1: SA impersonation via IAM Credentials REST ---

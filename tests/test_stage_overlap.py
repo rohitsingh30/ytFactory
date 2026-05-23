@@ -37,28 +37,28 @@ class TestGpuSafeToOverlap:
     def teardown_method(self) -> None:
         os.environ.pop("YTFACTORY_DISABLE_STAGE_OVERLAP", None)
 
-    def test_both_cloud_chatterbox_flux2_klein(self) -> None:
+    def test_both_cloud_chatterbox_z_image_turbo(self) -> None:
         ok, reason = gpu_safe_to_overlap(
             tts_provider="cloudrun_chatterbox",
-            image_provider="cloudrun_flux2_klein",
+            image_provider="cloudrun_z_image_turbo",
         )
         assert ok is True
         assert "both cloud" in reason
 
-    def test_both_cloud_indicf5_flux2_klein(self) -> None:
+    def test_both_cloud_indicf5_z_image_turbo(self) -> None:
         ok, _ = gpu_safe_to_overlap(
             tts_provider="cloudrun_indicf5",
-            image_provider="cloudrun_flux2_klein",
+            image_provider="cloudrun_z_image_turbo",
         )
         assert ok is True
 
     def test_local_tts_blocks_overlap(self) -> None:
         ok, reason = gpu_safe_to_overlap(
-            tts_provider="f5_tts",
-            image_provider="cloudrun_flux2_klein",
+            tts_provider="kokoro",
+            image_provider="cloudrun_z_image_turbo",
         )
         assert ok is False
-        assert "f5_tts" in reason
+        assert "kokoro" in reason
         assert "Metal contention" in reason
 
     def test_local_image_blocks_overlap(self) -> None:
@@ -73,7 +73,7 @@ class TestGpuSafeToOverlap:
         # Hindi laptop fallback path — must NOT overlap.
         ok, _ = gpu_safe_to_overlap(
             tts_provider="kokoro",
-            image_provider="cloudrun_flux2_klein",
+            image_provider="cloudrun_z_image_turbo",
         )
         assert ok is False
 
@@ -104,7 +104,7 @@ class TestGpuSafeToOverlap:
         os.environ["YTFACTORY_DISABLE_STAGE_OVERLAP"] = "1"
         ok, reason = gpu_safe_to_overlap(
             tts_provider="cloudrun_chatterbox",
-            image_provider="cloudrun_flux2_klein",
+            image_provider="cloudrun_z_image_turbo",
         )
         assert ok is False
         assert "YTFACTORY_DISABLE_STAGE_OVERLAP" in reason
@@ -114,7 +114,7 @@ class TestGpuSafeToOverlap:
             os.environ["YTFACTORY_DISABLE_STAGE_OVERLAP"] = val
             ok, _ = gpu_safe_to_overlap(
                 tts_provider="cloudrun_chatterbox",
-                image_provider="cloudrun_flux2_klein",
+                image_provider="cloudrun_z_image_turbo",
             )
             assert ok is False, f"env={val!r} should disable overlap"
 
@@ -123,14 +123,14 @@ class TestGpuSafeToOverlap:
             os.environ["YTFACTORY_DISABLE_STAGE_OVERLAP"] = val
             ok, _ = gpu_safe_to_overlap(
                 tts_provider="cloudrun_chatterbox",
-                image_provider="cloudrun_flux2_klein",
+                image_provider="cloudrun_z_image_turbo",
             )
             assert ok is True, f"env={val!r} should NOT disable overlap"
 
     def test_unknown_provider_treated_as_local(self) -> None:
         ok, reason = gpu_safe_to_overlap(
             tts_provider="some_unknown_provider",
-            image_provider="cloudrun_flux2_klein",
+            image_provider="cloudrun_z_image_turbo",
         )
         assert ok is False
         assert "local-GPU" in reason
@@ -138,7 +138,7 @@ class TestGpuSafeToOverlap:
     def test_none_tts_provider_treated_as_local(self) -> None:
         ok, _ = gpu_safe_to_overlap(
             tts_provider=None,
-            image_provider="cloudrun_flux2_klein",
+            image_provider="cloudrun_z_image_turbo",
         )
         assert ok is False
 

@@ -1,4 +1,4 @@
-"""Channel state CRUD against gs://ytfactory-prod-v2-state.
+"""Channel state CRUD against gs://ytfactory-prod-v3-state.
 
 Skills (Claude Code on laptop) used to read/write narrations / cast /
 shotlist / uploads JSON via the local filesystem, mirrored to GCS by
@@ -63,7 +63,7 @@ _ALLOWED_KINDS: frozenset[str] = frozenset({
 _SAFE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 
 _BUCKET_ENV = "YTFACTORY_STATE_BUCKET"
-_DEFAULT_BUCKET = "ytfactory-prod-v2-state"
+_DEFAULT_BUCKET = "ytfactory-prod-v3-state"
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +101,7 @@ def _bucket_name() -> str:
 
 def _gcs_client():
     from google.cloud import storage  # noqa: PLC0415
-    return storage.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2"))
+    return storage.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3"))
 
 
 def _blob_path(channel: str, kind: str, slug: str) -> str:

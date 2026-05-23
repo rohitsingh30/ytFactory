@@ -78,7 +78,7 @@ if _OTEL_OK:
 def _gcs_client():
     from google.cloud import storage  # noqa: PLC0415
 
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3")
     return storage.Client(project=project)
 
 

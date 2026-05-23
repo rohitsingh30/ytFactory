@@ -2,11 +2,9 @@
 
 Two layers:
 
-1. **Dispatcher** — fast, no network. Verifies the surviving cloud
-   providers (cloudrun_chatterbox, cloudrun_indicf5) route through
-   ``audio.synthesize()``. Post 2026-05-16 cost-optimization sweep
-   the f5/higgs/cosyvoice/indicparler/all-azure routes were dropped;
-   restore from git history if revival is needed.
+1. **Dispatcher** — fast, no network. Verifies the cloud providers
+   (cloudrun_chatterbox, cloudrun_indicf5) route through
+   ``audio.synthesize()``.
 
 2. **Live cloud smoke** — actually hits the Cloud Run chatterbox
    service and confirms a real WAV comes back. Slow (~3 s warm,
@@ -85,6 +83,97 @@ class TestCloudRunDispatch(unittest.TestCase):
             )
         self.assertIn("cloudrun_chatterbox", str(ctx.exception))
         self.assertIn("cloudrun_indicf5", str(ctx.exception))
+
+
+# ------------------------------------- chunked ref_text swap (P4.4 / Q71)
+
+
+class TestChunkedRefTextSwap(unittest.TestCase):
+    """P4.4 regression guard for the Hindi-noise bug.
+
+    Before 2026-05-23, ``_synth_cloudrun_chunked`` swapped the ref
+    AUDIO to chunk-0's own output (for timbre anchoring on
+    voice-clone-capable models like IndicF5) but kept the ORIGINAL
+    caller-provided ``ref_audio_text``. The mismatch (chunk-0 wav vs
+    sarah's transcript) is exactly what produced Hindi gibberish on
+    every chunk after the first.
+
+    After the fix the per-chunk call sees ref_audio_text swap to
+    chunk-0's text on chunk 1+.
+    """
+
+    def test_indicf5_chunked_swaps_ref_text_to_chunk0_text(self) -> None:
+        from pipeline.tts import cloudrun as _cr
+
+        # IndicF5 chunk cap is 200 chars (pipeline/tts/cloudrun.py
+        # ``_CHUNK_MAX_CHARS["indicf5"]``). Build a multi-sentence
+        # English string the splitter will reliably break on periods,
+        # well past 200 chars total — the SCRIPT under test only
+        # cares about chunk count + the ref_text swap, not the
+        # language of the text.
+        long_text = (
+            "This is a long Hindi-style narration sample sentence. "
+            "Here is a second long sentence about temples and rivers. "
+            "And a third sentence describing the calm village morning. "
+            "Then a fourth sentence about a wandering pilgrim's tale. "
+            "Finally a fifth sentence wrapping the small narration up."
+        )
+        captured: list[dict] = []
+
+        def _fake_synth_cloudrun(**kwargs):
+            captured.append({
+                "text": kwargs.get("text"),
+                "ref_audio_text": kwargs.get("ref_audio_text"),
+                "ref_audio_path": kwargs.get("ref_audio_path"),
+            })
+            # Materialise a tiny silent WAV at out_path so the caller's
+            # ffmpeg concat step succeeds.
+            out = kwargs.get("out_path")
+            assert out is not None
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(_TINY_WAV_BYTES)
+            return out
+
+        with tempfile.TemporaryDirectory() as td, \
+             patch.object(_cr, "_synth_cloudrun", side_effect=_fake_synth_cloudrun), \
+             patch.object(_cr, "_concat_wavs", return_value=Path(td) / "out.wav"):
+            _cr._synth_cloudrun_chunked(
+                model="indicf5",
+                text=long_text,
+                ref_audio_path="/tmp/ref.wav",
+                ref_audio_text="The original reference transcript.",
+                out_path=Path(td) / "out.wav",
+                speed=1.0,
+                seed=1,
+            )
+
+        self.assertGreater(len(captured), 1, "chunker must split the input")
+        # Chunk 0 — uses caller's original ref_audio_text.
+        self.assertEqual(
+            captured[0]["ref_audio_text"],
+            "The original reference transcript.",
+        )
+        # Chunk 1+ — ref_audio_text must equal that chunk's text (chunk-0's
+        # text, which the model just synthesised; so the new ref wav and
+        # new ref text describe the SAME audio).
+        for i in range(1, len(captured)):
+            self.assertEqual(
+                captured[i]["ref_audio_text"],
+                captured[0]["text"],
+                f"P4.4 regression: chunk {i} ref_audio_text did not swap to "
+                f"chunk-0's text — got {captured[i]['ref_audio_text']!r}, "
+                f"expected {captured[0]['text']!r}",
+            )
+            # And ref_audio_path must point at chunk_000.wav (timbre anchor).
+            self.assertIn("chunk_000.wav", captured[i]["ref_audio_path"])
+
+
+# Minimal valid silent WAV (44-byte header + zero samples) — just enough
+# to satisfy size + concat steps in the chunk-loop test above.
+_TINY_WAV_BYTES = (
+    b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00"
+    b"\x44\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+)
 
 
 # ----------------------------------------------------------------- fallback

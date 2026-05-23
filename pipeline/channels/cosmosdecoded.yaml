@@ -34,8 +34,8 @@
 name: Cosmos Decoded
 source_adapter: cosmosdecoded_manual  # manual curator flow, no auto-pull yet
 
-# render_style: footage_only — workers/heavy/render_short.py routes this
-# channel through historyrecapped/scripts/render_footage_only.py. Each
+# render_style: footage_only — the engine + plugin system routes this
+# channel to the footage-only visualize plugin (no AI image-gen). Each
 # slug needs a sidecar at cosmosdecoded/shotlist/<slug>.json with
 # source_url + windows[] (each {in_s, out_s, match_text}).
 render_style: footage_only
@@ -56,9 +56,8 @@ narrator_visual_mode: voice_only
 # ---- TTS — Shorts: cloud Chatterbox (cloud-first 2026-05-06) ----------
 # Was Kokoro am_michael (sober explainer male, zero-API local). Flipped
 # to cloudrun_chatterbox with sarah.wav clone for the cloud-first
-# migration. Long-form runs cloudrun_chatterbox strictly (see long_form:
-# block below; render_long_form.py rejects providers outside
-# {f5_tts, cloudrun_f5, cloudrun_chatterbox, kokoro}).
+# migration. Long-form runs cloudrun_chatterbox (see long_form: block
+# below).
 tts_provider: cloudrun_chatterbox
 tts_voice: pipeline/voice_refs/sarah.wav
 tts_ref_text: "Tonight we travel to the Western Front of the Great War. Speak softly. Let the lamp grow dim. Slow your breathing. We will walk together from the warm meadows"
@@ -178,18 +177,12 @@ long_form:
   # Voice — Chatterbox via Cloud Run L4 zero-shot voice clone of
   # sarah.wav. Same ref WAV as HistoryRecapped long-form so we don't
   # burn a second voice slot. Chatterbox conditions on the ref-audio
-  # embedding only, so `tts_ref_text` below is unused (kept for back-
-  # compat / fallback to F5 family if we ever re-enable cloudrun_f5).
+  # embedding only, so `tts_ref_text` below is unused (kept for the
+  # generic chunked-synth contract).
   # Cosmos Decoded long-form is calm-explainer cadence (NOT sleep-mode):
   # speed=1.0 + atempo=1.0 → ~150 wpm "Veritasium without the host"
   # tempo. NEVER use sleep cadence (0.95 + atempo=0.85) on this channel
   # — physics audience expects engaged narration, not bedtime narration.
-  #
-  # 2026-05-10: flipped from cloudrun_f5 → cloudrun_chatterbox because
-  # ytfactory-tts-f5 is not deployed under ytfactory-prod-v2 (Phase 4
-  # consolidation chose chatterbox as the canonical English service —
-  # see docs/full_cloud_cutover_2026_05_09.md). render_long_form.py
-  # now accepts both cloudrun_f5 and cloudrun_chatterbox.
   tts_provider: cloudrun_chatterbox
   tts_voice: pipeline/voice_refs/sarah.wav
   tts_ref_text: "Tonight we travel to the Western Front of the Great War. Speak softly. Let the lamp grow dim. Slow your breathing. We will walk together from the warm meadows"

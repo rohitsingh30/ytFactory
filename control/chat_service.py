@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-from control.schema import ShortProposal
+from control.core.schema import ShortProposal
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +159,7 @@ class ChatService:
         # Best-effort spend tracking (real billing comes from Azure; this just
         # feeds the daily cap circuit breaker in control/rate_limit.py).
         try:
-            from control import rate_limit  # noqa: PLC0415 — avoid import cycle
+            from control.core import rate_limit  # noqa: PLC0415 — avoid import cycle
             usage = getattr(resp, "usage", None)
             if usage is not None:
                 rate_limit.record_token_usage(

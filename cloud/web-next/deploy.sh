@@ -77,7 +77,7 @@ echo "==> Pre-building .next/ on host"
 # auth runs via the custom token minted by /api/jobs/<id>/critique/token
 # on the FastAPI backend + Firestore security rules. Provisioned
 # 2026-05-11 via `firebase apps:create WEB ytfactory-web-next` after
-# `firebase projects:addfirebase ytfactory-prod-v2`. Override via env
+# `firebase projects:addfirebase ytfactory-prod-v3`. Override via env
 # if you ever rotate the keys.
 export NEXT_PUBLIC_FIREBASE_API_KEY="${NEXT_PUBLIC_FIREBASE_API_KEY:-PLACEHOLDER}"
 export NEXT_PUBLIC_FIREBASE_PROJECT_ID="${NEXT_PUBLIC_FIREBASE_PROJECT_ID:-ytfactory-prod-v3}"

@@ -134,27 +134,12 @@ docs/screenshots/
 .copilot-session/
 .work/
 
-# Loop driver scripts (Playwright dev-only; not production code)
-scripts/loop/
+# Per-channel critique outputs — regenerable by re-running
+# `/critique-video` (referenced by pipeline/paths.py).
 data/critiques/
-data/loop/
-audit_data/
-audit_report.html
 
-# Demo / scratch render outputs at repo root — regenerable from
-# narrations + footage source. Heavy (mp4 + wav + per-beat PNGs).
-out/
-
-# Per-channel render artifacts at repo root — stay local per
-# convention (regenerable from the channel YAML + scheduler).
-# Add new channel slugs here as channels come online.
-mystoriesanimated/
-historyrecapped/
-hindutavaanimated/
-cosmosdecoded/
-sportsrecapped/
-rhymetimejunction/
-scrollpulse/
+# Per-channel render artifacts live under data/<channel>/ — see
+# pipeline/paths.py. Nothing is generated at the repo root.
 
 # Per-channel critique artifacts — the cloud-critic daemon writes
 # critique.md + score.json under <channel>/critiques/. Regenerable;

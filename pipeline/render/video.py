@@ -78,53 +78,6 @@ events to its own UI / Firestore. Same shape the worker's
 ``_compose_progress`` already consumes."""
 
 
-def render(
-    spec: RenderSpec,
-    *,
-    proposal: dict[str, Any],
-    work_dir: Path,
-    job_id: str,
-    progress_cb: ProgressCallback | None = None,
-) -> Path:
-    """Render the spec to an mp4. Returns the produced mp4 path.
-
-    Dispatches by ``spec.kind``. NEVER calls back into the worker's
-    Firestore-update loop — the caller wraps progress + persistence.
-    """
-    work_dir.mkdir(parents=True, exist_ok=True)
-    _logger.info(
-        "video.render: kind=%s channel=%s slug-source=%s aspect=%s res=%s",
-        spec.kind.value, spec.channel,
-        proposal.get("topic", "")[:40],
-        spec.aspect_ratio, spec.output_resolution,
-    )
-
-    if spec.kind == RenderKind.LONG_FORM:
-        return render_long_form(
-            spec=spec,
-            proposal=proposal,
-            work_dir=work_dir,
-            job_id=job_id,
-            progress_cb=progress_cb,
-        )
-
-    if spec.kind == RenderKind.SHORT:
-        # Slice 2: short still goes through the worker's existing
-        # stage-by-stage path. Returning a sentinel exception so the
-        # worker keeps using its current short logic without us
-        # silently bypassing it.
-        raise NotImplementedError(
-            "video.render: kind=short is still handled by the worker's "
-            "existing rewrite/cast/compose stages (Slice 5 will absorb "
-            "it). Caller should not invoke video.render(spec) for short."
-        )
-
-    raise NotImplementedError(
-        f"video.render: kind={spec.kind.value} is not yet wired "
-        "(Slice 5 lands sports_doc + footage_only)."
-    )
-
-
 def render_via_engines(
     spec: RenderSpec,
     *,
@@ -799,7 +752,6 @@ _LF_DONE_TOKEN_RE = re.compile(r"\bdone\b")
 
 
 __all__ = [
-    "render",
     "render_long_form",
     "render_via_engines",
     "ProgressCallback",

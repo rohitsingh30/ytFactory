@@ -11,7 +11,7 @@ them via the same base64 wire format as path-style refs.
 Both name-style and path-style are accepted by callers. Detection:
 a value containing "/" or ending in ".wav" is treated as a path; any
 other non-empty string is looked up in the catalog. Empty strings
-mean "no voice ref" (description-driven providers like indicparler).
+mean "no voice ref" (description-driven providers).
 
 Public API:
     resolve_voice(name_or_path, project_root) -> (Path, transcript)
@@ -88,8 +88,8 @@ def resolve_voice(
 
     Resolution order:
 
-    1. Empty string → ``(None, "")`` — caller treats as no-ref-WAV (the
-       description-driven providers like indicparler accept this).
+    1. Empty string → ``(None, "")`` — caller treats as no-ref-WAV
+       (description-driven providers accept this).
     2. Path-style (contains "/" or ends ".wav"): returned as-is, plus a
        sibling ``<basename>.txt`` / ``ref.txt`` transcript if found.
     3. Catalog name (in ``pipeline/voice_refs/catalog.yaml``): full

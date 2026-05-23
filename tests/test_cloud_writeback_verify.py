@@ -111,26 +111,46 @@ class VerifyMp4ArtifactTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("file_missing", reason)
 
-    # ---- duration gate ----
-    def test_short_duration_fails_duration(self):
+    # ---- duration sanity (P3.7, 2026-05-23, Q65, ADR-023) ----
+    # The writeback verifier no longer enforces a 0.8 × target floor.
+    # Upstream length gates own duration enforcement; the writeback
+    # is reduced to "does ffprobe even see a valid duration?"
+    def test_short_duration_does_NOT_fail_writeback(self):
+        """P3.7 regression guard: a 10-s mp4 against a 60-s target
+        MUST pass writeback. Earlier this failed at the 0.8 × target
+        floor (48 s), killing jobs whose upstream length already
+        decided the render was shippable. Per ADR-023 gates are repair
+        triggers — upstream owns duration enforcement, writeback is
+        sanity only."""
         self._seed_mp4(200_000)
-        # Target 60s, actual 10s → fails the 0.8 × 60 = 48s floor.
         probe = _ok_probe_json(duration=10.0)
         with mock.patch.object(self.ep.subprocess, "run") as mock_run:
             mock_run.side_effect = [
                 _make_proc(stdout=probe, returncode=0),  # ffprobe
                 _make_proc(stderr=_ok_volumedetect_stderr(), returncode=0),
             ]
-            ok, reason, diag = self.ep._verify_mp4_artifact(self.mp4, 60)
+            ok, reason, _ = self.ep._verify_mp4_artifact(self.mp4, 60)
+        self.assertTrue(ok, f"P3.7 regression: writeback re-introduced duration floor (reason: {reason})")
+
+    def test_zero_duration_still_fails(self):
+        """P3.7: zero / missing duration is the LAST remaining
+        duration-related kill — catches corrupt / empty mp4s."""
+        self._seed_mp4(200_000)
+        probe = _ok_probe_json(duration=0.0)
+        with mock.patch.object(self.ep.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _make_proc(stdout=probe, returncode=0),
+                _make_proc(stderr=_ok_volumedetect_stderr(), returncode=0),
+            ]
+            ok, reason, _ = self.ep._verify_mp4_artifact(self.mp4, 60)
         self.assertFalse(ok)
         self.assertIn("duration", reason)
-        self.assertIn("10", reason)
 
-    def test_duration_skipped_when_target_is_none(self):
-        """If duration_target_s is None / 0 the duration gate is not
-        applied (some kinds may not have a target)."""
+    def test_duration_check_skipped_when_target_is_none(self):
+        """If duration_target_s is None / 0 the writeback still
+        succeeds for any positive duration (no floor was ever
+        applied in this branch)."""
         self._seed_mp4(200_000)
-        # Tiny duration but target=None so the duration gate is skipped.
         probe = _ok_probe_json(duration=1.0)
         with mock.patch.object(self.ep.subprocess, "run") as mock_run:
             mock_run.side_effect = [

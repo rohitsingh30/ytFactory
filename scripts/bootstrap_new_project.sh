@@ -21,8 +21,8 @@
 #   5. Create GCS buckets (artifacts, weights, state)
 #   6. Create Secret Manager secrets (HF_TOKEN, AZURE_OPENAI_API_KEY)
 #   7. Grant SA permissions (storage.objectViewer, secretmanager.secretAccessor)
-#   8. Stage z-turbo weights via Cloud Build — klein/qwen/flux2-dev SKIPPED
-#      (per the cost-optimized minimal stack — see docs/cost_optimized_deploy.md)
+#   8. Stage z-turbo weights via Cloud Build (per the cost-optimized
+#      minimal stack — see docs/cost_optimized_deploy.md)
 #   9. Build + deploy z-image-turbo service (right-sized 4 vCPU + 16 GiB)
 #  10. Build + deploy TTS services (chatterbox, indicf5 — 4 vCPU + 16 GiB, concurrency=2)
 #  11. Deploy ASR service (asr-whisper — 4 vCPU + 16 GiB, concurrency=2)
@@ -35,8 +35,6 @@
 #   - Image services use GCS Fuse mount, NOT baked weights (faster builds)
 #   - --add-volume=...,readonly=true (NOT --add-volume-mount=readonly=true)
 #   - render-worker-v2 deploy.sh has all CLOUDRUN_*_URL env vars (rebuild-safe)
-#   - flux2-dev EXCLUDED (96hr/render on L4 — verified 2026-05-15)
-#   - klein + qwen EXCLUDED (z-turbo is sufficient and cheaper per render)
 #   - All GPU services right-sized to Cloud Run min (4 vCPU + 16 GiB)
 #   - min-instances=0 on every GPU service (kills the $272 idle waste)
 #   - TTS concurrency=2 (process 2 calls per warm instance; halves cold-starts)
@@ -210,48 +208,21 @@ for sd in "ytfactory-hf-token:${HF_TOKEN}" "ytfactory-azure-openai-key:${AZURE_O
 done
 ok "Secrets created + granted to compute + image-runner + render-runner SAs"
 
-# ─── 8. Stage weights (klein + qwen + z-image-turbo only) ─────────────
+# ─── 8. Stage weights (deleted 2026-05-23, R9) ───────────────────────
 #
-# CRITICAL LESSON: flux2-dev is EXCLUDED. On L4 GPU it does ~17 min/inference
-# step × 28 steps × 12 beats = ~96 hours per render. Verified 2026-05-15.
-# Use BFL paid API for flux2-dev or GKE with L40/A100.
+# The standalone ``cloud/weights-staging/`` Cloud Build job was deleted
+# per the lean-engineering / no-vestigial rule — zero invocations in
+# the last 90 days, plus z-image-turbo bakes its weights into the
+# Docker image (CLAUDE.md Cost Guardrail #5). When the production
+# image service is the only model and it ships its own weights, the
+# separate staging job has no consumer.
 #
-# Why Cloud Build (not Cloud Run JOB):
-#   - Cloud Run JOB caps at 32 GiB tmpfs → can't fit 64 GB safetensors
-#   - Cloud Build with e2-highcpu-32 + 200 GB disk handles ALL HF repos
+# To restore: bring the dir back from git history (commit pre-2026-05-23)
+# OR — preferred — stage weights inline via a one-shot laptop script.
 
-step 8 "Stage HF weights via Cloud Build (klein + qwen + z-image-turbo)"
-REPOS_TO_STAGE="Tongyi-MAI/Z-Image-Turbo"
+step 8 "Weights staging skipped (deleted per R9 — z-image-turbo bakes its own weights)"
 
-# Update cloudbuild.yaml's project reference
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-sed -i.bak "s|projects/ytfactory-prod-v2|projects/${PROJECT}|g" "${ROOT}/cloud/weights-staging/cloudbuild.yaml" 2>/dev/null || true
-
-build_id=$(gcloud builds submit \
-  --config="${ROOT}/cloud/weights-staging/cloudbuild.yaml" \
-  --no-source --project="${PROJECT}" \
-  --substitutions="_REPOS=${REPOS_TO_STAGE},_BUCKET=${WEIGHTS_BUCKET}" \
-  --timeout=7200s --async --format="value(id)" 2>/dev/null \
-  | grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
-  | tail -1)
-if [ -z "${build_id}" ]; then
-  echo "  ❌ Could not extract Cloud Build id; check 'gcloud builds list --ongoing'"
-  exit 1
-fi
-echo "  Cloud Build: ${build_id}"
-echo "  Console: https://console.cloud.google.com/cloud-build/builds/${build_id}?project=${PROJECT}"
-echo "  Polling weights staging (timeout 90 min)..."
-deadline=$((SECONDS + 5400))
-while [ $SECONDS -lt $deadline ]; do
-  s=$(gcloud builds describe "${build_id}" --project="${PROJECT}" --format="value(status)" 2>/dev/null || echo UNKNOWN)
-  case "$s" in
-    SUCCESS) ok "Weights staging done"; break ;;
-    FAILURE|CANCELLED|TIMEOUT|EXPIRED|INTERNAL_ERROR) echo "  ❌ Weights staging ${s}"; exit 1 ;;
-    *) echo "  ...status=${s} (${SECONDS}s)"; sleep 60 ;;
-  esac
-done
-
-# ─── 9. Image services (klein, qwen, z-image-turbo) ──────────────────
+# ─── 9. Image services (z-image-turbo only) ──────────────────────────
 
 step 9 "Build + deploy image service (z-image-turbo only — minimal stack)"
 for svc_dir in image-z-image-turbo; do
@@ -338,14 +309,13 @@ ok "Budget set: \$200 cap with alerts at 15% (\$30), 50% (\$100), 90% (\$180), 1
 
 # ─── 14. Smoke test ──────────────────────────────────────────────────
 
-step 14 "Smoke test (one short on z-turbo, verify mp4 produced)"
-cd "${ROOT}"
-export YTFACTORY_QUEUE_BACKEND=firestore
-export YTFACTORY_RENDER_BACKEND=cloudrun
-export GOOGLE_CLOUD_PROJECT="${PROJECT}"
-.venv/bin/python scripts/image_bake_off_full.py --execute \
-  --channels mystoriesanimated --models cloudrun_z_image_turbo --stagger-s 0
-ok "Smoke render dispatched. Poll Firestore jobs/<id> for status."
+step 14 "Smoke test (deleted 2026-05-23 — bake-off harness retired)"
+# The image bake-off harness (scripts/image_bake_off_full.py) was
+# deleted along with prompt_per_model.py + bake_off_beats.py per the
+# z-turbo-only ADR-024. To smoke after bootstrap: open the wizard at
+# /app/create, pick a channel, submit a render. Verify mp4 lands at
+# gs://${PROJECT}-artifacts/jobs/<id>/short.mp4.
+echo "Smoke step skipped — use /app/create wizard for a real render."
 
 echo ""
 echo "===================================================================="
@@ -362,10 +332,7 @@ echo "   Idle (no renders): \$0/day"
 echo "   50 renders/day:    ~\$95/mo"
 echo ""
 echo " Excluded (per docs/cost_optimized_deploy.md):"
-echo "   klein, qwen, flux2-dev, hidream (image)"
-echo "   cosyvoice, higgs, indicparler (TTS)"
-echo "   editing-agent, clone-video-worker, cobalt-api"
+echo "   editing-agent, clone-video-worker"
 echo ""
 echo " Daily audit:  python scripts/audit_idle_costs.py"
-echo " Run bake-off: bash scripts/run_bake_off.sh"
 echo "===================================================================="

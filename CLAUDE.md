@@ -20,14 +20,15 @@ laptop is the control plane.
   - `render/{audio,timeline,visualize,overlays,music,compose}/` — 6 plugin slots
   - `llm/cli.py` — 3-backend dispatcher (`cli` / `azure_openai` / `anthropic_sdk`)
   - `audio/` — TTS facade; real providers under `pipeline/tts/`
-  - `images/` — image-gen dispatcher (FLUX.2 klein and alternates)
+  - `images/` — image-gen dispatcher; **production model = Z-Image-Turbo**. Refiner in `pipeline/images/prompt_refiner.py` is calibrated for z-turbo (80-250-word structured prompts, positive-only, lighting-token-heavy).
   - `channels/<channel>.yaml` — per-channel config (source of truth)
   - `variants/<channel>/<v>.yaml` — variant overlays on top of channel config
 - `control/` — laptop control plane (FastAPI routes, Firestore queue, scheduler)
-- `cloud/` — Cloud Run services
+- `cloud/` — Cloud Run services (only the ones below are deployed)
   - `render-worker-v2/` — the JOB that executes a render
-  - `image-flux2-klein/`, `image-z-image-turbo/`, `image-qwen/`, `image-hidream/`
-  - `tts-chatterbox/`, `tts-f5/`, `tts-higgs/`, `tts-cosyvoice/`, `tts-indicparler/`, `tts-indicf5/`
+  - `image-z-image-turbo/` — the production image-gen GPU service
+  - `tts-chatterbox/` — English TTS
+  - `tts-indicf5/` — Hindi TTS (used by `hindutavaanimated`)
   - `asr-whisper/` — faster-whisper for word alignment
   - `editing-agent/` — optional polish stage
   - `_shared/` — sync.sh, otel_init.py, auth_setup.sh (sourced by every deploy.sh)
@@ -47,7 +48,7 @@ laptop is the control plane.
 6. `engine.pick_engine(spec)` returns `render_short` or `render_long`
 7. Engines call plugins from the 6 slots, each plugin registered via
    `register_plugin` at import time
-8. Final mp4 → `gs://ytfactory-prod-v2-artifacts/jobs/<id>/short.mp4`
+8. Final mp4 → `gs://ytfactory-prod-v3-artifacts/jobs/<id>/short.mp4`
 
 ## Channels
 
@@ -68,19 +69,17 @@ plus the variant overlay if one applies. Read the YAML.
 
 ## Cloud Run service env vars
 
+Active in production (everything else listed previously was for retired services):
+
 ```text
-CLOUDRUN_TTS_CHATTERBOX_URL     CLOUDRUN_TTS_F5_URL
-CLOUDRUN_TTS_INDICF5_URL        CLOUDRUN_TTS_INDICPARLER_URL
-CLOUDRUN_TTS_HIGGS_URL          CLOUDRUN_TTS_COSYVOICE_URL
-CLOUDRUN_TTS_URL                (generic fallback)
-
-CLOUDRUN_IMAGE_FLUX2_KLEIN_URL  CLOUDRUN_IMAGE_Z_TURBO_URL
-CLOUDRUN_IMAGE_QWEN_URL         CLOUDRUN_IMAGE_HIDREAM_URL
-
-CLOUDRUN_ASR_URL                CLOUDRUN_EDITING_AGENT_URL
-CLOUDRUN_CLONE_VIDEO_URL        CLOUDRUN_COBALT_URL
-CLOUDRUN_YT_DLP_URL
-CLOUDRUN_WEB_SERVER_URL         CLOUDRUN_WEB_NEXT_URL
+CLOUDRUN_TTS_CHATTERBOX_URL       (English TTS)
+CLOUDRUN_TTS_INDICF5_URL          (Hindi TTS)
+CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL  (sole production image model)
+CLOUDRUN_ASR_URL                  (faster-whisper)
+CLOUDRUN_EDITING_AGENT_URL        (optional 8th stage)
+CLOUDRUN_CLONE_VIDEO_URL          (yt-dlp / clone-video-worker)
+CLOUDRUN_WEB_SERVER_URL           (web prod surface)
+CLOUDRUN_WEB_NEXT_URL             (Next.js admin/wizard UI)
 ```
 
 `YTFACTORY_LLM_BACKEND` selects the LLM backend (`cli` / `azure_openai` /

@@ -6,8 +6,7 @@ Three layers:
    each provider to the right `_synth_*` and surfaces clean errors.
 
 2. **Configuration** — parses every production channel YAML and asserts
-   its `tts_provider` / `tts_voice` are coherent (path exists for clone
-   providers; non-empty description for indic_parler).
+   its `tts_provider` / `tts_voice` are coherent.
 
 3. **Live synth smoke** — actually invokes the model. Slow (10s-3min per
    provider, downloads model weights on first run). Auto-skipped when
@@ -44,7 +43,6 @@ def _lib_installed(name: str) -> bool:
 _TTS_LIVE = os.environ.get("YTFACTORY_TTS_LIVE") == "1"
 
 _LIVE_TEXT_EN = "This is a brief smoke test of the text to speech path."
-_LIVE_TEXT_HI = "नमस्कार। यह एक छोटा परीक्षण है।"
 
 
 def _read_wav_meta(path: Path) -> tuple[float, int]:
@@ -71,27 +69,8 @@ class SynthesizeDispatcherTest(unittest.TestCase):
         self.assertIn("unknown TTS provider", msg)
         # Error message must enumerate the legal choices so the operator
         # can fix the YAML without grepping.
-        for prov in ("kokoro", "f5_tts", "chatterbox", "styletts2",
-                     "indic_parler"):
+        for prov in ("kokoro", "chatterbox", "styletts2"):
             self.assertIn(prov, msg, f"choice list missing {prov!r}")
-
-    def test_f5_tts_requires_ref_audio_text(self):
-        with self.assertRaises(ValueError) as ctx:
-            audio.synthesize(
-                "x",
-                # Use sports_male_intense.wav specifically — it has NO .txt
-                # sidecar in voice_refs/, so the 2026-05-15 voice resolver
-                # returns an empty transcript and the dispatcher's
-                # "ref_audio_text required" check still fires when the
-                # caller passes None. Using theo.wav (which DOES have a
-                # sidecar) would silently auto-fill ref_audio_text and
-                # bypass the validation we're trying to test.
-                voice="pipeline/voice_refs/sports_male_intense.wav",
-                out_path=Path("/tmp/never.wav"),
-                provider="f5_tts",
-                ref_audio_text=None,
-            )
-        self.assertIn("ref_audio_text", str(ctx.exception))
 
     def test_kokoro_routes_to_synth_kokoro(self):
         with patch.object(audio, "_synth_kokoro") as mock:
@@ -102,27 +81,6 @@ class SynthesizeDispatcherTest(unittest.TestCase):
                 provider="kokoro",
             )
             mock.assert_called_once()
-
-    def test_f5_tts_routes_to_synth_f5_tts(self):
-        with patch.object(audio, "_synth_f5_tts") as mock:
-            mock.return_value = Path("/tmp/x.wav")
-            audio.synthesize(
-                "hello",
-                voice="pipeline/voice_refs/theo.wav",
-                out_path=Path("/tmp/x.wav"),
-                provider="f5_tts",
-                ref_audio_text="some transcript",
-            )
-            mock.assert_called_once()
-            kwargs = mock.call_args.kwargs
-            # 2026-05-15: dispatcher now resolves voice via
-            # pipeline.voice.voice_catalog → absolute path. Use suffix
-            # match instead of exact equality.
-            self.assertTrue(
-                kwargs["ref_audio_path"].endswith("pipeline/voice_refs/theo.wav"),
-                f"got {kwargs['ref_audio_path']!r}",
-            )
-            self.assertEqual(kwargs["ref_audio_text"], "some transcript")
 
     def test_chatterbox_routes_to_synth_chatterbox(self):
         with patch.object(audio, "_synth_chatterbox") as mock:
@@ -152,21 +110,6 @@ class SynthesizeDispatcherTest(unittest.TestCase):
             )
             mock.assert_called_once()
 
-    def test_indic_parler_routes_with_voice_as_description(self):
-        # indic_parler interprets `voice` as a natural-language
-        # description, NOT a path. Make sure the dispatcher passes it
-        # through as `description`.
-        desc = "Sneha speaks calmly with a moderate pace."
-        with patch.object(audio, "_synth_indic_parler") as mock:
-            mock.return_value = Path("/tmp/x.wav")
-            audio.synthesize(
-                "नमस्कार",
-                voice=desc,
-                out_path=Path("/tmp/x.wav"),
-                provider="indic_parler",
-            )
-            mock.assert_called_once()
-            self.assertEqual(mock.call_args.kwargs["description"], desc)
 
 # ---------- 2. Channel YAML configuration ---------------------------------
 
@@ -179,13 +122,12 @@ _PRODUCTION_CHANNELS = [
 ]
 
 _VALID_PROVIDERS = {
-    "kokoro", "f5_tts", "chatterbox", "styletts2", "indic_parler",
-    "cloudrun_chatterbox", "cloudrun_f5", "cloudrun_higgs",
-    "cloudrun_cosyvoice", "cloudrun_indicparler", "cloudrun_indicf5",
+    "kokoro", "chatterbox", "styletts2",
+    "cloudrun_chatterbox", "cloudrun_indicf5",
 }
 
 # Providers that interpret tts_voice as a filesystem path to a ref WAV.
-_REF_WAV_PROVIDERS = {"f5_tts", "chatterbox", "styletts2"}
+_REF_WAV_PROVIDERS = {"chatterbox", "styletts2"}
 
 
 class ChannelTtsConfigTest(unittest.TestCase):
@@ -205,9 +147,6 @@ class ChannelTtsConfigTest(unittest.TestCase):
         for ch in _PRODUCTION_CHANNELS:
             with self.subTest(channel=ch):
                 cfg = self._load(ch)
-                # rhymetimejunction uses audio_provider: external_song
-                # instead of TTS — but it's not in this list, so all
-                # listed channels must declare a real tts_provider.
                 provider = cfg.get("tts_provider")
                 self.assertIn(
                     provider, _VALID_PROVIDERS,
@@ -227,8 +166,7 @@ class ChannelTtsConfigTest(unittest.TestCase):
                     ref_path.exists(),
                     f"{ch}: tts_voice ref WAV {ref_path} does not exist",
                 )
-                # Mono 24kHz 5-15s — F5/Chatterbox docs both want a
-                # short clean clip.
+                # Mono 24kHz 5-15s — Chatterbox docs want a short clean clip.
                 duration_s, sr = _read_wav_meta(ref_path)
                 self.assertGreaterEqual(
                     duration_s, 4.0,
@@ -238,35 +176,6 @@ class ChannelTtsConfigTest(unittest.TestCase):
                     duration_s, 16.0,
                     f"{ch}: ref clip {duration_s:.2f}s > 15s maximum",
                 )
-
-    def test_f5_tts_channels_have_ref_text(self):
-        # F5-TTS requires `tts_ref_text` (transcript of the ref WAV).
-        # Without it, the dispatcher will raise at synth time —
-        # catch the misconfiguration here instead.
-        for ch in _PRODUCTION_CHANNELS:
-            with self.subTest(channel=ch):
-                cfg = self._load(ch)
-                if cfg.get("tts_provider") != "f5_tts":
-                    continue
-                ref_text = cfg.get("tts_ref_text")
-                self.assertIsInstance(ref_text, str)
-                self.assertGreater(len(ref_text.strip()), 10,
-                                   f"{ch}: tts_ref_text is too short")
-
-    def test_indic_parler_voice_is_description_not_path(self):
-        for ch in _PRODUCTION_CHANNELS:
-            with self.subTest(channel=ch):
-                cfg = self._load(ch)
-                if cfg.get("tts_provider") != "indic_parler":
-                    continue
-                voice = cfg.get("tts_voice")
-                self.assertIsInstance(voice, str)
-                # A description is multiple words; a path would have a
-                # `/` and end in `.wav`. Sanity-check.
-                self.assertNotIn(".wav", voice,
-                                 f"{ch}: indic_parler voice looks like a path, should be a description")
-                self.assertGreater(len(voice.split()), 5,
-                                   f"{ch}: indic_parler description is too short")
 
 
 # ---------- 3. Reference clip integrity -----------------------------------
@@ -278,11 +187,6 @@ class VoiceRefClipsTest(unittest.TestCase):
     silently degrades cloning quality. Catch problems at test time."""
 
     REF_DIR = PROJECT_ROOT / "pipeline" / "voice_refs"
-    # theo.wav was lost in the 2026-05-04 recovery wipe; sarah.wav is
-    # the only F5-TTS ref currently on disk. Channels that previously
-    # used Theo (male) now run sarah.wav. Re-add "theo" to this list
-    # once a 5-15s 24kHz mono male WAV is dropped at
-    # pipeline/voice_refs/theo.wav.
     EXPECTED_REFS = ["sarah"]
 
     def test_all_expected_refs_exist(self):
@@ -346,23 +250,6 @@ class KokoroLiveSynthTest(_LiveSynthBase):
 
 
 @unittest.skipUnless(_TTS_LIVE, "set YTFACTORY_TTS_LIVE=1 to run live synth tests")
-class F5TtsLiveSynthTest(_LiveSynthBase):
-    @unittest.skipUnless(_lib_installed("f5_tts_mlx"),
-                         "f5-tts-mlx not installed")
-    def test_f5_tts_synth_with_theo_ref(self):
-        ref_wav = PROJECT_ROOT / "pipeline" / "voice_refs" / "theo.wav"
-        ref_txt = (PROJECT_ROOT / "pipeline" / "voice_refs" / "theo.txt").read_text().strip()
-        with tempfile.TemporaryDirectory() as td:
-            out = Path(td) / "f5.wav"
-            audio.synthesize(
-                _LIVE_TEXT_EN, voice=str(ref_wav),
-                out_path=out, speed=0.95, provider="f5_tts",
-                ref_audio_text=ref_txt,
-            )
-            self._assert_valid_wav(out)
-
-
-@unittest.skipUnless(_TTS_LIVE, "set YTFACTORY_TTS_LIVE=1 to run live synth tests")
 class ChatterboxLiveSynthTest(_LiveSynthBase):
     @unittest.skipUnless(_lib_installed("chatterbox"),
                          "chatterbox-tts not installed")
@@ -377,47 +264,7 @@ class ChatterboxLiveSynthTest(_LiveSynthBase):
             self._assert_valid_wav(out)
 
 
-def _parler_tts_compatible() -> bool:
-    """parler-tts is incompatible with transformers >= 4.49 (it depends
-    on a removed `PreTrainedConfig` attribute). diffusers 0.38 requires
-    transformers >= 4.49 for image-gen, so this venv runs newer
-    transformers — parler-tts is permanently broken here."""
-    if not _lib_installed("parler_tts"):
-        return False
-    try:
-        from parler_tts import ParlerTTSForConditionalGeneration  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
-@unittest.skipUnless(_TTS_LIVE, "set YTFACTORY_TTS_LIVE=1 to run live synth tests")
-class IndicParlerLiveSynthTest(_LiveSynthBase):
-    """Indic Parler-TTS synth path. NOTE: hindutavaanimated's production
-    default is now Kokoro `hf_alpha` (Hindi female) — parler-tts isn't
-    used by any channel YAML in this repo because of the transformers
-    conflict. This test is kept as a regression check for the wired
-    code path; it auto-skips on incompatible venvs."""
-
-    @unittest.skipUnless(_parler_tts_compatible(),
-                         "parler-tts incompatible with transformers >= 4.49 "
-                         "(set up a separate venv to test)")
-    def test_indic_parler_synth_hindi(self):
-        description = (
-            "Sneha speaks in a calm, gentle, expressive Hindi storytelling "
-            "tone with a moderate speed and warm pitch. The recording is of "
-            "very high quality, with the speaker voice sounding clear."
-        )
-        with tempfile.TemporaryDirectory() as td:
-            out = Path(td) / "parler.wav"
-            audio.synthesize(
-                _LIVE_TEXT_HI, voice=description,
-                out_path=out, speed=0.85, provider="indic_parler",
-            )
-            self._assert_valid_wav(out)
-
-
-# ---------- 4. Voice resolver wiring (added 2026-05-15) -------------------
+# ---------- 5. Voice resolver wiring (added 2026-05-15) -------------------
 
 
 class SynthesizeVoiceResolutionTest(unittest.TestCase):
@@ -508,7 +355,7 @@ class SynthesizeVoiceResolutionTest(unittest.TestCase):
         )
 
     def test_empty_voice_passes_through_as_none(self):
-        # Description-driven providers (indic_parler) accept empty voice.
+        # Description-driven providers accept empty voice.
         captured = self._capture_synth_kwargs("")
         # Resolver returns None for empty input → synthesize keeps the
         # original empty string.

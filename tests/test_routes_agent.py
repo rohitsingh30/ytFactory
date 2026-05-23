@@ -12,8 +12,8 @@ os.environ.setdefault("YTFACTORY_QUEUE_BACKEND", "memory")
 
 import httpx
 
-from control.agent_routes import router, _q, get_last_seen, _LAST_SEEN
-from control.schema import (
+from control.routes.agent_routes import router, _q, get_last_seen, _LAST_SEEN
+from control.core.schema import (
     AgentResources,
     HeartbeatRequest,
     LeaseRequest,
@@ -84,7 +84,7 @@ class TestLease(unittest.IsolatedAsyncioTestCase):
         mock_queue.lease.return_value = task
         app = _make_app()
         transport = httpx.ASGITransport(app=app)
-        with patch("control.agent_routes.get_queue", return_value=mock_queue):
+        with patch("control.routes.agent_routes.get_queue", return_value=mock_queue):
             with patch.dict(os.environ, _ENV):
                 async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                     r = await client.post(
@@ -111,8 +111,8 @@ class TestLease(unittest.IsolatedAsyncioTestCase):
             call_count += 1
             return start if call_count <= 1 else start + 31.0
 
-        with patch("control.agent_routes.get_queue", return_value=mock_queue):
-            with patch("control.agent_routes.time.time", side_effect=fake_time):
+        with patch("control.routes.agent_routes.get_queue", return_value=mock_queue):
+            with patch("control.routes.agent_routes.time.time", side_effect=fake_time):
                 with patch.dict(os.environ, _ENV):
                     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                         r = await client.post(
@@ -139,9 +139,9 @@ class TestLease(unittest.IsolatedAsyncioTestCase):
             call_count[0] += 1
             return start  # deadline never reached
 
-        with patch("control.agent_routes.get_queue", return_value=mock_queue):
-            with patch("control.agent_routes.time.time", side_effect=fake_time):
-                with patch("control.agent_routes.asyncio.sleep", new_callable=AsyncMock):
+        with patch("control.routes.agent_routes.get_queue", return_value=mock_queue):
+            with patch("control.routes.agent_routes.time.time", side_effect=fake_time):
+                with patch("control.routes.agent_routes.asyncio.sleep", new_callable=AsyncMock):
                     with patch.dict(os.environ, _ENV):
                         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                             r = await client.post(
@@ -157,7 +157,7 @@ class TestLease(unittest.IsolatedAsyncioTestCase):
         mock_queue.get.return_value = None
         app = _make_app()
         transport = httpx.ASGITransport(app=app)
-        with patch("control.agent_routes.get_queue", return_value=mock_queue):
+        with patch("control.routes.agent_routes.get_queue", return_value=mock_queue):
             with patch.dict(os.environ, _ENV):
                 async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                     r = await client.post(
@@ -174,7 +174,7 @@ class TestLease(unittest.IsolatedAsyncioTestCase):
         mock_queue.ack.return_value = None
         app = _make_app()
         transport = httpx.ASGITransport(app=app)
-        with patch("control.agent_routes.get_queue", return_value=mock_queue):
+        with patch("control.routes.agent_routes.get_queue", return_value=mock_queue):
             with patch.dict(os.environ, _ENV):
                 async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                     r = await client.post(
@@ -192,7 +192,7 @@ class TestLease(unittest.IsolatedAsyncioTestCase):
         mock_queue.ack.return_value = None
         app = _make_app()
         transport = httpx.ASGITransport(app=app)
-        with patch("control.agent_routes.get_queue", return_value=mock_queue):
+        with patch("control.routes.agent_routes.get_queue", return_value=mock_queue):
             with patch.dict(os.environ, _ENV):
                 async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                     r = await client.post(

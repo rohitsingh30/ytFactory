@@ -124,7 +124,7 @@ def _aita_animated_payload() -> dict:
             "aspect": "9:16",
             "tts_provider": "cloudrun_chatterbox",
             "tts_voice": "sarah.wav",
-            "image_provider": "cloudrun_flux2_klein",
+            "image_provider": "cloudrun_z_image_turbo",
         },
         "validation": niche_defaults("aita-animated")["default_validation"],
     }

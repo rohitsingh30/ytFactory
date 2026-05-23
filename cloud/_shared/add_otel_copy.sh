@@ -62,8 +62,7 @@ for df in "${ROOT}"/*/Dockerfile; do
 
     # Scope filter: only Python services (server.py / entrypoint.py /
     # an existing otel_init.py) use OTel today. Skip everything else
-    # (web-next is Node.js; weights-staging is a one-shot init
-    # container; etc.). The ``otel_init.py`` clause catches slim-wrapper
+    # (web-next is Node.js, etc.). The ``otel_init.py`` clause catches slim-wrapper
     # images like cloud/web-server/ whose actual app code lives in
     # web/server.py and is COPY'd in via repo-root context. This MUST
     # mirror the filter in cloud/_shared/sync.sh — if they ever

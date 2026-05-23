@@ -33,8 +33,7 @@ Env vars:
   grants admin.
 * ``YTFACTORY_AUTH_REDIRECT_URI`` — the canonical redirect URI used
   in the OAuth flow. Must match one entry in the OAuth client's
-  ``redirect_uris``. Default
-  ``https://ytfactory-web-7hwnzw7lya-as.a.run.app/api/auth/google/callback``.
+  ``redirect_uris``. Required in production; no default — set it.
 
   **Single-host invariant.** The host portion of this URI MUST match
   ``YTFACTORY_CANONICAL_HOST`` on the public-facing service (the
@@ -77,9 +76,7 @@ _OAUTH_AUTH_URI = "https://accounts.google.com/o/oauth2/v2/auth"
 _OAUTH_TOKEN_URI = "https://oauth2.googleapis.com/token"
 _OAUTH_SCOPES = ("openid", "email", "profile")
 
-_DEFAULT_REDIRECT_URI = (
-    "https://ytfactory-web-7hwnzw7lya-as.a.run.app/api/auth/google/callback"
-)
+_DEFAULT_REDIRECT_URI = ""
 _DEFAULT_ADMIN_DOMAINS = ("docx.co.in",)
 _DEFAULT_TTL_S = 7 * 24 * 3600  # 7 days
 

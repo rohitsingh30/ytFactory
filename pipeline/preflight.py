@@ -12,7 +12,7 @@ History: incident F743A4C5 (2026-05-04) and the two SIGABRT
 
     lowPowerMode: 1
     displayState: "OFF" (lid closed / display asleep)
-    F5-TTS-MLX or z_image_turbo holding the Metal command queue
+    z_image_turbo holding the Metal command queue
 
 Under Low Power Mode the GPU is clocked down. Long Metal command
 buffers stretch from ~5–20 s to 40 s+. WindowServer also needs the
@@ -82,7 +82,7 @@ def power_check(*, label: str = "render") -> None:
         )
 
 
-def reset_mlx_state(*, drop_f5: bool = True, drop_image: bool = False, label: str = "") -> None:
+def reset_mlx_state(*, drop_f5: bool = False, drop_image: bool = False, label: str = "") -> None:
     """Drop in-process MLX singletons + flush the Metal cache.
 
     Call this at a renderer-stage boundary when an MLX-heavy stage has
@@ -90,8 +90,8 @@ def reset_mlx_state(*, drop_f5: bool = True, drop_image: bool = False, label: st
     model. Free unified-memory headroom and reduces the chance of the
     next Metal-using stage hitting fragmentation.
 
-    ``drop_f5`` (default True): drops the F5-TTS-MLX singleton + ref
-    cache from ``pipeline.tts.f5`` (~1.35 GB resident).
+    ``drop_f5`` (kept as a no-op for backward-compat; local TTS providers
+    that held an MLX singleton were retired — kwarg is ignored).
 
     ``drop_image`` (default False): drops the z_image / mflux pipes
     from ``pipeline.images`` (~3-4 GB resident). Only set True when
@@ -104,14 +104,8 @@ def reset_mlx_state(*, drop_f5: bool = True, drop_image: bool = False, label: st
     aren't importable, this function silently no-ops. Never raises —
     this is a hygiene call, not a correctness call.
     """
+    del drop_f5  # retired — kwarg kept for backward-compat
     cleared: list[str] = []
-    if drop_f5:
-        try:
-            from pipeline import audio as _aud  # type: ignore  # noqa: PLC0415
-            _aud.reset_f5_state()
-            cleared.append("F5")
-        except Exception as e:  # noqa: BLE001
-            print(f"[mem] reset_f5_state failed: {e}", file=sys.stderr)
     if drop_image:
         try:
             from pipeline import images as _img  # type: ignore  # noqa: PLC0415

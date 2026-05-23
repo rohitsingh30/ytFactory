@@ -19,10 +19,11 @@ os.environ.setdefault("YTFACTORY_QUEUE_BACKEND", "memory")
 
 from tests._helpers import PROJECT_ROOT  # noqa: F401
 
-from control import jobs as jobs_mod, rate_limit  # noqa: E402
-from control.queue import reset_queue  # noqa: E402
+from control.core import rate_limit
+from control.core import jobs as jobs_mod  # noqa: E402
+from control.core.queue import reset_queue  # noqa: E402
 from control.render_routes import router as render_router  # noqa: E402
-from control.schema import TaskStatus  # noqa: E402
+from control.core.schema import TaskStatus  # noqa: E402
 
 
 def _make_app():
@@ -48,8 +49,8 @@ class CancelJobTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_job_in_memory_queue(self):
         """InMemoryQueue branch: queued tasks for this job get cancelled."""
-        from control.queue import get_queue, InMemoryQueue
-        from control.schema import TaskKind, TaskEnvelope
+        from control.core.queue import get_queue, InMemoryQueue
+        from control.core.schema import TaskKind, TaskEnvelope
 
         job_id = "test-cancel-job-01"
         jobs_mod.get_jobs().create(
@@ -80,7 +81,7 @@ class CancelJobTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_job_firestore_queue_branch(self):
         """FirestoreQueue isinstance branch: exercises the Firestore cancel path."""
-        from control.queue import FirestoreQueue
+        from control.core.queue import FirestoreQueue
 
         job_id = "fs-job-cancel-01"
         jobs_mod.get_jobs().create(
@@ -116,7 +117,7 @@ class CancelJobTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_job_firestore_exception_swallowed(self):
         """Firestore exception in cancel is swallowed silently (lines 145-146)."""
-        from control.queue import FirestoreQueue
+        from control.core.queue import FirestoreQueue
 
         job_id = "fs-cancel-err-01"
         jobs_mod.get_jobs().create(
@@ -153,7 +154,7 @@ class HealthEndpointTest(unittest.IsolatedAsyncioTestCase):
         mock_snap.kokoro_warm = True
         mock_snap.mflux_warm = False
         mock_snap.on_battery = False
-        with patch("control.agent_routes.get_last_seen", return_value={
+        with patch("control.routes.agent_routes.get_last_seen", return_value={
             "agent-1": (1000.0, mock_snap),
         }), patch("control.render_routes.rate_limit") as mock_rl:
             mock_rl.daily_spend_usd.return_value = 0.05
@@ -171,7 +172,7 @@ class HealthEndpointTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_health_zero_cap_no_division_error(self):
         """daily_cap_usd=0 -> azure_spend_pct=None."""
-        with patch("control.agent_routes.get_last_seen", return_value={}), \
+        with patch("control.routes.agent_routes.get_last_seen", return_value={}), \
              patch("control.render_routes.rate_limit") as mock_rl:
             mock_rl.daily_spend_usd.return_value = 0.0
             mock_rl.daily_cap_usd.return_value = 0.0

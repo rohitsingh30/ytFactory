@@ -16,7 +16,7 @@ Two backends share one interface:
   ``~/.cache/ytfactory/`` by default; tests override via ``root=``.
 - ``GCSCache`` — cloud render-worker. Cache lives at
   ``gs://<YTFACTORY_CACHE_BUCKET>/cache/``; defaults to
-  ``ytfactory-prod-v2-cache`` so that any worker, in any execution,
+  ``ytfactory-prod-v3-cache`` so that any worker, in any execution,
   can hit the same cache. Critical for cost: a redo of beat #14 today
   reuses 29 images that any prior render already paid for.
 
@@ -278,7 +278,7 @@ def get_default_cache() -> CacheBackend:
 
     Cloud render-worker entrypoint should set
     ``YTFACTORY_CACHE_BACKEND=gcs`` +
-    ``YTFACTORY_CACHE_BUCKET=ytfactory-prod-v2-cache`` so all worker
+    ``YTFACTORY_CACHE_BUCKET=ytfactory-prod-v3-cache`` so all worker
     executions share the same cache and one-beat regen costs $0 in
     cloud-image-service GPU time.
     """

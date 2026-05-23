@@ -37,7 +37,7 @@ class _Base(unittest.TestCase):
                            metadata={"provider": "cloudrun_chatterbox"}):
                 pass
             with obs.timed("image_gen", category="image",
-                           metadata={"provider": "cloudrun_flux2_klein"}):
+                           metadata={"provider": "cloudrun_z_image_turbo"}):
                 pass
             try:
                 with obs.timed("upload_short", category="upload"):
@@ -59,7 +59,7 @@ class _Base(unittest.TestCase):
                            metadata={"provider": "cloudrun_chatterbox"}):
                 pass
             with obs.timed("image_gen", category="image",
-                           metadata={"provider": "cloudrun_flux2_klein"}):
+                           metadata={"provider": "cloudrun_z_image_turbo"}):
                 pass
             with obs.timed("compose", category="render"):
                 pass
@@ -224,7 +224,7 @@ class TestServices(_Base):
         r = self.client.get("/api/telemetry/services?hours=1").json()
         services = [s["service"] for s in r["services"]]
         self.assertIn("cloudrun_chatterbox", services)
-        self.assertIn("cloudrun_flux2_klein", services)
+        self.assertIn("cloudrun_z_image_turbo", services)
         self.assertIn("upload", services)
 
 

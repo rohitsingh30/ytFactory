@@ -286,7 +286,7 @@ def telemetry_services(
 _STAGE_EVENT_NAMES: set[str] = {
     "tts_synth", "image_gen", "llm_call",
     "asr_transcribe", "compose", "upload_short", "youtube_upload",
-    "x_post", "post_short", "authenticate",
+    "authenticate",
     "cast_author", "shotlist_author", "rewrite", "critic", "imitate",
 }
 

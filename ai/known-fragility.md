@@ -1,0 +1,610 @@
+# Known Fragility
+
+Catalog of fragile sites in pipeline + control. Each entry cites code,
+explains what it depends on, and names the trigger that breaks it. The
+overarching pattern is the same one Q49–Q51 of onboarding-qa.md
+diagnosed: **quality gates fire too coarsely AND error-swallowers hide
+real failures**. Some sites do both — they fail loud after first being
+silent, but the loudness is whole-render termination not granular
+retry.
+
+Sources: code reads on 2026-05-22; design tension surfaced in
+`/ai/onboarding-qa.md` Q47–Q77; PRE-FIX behaviour patterns persist in
+sibling sites the 2026-05-15 audit didn't touch.
+
+---
+
+## F1. Two coexisting render entry points in `pipeline/render/video.py` — RESOLVED 2026-05-23
+
+**Status:** RESOLVED 2026-05-23 — refactor-plan.md Phase 3 deletes the
+legacy `render()` and locks `render_via_engines` as the canonical entry
+(ADR-027). Entry kept for historical context.
+
+**Where:** `pipeline/render/video.py:81` (`render()`) and
+`pipeline/render/video.py:128` (`render_via_engines()`).
+
+**Why fragile:** The module docstring (lines 1–43) describes a Slice-2
+state that no longer exists — it says `kind=short` is a no-op
+("NotImplementedError, worker still handles short") and Slice 5 will
+absorb sports_doc / footage_only. In reality the bigbang already
+absorbed everything into `render_via_engines()` and `render()` itself
+calls into the new path via `render_long_form()` → `render_via_engines()`
+at line 321. The legacy `render()` entry is dead for SHORT (raises
+NotImplementedError at line 116) and a thin wrapper for LONG_FORM —
+yet it's still exported (`__all__` at line 801) and still imported
+by callers that may not have migrated.
+
+**What trips it:** A new contributor reads the docstring, believes
+short still goes through the worker stages, writes a caller that
+invokes `render(spec)` for a short → blows up at runtime with
+`NotImplementedError`. The 2026-05-14 / 2026-05-15 sequence of
+"slice 5 / bigbang / fail-loud audit" left the docstring drift in
+place. Charter principle "the function body is authoritative" applies
+literally here.
+
+---
+
+## F2. `spec.extra` is an untyped dict carrying load-bearing state across plugin slots
+
+**Where:** `pipeline/render/spec_enrich.py:145,214` (writes
+`era_anchor_prefix`, `character_description`), read sites at
+`pipeline/render/short_engine.py:157,177,414,445,454,458,462,466,571,588`,
+`pipeline/render/visualize/ai_beat_slideshow.py` (reads many keys),
+`pipeline/render/visualize/longform_panels.py:91-94` (reads
+`image_provider`, `image_style_prefix`, `image_seed`, `image_steps`),
+`pipeline/render/music/ducked_loop.py:96,116`,
+`pipeline/render/overlays/anchored_footage.py:97`,
+`pipeline/render/audio/audio_from_fixture.py:32,47`,
+`pipeline/render/visualize/visuals_from_fixture.py:26,43`,
+`pipeline/render/timeline/timeline_from_fixture.py:21`.
+
+**Why fragile:** `RenderSpec.extra: dict[str, Any]` is a free-for-all
+namespace. Every plugin reads keys with `.get(name, default)` and no
+schema. A typo in `spec_enrich.py` (e.g. `caracter_description`)
+silently produces empty character lock; the rendered character drifts
+across beats and the only signal is visual-inspection-after-the-fact.
+The "spec_enrich populates BEFORE plugins read" invariant
+(`short_engine.py:146-152`) is implicit — the engine can be entered
+from a code path that skips `populate_render_extras()` and the
+plugins will quietly use defaults.
+
+**What trips it:** Adding a new visualize plugin and forgetting to
+mirror the `spec.extra` reads `ai_beat_slideshow` uses. Or shipping
+a render path (tests, fixtures) that constructs RenderSpec directly
+without going through `build_spec()` + `populate_render_extras()`.
+
+---
+
+## F3. Long-form rewrite parallel fan-out with zero cross-section awareness
+
+**Where:** `pipeline/llm/rewrite_long_form.py:617`
+(`_call_outline_with_retry`), `pipeline/llm/rewrite_long_form.py:880`
+(`_call_section_body_llm`), `pipeline/llm/rewrite_long_form.py:1017`
+(`_generate_all_section_bodies`),
+`pipeline/llm/rewrite_long_form.py:1109` (ThreadPoolExecutor,
+`_SECTION_BODY_MAX_WORKERS=5`).
+
+**Why fragile:** The outline call allocates per-section `target_words`
+within a `[0.5x, 2x]` clamp of the mean. Then N body calls fire in
+parallel — each LLM call sees ONLY its own target. The LLM can't see
+peer sections, can't see the total budget, can't redistribute. Per-section
+retries (`_SECTION_BODY_MAX_RETRIES=2` at line 1014) regenerate from
+scratch — they do NOT carry forward "you under-delivered last time by N
+words; expand to M." After fan-out the only correction is the aggregate
+hard gate in `pipeline/critic_long_form.py:222` (`HARD_FLOOR_FRAC=0.50`)
+and `pipeline/critic_long_form.py:225` (`HARD_SECTION_FLOOR_FRAC=0.40`)
+which kills the entire render if either tripples.
+
+**What trips it:** This is the documented root cause of jobs `a734babb`
+(section 7 = 51 words against mean 363, 14% of mean → trips the
+`HARD_SECTION_FLOOR_FRAC=0.40` gate) and `7743ca76` (writeback
+duration 1232s < 1440s required → trips the duration gate). Both
+were marked rendered "successfully" through every stage and died at
+the final aggregate gate. Onboarding-qa Q55–Q56 + Q58–Q63 spell out
+the fix vector.
+
+---
+
+## F4. Kwarg-drift between caller and helper at `longform_panels` → `build_image_panels_video`
+
+**Where:** `pipeline/render/visualize/longform_panels.py:127-139`
+calling `pipeline.render.shared.long_form_lib.build_image_panels_video`.
+
+**Why fragile:** Pre-2026-05-15 the caller passed `narration_dur_s=`,
+`out_path=`, `image_w=`, `image_h=` — none existed on the helper's
+signature. The outer `except (TypeError, Exception)` swallowed
+`TypeError: unexpected keyword argument` and dispatched to
+`_fallback_solid_color`. Every cloudsdecoded / historyrecapped
+long-form shipped 26 min of black for weeks (per the docstring at
+lines 58-70). The current code pins the real signature but the broad
+`except Exception` at line 140 STILL swallows any future signature
+drift. The only safety net is the contract pin test
+`tests/render/visualize/test_long_form_fallback.py::LongformPanelsBuildKwargContractTest`.
+
+**What trips it:** Any future refactor of
+`build_image_panels_video()` that renames or removes a kwarg, with
+contributor running ONLY their immediate test file, not the pin test.
+The error path now defaults to `RenderFailedError` (good — F11 below)
+but a contributor who sees the test fail can re-add
+`YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1` to "make it work" and re-introduce
+26 min of black.
+
+---
+
+## F5. `RenderFailedError` is too coarse — whole-render termination on per-piece failure (DESIGN TENSION)
+
+**Where:** `pipeline/render/contracts.py:119-154` (definition);
+fires at `pipeline/render/visualize/ai_beat_slideshow.py:243,492,608`,
+`pipeline/render/visualize/longform_panels.py:234`,
+`pipeline/render/visualize/_fallback.py` (helpers at 53, 93, 129, 155).
+
+**Why fragile / design tension:** The 2026-05-15 fail-loud audit was
+a structurally correct fix to the silent-fallback class of bug — black
+renders, captionless mp4s, frozen-frame tails. But per onboarding-qa
+Q49–Q51 ("our philosophy is wrong; gates should be granular retry,
+not whole-render termination") the current implementation has the
+opposite problem: a 10% per-beat failure → kill the whole 30-min render
+instead of retrying the 3 failing beats with a stronger prompt + fallback
+provider. The `YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1` escape hatch
+trades one failure mode (visible silent failure) for another (invisible
+solid-black silent failure). Neither matches the locked principle:
+"gate fires → retry the failing piece."
+
+**What trips it:** Any per-beat image-gen failure rate >10% (cloud
+incident, content-filter trip, prompt with attractor tokens) at
+`ai_beat_slideshow.py:492` kills the whole short. Any
+`build_image_panels_video` exception kills the whole long-form. The
+test matrix at `tests/render/test_fail_loud_fallbacks.py` pins the
+fail-loud behaviour, so the granular-retry refactor (onboarding-qa
+attack items 9, 6) must EVOLVE the tests, not break them.
+
+---
+
+## F6. Closer-panel-related dead code path in `pipeline/compose.py:711-719`
+
+**Where:** `pipeline/compose.py:711-719`.
+
+**Why fragile:** Comment block explicitly says "closer_format /
+closer_panel_path are accepted for back-compat but ignored — no panel
+or row PNGs are rendered or overlaid by compose anymore."
+`closer_caption_rows: list[Path] = []` and `closer_panel_path = None`
+are hardcoded. The accepted-but-ignored kwargs are a footgun: a
+caller upstream still passes them, believes compose honors them, and
+ships a render missing the closer. The new engine architecture expects
+this functionality to live in the `overlays/` plugin slot
+(`pipeline/render/contracts.py:280-330`).
+
+**What trips it:** Any channel YAML that still configures
+`closer_panel`-style fields, or any caller in `make_*` scripts that
+constructs a closer_panel_path arg expecting it to render. The signal
+is silent — the render succeeds, just without the closer.
+
+---
+
+## F7. Subprocess `_extract_last_traceback` heuristic in `pipeline/render/video.py:642-714` — RESOLVED 2026-05-23
+
+**Status:** RESOLVED 2026-05-23 — refactor-plan.md Phase 3 deletes the
+subprocess heuristic machinery alongside the legacy `render()` entry
+(tech-debt D5). The render path is in-process; no subprocess traceback
+filtering is needed. Entry kept for historical context.
+
+**Where:** `pipeline/render/video.py:604-714`.
+
+**Why fragile:** This 100-LoC heuristic exists to filter OTel
+exporter tracebacks out of the "real error" surface. It walks the
+log backward, classifies tracebacks by "first File frame in
+opentelemetry path." Real render errors that *transit through* OTel
+code (e.g. a Cloud Logging handler invoked in user code) could be
+mis-classified as telemetry noise and never surfaced. The classifier
+checks the FIRST `File` frame only — sufficient for the documented
+cases but not provably robust. The fallback to "last 25 lines" at
+line 672 also depends on tracebacks being well-formed.
+
+**What trips it:** A future OTel SDK version that emits tracebacks
+with a different first-frame pattern; or a user-code error that
+genuinely starts inside an OTel wrapper. The error surface degrades
+silently — operator sees the wrong traceback and chases a phantom
+bug (the documented post-mortem of 8a4f7e15).
+
+NOTE: this function is also called from a path
+(`_format_subprocess_failure` at line 717) the bigbang made dead —
+`render_long_form` calls `render_via_engines` in-process now, not via
+subprocess. The function still exists and is still exported.
+Pure dead code in the cloud worker path.
+
+---
+
+## F8. Outline-LLM target_words can imbalance section allocations
+
+**Where:** `pipeline/llm/rewrite_long_form.py:617`
+(`_call_outline_with_retry`); the [0.5x, 2x] clamp is enforced
+downstream by `_call_section_body_llm` (line 880) via the per-section
+target it receives.
+
+**Why fragile:** No outline-level sum-check exists today. The outline
+LLM can return `sum(section.target_words)` significantly off the
+total target (Q55: "outline LLM can imbalance section allocations
+within clamp [0.5x, 2x] of mean"). Combined with no peer awareness
+across parallel section bodies (F3), the aggregate under-delivery
+compounds. Onboarding-qa Q63 spells out the proposed fix
+(retry-outline-once if sum is outside ±15% of total). Today: no
+such gate.
+
+**What trips it:** Any topic where the outline LLM picks an
+imbalanced act structure (e.g., 3 long acts + 7 short scenes, or
+one expository preamble at 0.5x mean), and the parallel fan-out
+runs to completion before the aggregate gate fires. Same class as
+job `a734babb`.
+
+---
+
+## F9. Broad `except Exception` swallows in artifact-emission paths
+
+**Where:** `pipeline/render/video.py:276-277, 397-398, 426-427`
+(emit_artifact calls wrapped in `except Exception: ... logger.warning`).
+Also `pipeline/render/artifacts.py:82, 96, 194, 360`.
+
+**Why fragile:** When `emit_artifact()` fails, the render proceeds.
+That's correct in one sense — the mp4 is the primary deliverable, not
+the live preview — but the dashboard's "live preview" promise (per
+the docstring at video.py:246-260) silently goes dark. Two classes of
+failure are conflated: transient GCS hiccup (correctly recoverable
+by ignoring) AND a misconfigured artifact pipeline (silently produces
+NO previews for every render).
+
+**What trips it:** Misconfigured GCS bucket, IAM regression on
+`render-runner@` SA, or any structural breakage of `emit_artifact()`.
+User sees the dashboard pills update via Firestore but the audio /
+script / panel previews never mount.
+
+---
+
+## F10. Duplicate route files in `control/*.py` + `control/routes/*.py` — RESOLVED 2026-05-23
+
+**Status:** RESOLVED 2026-05-23 — refactor-plan.md Phase 2 (migrate
+callers) + Phase 3 (delete legacy) lock `control/core/*` +
+`control/routes/*` as canonical (ADR-028). Top-level flat duplicates
+are deleted. Entry kept for historical context.
+
+**Where:** `control/agent_routes.py` vs `control/routes/agent_routes.py`
+(differ), and same for `dashboard_routes.py`, `render_routes.py`,
+`scheduler_routes.py`, `niche_routes.py`. Both directories also have
+parallel `auth.py` (control/auth.py + control/core/auth.py),
+`schema.py` (control/schema.py + control/core/schema.py),
+`jobs.py` (control/jobs.py + control/core/jobs.py).
+
+**Why fragile:** `web/server.py:1792-1813` (production FastAPI app)
+imports ONLY from `control.routes.*` and `control.core.*`.
+`control/server_dev.py:24-39` (laptop dev FastAPI) imports BOTH old
+flat `control.agent_routes` etc. AND new `control.routes.*` (with
+`_v2` suffixes). Result: laptop dev runs against a DIFFERENT route
+set than production. Bug reported in dev may not exist in prod and
+vice-versa. Confirmed by `diff -q` on all 5 pairs (all `differ`).
+
+**What trips it:** A contributor adds a route to
+`control/render_routes.py` (the flat one), tests locally via
+`control/server_dev.py`, ships — and the route never reaches prod
+because `web/server.py` only imports `control/routes/render_routes.py`.
+Or the inverse: a fix lands in `control/routes/` and laptop dev
+behaves stale.
+
+---
+
+## F11. Solid-color fallback survives via env override (`YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1`)
+
+**Where:** `pipeline/render/visualize/_fallback.py:53,93,129,155`
+(check the env), `pipeline/render/visualize/longform_panels.py:151,233`,
+`pipeline/render/visualize/footage_windows.py:57,63,75` (legacy site
+still has unguarded silent fallbacks — see below),
+`pipeline/render/visualize/ai_beat_slideshow.py:504-506` (silent
+0-images fallback).
+
+**Why fragile:** The env override exists "for emergency renders" but
+nothing rate-limits its use, alerts on it, or surfaces "this render
+was emergency-mode." If `YTFACTORY_ALLOW_SOLID_COLOR_FALLBACK=1`
+ever lands in `cloud/render-worker-v2/deploy.sh` (it doesn't today,
+line 106 — verified) every long-form ships black silently. Also
+`footage_windows.py` still calls `self._fallback_solid_color()`
+directly (lines 57, 63, 75) without going through the audit-gated
+path — those sites are not consistently fail-loud.
+
+**What trips it:** Any operator setting the env var "just to
+unblock the demo." Or contributors confused by the test failures and
+adding the env to the test fixture instead of fixing the underlying
+issue.
+
+---
+
+## F12. `ai_beat_slideshow.py` has TWO silent-fallback escape paths the audit missed
+
+**Where:** `pipeline/render/visualize/ai_beat_slideshow.py:503-506`
+("0 images produced — falling back to solid color") and
+`pipeline/render/visualize/ai_beat_slideshow.py:515-517`
+("stitch failed — falling back to solid color").
+
+**Why fragile:** Both go through `_fallback_solid_color()` directly,
+NOT the gated path. Comments at lines 504, 516 say "falling back" with
+a `_logger.warning()` — same shape as the bugs the 2026-05-15 audit
+fixed. The 10% per-beat gate fires at line 492 IF some images succeed
+but is bypassed when ALL beats fail (the 0-images branch). And the
+stitch-failed branch fires AFTER successful image-gen, so the audit's
+"refuse to ship visibly-broken artifact" principle is breached on
+ffmpeg-side failures.
+
+**What trips it:** A cloud-image-service total outage (all beats
+fail) → 0 images produced → solid color short ships silently. Or
+an ffmpeg stitch error from a corrupted intermediate (rare but
+non-zero in production).
+
+---
+
+## F13. `_synth_cloudrun_indicf5` ref_audio_text dispatch (suspected bug, per onboarding-qa Q71)
+
+**Where:** `pipeline/tts/cloudrun.py:813` (`_synth_cloudrun_indicf5`),
+called from chunked synthesis at line 793.
+
+**Why fragile:** Onboarding-qa Q71 attributes the IndicF5 "Hindi
+gibberish noise" issue to this function not actually shipping
+`ref_audio_text` to the model. Line 837 has `if not ref_audio_text:`
+guard but the actual outbound request body needs verification.
+HindutavaAnimated renders are downstream-coupled to whatever this
+function emits — silent malfunction produces shippable mp4s with
+inaudible/incorrect narration. Q9 reliability pain item #2 ("renders
+'succeed' but ship with wrong captions / frozen frames / missing
+audio") covers this class.
+
+**What trips it:** Any HindutavaAnimated render. The signal is
+late — only audible on playback of the finished mp4. No
+RenderFailedError fires because TTS technically returns a wav.
+
+---
+
+## F14. `noqa: BLE001` density signals systematic error-swallowing
+
+**Where:** 235 occurrences across pipeline/ + control/ (grepped
+2026-05-22). Hotspots:
+`pipeline/research/cross_engage.py` (~12 broad excepts),
+`pipeline/niche_specs.py:293-406` (8 sites),
+`pipeline/render/video.py` (10 sites in this one file),
+`pipeline/render/short_engine.py` (8 sites),
+`pipeline/render/input_registry.py` (7 sites).
+
+**Why fragile:** `# noqa: BLE001` suppresses ruff's "blind-except"
+lint. Each site is a deliberate "I will catch any error here and
+continue." Several are defensive (telemetry, progress_cb forwarding),
+which is correct. But the density makes audit hard — a contributor
+adding a NEW broad except inherits the appearance of legitimacy from
+the surrounding pattern. Charter principle "If a stage can't produce
+its real output, raise an exception" gets diluted across 235 sites.
+
+**What trips it:** New stage added with broad-except by reflex
+(see F12, F11 for sibling sites the audit missed). The maintainability
+risk is the lack of a "broad-except budget" — there's no review gate
+that says "we have 235; that's the ceiling."
+
+---
+
+## F15. Module docstring drift in `pipeline/render/video.py:1-43` — RESOLVED 2026-05-23
+
+**Status:** RESOLVED 2026-05-23 — refactor-plan.md Phase 3 deletes the
+legacy `render()` and rewrites the module docstring (tech-debt D7).
+Entry kept for historical context.
+
+**Where:** `pipeline/render/video.py:1-43`.
+
+**Why fragile:** The "Today's responsibilities (Slice 2
+minimum-viable)" section describes a state from before the 2026-05-14
+bigbang. It says `kind=short` is a no-op, `kind=sports_doc` /
+`footage_only` are "not yet wired (Slice 5 lands the wiring)." None
+of this is true now. The `render()` function still has the
+NotImplementedError stubs for `kind=short` (line 116) and other
+kinds (line 122). Whether those are correct CURRENT behaviour or just
+leftover from the migration is unclear from the code alone.
+
+**What trips it:** Any future contributor reading the docstring as
+ground truth. Charter: "Comments and docstrings can drift; the
+function body is authoritative" — exactly the case here. Same
+class as Q67–Q68's prompt-refiner-docstring mismatch with reality
+(klein-only docstring on a Z-Image-Turbo-only production system).
+
+---
+
+## F16. Ordering assumption: `populate_render_extras` MUST precede plugin reads
+
+**Where:** `pipeline/render/short_engine.py:146-152` (the call site),
+read sites across all visualize / overlays / music / audio plugins
+(see F2).
+
+**Why fragile:** The invariant is undocumented in `RenderSpec` itself
+and unenforced. `spec_enrich.py:51` says "Idempotent: if spec.extra
+already has a key, don't overwrite" — which means a partial
+pre-population (test fixtures, future callers) is silently used as-is
+even if it's stale. No `assert "character_description" in spec.extra`
+or similar at plugin entry.
+
+**What trips it:** A test fixture that pre-populates 2 of the 3
+required extras keys; the visualize plugin reads `.get("foo", "")` and
+proceeds with empty character_description. Render produces
+character-drifted slideshow with no diagnostic.
+
+---
+
+## F17. Schedulers / launchd plists referenced but unaudited
+
+**Where:** `control/com.ytfactory.cloud-critic.plist`,
+`com.ytfactory.cloud-snapshot.plist`, `com.ytfactory.critique-runner.plist`,
+`com.ytfactory.state-sync.plist`, `com.ytfactory.upload-next.plist`.
+Schedule unknown without inspecting each .plist.
+
+**Why fragile:** Per onboarding-qa Q36 "manual — every render is
+triggered from /app/create UI; no cron/scheduler auto-fires renders."
+But the launchd .plist files exist and presumably run on the laptop.
+Q36 explicitly punts: "to verify whether these handle upload
+scheduling, not render initiation." Unknown trigger surface = unknown
+failure surface.
+
+**What trips it:** A laptop that's never been audited for which
+launchd jobs are currently loaded. Stale plist could be hammering a
+deleted endpoint or running an outdated workflow with new artifacts.
+
+---
+
+## F18. Parallel section-body fan-out has no peer awareness → systematic length collapse
+
+**Where:** `pipeline/llm/rewrite_long_form.py:1017`
+(`_generate_all_section_bodies`), `pipeline/llm/rewrite_long_form.py:1109`
+(`ThreadPoolExecutor(max_workers=5)`),
+`pipeline/llm/rewrite_long_form.py:880` (`_call_section_body_llm`).
+
+**Why fragile (Q55):** N parallel section-body LLM calls fan out via
+ThreadPoolExecutor; each call sees ONLY its own `target_words`. No
+cross-section visibility, no peer-budget signal, no aggregate
+redistribution. When one section under-delivers, peer sections cannot
+compensate; when the outline imbalances, the bodies honor the
+imbalance and the total under-delivers. The aggregate gate (currently
+`HARD_FLOOR_FRAC=0.50` at `pipeline/critic_long_form.py:222`) fires
+post-hoc when the damage is irreversible. This is the documented
+root-cause pattern that produced job `a734babb` (section 7 at 14% of
+mean) — overlaps with F3 (which catalogued the call-site shape).
+
+**What trips it:** Any topic where the outline LLM produces unevenly
+sized sections, or any section LLM under-delivers due to thin source
+material; the parallel fan-out runs to completion before the issue is
+visible. Onboarding-qa Q55 names this as the architectural failure
+class; Q58 + Q59 + Q63 are the fix vector. Per ADR-023 the gate stays
+but the trigger shape moves to granular per-section retry (D6.6 +
+ADR-007) so a peer-blind body still has a recovery path.
+
+---
+
+## F19. Outline LLM can imbalance section allocations within [0.5x, 2x] of mean
+
+**Where:** `pipeline/llm/rewrite_long_form.py:617`
+(`_call_outline_with_retry`); enforcement happens implicitly via
+`_call_section_body_llm` (line 880) accepting the per-section target
+verbatim.
+
+**Why fragile (Q55):** The outline returns `target_words` per section
+within a `[0.5x, 2x]` clamp of the mean. Within that band, the outline
+LLM can pick a heavily imbalanced shape (e.g. 3 long acts + 7 short
+scenes, or one expository preamble at 0.5x mean) with no sum-check
+that `sum(target_words) ≈ total target`. Combined with F18 (parallel
+bodies honor their allocations blindly) and F3 (no aggregate
+redistribution), the imbalance compounds into systematic
+under-delivery. Onboarding-qa Q63 spells out the fix: outline
+sum-check with single retry → hard-fail (ADR-006). Today: no such
+gate. Overlaps with F8 (same site; this is the explicit "Q55 lock"
+entry).
+
+**What trips it:** Any outline LLM call that selects an unbalanced act
+structure under the `[0.5x, 2x]` clamp. Same root cause class as job
+`a734babb` even though the per-section terminal gate is the visible
+fire site.
+
+---
+
+## F20. `_PER_BEAT_FAILURE_THRESHOLD=0.10` is a first-failure kill, not a post-retry ceiling
+
+**Where:** `pipeline/render/visualize/ai_beat_slideshow.py:90`
+(constant), `pipeline/render/visualize/ai_beat_slideshow.py:492`
+(fire site).
+
+**Why fragile (Q66):** The 10% threshold today fires on the FIRST
+beat-failure aggregate exceeding it — there is no per-beat retry
+before the gate decides. A cloud-image-service hiccup that breaks
+12% of beats kills the whole short on first attempt. Per
+ADR-023 + locked operating principle 1, the gate stays but the
+trigger shape moves: post-gen image-quality validator → per-beat retry
+with stronger prompt → only after retry exhaustion does the beat count
+as failed → only then does the 10% aggregate fire and kill the render.
+The 10% becomes a *post-retry* ceiling, not a first-fail kill.
+Onboarding-qa Q66 spells out the retry shape; refactor-plan P4.2
+implements.
+
+**What trips it:** Any transient cloud-image-service outage exceeding
+10% beat failure rate. The retry path doesn't exist yet, so today
+the only mitigation is operator-side re-trigger of the whole render.
+
+---
+
+## F21. `_synth_cloudrun_indicf5` may not ship `ref_audio_text` to the model
+
+**Where:** `pipeline/tts/cloudrun.py:813` (`_synth_cloudrun_indicf5`),
+called from chunked synthesis at line 793.
+
+**Why fragile (Q71):** Onboarding-qa Q71 attributes HindutavaAnimated's
+"Hindi gibberish noise" to this function not forwarding
+`ref_audio_text` to the IndicF5 model. Line 837 has the
+`if not ref_audio_text:` guard but the outbound request body needs
+verification — config-side reads succeed; payload-side write may
+silently drop. Hindi renders technically return a wav so no TTS-level
+error surfaces; the failure is only audible on playback. Overlaps
+with F13 (same site; this is the explicit Q71-lock entry with the
+ADR-016 fix locked).
+
+**What trips it:** Every HindutavaAnimated render. Mitigation per
+ADR-016 is a targeted one-line fix + regression test that asserts
+`ref_audio_text` is in the request payload (refactor-plan P4.4).
+
+---
+
+## F22. `spec.caption_style` not wired end-to-end → captionless mp4s ship silently
+
+**Where:** `pipeline/render/spec.py` (`RenderSpec.caption_style` field),
+overlay producers at `pipeline/render/overlays/word_caption_pngs.py` +
+`pipeline/render/overlays/sentence_caption_ass.py`, compose mux in
+`pipeline/render/compose/compose.py`.
+
+**Why fragile (Q73):** `spec.caption_style` is set at the engine entry
+but is lossy through the overlay → compose path. Per onboarding-qa Q73
+the wiring is incomplete: caption import failures currently warn
+rather than hard-fail; Devanagari font is missing from the worker
+Dockerfile (line 29-38) so Devanagari beats render as boxes; there is
+no post-render caption density gate. Result: a render can ship a
+"successful" mp4 that has no captions, or has captions for half the
+audio time, or has Hindi captions rendered as Unicode replacement
+boxes. The signal is silent (no exception, no telemetry, no gate fire).
+ADR-012 + refactor-plan P5.2 are the structural fix.
+
+**What trips it:** Any render where the captions pipeline silently
+degrades — caption import broken, font missing, ASS pipeline returns
+empty timing, density below threshold. The mp4 still ships.
+
+---
+
+## F23. Writeback duration gate kills successful mp4s (`7743ca76` case)
+
+**Where:** `cloud/render-worker-v2/entrypoint.py:~2400` writeback
+verification (referenced by job-failure log of `7743ca76`).
+
+**Why fragile (Q54):** The writeback gate hard-fails when mp4 duration
+< 80% of target (1440s floor for 1800s target). Job `7743ca76`
+(2026-05-21 19:48) produced a real 59.7 MB h264+aac mp4 at 1232s —
+perfectly watchable, perfectly valid — and the writeback gate killed
+the render because 1232 < 1440. The duration floor duplicates length
+policing already done (or that *should* be done) at the rewrite gates;
+when upstream gates fire correctly the duration is naturally in band;
+when upstream gates over-correct or under-correct, the writeback gate
+fires on a real artifact that operators would have happily shipped.
+Per ADR-010 + ADR-023 the gate becomes a sanity check only (mp4 has
+valid streams; duration > 0; no truncation). Refactor-plan P3.7
+implements.
+
+**What trips it:** Any render where the rewrite gates allow a
+shorter-than-target narration (within their tolerance bands) AND the
+writeback floor is tighter than the rewrite tolerance — exactly the
+state today, where rewrite uses `HARD_FLOOR_FRAC=0.50` (50%) but
+writeback enforces 80%.
+
+---
+
+## Cross-cutting pattern
+
+Every entry above shares one root: **error handling is calibrated for
+the silent-failure class (audit 2026-05-15) but not for the
+granular-retry shape onboarding-qa Q51 + Q64 locked.** Fail-loud is
+the *right* default vs silent corruption, but it's the *wrong* shape
+when the failing piece is recoverable. The attack set items 1–13 in
+onboarding-qa are the structural fix; this doc is the inventory of
+sites that need to flip from "raise on first failure" to "retry the
+failing piece, raise on retry-exhaustion."

@@ -384,7 +384,7 @@ def _build_silent_video(channel: str, slug: str, shotlist: dict, scratch: Path) 
     # (one source video for every window). Per-window source_url is the
     # long-form kathaa pattern (each window from a distinct asset, possibly
     # mixing image stills + video clips). Both shapes are honoured here.
-    cache_dir = REPO_ROOT / channel / "footage" / "sources"
+    cache_dir = REPO_ROOT / "data" / channel / "footage" / "sources"
     default_src_path: Path | None = None
     default_src_kind: str | None = None
     legacy_src_url = shotlist.get("source_url")
@@ -538,7 +538,7 @@ def _scene_cuts(shotlist: dict) -> list[float]:
 
 # --- caption + flag overlay (the final ffmpeg pass) ----------------------
 
-EMOJI_DIR = REPO_ROOT / "historyrecapped" / "emoji"
+EMOJI_DIR = REPO_ROOT / "data" / "historyrecapped" / "emoji"
 TWEMOJI_BASE = "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72"
 EMOJI_CODEPOINTS = {
     "fr":      "1f1eb-1f1f7",
@@ -759,7 +759,7 @@ def render(channel: str, slug: str, *, do_upload: bool = False, aspect_override:
 
 def _render_impl(channel: str, slug: str, *, do_upload: bool = False, aspect_override: str | None = None) -> Path:
     from pipeline.paths import RenderPaths  # noqa: PLC0415
-    from pipeline.preflight import power_check, reset_mlx_state  # noqa: PLC0415
+    from pipeline.preflight import power_check  # noqa: PLC0415
 
     # Refuse to start in Low Power Mode (the 2026-05-04 / 2026-05-05
     # SIGABRT-on-Metal class of bug). Override with
@@ -822,10 +822,9 @@ def _render_impl(channel: str, slug: str, *, do_upload: bool = False, aspect_ove
     # downloads + libx264 trim ladder overlap with TTS + Whisper ASR
     # on the wall clock. Gated on
     # :func:`pipeline.stage_overlap.gpu_safe_to_overlap` — local TTS
-    # providers (f5_tts / kokoro) fall back to sequential to avoid
+    # providers (kokoro) fall back to sequential to avoid
     # Metal/unified-memory contention with any other in-process MLX
-    # singleton (this orchestrator drops F5 mid-render anyway, but
-    # the gate keeps the policy uniform across orchestrators).
+    # singleton.
     from pipeline.stage_overlap import StageOverlap, gpu_safe_to_overlap  # noqa: PLC0415
     tts_provider = str(cfg.get("tts_provider", "kokoro"))
     overlap_safe, overlap_reason = gpu_safe_to_overlap(
@@ -854,23 +853,7 @@ def _render_impl(channel: str, slug: str, *, do_upload: bool = False, aspect_ove
             channel, slug, cfg, caption_mode=caption_mode,
         )
 
-        # 2026-05-05: drop F5-TTS-MLX (~1.35 GB) at the renderer-stage boundary
-        # before the video build / mux stages. F5 was loaded by the TTS step and
-        # is not needed again in this renderer; previously it leaked into the
-        # ffmpeg-heavy stages and contributed to the Metal-completion-queue
-        # SIGABRTs. (No-op when channel uses Kokoro / Chatterbox / etc. — those
-        # singletons aren't dropped here, only F5.)
-        reset_mlx_state(drop_f5=True, label="footage-only stage-1 TTS")
-
         silent = _build_silent_video(channel, slug, shotlist, scratch)
-
-    # When the parallel branch ran, the F5 reset still needs to happen
-    # — but only AFTER the silent build finishes (so the trim ladder
-    # in _build_silent_video doesn't suddenly lose the MLX heap mid-
-    # ffmpeg). The order is: silent_fut.result() above, then drop F5
-    # here, then proceed to mux.
-    if overlap_safe:
-        reset_mlx_state(drop_f5=True, label="footage-only stage-1 TTS (post-overlap)")
 
     out_dir = chan_dir / ("long_form" if aspect == "16:9" else "shorts")
     out = out_dir / f"{slug}.mp4"

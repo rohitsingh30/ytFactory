@@ -87,7 +87,7 @@ def _firestore_client():
     """Lazy import so unit tests don't need the SDK on the path."""
     from google.cloud import firestore  # noqa: PLC0415
     return firestore.Client(
-        project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2"),
+        project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3"),
     )
 
 

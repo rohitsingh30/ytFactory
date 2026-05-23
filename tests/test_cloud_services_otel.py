@@ -14,7 +14,7 @@ server.py / entrypoint.py startup".
 Scope rule (per CLAUDE.md P9.1): only Python services with a
 ``server.py`` or ``entrypoint.py`` are auto-covered. Static-asset /
 Node.js / one-shot init containers (``cloud/web-next/``,
-``cloud/weights-staging/``) are explicitly excluded — they have
+are explicitly excluded — they have
 no Python entry point.
 """
 from __future__ import annotations

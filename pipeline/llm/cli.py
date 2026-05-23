@@ -158,9 +158,8 @@ _DEFAULT_MODEL_BY_STAGE: dict[str, str] = {
     "audio_critic": "opus",
     "imitate_analyze": "opus",
     "imitate_apply": "opus",
-    # Prompt-refiner pre-step for FLUX.2 [klein] (DALL-E 3 playbook).
-    # See pipeline/images/prompt_refiner.py and
-    # data/research/flux2_prompting_2026-05-14.md. Runs ONCE per render
+    # Prompt-refiner pre-step (DALL-E 3 playbook) — see
+    # pipeline/images/prompt_refiner.py. Runs ONCE per render
     # (batched across all beats) and only needs to rewrite ~30 short
     # scene strings into structured JSON — a Haiku-tier model handles
     # this at ~10x lower cost than the OPUS tier used for authoring.
@@ -302,20 +301,16 @@ def _reasoning_tokens(usage: Any) -> int | None:
 # Set to ``off`` / ``none`` to omit the param entirely (useful when
 # diagnosing a stage that needs the deployment default).
 _DEFAULT_REASONING_EFFORT_BY_STAGE: dict[str, str] = {
-    # 2026-05-13 calibration: dropped from "medium" → "minimal".
-    # Long-form rewrite for a 30-min target needs to emit ~6000
-    # narration words = ~8k output tokens, plus 24-60 panel scenes
-    # = 2-5k tokens, plus JSON syntax = ~1k tokens, total ~12-15k
-    # CONTENT tokens. With reasoning_effort=medium, gpt-5.3-chat
-    # was burning 5-8k INVISIBLE reasoning tokens BEFORE output,
-    # combined with the 32k → 64k cap we still hit truncation
-    # mid-section on jobs b318a787 + 0947ea51 + 7dca182d.
-    # Switching to "minimal" frees the full 64k for actual output.
-    # The new niche-tonal contract + length validator (validate_long_form_envelope)
-    # provide the planning structure that "medium" reasoning was
-    # nominally meant to bring — so we get the same content quality
-    # without the reasoning-token overhead.
-    "rewrite_long_form": "minimal",
+    # 2026-05-22 calibration: flipped back to "medium" (was "minimal"
+    # since 2026-05-13). Post-STORM-pattern fan-out the per-call
+    # output budget is now ~700 tokens per section body (well within
+    # the 64k cap), so the original justification for "minimal" (free
+    # the full 64k for output) no longer applies. What DOES matter for
+    # the length-sensitive long-form rewrite is the model planning
+    # which beats land in which section + how to ANCHOR the
+    # word_count it self-emits — both benefit from real reasoning
+    # tokens. Per Q57.4 / P3.4 of the refactor plan.
+    "rewrite_long_form": "medium",
     "critic":            "medium",  # we want thoughtful critique
 }
 _FALLBACK_REASONING_EFFORT = "minimal"

@@ -88,9 +88,14 @@ def test_check_niche_contract_empty_narration_hard_fails():
 # ---------- length contract (C2/C3/C4) -----------------------------------
 
 
-def _make_section(words: int, idx: int = 0):
+def _make_section(words: int, idx: int = 0, target_words: int | None = None):
+    # P3.2: per-section gate compares against section's OWN target_words
+    # when present. Default = the actual word count so legacy tests that
+    # don't care about per-section gates still pass; callers that DO want
+    # to test the ±10% per-section band pass an explicit target_words.
     return {"id": f"sec-{idx}", "title": f"Section {idx}",
-            "narration": "word " * words, "target_s": 180.0}
+            "narration": "word " * words, "target_s": 180.0,
+            "target_words": target_words if target_words is not None else words}
 
 
 def test_check_word_count_passes_when_at_target():
@@ -99,18 +104,15 @@ def test_check_word_count_passes_when_at_target():
     assert critic.check_word_count(sections, target_duration_s=1800) == []
 
 
-def test_check_word_count_hard_fails_under_50pct():
-    """C2 — rendered video delivered 53% of target.
+def test_check_word_count_hard_fails_outside_15pct_total_band():
+    """P3.2 (Q59): total length outside ±15% of user's target → hard.
 
-    Was 85% threshold pre-2026-05-13 calibration; lowered to 50%
-    after observed Azure GPT-5.3 single-shot output for 30-min
-    requests physically lands at 55-65% of target words. The 50%
-    floor catches catastrophic under-delivery (LLM produced 5-min
-    script for a 30-min request) without blocking realistic LLM
-    output. Soft warn at 85% still surfaces the gap to dashboards.
+    Pre-2026-05-22 the floor was a loose 50% (asymmetric, low-only).
+    Now: symmetric ±15%. 30-min target = 4500 → allowed [3825, 5175].
+    Delivering 3000 words (67%) MUST hard-fail now.
     """
-    # 30-min target = 4500 words. Deliver 2200 (49% — below 50% hard floor).
-    counts = [220, 220, 220, 220, 220, 220, 220, 220, 220, 220]
+    # 30-min target = 4500 words. Deliver 3000 — below 85% threshold.
+    counts = [300] * 10
     sections = [_make_section(c, i) for i, c in enumerate(counts)]
     out = critic.check_word_count(sections, target_duration_s=1800)
     hard = [v for v in out if v.severity == "hard"]
@@ -118,73 +120,75 @@ def test_check_word_count_hard_fails_under_50pct():
     assert "length_under_delivered_hard" in codes
 
 
-def test_check_word_count_soft_warns_at_realistic_llm_floor():
-    """C2 — rendered video delivered 58% of target — should soft-warn but not hard-fail."""
-    # 30-min target = 4500 words. Deliver 2631 (the actual job 0947ea51 count).
-    counts = [263, 263, 263, 263, 263, 263, 263, 263, 263, 263]
+def test_check_word_count_hard_fails_when_total_overshoots_15pct():
+    """P3.2: symmetric — over-delivery beyond +15% also hard-fails."""
+    # 30-min target = 4500 words. Deliver 5500 (122%) — above 115% ceiling.
+    counts = [550] * 10
     sections = [_make_section(c, i) for i, c in enumerate(counts)]
     out = critic.check_word_count(sections, target_duration_s=1800)
     hard = [v for v in out if v.severity == "hard"]
-    soft = [v for v in out if v.severity == "soft"]
-    # No HARD violation (above 50% floor).
-    assert "length_under_delivered_hard" not in {v.code for v in hard}
-    # SOFT warning fires (below 85% threshold).
-    assert "length_under_delivered_soft" in {v.code for v in soft}
+    codes = {v.code for v in hard}
+    assert "length_over_delivered_hard" in codes
 
 
-def test_check_word_count_hard_fails_per_section_degradation():
-    # Total OK overall, but section 8/9 = 50 words vs others = 600 words = 10% of mean.
-    # Mean of [600,600,600,600,600,600,600,600,50,50] = 480, worst/mean = 50/480 = 10%.
-    counts = [600, 600, 600, 600, 600, 600, 600, 600, 50, 50]
-    sections = [_make_section(c, i) for i, c in enumerate(counts)]
+def test_check_word_count_severe_overshoot_fires_hard():
+    """P3.2: severe overshoot fires the hard band (±15%). The soft
+    band is wider than the hard and is mutually exclusive (via the
+    ``elif`` branch in ``critic_long_form.check_word_count``) — only
+    ONE severity fires at a given deviation, and hard wins when both
+    bands are exceeded.
+    """
+    # 1800s @ 150wpm = 4500 target. Deliver 5900 words = 131%. Outside
+    # both 115% (5175) and 130% (5850) ceilings — hard fires.
+    sections = [_make_section(590, i) for i in range(10)]
+    out = critic.check_word_count(sections, target_duration_s=1800)
+    hard_codes = {v.code for v in out if v.severity == "hard" and "length_over" in v.code}
+    assert "length_over_delivered_hard" in hard_codes
+
+
+def test_check_word_count_hard_fails_per_section_outside_10pct_band():
+    """P3.2 (Q59): per-section ±10% gate. Section delivered 80 words
+    against a 200-word target = 40% (outside ±10%) → hard."""
+    sections = [_make_section(words=200, idx=i, target_words=200) for i in range(9)]
+    # Section 9 hits its target band (180-220 = 200 ±10%) → no violation.
+    # Replace section 9 with a low-count miss.
+    sections.append(_make_section(words=80, idx=9, target_words=200))
     out = critic.check_word_count(sections, target_duration_s=1800)
     codes = {v.code for v in out if v.severity == "hard"}
     assert "section_degradation_hard" in codes
 
 
-def test_check_word_count_soft_warns_at_70pct():
-    # 30-min target = 4500 words. Deliver 3150 (70% — under 85% soft floor).
-    sections = [_make_section(315, i) for i in range(10)]
+def test_check_word_count_per_section_in_band_passes():
+    """P3.2: section delivered exactly its target_words passes the
+    ±10% gate cleanly."""
+    sections = [_make_section(words=450, idx=i, target_words=450) for i in range(10)]
     out = critic.check_word_count(sections, target_duration_s=1800)
-    soft = [v for v in out if v.severity == "soft"]
-    hard = [v for v in out if v.severity == "hard"]
-    assert hard == []
-    assert any(v.code == "length_under_delivered_soft" for v in soft)
+    # Each section is on-target → no per-section hard violation.
+    assert not any(v.code == "section_degradation_hard" for v in out)
 
 
-def test_check_word_count_passes_above_soft_floor():
-    # 30-min target = 4500 words. Deliver 4000 (89% — above 85% soft floor).
-    sections = [_make_section(400, i) for i in range(10)]
-    out = critic.check_word_count(sections, target_duration_s=1800)
-    soft = [v for v in out if v.severity == "soft" and "length" in v.code]
-    hard = [v for v in out if v.severity == "hard" and "length" in v.code]
-    assert hard == []
-    assert soft == []
+def test_tolerance_env_defaults_are_15pct_total_and_10pct_section():
+    """P3.2: pin the SHIPPED gate tolerances so a future tweak can't
+    silently widen them back to the obsolete 2026-05-13 calibration
+    (HARD_FLOOR_FRAC=0.50 = ±50% asymmetric-low-only, which was too
+    loose AND symmetric-only on the low side per Q59).
 
-
-def test_floor_env_defaults_are_50pct_hard_and_85pct_soft():
-    """Tier 0 batch G — pin the env defaults so a future tweak can't
-    silently raise the floor back to the pre-2026-05-13 85% hard floor
-    that crashed every long_form render where Azure under-delivered.
-
-    Telemetry refs: TEL-EXEC-07 (1) + TEL-FS-28 (1) + TEL-LOG-18 (1) —
-    rewrite delivered 2631 words vs 3825 expected (69%) and the render
-    aborted because HARD_FLOOR_FRAC was 0.85. The 50%/85% calibration
-    keeps catastrophic short-deliveries hard-failing while letting
-    realistic Azure output through with a soft warning.
+    Gate philosophy (Q64): gates STAY. Tightening them is correct
+    when the underlying machinery (STORM fan-out + iterative-extend
+    retry) reliably hits the tighter band.
     """
     # Read fresh from os.environ — tests/conftest may have set a different
     # value; we want the SHIPPED defaults.
     import os
-    hard = float(os.environ.get("YTFACTORY_LONG_FORM_HARD_FLOOR_FRAC", "0.50"))
-    soft = float(os.environ.get("YTFACTORY_LONG_FORM_SOFT_FLOOR_FRAC", "0.85"))
-    assert hard == 0.50, (
-        f"YTFACTORY_LONG_FORM_HARD_FLOOR_FRAC default must be 0.50; got {hard}. "
-        "Raising it back to 0.85 will crash long_form renders when Azure "
-        "GPT-5.3 under-delivers (which it does at 55-69% on 30-min requests)."
+    total_tol = float(os.environ.get("YTFACTORY_LONG_FORM_TOTAL_TOL_FRAC", "0.15"))
+    section_tol = float(os.environ.get("YTFACTORY_LONG_FORM_SECTION_TOL_FRAC", "0.10"))
+    assert total_tol == 0.15, (
+        f"YTFACTORY_LONG_FORM_TOTAL_TOL_FRAC default must be 0.15 (±15%); got {total_tol}. "
+        "Widening this back to the pre-2026-05-22 50% floor would re-introduce "
+        "the silent-short-render class of bug (Q59 / P3.2)."
     )
-    assert soft == 0.85, (
-        f"YTFACTORY_LONG_FORM_SOFT_FLOOR_FRAC default must be 0.85; got {soft}."
+    assert section_tol == 0.10, (
+        f"YTFACTORY_LONG_FORM_SECTION_TOL_FRAC default must be 0.10 (±10%); got {section_tol}."
     )
 
 
@@ -291,11 +295,11 @@ def test_validate_long_form_envelope_passes_clean_envelope():
 def test_validate_long_form_envelope_catches_job_0c05c335_violations():
     """Pin the EXACT mistake stack of the rendered video so we never ship it again.
 
-    Note: post-2026-05-13 calibration the 57% delivery on this fixture
-    only fires the SOFT length warning (not hard) because we lowered
-    the hard floor to 50% to accommodate Azure GPT-5.3's natural
-    single-shot output. The OTHER three CLASS-OF-BUG violations
-    (niche, panel_hold, stock_anecdote) still hard-fail.
+    Note: post-2026-05-22 P3.2 retightening the hard length band is
+    ±15%, so this fixture's 57% delivery (2550 of 4500 expected words)
+    fires the HARD length violation rather than the older SOFT warn.
+    The other three CLASS-OF-BUG violations (niche, panel_hold,
+    stock_anecdote) still hard-fail as before.
     """
     env = {
         "long_form": {
@@ -314,13 +318,12 @@ def test_validate_long_form_envelope_catches_job_0c05c335_violations():
     }
     out = critic.validate_long_form_envelope(env, target_duration_s=1800, niche="r/nosleep")
     hard_codes = {v.code for v in out if v.severity == "hard"}
-    soft_codes = {v.code for v in out if v.severity == "soft"}
-    # Hard violations: niche tonal + panel hold + stock anecdote.
+    # Hard violations: length under (57% < 85% floor), niche tonal,
+    # panel hold, stock anecdote.
+    assert "length_under_delivered_hard" in hard_codes
     assert "niche_tonal_violation" in hard_codes
     assert "panel_hold_too_long" in hard_codes
     assert "stock_anecdote_drift" in hard_codes
-    # 57% delivery → soft length warn (post-2026-05-13 calibration).
-    assert "length_under_delivered_soft" in soft_codes
 
 
 def test_validate_long_form_envelope_handles_script_envelope_object():

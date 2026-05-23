@@ -324,9 +324,8 @@ def build_full_prompt(
     fields come from
     :func:`pipeline.images.prompt_refiner.refine_prompts_batch` — a
     second LLM pre-step that rewrites the authored visual content for
-    FLUX.2 [klein] adherence (positive-rephrased negations, explicit
-    shot type + lighting, BFL-format style/mood block). See
-    ``data/research/flux2_prompting_2026-05-14.md``.
+    z-image-turbo adherence (positive-rephrased negations, explicit
+    shot type + lighting, structured style/mood block).
 
     Critical invariants (post-2026-05-14 audit):
 
@@ -408,11 +407,8 @@ _PROVIDER_CAPABILITIES: dict[str, dict] = {
         "vertical_9_16_safe": True,
         "description": (
             "Z-Image-Turbo 6B via Cloud Run (Apache 2.0). diffusers "
-            "runtime on NVIDIA L4 in asia-southeast1. The sole image "
-            "provider post 2026-05-16 cost-optimization sweep — see "
-            "docs/cost_optimized_deploy.md. Other providers "
-            "(flux2_klein, flux2_dev, qwen_image, hidream, all azure_*) "
-            "were removed; restore from git history if revival needed."
+            "runtime on NVIDIA L4 in asia-southeast1. Sole production "
+            "image provider."
         ),
     },
 }
@@ -606,14 +602,10 @@ def _generate_impl(
 ) -> Path:
     """Generate one image. Dispatches on ``provider``.
 
-    Single-provider as of 2026-05-16 cost-optimization sweep —
-    cloudrun_z_image_turbo only. flux2_klein, flux2_dev, qwen_image,
-    hidream and all azure_* mirrors were removed; restore from git
-    history if revival of any path is needed.
+    Single production provider: ``cloudrun_z_image_turbo``.
 
     Local providers (sdxl_lightning, mflux, z_image_turbo,
-    z_image_turbo_fal) were removed earlier (2026-05-09 nuclear
-    cleanup).
+    z_image_turbo_fal) were removed (2026-05-09 nuclear cleanup).
 
     ``ip_adapter_image`` / ``ip_adapter_scale`` / ``extra_negative``
     are accepted for back-compat with old call sites but ignored —

@@ -41,13 +41,8 @@ bash scripts/bootstrap_new_project.sh
 
 | Service | Reason for excluding |
 |---|---|
-| **flux2-klein** | Apache 2.0 alternative, but z-turbo is sufficient and simpler. Drop unless you need ensemble. |
-| **flux2-dev** | Incompatible with L4 GPU (~96 hr/render with sequential offload). Verified 2026-05-15. |
-| **qwen-image** | 2x more expensive than z-turbo ($0.15 vs $0.07 per render) due to required CPU offload. |
-| **hidream** | Exploratory — not on production path. |
-| **cosyvoice / higgs / indicparler** | No active channel uses these TTS providers. |
 | **editing-agent** | Optional polish stage. Restore later if needed. |
-| **clone-video-worker / cobalt-api** | Only needed for `/clone-video-format` skill. |
+| **clone-video-worker** | Only needed for `/clone-video-format` skill. |
 
 ---
 
@@ -97,14 +92,12 @@ At ~$0.50-2.00 RPM (typical Shorts CPM) × 1000 views/video:
 | 6 | **Cloud Build VPC-SC log-streaming exits non-zero** | Use `--async` + poll instead of streaming |
 | 7 | **`gcloud auth` reauth broken in non-interactive shells** | `cloud/_shared/auth_setup.sh` impersonates deployer SA |
 | 8 | **Cloud Run JOB 32 GiB cap** can't stage huge HF repos | Weights staging via Cloud Build with e2-highcpu-32 |
-| 9 | **Provider dispatch was missing for qwen + flux2_dev** | Now in `pipeline/images/images.py` |
-| 10 | **Don't bake 20+ GB weights into Docker images** | All image services use GCS Fuse mount |
-| 11 | **`YTFACTORY_QUEUE_BACKEND=firestore` env required** | Otherwise jobs go to in-memory backend |
-| 12 | **`GOOGLE_CLOUD_PROJECT` env required** (not `<project>-prod` default) | Bootstrap sets it explicitly |
-| 13 | **`visual_mode: hybrid_beat_footage` is unregistered** | Override to `ai_beat_slideshow` |
-| 14 | **flux2-dev `Flux2Pipeline` rejects `negative_prompt`** | Verified via diffusers docs; sniff signature before passing |
-| 15 | **min-instances=1 burns ~$18/day per always-on GPU service** | Default = `min-instances=0` for ALL services |
-| 16 | **Cloud Run idle timeout = 15 min** = many cold-starts → high cost on TTS | Combine TTS chunks into 1 call |
+| 9 | **Don't bake 20+ GB weights into Docker images** | All image services use GCS Fuse mount |
+| 10 | **`YTFACTORY_QUEUE_BACKEND=firestore` env required** | Otherwise jobs go to in-memory backend |
+| 11 | **`GOOGLE_CLOUD_PROJECT` env required** (not `<project>-prod` default) | Bootstrap sets it explicitly |
+| 12 | **`visual_mode: hybrid_beat_footage` is unregistered** | Override to `ai_beat_slideshow` |
+| 13 | **min-instances=1 burns ~$18/day per always-on GPU service** | Default = `min-instances=0` for ALL services |
+| 14 | **Cloud Run idle timeout = 15 min** = many cold-starts → high cost on TTS | Combine TTS chunks into 1 call |
 
 ---
 
@@ -122,9 +115,7 @@ At ~$0.50-2.00 RPM (typical Shorts CPM) × 1000 views/video:
 
 6. **Monitor "Min Instance CPU/Memory Tier 2" SKU weekly.** Should be ~$0. Anything > $1 means a service has min-instances ≥ 1.
 
-7. **Never use flux2-dev on Cloud Run L4.** ~96 hr per render. If you need flux2-dev quality, use BFL paid API ($0.05/image) or GKE with L40/A100.
-
-8. **Cold-start budget per service: 60-90s.** If a model needs longer (e.g., qwen 20B with offload), it's a sign the model is wrong for L4.
+7. **Cold-start budget per service: 60-90s.** If a model needs longer, it's a sign the model is wrong for L4.
 
 ---
 
@@ -145,8 +136,6 @@ These bumps are **free** — quota lifts the cap; cost is only for actual usage.
 | Waste source | $ wasted | Bootstrap avoids? |
 |---|---|---|
 | **Idle GPU services with min-instances=1** (96% of waste) | ~$272 | ✅ Bootstrap defaults to min=0 |
-| Failed qwen image bakes (4 of 6 builds failed) | ~$3 | ✅ Drops qwen from default stack |
-| Failed FLUX.2-dev weight staging (4 of 6 failed) | ~$2 | ✅ Drops flux2-dev (incompatible w/ L4) |
 | Cancelled mid-render worker executions (15+) | ~$3 | ✅ Bootstrap pre-warms before submit |
 | Quota-exceeded retry deploys | ~$1 | ✅ Quotas requested upfront |
 | Web service auto-rebuilds (cron?) | ~$0.30 | (separate fix — disable cron or set webhook) |
@@ -219,8 +208,7 @@ If any recent build ran in the global pool, add `--region=asia-southeast1` to th
 Skip Azure for now. Reconsider when:
 
 1. **Production hits 500+ renders/day** — Azure Spot for TTS saves ~$50/mo
-2. **Need flux2-dev quality** — use BFL paid API or Azure GKE with A100
-3. **Multi-region / DR requirements** — Azure for cross-cloud failover
+2. **Multi-region / DR requirements** — Azure for cross-cloud failover
 
 Today: **GCP-only is the right call.** Adding Azure adds operational complexity that doesn't pay off below 500 renders/day.
 
@@ -229,7 +217,6 @@ Today: **GCP-only is the right call.** Adding Azure adds operational complexity 
 ## Recovery / rollback
 
 - **Killed a service?** Re-run its `cloud/<svc>/deploy.sh`. Image is in Artifact Registry, weights are in GCS — service comes back in ~5 min.
-- **Want to add klein/qwen later?** Re-stage their weights (~10 min via `bash scripts/stage_weights.sh klein qwen`) then run their `cloud/image-<svc>/deploy.sh`.
 - **Worker broken?** Check that all `CLOUDRUN_*_URL` envs are set: `gcloud run jobs describe ytfactory-render-worker-v2 --format=json | grep CLOUDRUN`. If missing, run worker `deploy.sh` again — the patched version preserves all envs.
 
 ---
@@ -238,7 +225,4 @@ Today: **GCP-only is the right call.** Adding Azure adds operational complexity 
 
 | Goal | Action |
 |---|---|
-| Cheaper image gen | Add 4-bit qwen variant: `Qwen/Qwen-Image-4bit` fits on L4 without offload (~$0.04/render) |
 | Cheaper TTS | Move to Azure Spot once GPU quota lands (~$0.04/render base) |
-| Higher reliability | Add klein as backup image-gen (3-tier fallback already in code) |
-| flux2-dev quality | BFL paid API (`$0.05/image × 12 = $0.60/render`) — no infra needed |

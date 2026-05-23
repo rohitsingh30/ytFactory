@@ -116,7 +116,7 @@ class TestPublicBaseUrl(unittest.TestCase):
         mock_request = MagicMock(spec=Request)
         mock_request.headers = {
             "x-forwarded-proto": "https",
-            "x-forwarded-host": "ytfactory-web-7hwnzw7lya-as.a.run.app",
+            "x-forwarded-host": "ytfactory-web-prod.run.app",
             "host": "internal-host",
         }
         mock_request.url.scheme = "http"
@@ -124,13 +124,13 @@ class TestPublicBaseUrl(unittest.TestCase):
         with patch.dict(os.environ, {
             "YTFACTORY_PUBLIC_BASE_URL": "",
             "YTFACTORY_ALLOWED_HOSTS": (
-                "ytfactory-web-7hwnzw7lya-as.a.run.app, "
-                "ytfactory-web-283470729204.as.run.app"
+                "ytfactory-web-prod.run.app, "
+                "ytfactory-web-alt.run.app"
             ),
         }):
             result = _public_base_url(mock_request)
         self.assertEqual(
-            result, "https://ytfactory-web-7hwnzw7lya-as.a.run.app",
+            result, "https://ytfactory-web-prod.run.app",
         )
 
     def test_xfh_NOT_in_allowlist_raises_400(self) -> None:
@@ -147,7 +147,7 @@ class TestPublicBaseUrl(unittest.TestCase):
         mock_request.url.hostname = "also-not-allowed.example"
         with patch.dict(os.environ, {
             "YTFACTORY_PUBLIC_BASE_URL": "",
-            "YTFACTORY_ALLOWED_HOSTS": "ytfactory-web-7hwnzw7lya-as.a.run.app",
+            "YTFACTORY_ALLOWED_HOSTS": "ytfactory-web-prod.run.app",
         }):
             with self.assertRaises(HTTPException) as ctx:
                 _public_base_url(mock_request)

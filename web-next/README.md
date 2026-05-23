@@ -35,8 +35,7 @@ cd /Users/rohit/ytFactory/web-next && npm install && npm run dev
 Override the API base if the control plane runs elsewhere:
 
 ```bash
-YTFACTORY_API_BASE=https://ytfactory-control-767262167641.us-central1.run.app \
-  npm run dev
+YTFACTORY_API_BASE=<your-control-plane-url> npm run dev
 ```
 
 ## Production build

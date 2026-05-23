@@ -4,10 +4,7 @@
  * Two responsibilities, in order:
  *
  * 1. **Host normalization.** Cloud Run hands every service two public
- *    URLs (the project-id-hash form like
- *    `ytfactory-web-next-7hwnzw7lya-as.a.run.app` and the
- *    project-number form like
- *    `ytfactory-web-next-283470729204.asia-southeast1.run.app`). Both
+ *    URLs (a project-id-hash form and a project-number form). Both
  *    reach the same container, but cookies are host-bound — a cookie
  *    set on host A is not sent on a request to host B. Our Google
  *    OAuth flow stores a CSRF state nonce in `yt_oauth_state` cookie

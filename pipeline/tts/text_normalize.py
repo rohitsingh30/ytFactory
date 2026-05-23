@@ -5,7 +5,7 @@ it has no g2p rule for the dollar sign and falls back to digit-by-digit on
 unrecognised tokens. We pre-expand currency, K/M suffixes, and bare integers
 to spelled-out words so the audio sounds natural — and so Whisper hears
 the same words the source narration aligns against (no caption/audio drift).
-Applies to both Kokoro and f5_tts, both of which suffer the same numeral
+Applies to every TTS provider — all of which suffer the same numeral
 pronunciation problem to varying degrees.
 
 This module is **import-safe** — no torch / kokoro / soundfile dependencies.

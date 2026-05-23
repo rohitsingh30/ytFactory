@@ -138,7 +138,7 @@ def _gcs_download(uri: str, dest: Path) -> Path:
     bucket_name, key = _parse_gs_uri(uri)
     from google.cloud import storage  # noqa: PLC0415 — lazy
 
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3")
     client = storage.Client(project=project)
     blob = client.bucket(bucket_name).blob(key)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -463,7 +463,7 @@ def _one_iteration(
 
 def poll_and_critique_loop(
     *,
-    project_id: str = "ytfactory-prod-v2",
+    project_id: str = "ytfactory-prod-v3",
     interval_s: int = 60,
     max_iters: Optional[int] = None,
     stop_event: Optional[threading.Event] = None,

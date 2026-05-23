@@ -10,10 +10,11 @@ os.environ["YTFACTORY_QUEUE_BACKEND"] = "memory"
 
 import httpx  # noqa: E402
 
-from control import jobs as jobs_mod, rate_limit  # noqa: E402
-from control.queue import get_queue, reset_queue  # noqa: E402
+from control.core import rate_limit
+from control.core import jobs as jobs_mod  # noqa: E402
+from control.core.queue import get_queue, reset_queue  # noqa: E402
 from control.render_routes import router as render_router  # noqa: E402
-from control.schema import TaskKind, TaskStatus  # noqa: E402
+from control.core.schema import TaskKind, TaskStatus  # noqa: E402
 
 
 def _make_app():
@@ -91,7 +92,7 @@ class PostRenderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r1.status_code, 200)
         self.assertEqual(r2.status_code, 200)
         q = get_queue()
-        from control.queue import InMemoryQueue
+        from control.core.queue import InMemoryQueue
         assert isinstance(q, InMemoryQueue)
         lengths = sorted(t.payload["length_s"] for t in q._tasks.values())  # type: ignore[attr-defined]
         self.assertEqual(lengths, [20, 7200])
@@ -110,7 +111,7 @@ class PostRenderTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(r.status_code, 200)
         q = get_queue()
-        from control.queue import InMemoryQueue
+        from control.core.queue import InMemoryQueue
         assert isinstance(q, InMemoryQueue)
         lengths = sorted(t.payload["length_s"] for t in q._tasks.values())  # type: ignore[attr-defined]
         self.assertEqual(lengths, [1800, 3600, 7200])
@@ -177,7 +178,7 @@ class GetJobTest(unittest.IsolatedAsyncioTestCase):
         jobs_mod.create_job("jdone", channel="auto", topic="t", proposal={})
         jobs_mod.mark_done("jdone", short_uri="gs://ytfactory-prod-artifacts/jobs/jdone/short.mp4",
                            youtube_url="https://youtu.be/abc")
-        from control import storage
+        from control.core import storage
         with patch.object(storage, "signed_url", return_value="https://signed.example/x") as mock_su:
             app = _make_app()
             transport = httpx.ASGITransport(app=app)
@@ -197,7 +198,7 @@ class GetJobTest(unittest.IsolatedAsyncioTestCase):
     async def test_done_with_signed_url_failure_does_not_500(self) -> None:
         jobs_mod.create_job("jbad", channel="auto", topic="t", proposal={})
         jobs_mod.mark_done("jbad", short_uri="gs://b/short.mp4")
-        from control import storage
+        from control.core import storage
         with patch.object(storage, "signed_url", side_effect=RuntimeError("no creds")):
             app = _make_app()
             transport = httpx.ASGITransport(app=app)

@@ -13,8 +13,8 @@ Pipeline (per slug):
     4. Persist ``<channel>/voices/<slug>.json`` with
        ``{ref_wav, ref_text, source_url, start, duration}``.
 
-Once that JSON exists, ``make_shorts.make_short`` picks it up and forces
-``tts_provider=f5_tts`` for that slug — see _find_voice_path there.
+Once that JSON exists, ``make_shorts.make_short`` picks it up for that
+slug — see _find_voice_path there.
 
 The clip should be 5–15s of clean, single-speaker speech. Cloud yt-dlp +
 ffmpeg do no speaker isolation; if the chosen window has music or a

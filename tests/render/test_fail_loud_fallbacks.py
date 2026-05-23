@@ -246,7 +246,7 @@ class AiBeatSlideshowPerBeatFailureTest(unittest.TestCase):
         spec.output_resolution = (1080, 1920)
         spec.output_fps = 30
         spec.extra = {
-            "image_provider": "cloudrun_flux2_klein",
+            "image_provider": "cloudrun_z_image_turbo",
             "image_seed": 42,
             "image_steps": 4,
         }

@@ -44,9 +44,9 @@ router = APIRouter()
 
 CLOUDRUN_JOB_NAME = os.environ.get("YTFACTORY_CLOUDRUN_JOB", "ytfactory-render-worker-v2")
 CLOUDRUN_JOB_REGION = os.environ.get("YTFACTORY_CLOUDRUN_REGION", "asia-southeast1")
-CLOUDRUN_JOB_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
-CLOUDRUN_ARTIFACTS_BUCKET = os.environ.get("YTFACTORY_BUCKET", "ytfactory-prod-v2-artifacts")
-STATE_BUCKET = os.environ.get("YTFACTORY_STATE_BUCKET", "ytfactory-prod-v2-state")
+CLOUDRUN_JOB_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3")
+CLOUDRUN_ARTIFACTS_BUCKET = os.environ.get("YTFACTORY_BUCKET", "ytfactory-prod-v3-artifacts")
+STATE_BUCKET = os.environ.get("YTFACTORY_STATE_BUCKET", "ytfactory-prod-v3-state")
 
 # Renderer entry points the cloud render-worker image carries. Anything
 # not in this set is rejected at the API boundary so a typo/poison

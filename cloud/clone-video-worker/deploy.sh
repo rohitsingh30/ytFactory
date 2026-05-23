@@ -29,7 +29,7 @@ echo "==> Verifying web-runner IAM bindings (preflight)"
 
 TAG="${1:-$(date +%Y%m%d-%H%M%S)}"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 REGION="${GCP_REGION:-asia-southeast1}"
 SERVICE="ytfactory-clone-video-worker"
 REPO="ytfactory-tts"   # reuse the existing AR repo

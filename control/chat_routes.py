@@ -14,11 +14,11 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from control import rate_limit
-from control import jobs as jobs_mod
+from control.core import rate_limit
+from control.core import jobs as jobs_mod
 from control.chat_service import ChatService, new_session_id
-from control.queue import get_queue, new_task_id
-from control.schema import (
+from control.core.queue import get_queue, new_task_id
+from control.core.schema import (
     ShortProposal,
     TaskEnvelope,
     TaskKind,

@@ -14,7 +14,7 @@
 # that — idempotent, safe to re-run, prints the resulting policy at the end.
 #
 # Required env (defaults match prod):
-#   GCP_PROJECT       ytfactory-prod-v2
+#   GCP_PROJECT       ytfactory-prod-v3
 #   RUNTIME_SA        tts-runner@${GCP_PROJECT}.iam.gserviceaccount.com
 #
 # Usage:
@@ -23,7 +23,7 @@
 #
 # Verify after:
 #   gcloud secrets get-iam-policy youtube-token-mystoriesanimated \
-#     --project ytfactory-prod-v2
+#     --project ytfactory-prod-v3
 # ============================================================================
 
 set -euo pipefail
@@ -33,7 +33,7 @@ set -euo pipefail
 # application-default login` covers every wire-up script.
 source "$(cd "$(dirname "$0")" && pwd)/../_shared/auth_setup.sh"
 
-PROJECT="${GCP_PROJECT:-ytfactory-prod-v2}"
+PROJECT="${GCP_PROJECT:-ytfactory-prod-v3}"
 RUNTIME_SA="${RUNTIME_SA:-tts-runner@${PROJECT}.iam.gserviceaccount.com}"
 # Audit D3.29 — pre-fix any typo (--dryrun, --help, --whatever)
 # silently slipped past as "not --dry-run" and ran live grants. Now

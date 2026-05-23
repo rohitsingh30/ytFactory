@@ -275,7 +275,7 @@ def _gcs_blob(bucket_name: str, channel_key: str, key: str):
     """Return a GCS Blob handle. Raises on auth / network problems."""
     from google.cloud import storage  # noqa: PLC0415 — lazy
 
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3")
     client = storage.Client(project=project)
     return client.bucket(bucket_name).blob(_gcs_blob_path(channel_key, key))
 
@@ -308,7 +308,7 @@ def _gcs_list(channel_key: str) -> list[NicheDoc]:
     try:
         from google.cloud import storage  # noqa: PLC0415 — lazy
 
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v2")
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3")
         client = storage.Client(project=project)
         prefix = f"{channel_key}/niches/"
         blobs = client.list_blobs(bucket, prefix=prefix)

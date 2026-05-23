@@ -40,7 +40,7 @@ class JobsIdFallthroughTests(unittest.TestCase):
         self.log.write_text(
             "[1/4] TTS cached\n"
             "[2/4] beats cached\n"
-            "[3/4] cloudrun_flux2_klein: generating 12 images\n"
+            "[3/4] cloudrun_z_image_turbo: generating 12 images\n"
             "[image-done] beat 4 of 12\n"
         )
         self.created: list[str] = []

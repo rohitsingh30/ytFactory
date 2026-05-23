@@ -14,42 +14,14 @@ This module is a **compatibility facade** for what used to be a single
 :mod:`pipeline.tts`:
 
 * :mod:`pipeline.tts.kokoro`        — Kokoro 82M (Apache 2.0)
-* :mod:`pipeline.tts.f5`            — F5-TTS-MLX (MIT, voice clone)
 * :mod:`pipeline.tts.chatterbox`    — Chatterbox (MIT, emotional clone)
 * :mod:`pipeline.tts.styletts2`     — StyleTTS2 (MIT, long-form prosody)
-* :mod:`pipeline.tts.parler`        — AI4Bharat Indic Parler-TTS
 * :mod:`pipeline.tts.song`          — Suno API + song trim helpers
 * :mod:`pipeline.tts.text_normalize` — currency/year/acronym/Hindi normalisation
 
 The split was driven by audio.py becoming unmaintainable. This file
 re-exports every public + every documented-private symbol so existing
-callers continue to work unchanged:
-
-* :mod:`scripts.historyrecapped.render_long_form`
-* :mod:`scripts.historyrecapped.render_footage_only`
-* :mod:`scripts.historyrecapped.kokoro_voice_samples`
-* :mod:`historyrecapped.scripts.regen_audio_caps`
-* :mod:`web.server`
-* :mod:`tests.test_audio_tts_providers`
-
-In particular:
-
-* ``audio._synth_kokoro``, ``_synth_f5_tts``, ``_synth_chatterbox``,
-  ``_synth_styletts2``, ``_synth_indic_parler`` — re-exported into this
-  module's globals so :func:`unittest.mock.patch.object(audio, ...)`
-  in :mod:`tests.test_audio_tts_providers` continues to intercept the
-  real dispatch path. The ``synthesize`` function below dispatches
-  via bare-name lookup (which resolves through this module's
-  ``__dict__``) so a patched binding is honoured.
-* ``audio._F5_MODEL`` / ``audio._F5_REF_CACHE`` — both re-exported, but
-  **direct mutation is deprecated**. Use :func:`reset_f5_state`
-  instead. The historyrecapped long-form renderer was migrated to the
-  new API in the same commit that created this facade. Direct mutation
-  through this module would only update the local re-export, NOT the
-  underlying singletons in :mod:`pipeline.tts.f5` — which is why the
-  old pattern needs the explicit reset API.
-* ``audio._kokoro`` — the Kokoro model accessor (used by
-  ``historyrecapped/scripts/kokoro_voice_samples.py:18``).
+callers continue to work unchanged.
 """
 from __future__ import annotations
 
@@ -126,56 +98,6 @@ from pipeline.tts.kokoro import (  # noqa: F401
     _word_count,
 )
 
-# ---- F5-TTS-MLX (MIT — voice clone, Apple Silicon) ------------------------
-# Re-export so monkeypatch tests work AND legacy mutation patterns
-# (deprecated) still find the names. See the module docstring above for
-# the migration guidance.
-from pipeline.tts import f5 as _f5_mod  # noqa: F401
-from pipeline.tts.f5 import (  # noqa: F401
-    _f5_get_model,
-    _f5_get_ref,
-    _synth_f5_tts,
-)
-# Backward-compatible alias — `audio._synth_f` was used in some older
-# external scripts as a short name for `_synth_f5_tts`.
-_synth_f = _synth_f5_tts
-
-
-def reset_f5_state() -> None:
-    """Drop the F5-TTS singleton + clear the ref-audio cache.
-
-    Replaces direct mutation of ``audio._F5_MODEL = None`` /
-    ``audio._F5_REF_CACHE.clear()`` (which now only affect the local
-    re-export, not the underlying singletons in :mod:`pipeline.tts.f5`).
-
-    Long-form renderers call this between the TTS pass and the image-gen
-    pass so MLX has contiguous heap headroom for z_image_turbo. See
-    ``historyrecapped/scripts/render_long_form.py``.
-    """
-    _f5_mod.reset_state()
-
-
-def __getattr__(name: str):
-    """Lazy proxy for the F5 module-state globals.
-
-    ``_F5_MODEL`` and ``_F5_REF_CACHE`` are looked up on the *underlying*
-    :mod:`pipeline.tts.f5` module so a fresh value (e.g. after the
-    singleton was loaded by a synth call) is observed by any reader that
-    does ``audio._F5_MODEL`` / ``audio._F5_REF_CACHE`` — not the stale
-    None / empty-dict snapshot taken at facade-import time.
-
-    Direct *writes* (``audio._F5_MODEL = None``) still only set the
-    facade's local attribute and do NOT propagate to the underlying
-    module — use :func:`reset_f5_state` instead. We keep the read-side
-    proxy because there's no harm in serving fresh values to callers
-    that just want to inspect the singleton.
-    """
-    if name == "_F5_MODEL":
-        return _f5_mod._F5_MODEL
-    if name == "_F5_REF_CACHE":
-        return _f5_mod._F5_REF_CACHE
-    raise AttributeError(f"module 'pipeline.audio' has no attribute {name!r}")
-
 
 # ---- Chatterbox (MIT — Resemble AI emotional voice clone) -----------------
 from pipeline.tts.chatterbox import (  # noqa: E402, F401
@@ -191,16 +113,6 @@ from pipeline.tts.styletts2 import (  # noqa: E402, F401
     _synth_styletts2,
 )
 
-# ---- Indic Parler-TTS (Apache 2.0; broken in default venv) ----------------
-from pipeline.tts.parler import (  # noqa: E402, F401
-    _INDIC_PARLER_DEFAULT_DESCRIPTION,
-    _INDIC_PARLER_DESC_TOKENIZER,
-    _INDIC_PARLER_MODEL,
-    _INDIC_PARLER_TOKENIZER,
-    _indic_parler_model,
-    _synth_indic_parler,
-)
-
 # ---- Sung music (Suno wrapper + trim helpers) -----------------------------
 from pipeline.tts.song import (  # noqa: E402, F401
     _SUNOAPI_BASE,
@@ -212,11 +124,7 @@ from pipeline.tts.song import (  # noqa: E402, F401
 )
 
 # ---- Cloud Run GPU providers (asia-southeast1) ----------------------------
-# Re-exported for the same reason as the local providers above —
-# tests/test_audio_tts_providers.py uses patch.object(audio, '_synth_cloudrun_f5')
-# so the dispatcher must look up the name via this module's __dict__.
-# Post 2026-05-16 cost-optimization sweep: only chatterbox + indicf5 remain;
-# f5, higgs, cosyvoice, indicparler were removed (see docs/cost_optimized_deploy.md).
+# Re-exported so tests can patch.object(audio, '_synth_cloudrun_*').
 from pipeline.tts.cloudrun import (  # noqa: E402, F401
     CloudRunUnavailable,
     _synth_cloudrun_chatterbox,
@@ -254,23 +162,11 @@ def synthesize(
     event so the dashboard can split clean cloud success from
     fallback-rescued runs.
 
-    See :func:`_synthesize_impl` for the per-provider routing — the
-    impl docstring carries the long-form behaviour notes.
+    See :func:`_synthesize_impl` for the per-provider routing.
     """
     chars = len(text or "")
 
     # Resolve voice ID → on-disk path BEFORE any provider sees it.
-    # Pre-2026-05-15 the dispatcher passed bare names like "sarah"
-    # straight through, and chatterbox cloud tried Path("sarah").read_bytes()
-    # → FileNotFoundError on every wizard render that defaulted to
-    # ``voice="sarah"`` (the dropdown sends voice IDs, not paths).
-    # Now ALL providers (chatterbox / cosyvoice / f5 / higgs / kokoro /
-    # parler) get the same canonical resolved path AND transcript so:
-    #   1. bare "sarah" → pipeline/voice_refs/sarah.wav
-    #   2. catalog name → catalog entry's wav + transcript
-    #   3. path-style ("pipeline/voice_refs/x.wav") → returned as-is
-    #   4. None / empty → providers that don't need a ref still work
-    # Surfaced by job 215e411b canary on 2026-05-15.
     resolved_voice = voice
     resolved_transcript = ref_audio_text
     if voice:
@@ -282,15 +178,10 @@ def synthesize(
             if wav_path is not None:
                 resolved_voice = str(wav_path)
             # Catalog transcript wins over caller-provided ref_audio_text
-            # ONLY when caller didn't pass one (so make_* skills can still
-            # override per-render).
+            # ONLY when caller didn't pass one.
             if catalog_transcript and not ref_audio_text:
                 resolved_transcript = catalog_transcript
         except Exception as exc:  # noqa: BLE001 — best-effort
-            # Resolution failure (voice not in catalog AND not on disk) →
-            # log + propagate the original value. The provider will raise
-            # a more specific error which is still better than a silent
-            # path-not-found further downstream.
             import logging as _logging  # noqa: PLC0415
             _logging.getLogger(__name__).warning(
                 "voice resolution failed for %r (%s) — provider will "
@@ -321,9 +212,6 @@ def synthesize(
             language=language,
             narration_prosody=narration_prosody,
         )
-        # Best-effort: record the produced audio's wall-clock duration
-        # (cheap soundfile probe; falls back to file size if probe
-        # fails). Useful for the dashboard's chars/sec heatmap.
         try:
             import soundfile as _sf  # noqa: PLC0415
             info = _sf.info(str(result))
@@ -354,98 +242,42 @@ def _synthesize_impl(
     """Generate speech audio. Returns path to the .wav file.
 
     For ``provider='kokoro'``, ``voice`` is a Kokoro voice id.
-    For ``provider='f5_tts'``, ``voice`` is the path to a 5–15s
-    reference clip, and ``ref_audio_text`` is required.
     For ``provider='chatterbox'`` / ``'styletts2'``, ``voice`` is a
     ref-WAV path; ``ref_audio_text`` is not required.
-    For ``provider='indic_parler'``, ``voice`` is a natural-language
-    description of the desired speaker (NOT a path).
 
     Numbers and currency in ``text`` are expanded to spoken words before
-    synthesis (Kokoro reads "$2000" as digit-by-digit otherwise). The
-    caller should pass the SAME normalised string to source-text alignment
-    downstream so beat captions match what was actually spoken — see
-    ``normalize_for_tts``.
+    synthesis (Kokoro reads "$2000" as digit-by-digit otherwise).
 
-    For Indic providers (``cloudrun_indicparler``, ``cloudrun_indicf5``,
-    ``azure_indicparler``, ``azure_indicf5``) Hindi respellings are
+    For Indic providers (``cloudrun_indicf5``) Hindi respellings are
     skipped — those models were trained on raw Devanagari and respelling
     actively hurts pronunciation.
 
-    ``modulation`` (Kokoro path only): per-paragraph speed-factor knobs.
-    See ``_DEFAULT_MODULATION`` for the keys; channel YAML's
-    ``tts_modulation`` block overrides individual factors. Pass
-    ``{"enabled": False}`` to disable modulation entirely. Without
-    modulation each paragraph runs at the base ``speed``; with it, the
-    hook reads slightly slower for clarity, the closer reads slower
-    for impact, exclamation-heavy paragraphs read faster, and ellipsis-
-    trailing paragraphs read slower for the hanging-beat effect.
-
     ``narration_prosody`` (chunked cloudrun providers only): per-sentence
-    speed + post-pause hints from the LLM rewriter. Forwarded to
-    ``_synth_cloudrun_chunked`` for chunking-capable cloud providers
-    (cloudrun_indicf5 / cloudrun_indicparler / cloudrun_chatterbox).
-    Azure variants don't yet support it — passing prosody to azure_*
-    logs a WARNING and proceeds without it.
+    speed + post-pause hints from the LLM rewriter.
     """
     import logging  # noqa: PLC0415
     logger = logging.getLogger("pipeline.audio.audio")
 
-    _INDIC_PROVIDERS = {
-        "cloudrun_indicparler", "cloudrun_indicf5",
-        "azure_indicparler", "azure_indicf5",
-        "indic_parler",
-    }
+    _INDIC_PROVIDERS = {"cloudrun_indicf5"}
     text = normalize_for_tts(
         text,
         skip_hindi_respellings=(provider in _INDIC_PROVIDERS),
     )
-    # Pronunciation overrides apply ONLY to the TTS-input string.
-    # Captions and ASR-source-text alignment must continue to see the
-    # original (unrespelled) text upstream — synthesize is the only
-    # path that should ever consume the respelled form.
     text = apply_pronunciation_overrides(text, pronunciation_dict)
 
-    # Validate ref_audio_text up-front for providers that need it. We
-    # do this BEFORE invoking the synth function so the error is the
-    # contract-level one ("requires ref_audio_text") rather than a
-    # downstream FileNotFoundError when the synth function tries to
-    # read a missing ref WAV.
-    _REF_TEXT_REQUIRED = {
-        "f5_tts", "cloudrun_f5", "cloudrun_cosyvoice", "cloudrun_indicf5",
-        "azure_f5", "azure_cosyvoice", "azure_indicf5",
-    }
+    _REF_TEXT_REQUIRED = {"cloudrun_indicf5"}
     if provider in _REF_TEXT_REQUIRED and not ref_audio_text:
         raise ValueError(
             f"{provider} provider requires `ref_audio_text` "
             f"(transcript of the reference audio at `voice`)"
         )
 
-    # Azure providers don't yet honour narration_prosody — log + drop.
-    if narration_prosody and provider.startswith("azure_"):
-        logger.warning(
-            "%s does not support narration_prosody yet — ignoring (will be "
-            "wired with the Azure chunked-synth pass).",
-            provider,
-        )
-        narration_prosody = None
-
     if provider == "kokoro":
         return _synth_kokoro(
             text, voice=voice, out_path=out_path, speed=speed,
             modulation=modulation,
         )
-    if provider == "f5_tts":
-        return _synth_f5_tts(
-            text,
-            ref_audio_path=voice,
-            ref_audio_text=ref_audio_text,
-            out_path=out_path,
-            speed=speed,
-        )
     if provider == "chatterbox":
-        # `voice` = path to a 5-15s reference WAV. ref_audio_text not
-        # required — Chatterbox conditions on audio embeddings only.
         return _synth_chatterbox(
             text,
             ref_audio_path=voice,
@@ -453,27 +285,13 @@ def _synthesize_impl(
             speed=speed,
         )
     if provider == "styletts2":
-        # `voice` = path to a 5-15s reference WAV.
         return _synth_styletts2(
             text,
             ref_audio_path=voice,
             out_path=out_path,
             speed=speed,
         )
-    if provider == "indic_parler":
-        # `voice` = natural-language description of the target speaker
-        # (NOT a ref-WAV path). Empty → falls back to the default Sneha
-        # description in `_synth_indic_parler`.
-        return _synth_indic_parler(
-            text,
-            description=voice,
-            out_path=out_path,
-            speed=speed,
-        )
     if provider == "cloudrun_chatterbox":
-        # Chatterbox via cloud — chunked-capable. Pass prosody through
-        # only if the underlying signature accepts it (it does, after
-        # the chunked-synth refactor).
         kwargs = {
             "text": text, "ref_audio_path": voice,
             "ref_audio_text": ref_audio_text,
@@ -493,7 +311,6 @@ def _synthesize_impl(
         return _synth_cloudrun_indicf5(**kwargs)
     raise ValueError(
         f"unknown TTS provider {provider!r} "
-        "(cloud choices post 2026-05-16 sweep: cloudrun_chatterbox, "
-        "cloudrun_indicf5. Local choices: kokoro, f5_tts, chatterbox, "
-        "styletts2, indic_parler. See docs/cost_optimized_deploy.md.)"
+        "(cloud choices: cloudrun_chatterbox, cloudrun_indicf5. "
+        "Local choices: kokoro, chatterbox, styletts2.)"
     )

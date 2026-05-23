@@ -18,14 +18,18 @@
 #
 # Cloud Run JOB shape: CPU 4, mem 8Gi, no GPU. The renderer's heavy
 # compute (TTS + image-gen) is delegated to the existing Cloud Run
-# services (ytfactory-tts-chatterbox, ytfactory-tts-indicparler,
-# ytfactory-image-flux2-klein). This worker just orchestrates +
+# services (ytfactory-tts-chatterbox, ytfactory-tts-indicf5,
+# ytfactory-image-z-image-turbo). This worker just orchestrates +
 # ffmpeg-composes + faster-whisper-aligns.
 
 FROM python:3.12-slim AS base
 
 # System deps. ffmpeg for compose; build-essential for the few packages
-# that need to compile; curl for health probes.
+# that need to compile; curl for health probes; fonts-noto-* covers the
+# Devanagari + Latin + Tamil + Bengali glyph set so caption PNGs and
+# ASS overlays render Hindi/Tamil/Bengali correctly (P5.2, Q73 — pre-
+# fix Hindi captions on the hindutavaanimated long-form rendered as
+# tofu boxes because the slim base image has no Devanagari font).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ffmpeg \
@@ -33,6 +37,10 @@ RUN apt-get update && \
         curl \
         ca-certificates \
         build-essential \
+        fonts-noto-core \
+        fonts-noto-cjk \
+        fonts-noto-color-emoji \
+        fonts-noto-ui-core \
         && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*

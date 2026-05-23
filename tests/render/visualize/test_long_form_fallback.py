@@ -553,7 +553,7 @@ class LongformPanelsAdjustHoldsToNarrationTest(unittest.TestCase):
         spec = MagicMock()
         spec.output_resolution = (1920, 1080)
         spec.output_fps = 30
-        spec.extra = {"image_provider": "cloudrun_flux2_klein",
+        spec.extra = {"image_provider": "cloudrun_z_image_turbo",
                       "image_seed": 42, "image_steps": 4}
         spec.channel = "historyrecapped"
         return spec
@@ -686,7 +686,7 @@ class LongformPanelsProduceSuccessPathTest(unittest.TestCase):
         spec.output_resolution = (1920, 1080)
         spec.output_fps = 30
         spec.extra = {
-            "image_provider": "cloudrun_flux2_klein",
+            "image_provider": "cloudrun_z_image_turbo",
             "image_style_prefix": "Crayon style.",
             "image_seed": 42,
             "image_steps": 4,
@@ -727,7 +727,7 @@ class LongformPanelsProduceSuccessPathTest(unittest.TestCase):
         # The helper was called with the right kwargs (smoke-check;
         # contract-pin lives in LongformPanelsBuildKwargContractTest).
         self.assertEqual(produced_path_holder["kwargs"]["image_provider"],
-                         "cloudrun_flux2_klein")
+                         "cloudrun_z_image_turbo")
         self.assertEqual(produced_path_holder["kwargs"]["image_seed"], 42)
         self.assertEqual(produced_path_holder["kwargs"]["image_width"], 1920)
         self.assertEqual(produced_path_holder["kwargs"]["image_height"], 1080)

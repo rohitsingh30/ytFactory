@@ -51,7 +51,7 @@ def _write_channel_yaml(dir_: Path, character_description: str | None = None) ->
     cfg = {
         "channel": "prorevenge",
         "kind": "short",
-        "image_provider": "cloudrun_flux2_klein",
+        "image_provider": "cloudrun_z_image_turbo",
     }
     if character_description is not None:
         cfg["character_description"] = character_description
@@ -684,13 +684,13 @@ class BackfillYamlImageKeysTest(unittest.TestCase):
 
     def test_fills_in_image_keys_from_yaml(self):
         yp = self._write_yaml(
-            image_provider="cloudrun_flux2_klein",
+            image_provider="cloudrun_z_image_turbo",
             image_style_prefix="comic illustration, soft palette",
             image_seed=42,
             image_steps=4,
         )
         out = _ep._backfill_yaml_image_keys(None, yp)
-        self.assertEqual(out["image_provider"], "cloudrun_flux2_klein")
+        self.assertEqual(out["image_provider"], "cloudrun_z_image_turbo")
         self.assertEqual(out["image_style_prefix"], "comic illustration, soft palette")
         self.assertEqual(out["image_seed"], 42)
         self.assertEqual(out["image_steps"], 4)
@@ -699,7 +699,7 @@ class BackfillYamlImageKeysTest(unittest.TestCase):
         # If a per-render proposal already set image_provider, the
         # YAML default must NOT clobber it.
         yp = self._write_yaml(
-            image_provider="cloudrun_flux2_klein",
+            image_provider="cloudrun_z_image_turbo",
             image_style_prefix="default style",
         )
         existing = {"image_provider": "cloudrun_z_image_turbo"}

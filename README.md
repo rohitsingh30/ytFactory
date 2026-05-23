@@ -1,301 +1,291 @@
 # ytFactory
 
-End-to-end product for generating YouTube Shorts from a chat conversation.
+End-to-end YouTube video generator for the operator's own channels.
+Idea → uploaded mp4, fully automated: script (LLM) → cast → AI image
+panels → TTS narration → ASR alignment → captions → compose → upload.
 
-A user opens the website, describes the Short they want in chat, and the
-system produces a finished 1080×1920 mp4 — script, voice, illustrations,
-captions, broadcast cut-ins where applicable. Owner accounts can also
-publish the result directly to a connected YouTube channel.
+Internal tool. The operator drives renders from a Next.js wizard at
+`/app/create`; the laptop control plane queues jobs to Firestore; a
+Cloud Run **Job** (`ytfactory-render-worker-v2`) executes each render,
+calling out to GPU-backed Cloud Run services (TTS, image-gen, ASR).
 
-## Live
+## Channels
 
-**Production URLs (project `ytfactory-prod-v2`, region `asia-southeast1`):**
+Seven channels share one render pipeline. Any channel can render in any
+of three visual modes (AI image-gen / motion video / archival footage)
+and either audio mode (TTS narration / sung Suno song). The split is
+per-render, not per-channel.
 
-| Surface | URL | Role |
+| Channel | Format | Audio | Visual |
+|---|---|---|---|
+| `mystoriesanimated` | Reddit/AITA/TIFU/wiki/TIH Shorts (13+ niche variants) | Chatterbox TTS | AI image-gen (Z-Image-Turbo, watercolor + ink) |
+| `historyrecapped` | War-history Shorts + long-form sleep narrations | Chatterbox TTS | Archival YouTube footage (Shorts), AI panels (long-form) |
+| `hindutavaanimated` | Hindi Mahabharat / Ramayan Shorts + long-form | IndicF5 (Hindi) | AI image-gen (Amar Chitra Katha style) |
+| `cosmosdecoded` | Physics / space "how we knew" Shorts + long-form | Chatterbox TTS | Footage-only (NASA / ESA / CERN / archive.org) |
+| `sportsrecapped` | Football moments + long-form docs | Chatterbox TTS | Tifo-style art + broadcast cut-ins |
+| `rhymetimejunction` | Hinglish kids rhymes | Sung Suno song (not TTS) | Image-to-video motion |
+| `scrollpulse` | Reddit thread + split-screen gameplay overlay Shorts | Chatterbox TTS | Reddit card + pre-rendered gameplay loop |
+
+**In rotation** (`pipeline.channels.channel_rotation()`):
+`mystoriesanimated`, `historyrecapped`, `hindutavaanimated`,
+`cosmosdecoded`, `sportsrecapped`.
+
+**Out of rotation** (configs exist, not auto-scheduled):
+`rhymetimejunction`.
+
+**In-progress:** `scrollpulse` YAML — channel approved (Q21-Q23);
+`pipeline/channels/scrollpulse.yaml` is pending (refactor plan
+item P6.1).
+
+Source of truth for any channel rule:
+`pipeline/channels/<channel>.yaml` plus the variant overlay at
+`pipeline/variants/<channel>/<niche>.yaml` if one applies. Read the
+YAML — not the code, not these docs.
+
+## Production stack
+
+- **GCP project:** `ytfactory-prod-v3`
+- **Region:** `asia-southeast1`
+- **Artifact bucket:** `gs://ytfactory-prod-v3-artifacts/jobs/<job_id>/`
+- **State store:** Firestore (`jobs/`, queue, scheduler, rate-limits)
+
+**Deployed Cloud Run surfaces:**
+
+| Service / Job | Type | Role |
 |---|---|---|
-| User-facing UI | https://ytfactory-web-next-7hwnzw7lya-as.a.run.app | Next.js studio (chat, queue, channels) |
-| Backend API | https://ytfactory-web-7hwnzw7lya-as.a.run.app | FastAPI control plane (chat, jobs, agent lease) |
+| `ytfactory-render-worker-v2` | Job | One execution per render; walks the 7 stages |
+| `ytfactory-image-z-image-turbo` | Service (GPU) | Production image-gen — Z-Image-Turbo 6B S3-DiT |
+| `ytfactory-tts-chatterbox` | Service (GPU) | English TTS — primary for 6/7 channels |
+| `ytfactory-tts-indicf5` | Service (GPU) | Hindi TTS — `hindutavaanimated` |
+| `ytfactory-asr-whisper` | Service (GPU) | faster-whisper word alignment |
+| `ytfactory-editing-agent` | Service | Optional polish stage (8th, opt-in) |
+| `ytfactory-clone-video-worker` | Service | yt-dlp / clone-video back-end |
+| `ytfactory-stats-refresh` | Service | YouTube stats ingest |
+| `ytfactory-web-server` | Service | FastAPI control-plane prod surface |
+| `ytfactory-web-next` | Service | Next.js admin/wizard UI |
 
-The backend redirects browser-style GETs on `/`, `/docs`, and similar
-routes to the Next.js UI; programmatic API access goes directly to the
-FastAPI endpoints below. Local dev still works, but **the deployed
-Cloud Run services are the source of truth** — never run a parallel
-local server in production mode.
+## Render pipeline
 
-| Endpoint | What |
+Every render walks 7 stages. They are **not strictly linear** —
+later stages overlap when GPU + data dependencies allow.
+
+```
+rewrite ──► cast ──► prompts ──┬─► images ──┐
+                                │            │
+                                └─► tts ──► asr ──► compose ──► upload
+```
+
+Sequence (Q45):
+
+1. `rewrite` — single LLM call. Fetches real source material (Reddit /
+   Wiki / archive / supplied seed) and **synthesizes one engaging
+   script**. LLM is editor on real material, not author from nothing.
+2. `cast` — smaller LLM call. Reads the script, emits structured
+   per-character fields (age, hair, build, clothing, signature prop)
+   for character consistency across image panels.
+3. `prompts` — per-beat / per-section image-prompt authoring (Z-Image-
+   Turbo-shaped: 80-250 word structured, positive-only).
+4. `tts` ‖ `images` — parallel. TTS narration synthesised; image panels
+   generated. `tts` uses one of `tts_single` (short engine, one call)
+   or `tts_chunked` (long engine, ~380-char chunks).
+5. `asr` — faster-whisper word alignment over the TTS output (after
+   `tts` finishes).
+6. `compose` — final mp4 mux (after `images` + `asr`).
+7. `upload` — YouTube only. (X/Twitter upload is dead code per Q33.)
+
+Optional laptop-side stages (post-hoc, not in cloud path):
+`critic` + `audio_critic` via `pipeline/critique/cloud_poller.py` +
+`scripts/cloud_critic_loop.py`.
+
+### Engine + plugin dispatch
+
+The render stage entry point is
+`pipeline.render.video.render_via_engines(spec, ...)`. There is no
+longer a legacy `render()` — `render_via_engines` is canonical.
+
+```
+render_via_engines(spec, ...)              # pipeline/render/video.py
+    └─► pick_engine(spec)                  # pipeline/render/engine.py
+            └─► render_short OR render_long
+                    └─► get_plugin(slot, name)
+```
+
+Six plugin slots, declared as Protocols in
+`pipeline/render/contracts.py` and self-registering at import:
+
+| Slot | Protocol | Selected by | Dir |
+|---|---|---|---|
+| `audio` | `AudioSynthesizer` | `audio_mode` + `voice_provider` | `pipeline/render/audio/` |
+| `timeline` | `TimelineBuilder` | engine default | `pipeline/render/timeline/` |
+| `visualize` | `VisualProducer` | `spec.visual_mode.value` | `pipeline/render/visualize/` |
+| `overlays` | `OverlayProducer` | list-valued | `pipeline/render/overlays/` |
+| `music` | `MusicComposer` | `spec.music_policy.value` | `pipeline/render/music/` |
+| `compose` | `FinalMux` | engine default | `pipeline/render/compose/` |
+
+A new visual mode = one new file + one `register_plugin(...)` call.
+
+## Image model
+
+Production image-gen is **Z-Image-Turbo** (Tongyi-MAI, 6B S3-DiT,
+CFG-distilled). Key facts the refiner and prompts are calibrated for:
+
+- Negative prompts ignored (`guidance_scale=0.0`). Use positive
+  framing only (`"correct anatomy"`, not `"no extra fingers"`).
+- Optimal prompt length: **80-250 words**, structured shot + subject +
+  age/appearance + clothing/palette + environment + lighting + mood +
+  style + safety.
+- Lighting tokens are high-impact: `"soft diffused daylight"`,
+  `"cinematic warm key light"`, `"noir high-contrast"`,
+  `"rim lighting"`.
+- Character consistency: rely on cast spec verbatim in each panel
+  prompt (no LoRA today).
+
+`pipeline/images/prompt_refiner.py` produces these 80-250 word z-turbo
+prompts. Z-turbo is the only image model in production today.
+
+## LLM backends
+
+`YTFACTORY_LLM_BACKEND` selects one of three backends, all
+intentional:
+
+| Backend | When |
 |---|---|
-| `GET  /` (web-next) | Marketing landing page |
-| `GET  /app/*` (web-next) | Studio: chat, queue, channels, admin |
-| `POST /api/chat` (web) | Chat with the assistant — extracts a `short_proposal` JSON when it has enough info |
-| `POST /api/chat/confirm` (web) | Turn the latest proposal into a Job + first Task in the Firestore queue |
-| `GET  /docs` (web) | FastAPI auto-generated API docs (auth-gated) |
-| `POST /agent/heartbeat` `lease` `ack/{id}` (web) | Laptop agent lease protocol (bearer-token auth) |
+| `cli` | Laptop dev default — Claude Code CLI |
+| `azure_openai` | Cloud worker default — Azure OpenAI |
+| `anthropic_sdk` | Cost / quota fallback |
 
-Hitting the live URLs directly (curl / browser / Playwright MCP) is the
-supported workflow. No local server needed.
-
-## Architecture
-
-Cloud control plane on Cloud Run + Firestore + GCS, fronted by a public
-chat UI; light I/O work runs on Cloud Run jobs; heavy MLX rendering runs
-on the laptop via a pull-based agent over outbound HTTPS.
-
-### Documentation
-
-| Doc | Audience | What it covers |
-|---|---|---|
-| [`docs/architecture.md`](./docs/architecture.md) | engineers | Components, deployment, IAM, repo layout, mermaid system diagram |
-| [`docs/user_flows.md`](./docs/user_flows.md) | designers / PMs / new contributors | Three user types (visitor, owner, operator), state machine, anti-abuse perimeter — sequence diagrams |
-| [`docs/data_flows.md`](./docs/data_flows.md) | backend engineers, debuggers | Where data lives, chat extraction, lease protocol, render pipeline, lifecycle GC, polling — flowcharts + sequence diagrams |
-| [`docs/legacy_pipeline.md`](./docs/legacy_pipeline.md) | rendering engineers | What `scripts/make_shorts.py` does internally — the ~7-min render, stage by stage |
-
-| Layer | Where | What |
-|---|---|---|
-| Control plane | **Cloud Run** (deployed) | FastAPI app: chat, queue, agent endpoints, static UI |
-| Queue + state | **Firestore** (native, us-central1) | tasks, jobs, chat sessions |
-| Artifacts | **Cloud Storage** (`gs://ytfactory-prod-artifacts`) | scripts, images, audio, mp4s, thumbnails |
-| Secrets | **Secret Manager** | Azure OpenAI key, agent bearer token |
-| Heavy workers | **Laptop agent** (outbound HTTPS) | image gen, TTS, ASR, ffmpeg compose, footage trim |
-
-Lifecycle rules on the bucket auto-delete heavy intermediates after 1 day,
-finished mp4s after 7 days, metadata after 30. After a successful YouTube
-upload the worker also explicitly GCs heavy artifacts and hands off to the
-research pipeline (analytics-only mode for the published video).
+Dispatcher: `pipeline/llm/cli.py`.
 
 ## Repo layout
 
 ```
-control/              # Cloud Run service (deployed)
-  server_dev.py         # FastAPI app entry point (also used in prod)
-  chat_service.py       # Azure OpenAI chat with proposal extraction
-  chat_routes.py        # /api/chat + /api/chat/confirm
-  agent_routes.py       # /agent/heartbeat /lease /ack
-  queue.py              # Firestore + InMemory queue backends
-  storage.py            # GCS adapter
-  auth.py               # bearer-token agent auth (Firebase user auth in #12)
-  dashboard_routes.py   # /api/dashboard/* — live YouTube stats
-  scheduler.py          # round-robin 24/7 cron scheduler
-pipeline/               # shared library — all channels reuse from here
-  paths.py              # CANONICAL — single source of truth for layout (RenderPaths)
-  niches.py             # variant_yaml → (channel, niche) routing (NICHE_CHANNEL)
-  audio.py              # TTS facade re-exporting pipeline.tts.* providers
-  tts/{kokoro,f5,chatterbox,styletts2,parler,song,text_normalize}.py
-  render/{shorts,long_form,footage_only,sports_doc}.py   # universal renderers
-  upload.py             # YouTube upload + part2 sidecar + critic gate
-  x_upload.py           # X cross-post (sidecar to YouTube)
-  research.py           # cross-channel YouTube analytics ingest
-  preflight.py          # power-state guard + MLX state reset
-  ... + asr, beats, captions, cast, compose, critic, footage, images,
-        imitate, prompts, rewrite, script_check, telemetry, thumbnails,
-        visualizability, voice_clone, wiki_research, ...
-workers/
-  agent/                # laptop daemon (outbound-only HTTPS)
-    main.py               # heartbeat + lease loops
-    config.py runner.py resources.py
-  heavy/                # registered with agent runner; runs on laptop
-    render_short.py     # mega-task wrapping pipeline.render.shorts via subprocess
-  light/                # YOUTUBE_UPLOAD + RESEARCH_HANDOFF Cloud Run jobs
-scripts/                # CLI entry points — thin shims around pipeline.render.*
-  make_shorts.py        # → pipeline.render.shorts.cli_main
-  historyrecapped/render_long_form.py    # → pipeline.render.long_form.cli_main
-  historyrecapped/render_footage_only.py # → pipeline.render.footage_only.cli_main
-  sportstoriesanimated/render_long_form_doc.py # → pipeline.render.sports_doc.cli_main
-  ... channel-specific tooling (auth, branding, b-roll discovery, ...)
-web/static/             # public chat UI + landing page (vanilla JS)
-  chat.html  landing.html  index.html  dashboard.html
-data/                   # cross-channel state ONLY (per-channel state lives in <channel>/)
-  cache/                  # ML model weight cache (Kokoro, F5, Whisper)
-  research/               # YouTube analytics aggregate
-  telemetry/              # render telemetry JSONL
-  _bench/                 # TTS A/B benchmark output (gitignored)
-
-# Per-channel folders — every channel matches the canonical spec in
-# docs/channel_layout.md. RenderPaths.for_channel(...) is the only
-# correct way to derive paths within a channel.
-cosmosdecoded/  hindutavaanimated/  historyrecapped/
-mystoriesanimated/  rhymetimejunction/  sportsrecapped/
+/Users/rohit/ytFactory/
+├── pipeline/            # channel-agnostic render library
+│   ├── channels/        # 6 channel YAMLs (scrollpulse pending)
+│   ├── variants/        # niche overlays (mystoriesanimated/, sportsrecapped/)
+│   ├── render/          # engine + 6 plugin slots
+│   ├── llm/             # rewrite + cast + prompts + 3-backend dispatcher
+│   ├── tts/             # cloudrun.py — provider dispatch
+│   ├── images/          # image-gen dispatcher + z-turbo prompt refiner
+│   ├── captions/        # word PNGs, ASS sentence captions
+│   ├── audio/, observability/, critique/, cloud/
+│   ├── paths.py         # RenderPaths — canonical per-channel layout
+│   ├── channels.py      # channel_rotation()
+│   ├── niches.py        # NICHE_CHANNEL map
+│   ├── upload.py        # YouTube upload + record writing
+│   └── stage_overlap.py # parallel-stage gate
+├── control/             # laptop control plane (FastAPI + Firestore)
+│   ├── core/            # canonical state modules (jobs, queue,
+│   │                    #   scheduler, rate_limit, cloud_run, auth, …)
+│   ├── routes/          # FastAPI routers (render, channels, niche, …)
+│   └── server_dev.py    # local dev entry
+├── cloud/               # Cloud Run services + deploy.sh per service
+│   ├── render-worker-v2/    # the render Job
+│   ├── image-z-image-turbo/ # production image-gen
+│   ├── tts-chatterbox/, tts-indicf5/, asr-whisper/
+│   ├── editing-agent/, clone-video-worker/
+│   ├── web-server/, web-next/, stats-refresh/
+│   ├── _shared/         # auth_setup.sh, otel_init.py, sync.sh
+│   └── iam/             # IAM grant scripts
+├── web/                 # legacy FastAPI server (Cloud Run web-server)
+├── web-next/            # Next.js admin/wizard UI (Cloud Run web-next)
+├── scripts/             # laptop CLI entry points + ops utilities
+├── tests/               # pytest
+├── data/                # cross-channel state: research, telemetry, cache, _bench
+├── ai/                  # 18-doc knowledge base — mental model, decision log
+├── docs/                # ops + cost docs
+├── CLAUDE.md            # agent instructions (loaded into every session)
+└── README.md            # this file
 ```
 
-For the canonical per-channel layout (every subdir, niche rules,
-gitignore conventions) see [`docs/channel_layout.md`](./docs/channel_layout.md).
+Per-channel render outputs live at the repo root in `<channel>/` dirs
+(`narrations/`, `shotlist/`, `uploads/` tracked; `shorts/`, `long_form/`,
+`cache/`, `scratch/` gitignored). Layout is canonical via
+`pipeline.paths.RenderPaths` (`pipeline/paths.py:157`).
 
-## Running
+**In-progress:** moving per-channel artifact dirs from repo root into
+`data/<channel>/` is planned but not done yet — `paths.py` is the
+single seam to update when this lands.
 
-### Production (canonical)
+## Running locally
 
-```bash
-# That's it. Open:
-open https://ytfactory-web-next-7hwnzw7lya-as.a.run.app
-```
-
-### Laptop agent (so renders actually run)
-
-The laptop agent leases tasks from the live Cloud Run service. It needs
-the bearer token the service expects, plus the optional TTS dependencies
-matching whichever providers the channel YAMLs declare.
+Local dev is rare — production Cloud Run is the source of truth. Use
+local dev only when changing control-plane code.
 
 ```bash
-# Pull the agent token from Secret Manager (one-time)
-gcloud secrets versions access latest --secret=ytfactory-agent-token \
-  --project=ytfactory-prod > .agent-token
+# Python 3.12 required (see .python-version)
+pyenv install 3.12 && pyenv local 3.12
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt -r requirements-control.txt
 
-# Install free local TTS providers (one-time per provider, per laptop).
-# All production channels default to free local TTS as of 2026-05-04 —
-# no API key needed for rendering. See "TTS providers" section below
-# for the full per-channel mapping.
-.venv/bin/pip install f5-tts-mlx                                       # historyrecapped Shorts + sportstoriesanimated
-.venv/bin/pip install --no-deps chatterbox-tts                         # mystoriesanimated (AITA)
-
-# StyleTTS2 (0.1.6) and Indic Parler-TTS are wired in pipeline/audio.py
-# but BOTH are incompatible with this venv:
-#
-# - StyleTTS2 0.1.6 hard-pins huggingface_hub<0.20 / librosa<0.11 /
-#   networkx<3 — conflicts with everything else.
-# - parler-tts is unmaintained against transformers ≥ 4.49 (which
-#   diffusers 0.38 requires for image-gen). Its Config API uses the
-#   removed PreTrainedConfig attribute.
-#
-# Both stay wired so anyone with a separate venv can use them; the
-# default channel YAMLs route around them:
-#   - hindutavaanimated → Kokoro hf_alpha (Hindi female)
-#   - historyrecapped long-form → Kokoro bf_isabella + atempo
-
-# Run the agent — points at production by default
-YTFACTORY_AGENT_TOKEN=$(cat .agent-token) \
-  .venv/bin/python -m agent.main
-```
-
-### TTS providers
-
-Each channel declares its TTS provider in `<channel>/config.yaml`. The
-production defaults as of 2026-05-04 are all **free, local, and
-commercial-licensed** — `$0/render`, no per-character caps:
-
-| Channel | Provider | Voice / config | License |
-|---|---|---|---|
-| historyrecapped (Shorts) | `kokoro` | `am_michael` (US male documentary) | Apache 2.0 |
-| historyrecapped (long-form sleep) | `f5_tts` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
-| mystoriesanimated (parent) | `chatterbox` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
-| mystoriesanimated/variants/* | `f5_tts` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
-| sportsrecapped | `f5_tts` | clones from `pipeline/voice_refs/sarah.wav` | MIT |
-| hindutavaanimated | `kokoro` | `hf_alpha` (Hindi female) | Apache 2.0 |
-| rhymetimejunction | n/a (sung audio via Suno) | external_song | n/a |
-
-**Voice cloning details:** F5-TTS-MLX and Chatterbox both clone from a
-9.5s reference WAV. The reference clip at `pipeline/voice_refs/sarah.wav`
-is the only English ref currently on disk (`theo.wav` was lost in the
-2026-05-04 recovery wipe). To refresh or add a clip, see
-`pipeline/voice_refs/README.md`.
-
-**Indic Parler-TTS interface differs:** It is description-conditioned,
-not voice-cloned. The hindutavaanimated YAML's `tts_voice` field is a
-natural-language description (e.g. "Sneha speaks in a calm…") rather
-than a UUID or ref-WAV path.
-
-### Local dev (rare — only when changing control plane code)
-
-**Python version:** This project pins Python **3.12** (see `.python-version`).
-3.13 + 3.14 break several deps (notably `torch.jit` is unsupported on
-3.14, several MLX/diffusers transitive packages still pin <3.13). Use
-`pyenv install 3.12 && pyenv local 3.12` and create the venv with
-`python3.12 -m venv .venv`.
-
-```bash
-# 1. Set env (chat needs Azure keys, agent endpoints need a token)
+# Set env (Azure OpenAI keys, GCP creds, agent token)
 source .env
 
-# 2. Run the control plane locally
+# Run control plane locally
 .venv/bin/uvicorn control.server_dev:app --host 127.0.0.1 --port 8765
-
-# 3. Point the agent at localhost
-YTFACTORY_CONTROL_URL=http://127.0.0.1:8765 \
-YTFACTORY_AGENT_TOKEN=$YTFACTORY_AGENT_TOKEN \
-  .venv/bin/python -m agent.main
 ```
 
-## Production targets
+Key env vars (see `cloud/render-worker-v2/deploy.sh:106` for the full
+Cloud Run set — that file is the source of truth for the worker
+environment):
 
-| YouTube channel | Source | Aesthetic |
-|---|---|---|
-| **MyStoriesAnimated** | Reddit (AITA / TIFU / etc.) | Flat 2D crayon, pastel fills |
-| **SportsRecapped** | Football moments | Tifo line-art + real broadcast cut-ins at the climactic moment |
-| **HindutavaAnimated** | Mahabharat episodes | Amar Chitra Katha comic-book, Hindi narration |
-| **History Recapped** | War/military stories | 100% archival footage with documentary narration |
-| **Rhyme Time Junction** | Bilingual nursery rhymes | Continuous animation, Hinglish lyrics, recurring mascots |
-| **Cosmos Decoded** | Physics + space "how we knew" | Footage-only documentary, archival science imagery |
-
-Other channel YAMLs are research / variant configs that share a target.
-
-### Cross-posting to X (Twitter)
-
-Each channel can opt into cross-posting to X by adding an `x:` block to
-its `config.yaml`.
-The X uploader sits at Stage 8b and reuses the same rendered mp4 the
-YouTube uploader ships:
-
-- `pipeline/x_upload.py` — chunked-upload + tweet-create via tweepy.
-  CLI: `python -m pipeline.x_upload --channel <channel> --slug <slug>`.
-  Idempotent record at `<channel>/uploads/<slug>.x.json` (sidecar to
-  the YouTube `<slug>.json`).
-- `scripts/setup_x_credentials.py` — interactive installer with hidden
-  input + live verification against X's API. Run once per X handle.
-- See [`docs/X_SETUP.md`](./docs/X_SETUP.md) for the full per-handle
-  bring-up flow.
-
-X is a secondary cross-post path for channels that opt in via the
-`x:` block in `config.yaml`.
-
-## Cost
-
-Hard ceiling: **<$10/month at low traffic.** Hard rules to keep it there:
-
-- No GKE, no persistent VM, no Vertex, no GPU on cloud, ever.
-- Cloud Run scales to zero. Min instances = 0.
-- Firestore queue, not Pub/Sub.
-- No Cloud SQL.
-- Lifecycle rules wipe artifacts on a short clock.
-- Per-IP, per-user, per-session, daily Azure spend caps in code (#12).
-
-Current monthly burn estimate: **~$3–8** at low traffic
-(Cloud Run free tier + Firestore free tier + ~10–20 GiB GCS + Azure
-OpenAI gpt-5.3-chat at <100 chat sessions).
-
-## Migration status
-
-| ✅ done | what |
-|---|---|
-| ✅ | git init + safety baseline |
-| ✅ | docs trimmed (5 → 2 files, −1.6K LOC) |
-| ✅ | dead spec-render path deleted (−2K LOC) |
-| ✅ | GCP project provisioned (ytfactory-prod) |
-| ✅ | laptop agent + lease protocol over outbound HTTPS |
-| ✅ | GCS storage adapter + bucket lifecycle rules |
-| ✅ | per-task scratch dir with unconditional cleanup |
-| ✅ | chat ported from trading project, Azure OpenAI, ShortProposal extraction |
-| ✅ | chat UI at `/`, vanilla JS, proposal preview + confirm |
-| ✅ | per-IP daily rate limits + global Azure spend cap |
-| ✅ | control plane deployed to Cloud Run, prod URL canonical |
-| ✅ | RENDER_SHORT mega-task (wraps scripts/make_shorts.py) |
-| ✅ | YOUTUBE_UPLOAD light worker (post-upload GC inside) |
-| ✅ | RESEARCH_HANDOFF light worker (calls into pipeline/research.py) |
-| ✅ | scripts/laptop_cleanup.py (dry-run reclaims ~1.9 GiB) |
-| ✅ | X (Twitter) cross-post — pipeline/x_upload.py |
-
-| 🟡 deferred | why |
-|---|---|
-| 🟡 channels reorg by target | parallel session still adding flat YAMLs; do after monolith decom |
-| 🟡 move llm/cast_router/prompts → shared/ | every legacy import would need updating; do after monolith decom |
-| 🟡 decommission monolith | needs first successful prod render to verify the new chain |
+```text
+CLOUDRUN_TTS_CHATTERBOX_URL
+CLOUDRUN_TTS_INDICF5_URL
+CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL
+CLOUDRUN_ASR_URL
+CLOUDRUN_EDITING_AGENT_URL
+CLOUDRUN_WEB_SERVER_URL
+CLOUDRUN_WEB_NEXT_URL
+YTFACTORY_LLM_BACKEND          # cli | azure_openai | anthropic_sdk
+```
 
 ## Tests
 
 ```bash
-.venv/bin/python -m unittest discover tests/
+.venv/bin/pytest tests/ -x -q
 ```
 
-22 control-plane / agent / chat / storage tests run in ~100ms. Existing
-pipeline tests run alongside.
+When you fix a bug, add a test that fails when the bug returns
+(per `CLAUDE.md`).
 
-## License
+## Operating principles
 
-Private.
+Locked in `ai/onboarding-qa.md` (the cofounder Q&A — read it first):
+
+1. **Gates are repair triggers, not termination signals.** When a
+   gate fires, retry the failing piece granularly (one section, one
+   beat, one chunk). Don't loosen the gate, don't kill the whole
+   render.
+2. **LLM is an editor on real material, not an author from nothing.**
+   Fetch real sources first; LLM synthesises them into an engaging
+   script. One LLM call handles pick + synthesise + write.
+3. **Z-Image-Turbo is the canonical image model.** All image-side
+   prompting, refinement, and gates are calibrated to z-turbo.
+4. **Models are fixed** — don't propose switching TTS / image / LLM
+   providers; work within current model behaviour.
+5. **All 7 channels must be functional** — no hierarchy of
+   importance. Channel-creation is a repeatable workflow.
+6. **Negative-framing in prompts often amplifies what you're trying
+   to avoid.** Use positive specifications.
+7. **MVP target:** all 7 channels producing clean automated
+   end-to-end videos. Volume, latency, cost are post-MVP.
+
+## Where to look
+
+For depth beyond this README, the 18-doc knowledge base at
+`/ai/` is the project brain. Start with:
+
+- `ai/onboarding-qa.md` — locked Q&A, attack set, operating principles
+- `ai/architecture.md` — runtime planes, engine, plugin slots,
+  RenderSpec precedence
+- `ai/current-system-map.md` — file/dir map with paths
+- `ai/refactor-plan.md` — current refactor cycle, what's in-progress
+- `ai/decision-log.md` — ADRs (gates as repair triggers, z-turbo
+  canonical, render_via_engines canonical, control/core canonical, …)
+- `ai/known-fragility.md`, `ai/tech-debt.md`,
+  `ai/improvement-opportunities.md` — running backlog
+
+For any **channel rule** specifically:
+`pipeline/channels/<channel>.yaml` + the variant overlay if one
+applies. Always the YAML. Don't restate channel rules in code or docs.

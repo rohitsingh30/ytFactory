@@ -58,8 +58,7 @@ no prompts.json is provided, the bare ``Segment.text`` path runs —
 preserving the existing engine-test contract).
 
 This is the kill switch: clearing the env variable disables the
-refiner immediately, no cache invalidation required. See
-``data/research/flux2_prompting_2026-05-14.md`` for the design rationale.
+refiner immediately, no cache invalidation required.
 """
 from __future__ import annotations
 
@@ -87,7 +86,52 @@ _logger = logging.getLogger(__name__)
 # with the last image (frozen-frame tail). 10% lets a single corrupt
 # glyph in a 20-beat short pass; 50% (the failure mode that bit
 # sportsrecapped during cloud incidents) trips the gate.
+#
+# P4.2 (2026-05-23, Q66): the threshold is now a POST-RETRY ceiling.
+# Each beat gets ONE retry with a stronger prompt + bumped seed when
+# its first attempt either errors or fails the image-quality validator
+# below; only AFTER the retry budget is exhausted does the beat count
+# toward this 10% pool. Per ADR-023 (gates as repair triggers) the
+# render is killed only when granular retries can't recover.
 _PER_BEAT_FAILURE_THRESHOLD = 0.10
+
+# P4.2 image-quality bounds. Z-Image-Turbo can fail by producing a
+# solid black/white frame (luminance pegged at one extreme) or a
+# solid-color frame (per-channel variance below the floor). Caught
+# here as "quality-fail → retry" before the failure counts.
+_QUALITY_MIN_LUMINANCE = 0.04     # below ~4% mean = near-black
+_QUALITY_MAX_LUMINANCE = 0.96     # above ~96% mean = near-white
+_QUALITY_MIN_PER_CHANNEL_VARIANCE = 30.0  # raw pixel-value variance
+
+
+def _image_quality_ok(png_path: Path) -> tuple[bool, str]:
+    """Post-gen sanity check on a rendered PNG.
+
+    Returns ``(True, "")`` on pass; ``(False, reason)`` when the image
+    is solid black / white / monochrome (within configured bounds). The
+    check is cheap (PIL stat on a 32-px downscaled copy) so it runs
+    inside the per-beat loop without measurable overhead.
+    """
+    try:
+        from PIL import Image, ImageStat  # noqa: PLC0415
+    except ImportError:
+        # PIL absent — skip the check rather than block the render.
+        return True, ""
+    try:
+        with Image.open(png_path) as im:
+            small = im.convert("RGB").resize((32, 32))
+            stat = ImageStat.Stat(small)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"PIL read failed: {exc}"
+    mean_lum = sum(stat.mean) / (3.0 * 255.0)
+    if mean_lum < _QUALITY_MIN_LUMINANCE:
+        return False, f"near-black (mean luminance {mean_lum:.3f})"
+    if mean_lum > _QUALITY_MAX_LUMINANCE:
+        return False, f"near-white (mean luminance {mean_lum:.3f})"
+    min_var = min(stat.var)
+    if min_var < _QUALITY_MIN_PER_CHANNEL_VARIANCE:
+        return False, f"solid color (min per-channel variance {min_var:.1f})"
+    return True, ""
 
 
 def _load_prompts_json(path: str | Path | None) -> list[dict] | None:
@@ -394,29 +438,76 @@ class AiBeatSlideshow:
             # trailing copy of the legacy style_prefix (rubber-duck
             # 2026-05-14 finding #2).
             style_for_generate = "" if beat is not None else style_prefix
-            try:
-                _generate_image(
-                    prompt=prompt,
-                    style_prefix=style_for_generate,
-                    seed=seed_base + i * seed_stride,
-                    out_path=png_path,
-                    width=spec.output_resolution[0],
-                    height=spec.output_resolution[1],
-                    steps=steps,
-                    provider=provider,
+            # P4.2 (Q66): per-beat retry. The first attempt uses the
+            # base seed; on either an exception or an image-quality
+            # validator rejection (solid-black / solid-color / etc.),
+            # one retry fires with a much-wider seed and an emphatic
+            # "richer composition" suffix on the prompt. Only after the
+            # retry budget is exhausted does the beat count toward
+            # ``n_failed``.
+            attempts_remaining = 2
+            attempt_idx = 0
+            last_exc: BaseException | None = None
+            beat_ok = False
+            while attempts_remaining > 0:
+                attempt_idx += 1
+                attempts_remaining -= 1
+                if attempt_idx == 1:
+                    attempt_seed = seed_base + i * seed_stride
+                    attempt_prompt = prompt
+                else:
+                    # Retry seed jumps a full stride past the base so
+                    # we land in a different latent neighborhood from
+                    # the failed attempt. The "richer composition"
+                    # suffix is positive-framed (Z-Image-Turbo ignores
+                    # negatives per ADR-024) and keeps the structured
+                    # prompt z-turbo-friendly.
+                    attempt_seed = seed_base + (i + n_total + 1) * seed_stride
+                    attempt_prompt = (
+                        prompt.rstrip(".") +
+                        ". richer composition with full subject in frame, "
+                        "natural lighting, varied textures, clear depth."
+                    )
+                try:
+                    _generate_image(
+                        prompt=attempt_prompt,
+                        style_prefix=style_for_generate,
+                        seed=attempt_seed,
+                        out_path=png_path,
+                        width=spec.output_resolution[0],
+                        height=spec.output_resolution[1],
+                        steps=steps,
+                        provider=provider,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    _logger.warning(
+                        "ai_beat_slideshow: beat %d attempt %d raised %s",
+                        i, attempt_idx, exc,
+                    )
+                    continue
+                ok, reason = _image_quality_ok(png_path)
+                if ok:
+                    beat_ok = True
+                    break
+                # Quality validator rejected — record + retry if budget remains.
+                last_exc = RuntimeError(f"image-quality validator rejected: {reason}")
+                _logger.warning(
+                    "ai_beat_slideshow: beat %d attempt %d quality-fail (%s) — "
+                    "%s",
+                    i, attempt_idx, reason,
+                    "retrying with stronger prompt + wider seed" if attempts_remaining else "no retry budget left",
                 )
-            except Exception as exc:  # noqa: BLE001
-                # 2026-05-15 fail-loud audit — count per-beat failures
-                # so the post-loop gate can RAISE when >10% fail. We
-                # still continue here so a 5% transient failure rate
-                # is tolerated and the loop produces a viewable
-                # slideshow.
+            if not beat_ok:
+                # P4.2: only NOW does this beat count toward the 10% pool.
                 n_failed += 1
-                if first_failure is None:
-                    first_failure = exc
-                _logger.warning("ai_beat_slideshow: image %d failed (%s) — "
-                                "skipping this beat (%d/%d failed so far)",
-                                i, exc, n_failed, n_total)
+                if first_failure is None and last_exc is not None:
+                    first_failure = last_exc
+                _logger.warning(
+                    "ai_beat_slideshow: beat %d failed after %d attempts — "
+                    "skipping (%d/%d failed so far)",
+                    i, attempt_idx, n_failed, n_total,
+                )
                 continue
             images.append(png_path)
 

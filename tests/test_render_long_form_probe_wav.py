@@ -85,8 +85,8 @@ def test_probe_wav_params_handles_unknown_layout_stereo(tmp_path: Path):
 
 
 def test_probe_wav_params_handles_22050_mono(tmp_path: Path):
-    """Higgs Audio v2 emits 22050Hz mono — pin it works."""
-    wav = tmp_path / "higgs.wav"
+    """Some TTS providers emit 22050Hz mono — pin it works."""
+    wav = tmp_path / "mono22k.wav"
     _write_wav(wav, sample_rate=22050, channels=1)
     rate, layout = _probe_wav_params(wav)
     assert rate == 22050

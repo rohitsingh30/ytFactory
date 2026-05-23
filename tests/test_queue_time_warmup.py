@@ -110,9 +110,9 @@ def test_warm_async_http_dispatches_to_provider_warmups():
         img_calls.append(provider)
         return None
 
-    # mystoriesanimated channel YAML uses cloudrun_chatterbox + cloudrun_flux2_klein
+    # mystoriesanimated channel YAML uses cloudrun_chatterbox + cloudrun_z_image_turbo
     with patch.object(_warm, "_providers_for_channel",
-                      return_value=({"chatterbox"}, {"flux"})), \
+                      return_value=({"chatterbox"}, {"zimage"})), \
          patch("pipeline.tts.cloudrun.warmup", side_effect=_fake_tts_warmup), \
          patch("pipeline.images.images.warmup", side_effect=_fake_img_warmup):
         thread = _warm.warm_async_http("mystoriesanimated")
@@ -120,8 +120,8 @@ def test_warm_async_http_dispatches_to_provider_warmups():
 
     assert "cloudrun_chatterbox" in tts_calls, \
         f"TTS warmup not fired for chatterbox; got tts_calls={tts_calls}"
-    assert "cloudrun_flux2_klein" in img_calls, \
-        f"image warmup not fired for flux; got img_calls={img_calls}"
+    assert "cloudrun_z_image_turbo" in img_calls, \
+        f"image warmup not fired for z-image-turbo; got img_calls={img_calls}"
 
 
 def test_warm_async_http_returns_thread_immediately():

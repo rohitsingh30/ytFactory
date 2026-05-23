@@ -10,7 +10,7 @@ os.environ.setdefault("YTFACTORY_QUEUE_BACKEND", "memory")
 
 import httpx
 
-from control.scheduler_routes import router, _require_auth
+from control.routes.scheduler_routes import router, _require_auth
 from fastapi import FastAPI, HTTPException
 
 
@@ -56,7 +56,7 @@ class TestSchedulerRoutes(unittest.IsolatedAsyncioTestCase):
         app = _make_app()
         transport = httpx.ASGITransport(app=app)
         mock_result = {"action": "enqueued", "count": 1}
-        with patch("control.scheduler_routes.scheduler.tick", return_value=mock_result):
+        with patch("control.routes.scheduler_routes.scheduler.tick", return_value=mock_result):
             with patch.dict(os.environ, {"YTFACTORY_AGENT_TOKEN": "test-token"}):
                 async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                     r = await client.post(
@@ -73,7 +73,7 @@ class TestSchedulerRoutes(unittest.IsolatedAsyncioTestCase):
         # Audit S1.9 — the route now calls scheduler.read_state() (public
         # alias). Patch the underscore-prefixed helper so the alias body
         # actually executes (read_state -> _read_state, exercising both).
-        with patch("control.scheduler_routes.scheduler._read_state", return_value=mock_state):
+        with patch("control.routes.scheduler_routes.scheduler._read_state", return_value=mock_state):
             with patch.dict(os.environ, {"YTFACTORY_AGENT_TOKEN": "test-token"}):
                 async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                     r = await client.get(
@@ -88,7 +88,7 @@ class TestSchedulerRoutes(unittest.IsolatedAsyncioTestCase):
         public alias so cross-module callers have a stable name. The
         underscore version stays as the in-module entry point.
         """
-        from control import scheduler as _legacy
+        from control.core import scheduler as _legacy
         with patch.object(_legacy, "_read_state", return_value={"hi": 1}) as m:
             self.assertEqual(_legacy.read_state(), {"hi": 1})
             m.assert_called_once_with()

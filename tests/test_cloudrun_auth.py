@@ -5,7 +5,7 @@ regression. The original `pipeline.tts.cloudrun._get_id_token` had
 a single global cache, which meant a token issued for service A
 got reused against service B → Cloud Run rejected with a
 audience-claim mismatch. With multiple Cloud Run services in flight
-(6 TTS + 2 image) this is no longer hypothetical.
+(2 TTS + 1 image) this is no longer hypothetical.
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ class TestPerAudienceCache(unittest.TestCase):
     def test_cache_keyed_by_audience(self) -> None:
         """Different audiences → different cached tokens, no leak."""
         url_a = "https://ytfactory-tts-chatterbox-foo.run.app"
-        url_b = "https://ytfactory-image-flux2-klein-foo.run.app"
+        url_b = "https://ytfactory-image-z-image-turbo-foo.run.app"
         with patch.object(
             subprocess, "run",
             side_effect=self._stub_run({url_a: "token-A", url_b: "token-B"}),
@@ -73,7 +73,7 @@ class TestPerAudienceCache(unittest.TestCase):
         for url_b on the first call. Verify the per-audience cache
         does NOT have that property."""
         url_a = "https://ytfactory-tts-chatterbox-foo.run.app"
-        url_b = "https://ytfactory-image-flux2-klein-foo.run.app"
+        url_b = "https://ytfactory-image-z-image-turbo-foo.run.app"
         with patch.object(
             subprocess, "run",
             side_effect=self._stub_run({url_a: "token-A", url_b: "token-B"}),

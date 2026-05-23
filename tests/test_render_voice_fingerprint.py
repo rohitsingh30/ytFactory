@@ -35,14 +35,14 @@ class TestComputeFingerprint(unittest.TestCase):
 
     def test_provider_voice_speed_extracted(self):
         cfg = {
-            "tts_provider": "f5_tts",
+            "tts_provider": "cloudrun_chatterbox",
             "tts_voice": "/path/to/clip.wav",
             "tts_speed": 0.85,
             "tts_language": "en",
             "tts_ref_text": "Hello world",
         }
         fp = compute_fingerprint(cfg)
-        self.assertEqual(fp["tts_provider"], "f5_tts")
+        self.assertEqual(fp["tts_provider"], "cloudrun_chatterbox")
         self.assertEqual(fp["tts_voice"], "/path/to/clip.wav")
         self.assertEqual(fp["tts_speed"], 0.85)
         self.assertEqual(fp["tts_language"], "en")
@@ -60,14 +60,14 @@ class TestComputeFingerprint(unittest.TestCase):
 
 class TestFingerprintHash(unittest.TestCase):
     def test_same_input_same_hash(self):
-        cfg = {"tts_provider": "f5_tts"}
+        cfg = {"tts_provider": "cloudrun_chatterbox"}
         self.assertEqual(
             fingerprint_hash(compute_fingerprint(cfg)),
             fingerprint_hash(compute_fingerprint(cfg)),
         )
 
     def test_different_input_different_hash(self):
-        a = fingerprint_hash(compute_fingerprint({"tts_provider": "f5_tts"}))
+        a = fingerprint_hash(compute_fingerprint({"tts_provider": "cloudrun_chatterbox"}))
         b = fingerprint_hash(compute_fingerprint({"tts_provider": "kokoro"}))
         self.assertNotEqual(a, b)
 
@@ -85,7 +85,7 @@ class TestSidecarRoundTrip(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             narr = Path(td) / "narration.wav"
             narr.write_bytes(b"fake")
-            fp = compute_fingerprint({"tts_provider": "f5_tts", "tts_voice": "v"})
+            fp = compute_fingerprint({"tts_provider": "cloudrun_chatterbox", "tts_voice": "v"})
             write_sidecar(narr, fp)
             self.assertEqual(read_sidecar(narr), fp)
 
@@ -113,7 +113,7 @@ class TestNeedsResynth(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             narr = Path(td) / "narration.wav"
             narr.write_bytes(b"fake")
-            resynth, reason = needs_resynth(narr, {"tts_provider": "f5_tts"})
+            resynth, reason = needs_resynth(narr, {"tts_provider": "cloudrun_chatterbox"})
             self.assertTrue(resynth)
             self.assertIn("sidecar missing", reason)
 
@@ -121,7 +121,7 @@ class TestNeedsResynth(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             narr = Path(td) / "narration.wav"
             narr.write_bytes(b"fake")
-            cfg = {"tts_provider": "f5_tts", "tts_voice": "v"}
+            cfg = {"tts_provider": "cloudrun_chatterbox", "tts_voice": "v"}
             write_sidecar(narr, compute_fingerprint(cfg))
             resynth, reason = needs_resynth(narr, cfg)
             self.assertFalse(resynth)
@@ -131,7 +131,7 @@ class TestNeedsResynth(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             narr = Path(td) / "narration.wav"
             narr.write_bytes(b"fake")
-            write_sidecar(narr, compute_fingerprint({"tts_provider": "f5_tts"}))
+            write_sidecar(narr, compute_fingerprint({"tts_provider": "cloudrun_chatterbox"}))
             resynth, reason = needs_resynth(narr, {"tts_provider": "kokoro"})
             self.assertTrue(resynth)
             self.assertIn("changed", reason)
@@ -148,7 +148,7 @@ class TestMaybeWipeStaleChunks(unittest.TestCase):
             narr.write_bytes(b"fake-wav-bytes")
             chunk = Path(td) / "chunk_0001.wav"
             chunk.write_bytes(b"fake-chunk")
-            wiped = maybe_wipe_stale_chunks(narr, {"tts_provider": "f5_tts"})
+            wiped = maybe_wipe_stale_chunks(narr, {"tts_provider": "cloudrun_chatterbox"})
             self.assertFalse(wiped)
             self.assertTrue(narr.exists())
             self.assertTrue(chunk.exists())
@@ -157,7 +157,7 @@ class TestMaybeWipeStaleChunks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             narr = Path(td) / "narration.wav"
             # No narr file — even if a sidecar somehow exists, nothing to wipe.
-            write_sidecar(narr, compute_fingerprint({"tts_provider": "f5_tts"}))
+            write_sidecar(narr, compute_fingerprint({"tts_provider": "cloudrun_chatterbox"}))
             wiped = maybe_wipe_stale_chunks(narr, {"tts_provider": "kokoro"})
             self.assertFalse(wiped)
 
@@ -167,7 +167,7 @@ class TestMaybeWipeStaleChunks(unittest.TestCase):
             narr.write_bytes(b"fake-wav-bytes")
             chunk = Path(td) / "chunk_0001.wav"
             chunk.write_bytes(b"fake-chunk")
-            cfg = {"tts_provider": "f5_tts", "tts_voice": "sarah"}
+            cfg = {"tts_provider": "cloudrun_chatterbox", "tts_voice": "sarah"}
             write_sidecar(narr, compute_fingerprint(cfg))
             wiped = maybe_wipe_stale_chunks(narr, cfg)
             self.assertFalse(wiped)
@@ -187,7 +187,7 @@ class TestMaybeWipeStaleChunks(unittest.TestCase):
                 (unrelated, b"keep me"),
             ):
                 p.write_bytes(payload)
-            write_sidecar(narr, compute_fingerprint({"tts_provider": "f5_tts"}))
+            write_sidecar(narr, compute_fingerprint({"tts_provider": "cloudrun_chatterbox"}))
             wiped = maybe_wipe_stale_chunks(narr, {"tts_provider": "kokoro"})
             self.assertTrue(wiped)
             self.assertFalse(narr.exists(), "narration.wav should be wiped")

@@ -74,6 +74,12 @@ class LongFormSection:
     narration: str
     target_s: float | None = None
     visual_brief: str | None = None
+    # Outline-authored intended word count for this section. Used by
+    # the post-rewrite length validator (P3.2) to apply the ±10%
+    # per-section gate against the section's OWN target rather than
+    # against mean-of-sections (which is symmetric-only and misses
+    # outline-imbalance bugs). None when authored pre-2026-05-22.
+    target_words: int | None = None
 
 
 @dataclass

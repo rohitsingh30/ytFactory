@@ -600,7 +600,7 @@ function renderPublishFailed(jobId, rec, quota) {
 
 // ----- main loop -----
 // Use a faster cadence while anything is in-flight so the stage strip
-// updates fluidly (per-image events fire ~every 2-4s on cloudrun_flux2).
+// updates fluidly (per-image events fire ~every 2-4s on cloudrun image).
 // Idle cadence stays at 5s to keep dashboard load light.
 const REFRESH_FAST_MS = 1500;
 const REFRESH_IDLE_MS = REFRESH_MS;

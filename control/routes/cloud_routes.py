@@ -181,7 +181,7 @@ def cloud_deploys(authorization: str | None = Header(None)) -> dict[str, Any]:
 @router.post("/api/cloud/refresh")
 def cloud_refresh(
     cost_days: int = Query(30, ge=1, le=90),
-    project: str = Query("ytfactory-prod-v2"),
+    project: str = Query("ytfactory-prod-v3"),
     authorization: str | None = Header(None),
 ) -> dict[str, Any]:
     """Force snapshot_all() now. Used by the panel's Refresh button."""

@@ -2,7 +2,7 @@
 #
 # Hosts the FastAPI app at /, /renders, /dashboard, /api/*. Does NOT
 # render videos itself; calls out to:
-#   - existing GPU services (chatterbox / indicf5 / flux2-klein)
+#   - existing GPU services (chatterbox / indicf5 / z-image-turbo)
 #     when YTFACTORY_RENDER_BACKEND=local (won't usually run in cloud)
 #   - the render-worker Cloud Run JOB
 #     (`gcloud run jobs execute ytfactory-render-worker`) when

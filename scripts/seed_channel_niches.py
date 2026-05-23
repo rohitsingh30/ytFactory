@@ -35,7 +35,7 @@ selected per-render. A given niche can be narrated by any voice.
 
 Usage:
     # Against prod GCS (use the same bucket Cloud Run serves from)
-    YTFACTORY_STATE_BUCKET=ytfactory-prod-v2-state \\
+    YTFACTORY_STATE_BUCKET=ytfactory-prod-v3-state \\
         .venv/bin/python scripts/seed_channel_niches.py
 
     # Local disk only (no GCS write — useful for dry-running)
