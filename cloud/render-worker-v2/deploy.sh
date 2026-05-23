@@ -101,11 +101,11 @@ _resolve_url() {
     --project="${PROJECT}" --region="${REGION}" \
     --format="value(status.url)" 2>/dev/null
 }
-TTS_CHATTERBOX_URL="$(_resolve_url ytfactory-tts-chatterbox)"
+TTS_CHATTERBOX_URL="$(_resolve_url tts-chatterbox)"
 TTS_INDICF5_URL="$(_resolve_url ytfactory-tts-indicf5)"
 IMAGE_Z_IMAGE_TURBO_URL="$(_resolve_url ytfactory-image-z-image-turbo)"
 ASR_URL="$(_resolve_url ytfactory-asr-whisper)"
-for pair in "ytfactory-tts-chatterbox:${TTS_CHATTERBOX_URL}" \
+for pair in "tts-chatterbox:${TTS_CHATTERBOX_URL}" \
             "ytfactory-tts-indicf5:${TTS_INDICF5_URL}" \
             "ytfactory-image-z-image-turbo:${IMAGE_Z_IMAGE_TURBO_URL}" \
             "ytfactory-asr-whisper:${ASR_URL}"; do
