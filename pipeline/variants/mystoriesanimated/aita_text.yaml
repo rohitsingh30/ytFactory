@@ -7,11 +7,12 @@ tts_voice: pipeline/voice_refs/sarah.wav
 tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 1.05
 
-# Image gen — CLOUD FLUX.2 [klein] 4B via Cloud Run NVIDIA L4
-# (Apache 2.0). New default per docs/research/image_gen_2026.md
-# (canary 2026-05-07). Falls back to local z_image_turbo (mflux) on
-# cloud failure via render-level circuit breaker. For pre-cloudrun
-# parity, set image_provider: z_image_turbo.
+# Image gen — Z-Image-Turbo 6B via Cloud Run NVIDIA L4 (Apache 2.0).
+# Sole production image provider; we inherit CANONICAL_IMAGE_PROVIDER
+# from pipeline/images/images.py:410, so this variant does NOT set
+# image_provider explicitly. The prior FLUX.2 [klein] canary (2026-05-07
+# → 2026-05-23) and the local mflux fallback (removed 2026-05-09) are
+# both gone — z-turbo is the only path.
 image_style_prefix: |
   Hand-drawn doodle illustration in the style of modern indie
   webcomics, intentionally simpler than the animated AITA variants

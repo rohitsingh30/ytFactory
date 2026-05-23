@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -12,6 +12,7 @@ import {
   ExternalLink,
   Loader2,
   Play,
+  RotateCw,
   Send,
   Timer,
   Wand2,
@@ -62,9 +63,32 @@ const STAGE_LABELS: Record<string, string> = {
 
 export default function RenderDetailPage() {
   const params = useParams<{ jobId: string }>();
+  const router = useRouter();
   const jobId = params.jobId;
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+
+  const handleRetry = async () => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      const res = await jobsApi.retry(jobId);
+      const copied = res.cache_objects_copied;
+      toast.success("Retry dispatched", {
+        description: copied > 0
+          ? `Reusing ${copied} cached artifact${copied === 1 ? "" : "s"} from the failed run`
+          : "Starting fresh — no cache available from the failed run",
+      });
+      router.push(`/app/render/${res.retry_job_id}`);
+    } catch (e) {
+      toast.error("Retry failed", {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   useEffect(() => {
     if (!jobId) return;
@@ -131,6 +155,21 @@ export default function RenderDetailPage() {
               >
                 <X className="h-3.5 w-3.5" />
                 Cancel
+              </Button>
+            )}
+            {job && (job.status === "failed" || job.status === "cancelled") && (
+              <Button
+                variant="default"
+                size="sm"
+                disabled={retrying}
+                onClick={handleRetry}
+              >
+                {retrying ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RotateCw className="h-3.5 w-3.5" />
+                )}
+                Retry render
               </Button>
             )}
           </>
@@ -255,6 +294,32 @@ function PlayerCard({ job, src }: { job: Job | null; src: string | null }) {
                     </pre>
                   ) : (
                     <span>No error message reported.</span>
+                  )}
+                  {/* B4 — retry chain links. If this failed doc has
+                      already been retried, show the link to the retry
+                      so the operator doesn't accidentally retry twice.
+                      If this IS a retry, show a back-link to the
+                      original failed run. */}
+                  {job.retried_as && (
+                    <div className="mt-2 text-[10px]">
+                      <Link
+                        href={`/app/render/${job.retried_as}`}
+                        className="text-emerald-300 underline-offset-2 hover:underline"
+                      >
+                        Retried as {job.retried_as.slice(0, 8)}…
+                      </Link>
+                    </div>
+                  )}
+                  {job.retry_of && (
+                    <div className="mt-1 text-[10px] text-muted-foreground">
+                      Retry of{" "}
+                      <Link
+                        href={`/app/render/${job.retry_of}`}
+                        className="underline-offset-2 hover:underline"
+                      >
+                        {job.retry_of.slice(0, 8)}…
+                      </Link>
+                    </div>
                   )}
                 </div>
               ) : (

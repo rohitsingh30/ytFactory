@@ -54,8 +54,9 @@ class EraEntry:
 
         Format: ``[ERA — <costume tokens, single line>]``. The brackets
         and ``[ERA — ]`` framing tell the diffusion model this is a
-        directorial constraint, not a scene description; FLUX.2 klein
-        respects bracketed prompt structure as priority guidance.
+        directorial constraint, not a scene description; Z-Image-Turbo
+        (and historically the retired FLUX.2 klein lane) respects
+        bracketed prompt structure as priority guidance.
         """
         # Collapse multi-line YAML block scalars to one line so the
         # prompt stays readable in logs + diff tools.

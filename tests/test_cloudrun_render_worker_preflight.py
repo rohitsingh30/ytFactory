@@ -66,8 +66,7 @@ class _PreflightEnvMixin:
         "CLOUDRUN_TTS_INDICF5_URL",
         "CLOUDRUN_TTS_HIGGS_URL",
         "CLOUDRUN_TTS_COSYVOICE_URL",
-        "CLOUDRUN_IMAGE_FLUX2_KLEIN_URL",
-        "CLOUDRUN_IMAGE_Z_TURBO_URL",
+        "CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL",
         "CLOUDRUN_IMAGE_QWEN_URL",
         "CLOUDRUN_IMAGE_HIDREAM_URL",
     )
@@ -85,7 +84,7 @@ class _PreflightEnvMixin:
         env["AZURE_OPENAI_API_KEY"] = "k"
         env["AZURE_OPENAI_MODEL"] = "gpt-5.3-chat"
         env["CLOUDRUN_TTS_CHATTERBOX_URL"] = "https://tts.example.com"
-        env["CLOUDRUN_IMAGE_FLUX2_KLEIN_URL"] = "https://img.example.com"
+        env["CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL"] = "https://img.example.com"
         env["YTFACTORY_ASR_PROVIDER"] = "faster_whisper"
         env.update(overrides)
         return env
@@ -191,7 +190,7 @@ class TestPreflightCloudServiceUrls(_PreflightEnvMixin, unittest.TestCase):
     def test_no_image_url_caught(self):
         ep = _load_entrypoint()
         env = self._real_mode_env()
-        del env["CLOUDRUN_IMAGE_FLUX2_KLEIN_URL"]
+        del env["CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL"]
         with mock.patch.dict(os.environ, env, clear=True):
             problems = ep._preflight()
         keys = [k for k, _ in problems]

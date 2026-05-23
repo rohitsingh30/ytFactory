@@ -9,7 +9,7 @@ After Section 6 quality gates pass, the skill MUST Bash-execute the prep tool fo
 .venv/bin/python -u -m pipeline.cosmos_footage_prep --channel cosmosdecoded --slug <short-slug>
 ```
 
-The tool resolves Wikimedia / NASA / archive.org URLs automatically, downloads stills, and runs ffmpeg zoompan to produce the right-aspect Ken-Burns mp4s. Manual fallback is only triggered for paywalled hosts (royalsocietypublishing, nature.com, NYT TimesMachine, Pexels) — typically 2–4 entries per video.
+The tool resolves Wikimedia / NASA / archive.org URLs automatically, downloads stills, and converts them to right-aspect mp4s via ffmpeg. Manual fallback is only triggered for paywalled hosts (royalsocietypublishing, nature.com, NYT TimesMachine, Pexels) — typically 2–4 entries per video.
 
 **Why this matters:** First eddington-1919-eclipse run shipped four JSONs and stopped. The renderer immediately hard-failed at `FileNotFoundError`. User feedback: "source should run in the skill by default". The skill — not the curator — owns the prep. Run it before reporting back.
 

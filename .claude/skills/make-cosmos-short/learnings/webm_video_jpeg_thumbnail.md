@@ -8,7 +8,7 @@ type: feedback
 
 **Rule:** when authoring a Cosmos Decoded shotlist, do NOT set
 `source_type: video` against a `commons.wikimedia.org/wiki/File:foo.webm`
-URL. Use a still image of the same content with `source_type: still_ken_burns`,
+URL. Use a still image of the same content with `source_type: still_image`,
 or wait for the prep tool to be fixed (Section 3 below).
 
 **Why:** 2026-05-08 first run on `ligo-2015-gw150914-short` had beat 4
@@ -32,8 +32,8 @@ The prep tool's resolver path goes through the API, not the upload CDN.
 1. **Don't reference .webm video files in the shotlist.** Search
    Wikimedia for a still-frame JPEG of the same simulation (e.g.
    `MergingBlackHoles_V2.jpg`, `Black_Hole_Merger.jpg`). Set
-   `source_type: still_ken_burns`. The prep tool's Ken Burns pipeline
-   handles the still cleanly.
+   `source_type: still_image`. The prep tool's still-to-mp4 path
+   handles it cleanly.
 2. **Carry `_wikimedia_search_query`** so future-you (or the next
    curator) can re-verify if the still page goes away.
 
@@ -47,7 +47,7 @@ Extend `pipeline/cosmos_footage_prep.py::_fetch_video_from_wikimedia`
    resolved via the same imageinfo response.
 2. If the upload URL also can't be fetched as video bytes (rare —
    Wikimedia thumbnails .webm via the thumb endpoint), gracefully
-   degrade to still_ken_burns mode using the JPEG thumbnail and log
+   degrade to still_image mode using the JPEG thumbnail and log
    a warning so the curator knows the Short uses a single frame
    instead of the moving simulation.
 

@@ -1,12 +1,13 @@
 """AI beat-slideshow VisualProducer (short-engine canonical).
 
-One Flux/SD image per Segment, cross-faded with Ken Burns motion.
-Default visualize for short renders on every animated channel
-(mystoriesanimated / hindutavaanimated / rhymetimejunction).
+One Flux/SD image per Segment, cross-faded with a per-image punch-in
++ slow-drift zoom. Default visualize for short renders on every
+animated channel (mystoriesanimated / hindutavaanimated /
+rhymetimejunction).
 
 Today's impl is a delegating wrapper around ``pipeline.compose``'s
-existing per-beat image-gen + Ken Burns chain. The bigbang PR moves
-the body fully into this module so shorts.py can be deleted.
+existing per-beat image-gen + zoom chain. The bigbang PR moves the
+body fully into this module so shorts.py can be deleted.
 
 Plugin selection: ``spec.visual_mode = AI_BEAT_SLIDESHOW``.
 
@@ -207,7 +208,7 @@ def _resolve_prompt_for_beat(
 
 
 class AiBeatSlideshow:
-    """One image per beat, Ken Burns motion, cross-faded.
+    """One image per beat, per-image punch-in + slow-drift zoom, cross-faded.
 
     Today's impl falls back to a solid-color stand-in when the
     pipeline.images dispatcher isn't available — bigbang PR plumbs
@@ -251,9 +252,9 @@ class AiBeatSlideshow:
         # the upstream prompts.json itself had ≤2 unique ``key_visual``
         # strings across all beats, so EVERY rendered image looked the
         # same (same kitchen / same shrug / same bowl). The viewer saw
-        # one image Ken-Burns'd for 30+ seconds — strictly worse than
-        # a frozen-frame tail, because the Ken-Burns motion masks the
-        # bug from any automated duration/duplicate-hash check.
+        # one image looped for 30+ seconds — strictly worse than a
+        # frozen-frame tail, because any per-image zoom masks the bug
+        # from automated duration/duplicate-hash checks.
         #
         # Defense: when ``prompts_path`` was provided AND the prompts
         # list has ≥ 4 entries (enough that a uniqueness ratio is
@@ -532,9 +533,7 @@ class AiBeatSlideshow:
             )
 
         # Stitch one image per beat into a continuous video. Each image
-        # is held for the beat's duration. Bigbang PR adds Ken Burns
-        # motion via a ffmpeg zoompan filter; today we use plain
-        # framebatch-per-second.
+        # is held statically for the beat's duration.
         out_path = work_dir / "slideshow.mp4"
         self._stitch_images(images, timeline, spec, out_path)
 
@@ -557,19 +556,13 @@ class AiBeatSlideshow:
     ) -> None:
         """Stitch per-beat images into a continuous video with hard cuts.
 
-        2026-05-23: Ken-Burns / zoompan REMOVED (user directive).
-        ``image_to_kenburns_clip`` now produces a STATIC clip (the
-        function name is kept for back-compat). Each PNG is held for
-        its beat window with no zoom, no pan; segments are
-        concat-demuxed with ``-c copy`` (hard cuts, no fade).
-
-        The retention-defense rationale that drove the previous Ken-Burns
-        path ("no two pixel-identical frames > 1s") now relies on the
-        beat-cadence being tight enough that each still doesn't dwell
-        for long — shorts already hit ~2-3 s/beat via the sentence-per-
-        beat splitter in ``pipeline.beats``.
+        Each PNG is held statically for its beat window — no zoom, no pan,
+        no drift — and segments are concat-demuxed with ``-c copy``
+        (hard cuts, no fade). Retention-defense against "frozen video"
+        relies on tight beat cadence (~2-3 s/beat via the sentence-per-
+        beat splitter in ``pipeline.beats``), not intra-clip motion.
         """
-        from pipeline.compose import Resolution, image_to_kenburns_clip  # noqa: PLC0415
+        from pipeline.compose import Resolution, image_to_static_clip  # noqa: PLC0415
         from pipeline.render.shared.concat_safe import concat_file_line  # noqa: PLC0415
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -584,7 +577,7 @@ class AiBeatSlideshow:
             duration = max(seg.end_s - seg.start_s if seg else 1.0, 0.5)
             clip_p = clips_dir / f"beat_{i:03d}.mp4"
             try:
-                image_to_kenburns_clip(img, duration, clip_p, resolution=res)
+                image_to_static_clip(img, duration, clip_p, resolution=res)
                 clip_paths.append(clip_p)
             except Exception as exc:  # noqa: BLE001
                 _logger.warning(

@@ -199,12 +199,10 @@ ESSAY_DRIFT_OPENERS: tuple[tuple[str, str], ...] = (
 # that suggest the model misunderstood the prompt.
 #
 # 2026-05-23: bumped from 12s/8s to 60s/45s. Rationale:
-#   * Ken-Burns motion was REMOVED (user directive — see
-#     pipeline/render/shared/long_form_lib.py::_assemble_panel_static)
-#     so the "panels >12s without animation read as dead" rationale
-#     for the old cap no longer applies. With hard cuts between
-#     stills the empirical hard floor on static-still hold is ~45s
-#     (research: panel_pacing_research_2026-05.md, citing
+#   * The renderer produces static stills with hard cuts (see
+#     pipeline/render/shared/long_form_lib.py::_assemble_panel_static).
+#     With hard cuts between stills the empirical hard floor on hold
+#     is ~45s (research: panel_pacing_research_2026-05.md, citing
 #     YouTube retention dips + Bordwell ASL ranges).
 #   * The pipeline-side compensation is denser panel cadence
 #     (channel YAML's ``long_form.panel_seconds_target`` defaults to

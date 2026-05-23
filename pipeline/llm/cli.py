@@ -228,11 +228,12 @@ _DEFAULT_MAX_TOKENS_BY_STAGE: dict[str, int] = {
     "audio_critic": 8192,
     "imitate_analyze": 8192,
     "imitate_apply": 8192,
-    # Prompt-refiner pre-step (FLUX.2 [klein] DALL-E 3 playbook). Batched
-    # output: ~30 beats × {refined_visual ~10 tokens, refined_scene
-    # ~80 tokens, style_block ~20 tokens} ≈ 3.3k content tokens plus JSON
-    # syntax + Haiku-tier reasoning (negligible) ≈ ~4-5k tokens of output.
-    # 8192 gives ~50% margin so the largest long-form (60+ beats) can't
+    # Prompt-refiner pre-step (Z-Image-Turbo DALL-E 3 playbook, rewritten
+    # 2026-05-23 from the FLUX.2 [klein] calibration). Batched output:
+    # ~30 beats × {refined_visual ~30 tokens, refined_scene ~120 tokens,
+    # style_block ~20 tokens} ≈ 5.1k content tokens plus JSON syntax +
+    # Haiku-tier reasoning (negligible) ≈ ~6-7k tokens of output. 8192
+    # gives ~20% margin so the largest long-form (60+ beats) can't
     # truncate.
     "prompt_refine": 8192,
 }

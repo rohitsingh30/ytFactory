@@ -223,7 +223,7 @@ Submit calls `renderApi.enqueue(...)` → routes to `/app/render/<jobId>`. So th
 
 **Q48. Image architecture investigation.**
 **Findings:**
-- 2 main impls: `ai_beat_slideshow` (short engine: one image per ASR beat, ~1-3s each) + `longform_panels` (long engine: one panel per ~30-60s with Ken Burns).
+- 2 main impls: `ai_beat_slideshow` (short engine: one image per ASR beat, ~1-3s each) + `longform_panels` (long engine: one panel per ~30-60s, static stills + hard cuts).
 - Per-beat failure threshold: 10% (`_PER_BEAT_FAILURE_THRESHOLD = 0.10` in `ai_beat_slideshow.py:90`). Above this, raises `RenderFailedError`.
 - Character consistency depends on `spec.extra["character_description"]` from `cast.json` via `spec_enrich.populate_render_extras`.
 

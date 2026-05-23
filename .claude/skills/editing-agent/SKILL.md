@@ -1,6 +1,6 @@
 ---
 name: editing-agent
-description: Polish a finished ytFactory mp4 OR assemble a folder of raw mp4 clips, generated stills, or a mixed bag into a directed cinematic edit. Auto-detects mode (polish / assemble-clips / assemble-stills / assemble-mixed) from input. LLM planner emits an EDL (cuts, transitions, LUT, Ken Burns, audio duck, letterbox, music sync); ffmpeg + PySceneDetect execute. Runs as a Cloud Run service (cloud/editing-agent/) registered in the admin-tab orchestrator alongside render-worker-v2; falls back to laptop ffmpeg when cloud unavailable. Optional 8th stage between compose and upload via proposal.editing.enabled. Use when the user says "polish this short", "make this cinematic", "assemble these clips", "cut these stills into a teaser", "/editing-agent on aita04". For pure review use /critique-video. For format research use /clone-video-format.
+description: Polish a finished ytFactory mp4 OR assemble a folder of raw mp4 clips, generated stills, or a mixed bag into a directed cinematic edit. Auto-detects mode (polish / assemble-clips / assemble-stills / assemble-mixed) from input. LLM planner emits an EDL (cuts, transitions, LUT, zoom/pan, audio duck, letterbox, music sync); ffmpeg + PySceneDetect execute. Runs as a Cloud Run service (cloud/editing-agent/) registered in the admin-tab orchestrator alongside render-worker-v2; falls back to laptop ffmpeg when cloud unavailable. Optional 8th stage between compose and upload via proposal.editing.enabled. Use when the user says "polish this short", "make this cinematic", "assemble these clips", "cut these stills into a teaser", "/editing-agent on aita04". For pure review use /critique-video. For format research use /clone-video-format.
 learnings_consulted:
   - .claude/skills/editing-agent/learnings/_index.md
   - .claude/skills/critique-video/SKILL.md
@@ -18,7 +18,7 @@ edit-decision-list (EDL) to ffmpeg. Works on three artifact types:
    ducks audio, smooths transitions. The "polish" pass.
 2. A folder of `.mp4` clips — scene-detects each, picks the best
    moments, weaves them into a cinematic montage with grade + music.
-3. A folder of images (`.png` / `.jpg` / `.webp`) — Ken Burns,
+3. A folder of images (`.png` / `.jpg` / `.webp`) — slow zoom/pan,
    parallax, crossfade, optional 2.5D pseudo-motion, color grade,
    music sync. Treats each still as a directed shot.
 4. A mixed folder of clips + stills — types are auto-classified and

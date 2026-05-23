@@ -368,7 +368,7 @@ def test_aggregator_caps_panel_hold_at_renderer_max():
     PANEL_HOLD_SOFT_MAX_S — defense-in-depth so a misbehaving outline
     can't ship absurdly long static stills.
 
-    2026-05-23: caps raised (Ken-Burns removed) — HARD 60s, SOFT 45s.
+    2026-05-23: caps raised — HARD 60s, SOFT 45s.
     A panel emitting hold_s=90 hits the cap and gets clamped to 45.
     """
     raw_story = {"slug": "x", "title": "T", "body": "Source"}

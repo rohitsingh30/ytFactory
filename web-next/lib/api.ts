@@ -238,6 +238,13 @@ export const jobsApi = {
     api.post<{ job_id: string; cancelled_tasks: number; job_status: string }>(
       `/api/jobs/${jobId}/cancel`,
     ),
+  retry: (jobId: string) =>
+    api.post<{
+      retry_job_id: string;
+      retry_of: string;
+      cache_objects_copied: number;
+      cloud_execution: string | null;
+    }>(`/api/jobs/${jobId}/retry`),
   publish: (jobId: string, body: PublishRequest) =>
     api.post<PublishResponse>(`/api/jobs/${jobId}/publish`, body),
   previewUrl: (jobId: string) => `/api/jobs/${jobId}/preview.mp4`,

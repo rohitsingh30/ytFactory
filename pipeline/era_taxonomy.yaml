@@ -21,10 +21,12 @@
 #
 #   negatives — anti-prompt fragments appended to the suffix to suppress
 #              common drift modes (e.g. "no rifles" for medieval, "no
-#              automobiles" for pre-1900 eras). These are advisory; the
-#              model only weakly respects negative tokens in distilled
-#              FLUX.2 klein, so the POSITIVE tokens above carry most of
-#              the signal.
+#              automobiles" for pre-1900 eras). These are advisory;
+#              Z-Image-Turbo is CFG-distilled at guidance_scale=0 and
+#              ignores negative prompts at the model level, so the
+#              POSITIVE tokens above carry essentially all the signal.
+#              The negatives are kept for prompt-side lint visibility,
+#              not because the diffusion model honours them.
 #
 #   description — operator-facing summary (shown in errors, never sent
 #              to the LLM).

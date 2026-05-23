@@ -36,9 +36,9 @@ def run_ffmpeg(args: list[str], *, timeout: float | None = None) -> None:
       worker tail buffer and got overwritten by OTel metric dumps,
       leaving us with opaque "ffmpeg failed: ..." messages).
     - Optional timeout (seconds). None = no timeout (default; preserves
-      existing behaviour for the multi-minute panel kenburns / long-form
-      compose calls). Callers that know their command should finish in
-      bounded time SHOULD pass a value.
+      existing behaviour for the multi-minute long-form compose calls).
+      Callers that know their command should finish in bounded time
+      SHOULD pass a value.
 
     On non-zero exit, raises RuntimeError that includes the last 1500
     chars of stderr so the worker subprocess tail captured by

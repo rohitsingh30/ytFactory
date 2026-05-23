@@ -55,6 +55,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -73,6 +74,115 @@ logger = logging.getLogger("render-worker-v2")
 
 REPO_ROOT = Path("/workspace")
 TMP_ROOT = Path("/tmp/render")
+
+# ---------------------------------------------------------------------------
+# SIGTERM-induced "silent death" mitigation (B3a in 2026-05-23 docket)
+# ---------------------------------------------------------------------------
+#
+# Cloud Run Jobs send SIGTERM when a task hits its --task-timeout ceiling
+# (3600s for ytfactory-render-worker-v2), wait 10s, then SIGKILL. The
+# top-of-_main_from_firestore try/except cannot catch SIGKILL — Python
+# is already dead. Pre-fix: jobs that timed out left status="rendering"
+# in Firestore forever; you only knew the worker had died by tailing
+# Cloud Run logs (e.g. job a0aac53ea01949178afd50ac2b254ef7, the render
+# that prompted this fix).
+#
+# Fix: install a SIGTERM handler the moment we know the job_id, capture
+# the latest timeline + current stage on every _update_job call, and
+# on signal delivery spawn a thread that writes status=failed within
+# the 10s grace window. We can't do Firestore I/O directly from the
+# signal frame (gRPC reentrancy hazard) so the thread pattern is
+# mandatory.
+_LIVE_RENDER: dict[str, Any] = {
+    "job_id": None,
+    "stage": None,
+    "timeline": None,
+}
+_SIGTERM_INSTALLED = False
+_SIGTERM_FIRED = False  # idempotency guard — multiple SIGTERMs would otherwise re-trigger
+
+
+def _on_sigterm(signum, frame):  # noqa: ARG001
+    """SIGTERM handler — marks the job failed before SIGKILL arrives.
+
+    Spawns a background thread for the actual Firestore write because
+    calling gRPC client methods from a signal handler frame is
+    documented as unsafe (the gRPC SDK uses its own threads + locks
+    and the main-thread interrupt can deadlock against them).
+    """
+    global _SIGTERM_FIRED
+    if _SIGTERM_FIRED:
+        return
+    _SIGTERM_FIRED = True
+
+    state = dict(_LIVE_RENDER)
+    job_id = state.get("job_id")
+    if not job_id:
+        logger.error("SIGTERM received before job_id known; exiting")
+        sys.exit(143)
+        return
+
+    def _do_write() -> None:
+        try:
+            err = (
+                "Worker received SIGTERM (likely Cloud Run task-timeout, "
+                "default 3600s for ytfactory-render-worker-v2). The "
+                "renderer was killed mid-pipeline. Per-call artifacts "
+                "(panel PNGs + TTS chunk WAVs) already paid for have "
+                "been persisted to gs://<bucket>/jobs/<job_id>/cache/ "
+                "(B2) — a re-render of this job_id will hydrate them "
+                "back into work_dir on startup, so retry cost is "
+                "limited to whatever wasn't yet uploaded when SIGKILL "
+                "arrived."
+            )
+            _update_job(
+                job_id,
+                status="failed",
+                stage=state.get("stage") or "unknown",
+                error=err,
+                timeline=state.get("timeline") or [],
+            )
+            logger.error(
+                "SIGTERM: marked job=%s failed at stage=%s",
+                job_id, state.get("stage"),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("SIGTERM Firestore write failed for job=%s", job_id)
+        # B2 — flush any in-flight cache uploads. We're in the 10s
+        # grace window before SIGKILL; whatever already got
+        # ``pool.submit()``'d but hasn't finished uploading should
+        # finish so the next retry can hydrate from it.
+        try:
+            from pipeline.cloud.cache import shutdown_upload_pool  # noqa: PLC0415
+            shutdown_upload_pool(wait=True, timeout=5.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SIGTERM cache flush failed: %s", exc)
+
+    t = threading.Thread(target=_do_write, daemon=False, name="sigterm-firestore")
+    t.start()
+    # Cloud Run gives 10s before SIGKILL; reserve ~2s for log flush.
+    t.join(timeout=8.0)
+    if t.is_alive():
+        logger.error("SIGTERM Firestore write still running at 8s; SIGKILL imminent")
+    sys.exit(143)
+
+
+def _install_sigterm_handler(job_id: str) -> None:
+    """Install the SIGTERM handler once per process. Idempotent."""
+    global _SIGTERM_INSTALLED
+    _LIVE_RENDER["job_id"] = job_id
+    if _SIGTERM_INSTALLED:
+        return
+    try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+        _SIGTERM_INSTALLED = True
+        logger.info("SIGTERM handler installed for job=%s", job_id)
+    except (ValueError, OSError) as exc:
+        # signal.signal can only be called from the main thread —
+        # if we're in a worker thread (tests, embedded use) just log
+        # and continue. The job will silently die on timeout in that
+        # case, but that's no worse than before this fix.
+        logger.warning("SIGTERM handler install skipped: %s", exc)
 
 # Canonical stages — UI mirrors these.
 #
@@ -376,8 +486,18 @@ def _update_job(job_id: str, **fields: Any) -> None:
     render must NEVER crash because a Firestore blip cost us one
     progress update. Terminal writes (status=done/failed) are written
     via the same path; if they're lost the reaper retries.
+
+    Also snapshots ``stage`` and ``timeline`` into ``_LIVE_RENDER`` for
+    the SIGTERM handler — every progress write flows through here, so
+    the handler always reads the latest state without each callsite
+    having to remember to update it.
     """
     fields["updated_at"] = datetime.now(timezone.utc)
+    if _LIVE_RENDER.get("job_id") == job_id:
+        if "stage" in fields:
+            _LIVE_RENDER["stage"] = fields["stage"]
+        if "timeline" in fields:
+            _LIVE_RENDER["timeline"] = fields["timeline"]
     base_backoff = 0.2
     for attempt in range(1, 4):
         try:
@@ -960,8 +1080,8 @@ _REGEX_LF_TTS_ALL_CACHED = re.compile(r"^\[tts\] all (\d+) chunks already cached
 _REGEX_LF_TTS_DONE = re.compile(r"^\[1/5\] narration (\d+) chunks → \S+ ([\d.]+)s")
 _REGEX_LF_PANEL_GEN = re.compile(r"^\[panel\] (\d+)/(\d+) gen → (\S+) \(seed (\d+)\)")
 _REGEX_LF_PANEL_FILL = re.compile(r"^\[2/5\] panels total ([\d.]+)s [<>] narration ([\d.]+)s")
-_REGEX_LF_PANEL_SEG = re.compile(r"^\[seg \] (\d+)/(\d+) ([\d.]+)s zoom")
-_REGEX_LF_PANEL_XFADE = re.compile(r"^\[xfade\] (\d+) panels → (\S+)")
+_REGEX_LF_PANEL_SEG = re.compile(r"^\[seg \] (\d+)/(\d+) ([\d.]+)s static")
+_REGEX_LF_PANEL_CONCAT = re.compile(r"^\[concat\] (\d+) panels → (\S+)")
 _REGEX_LF_VIDEO_DONE = re.compile(r"^\[2/5\] video → \S+ ([\d.]+)s")
 _REGEX_LF_CAP_PNG = re.compile(r"^\[cap\] (\d+) (?:authored )?sentence PNGs")
 _REGEX_LF_MUX_START = re.compile(r"^\[4/4\] muxing video")
@@ -1057,10 +1177,10 @@ def _classify_renderer_line(line: str) -> tuple[str, str] | None:
                 f"Panel timing fit: {m.group(1)}s panels vs {m.group(2)}s narration")
     if (m := _REGEX_LF_PANEL_SEG.match(s)):
         return ("images",
-                f"Rendering panel {m.group(1)}/{m.group(2)} ({m.group(3)}s Ken-Burns)")
-    if (m := _REGEX_LF_PANEL_XFADE.match(s)):
+                f"Rendering panel {m.group(1)}/{m.group(2)} ({m.group(3)}s static)")
+    if (m := _REGEX_LF_PANEL_CONCAT.match(s)):
         return ("images",
-                f"Crossfading {m.group(1)} panel segments → video track")
+                f"Concatenating {m.group(1)} panel segments → video track")
     if (m := _REGEX_LF_VIDEO_DONE.match(s)):
         return ("images", f"Video track ready ({m.group(1)}s)")
 
@@ -2127,6 +2247,11 @@ def _main_from_firestore(job_id: str) -> int:
     mode = "stub" if _is_stub_mode() else "real"
     logger.info("starting render-worker-v2 for job=%s mode=%s (Firestore)", job_id, mode)
 
+    # Install SIGTERM handler immediately — Cloud Run sends SIGTERM at
+    # task-timeout with a 10s grace before SIGKILL. Without this, a
+    # timeout leaves status="rendering" in Firestore forever.
+    _install_sigterm_handler(job_id)
+
     # Bounded retry on the initial lookup (TEL-FS-04 / TEL-EXEC-01).
     # When the dispatcher fires `gcloud run jobs execute` IMMEDIATELY
     # after `create_job` (control/core/jobs.py:_enqueue_render_job),
@@ -2262,6 +2387,31 @@ def _main_from_firestore(job_id: str) -> int:
 
     work_dir = TMP_ROOT / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    # B2 — export env vars consumed by ``pipeline.cloud.cache``. Library
+    # code in pipeline/render/shared/long_form_lib.py reads
+    # ``YTFACTORY_JOB_ID`` / ``YTFACTORY_BUCKET`` to fire-and-forget
+    # uploads of panel PNGs + TTS chunk WAVs — keeping the cache call
+    # sites env-driven means we don't have to thread ``job_id``
+    # through every internal helper.
+    os.environ["YTFACTORY_JOB_ID"] = job_id
+    os.environ.setdefault("YTFACTORY_BUCKET", _bucket_name())
+
+    # B2 — hydrate the per-call cache from GCS BEFORE any stage runs.
+    # If this job was retried (or the previous attempt SIGKILLed
+    # mid-render), the panel PNGs + TTS chunk WAVs we already paid
+    # for live at gs://<bucket>/jobs/<job_id>/cache/. Pull them down
+    # so the renderer's existing cache-skip checks (see
+    # pipeline/render/shared/long_form_lib.py::_generate_panel_stills
+    # and synth_long_narration) short-circuit those panels/chunks.
+    # Best-effort: any failure logs + continues with a cold cache.
+    try:
+        from pipeline.cloud.cache import hydrate_cache  # noqa: PLC0415
+        counts = hydrate_cache(work_dir, job_id=job_id)
+        if counts:
+            logger.info("cache hydrated for job=%s: %s", job_id, counts)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cache hydrate skipped for job=%s: %s", job_id, exc)
 
     # Per-job stage list — inserts the optional editing_agent stage
     # between compose and upload when proposal.editing.enabled is true.

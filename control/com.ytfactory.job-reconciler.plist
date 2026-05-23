@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ytfactory.job-reconciler</string>
+    <!-- Cloud Run JOB execution reconciler — B3b in 2026-05-23 docket.   -->
+    <!-- Sweeps Firestore for render jobs stuck mid-pipeline whose JOB    -->
+    <!-- execution has finished failing (SIGKILL / OOM / task-timeout)    -->
+    <!-- and marks them status=failed so the dashboard surfaces them.    -->
+    <!-- See control/core/reconciler.py for the full docstring.           -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>curl -sS -X POST http://127.0.0.1:8090/api/admin/reconcile_jobs -H "Content-Type: application/json" -d '{"max_age_minutes": 120, "batch_size": 50, "dry_run": false}' &gt;&gt; /tmp/ytfactory-job-reconciler.log 2&gt;&amp;1 &amp;&amp; echo "" &gt;&gt; /tmp/ytfactory-job-reconciler.log</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Every 5 minutes. The worker's task-timeout is 60m, so any stuck -->
+    <!-- job will be found within at most 125m (60m timeout + 60m         -->
+    <!-- candidacy floor + 5m tick). That's fine — the dashboard already  -->
+    <!-- shows the timeline pill so the user knows what stage it died    -->
+    <!-- at; the reconciler just guarantees the spinner eventually       -->
+    <!-- stops, not that it stops within seconds.                         -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/ytfactory-job-reconciler.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/ytfactory-job-reconciler.err</string>
+    <!-- AUTH NOTE: the /api/admin/reconcile_jobs route requires the pin -->
+    <!-- header (Depends(require_pin)). If the laptop server is running  -->
+    <!-- with YTFACTORY_PIN set, install this plist with the pin baked   -->
+    <!-- into the curl call:                                              -->
+    <!--   -H "X-Pin: $(cat ~/.config/ytfactory/pin)"                    -->
+    <!-- Localhost-only deployment without a pin works as-is.            -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/rohit</string>
+        <key>PATH</key>
+        <string>/Users/rohit/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

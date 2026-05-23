@@ -1,23 +1,23 @@
-"""Auto source-fetch + Ken Burns prep for footage-only channels (Cosmos Decoded).
+"""Auto source-fetch + still-to-video prep for footage-only channels (Cosmos Decoded).
 
 Runs after a /make-cosmos-decoder authoring pass. Reads the channel/slug
 shotlist, fetches every `source_url` to disk, and converts every
-`still_ken_burns` entry to an mp4 clip via ffmpeg zoompan. Idempotent:
-re-runs skip already-present files.
+`still_image` entry to an mp4 clip. Idempotent: re-runs skip
+already-present files.
 
 Why this exists (class-of-bug fix, 2026-05-05):
     The cosmosdecoded long-form footage_only renderer expects local mp4
     files in `<channel>/footage/long_sources/` (long-form) or
     `<channel>/footage/sources/` (Shorts). Authoring shotlists in the
     /make-cosmos-decoder skill only produced URLs + filenames — leaving
-    the curator to manually wget every asset and run ffmpeg-zoompan
-    one-liners. Every future invocation of the skill would have hit the
+    the curator to manually wget every asset and run ffmpeg one-liners
+    by hand. Every future invocation of the skill would have hit the
     same gap. This module bakes the prep step into the skill flow so
     the renderer can be invoked immediately after authoring.
 
 Resolvers supported:
     * commons.wikimedia.org/wiki/File:Foo.jpg   → direct asset URL via
-        Wikimedia API; downloaded as a still and Ken-Burns'd to mp4.
+        Wikimedia API; downloaded as a still and converted to mp4.
     * upload.wikimedia.org/wikipedia/commons/.. → direct download.
     * images.nasa.gov/details/<nasa_id>          → highest-res asset
         via NASA images-api.
@@ -111,8 +111,8 @@ def _resolve_wikimedia(url: str) -> Optional[str]:
         if not infos:
             continue
         info = infos[0]
-        # iiurlwidth produces a thumbnail at the requested width — better
-        # for Ken Burns than the full multi-MB original.
+        # iiurlwidth produces a thumbnail at the requested width — cheaper
+        # than fetching the multi-MB original.
         return info.get("thumburl") or info.get("url")
     return None
 
@@ -223,17 +223,13 @@ def _resolve_url(url: str) -> tuple[Optional[str], Optional[str]]:
     return None, "unrecognised host — fetch manually"
 
 
-def _kenburns(still: Path, out_path: Path, *, duration_s: float, aspect: str, fps: int = 30) -> None:
+def _still_to_video(still: Path, out_path: Path, *, duration_s: float, aspect: str, fps: int = 30) -> None:
     """Convert a still image into an N-second 1080x1920 (9:16) or 1920x1080 (16:9)
     mp4. Footage-only; the renderer adds blurred-letterbox at concat time.
 
-    Speed-tuned (2026-05-05): the original zoompan-based ken-burns ran
-    ~2-3 minutes per clip on M2 Max (zoompan on a looped still is
-    pathologically slow inside libavfilter). This version uses `-tune
-    stillimage` + a single scale+pad pass — runs in ~0.5-2s per clip.
-    Trade-off: no on-clip pan/zoom motion. For a 25-min footage-only
-    decoder with 5-22s cuts, the cut tempo provides enough motion;
-    intra-clip Ken Burns animation is a follow-up engineering item."""
+    Uses `-tune stillimage` + a single scale+pad pass — runs in ~0.5-2s
+    per clip. No on-clip motion. For a 25-min footage-only decoder with
+    5-22s cuts, the cut tempo provides enough motion."""
     out_w, out_h = ASPECT_DIMS[aspect]
     # Scale to fit output aspect (preserve aspect ratio, pad with black).
     vf = (
@@ -261,7 +257,7 @@ def _entries_from_shotlist(shotlist: dict) -> tuple[list[dict], str]:
 
 
 def prep_shotlist(channel: str, slug: str, *, force: bool = False) -> PrepResult:
-    """Fetch every source_url + Ken Burns convert every still_ken_burns. Idempotent."""
+    """Fetch every source_url + convert every still_image entry to mp4. Idempotent."""
     chan_dir = REPO_ROOT / "data" / channel
     shotlist_path = chan_dir / "shotlist" / f"{slug}.json"
     if not shotlist_path.exists():
@@ -309,16 +305,16 @@ def prep_shotlist(channel: str, slug: str, *, force: bool = False) -> PrepResult
             continue
 
         try:
-            if kind == "still_ken_burns":
-                # Download still → cache, then Ken-Burns → dest.
+            if kind == "still_image":
+                # Download still → cache, then convert to mp4 → dest.
                 still_ext = Path(urllib.parse.urlparse(resolved).path).suffix or ".jpg"
                 still_path = cache_dir / f"{src_name}.still{still_ext}"
                 if not still_path.exists():
                     print(f"[prep] {i+1}/{len(entries)}  fetch still  {src_name}")
                     _http_get(resolved, still_path, expect_kind="image")
                 duration = max(1.0, out_s - in_s)
-                print(f"[prep] {i+1}/{len(entries)}  ken-burns  {src_name}  {duration:.1f}s {aspect}")
-                _kenburns(still_path, dest, duration_s=duration, aspect=aspect)
+                print(f"[prep] {i+1}/{len(entries)}  still→mp4  {src_name}  {duration:.1f}s {aspect}")
+                _still_to_video(still_path, dest, duration_s=duration, aspect=aspect)
             else:
                 # Direct download.
                 print(f"[prep] {i+1}/{len(entries)}  fetch video  {src_name}")

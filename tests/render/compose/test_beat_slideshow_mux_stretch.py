@@ -7,11 +7,11 @@ frame for the overrun. On render-41f77152 this would have meant 14s
 of static beat_012.png after the 27s slideshow ended — viewers register
 that as a frozen-frame bug ("the video stopped but the audio kept
 going"). Post-fix the mux uses ``setpts=PTS*factor`` to smoothly
-time-stretch the slideshow to the audio duration, so Ken-Burns motion
-plays continuously through the entire audio (slightly slower, no static
-tail).
+time-stretch the slideshow to the audio duration, so the visual
+plays continuously through the entire audio (slightly slower, no
+static tail).
 
-Why this matters even after the ``image_to_kenburns_clip`` frame-cap
+Why this matters even after the ``image_to_static_clip`` frame-cap
 fix in compose.py: that fix made each beat clip the right duration,
 but the SLIDESHOW total is still ``13 × per_beat`` which doesn't
 necessarily match the post-ASR audio duration. The two fixes work

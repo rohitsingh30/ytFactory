@@ -219,7 +219,7 @@ beat-aligned source URLs:
       "source_class": "wikimedia",
       "attribution": "© Royal Astronomical Society / Wikimedia Commons (PD)",
       "match_text": "On the morning of May 29, 1919, on the island of Príncipe...",
-      "ken_burns": {"start": [0.5, 0.5, 1.0], "end": [0.5, 0.5, 1.18]}
+      "zoom": {"start": [0.5, 0.5, 1.0], "end": [0.5, 0.5, 1.18]}
     },
     ...
   ],
@@ -410,7 +410,7 @@ What it does, automatically, per shotlist entry:
 - Resolves `images.nasa.gov/details/<id>` → highest-res asset via NASA images-api.
 - Resolves `archive.org/details/<id>` → mp4 via `archive.org/metadata/<id>`.
 - Direct `.mp4`/`.jpg`/`.png`/`.webp` URLs → urllib download.
-- For `source_type: still_ken_burns` entries: ffmpeg zoompan (1.00→1.18)
+- For `source_type: still_image` entries: ffmpeg zoompan (1.00→1.18)
   to produce an N-second mp4 of the right aspect (1920×1080 long-form,
   1080×1920 Short).
 
@@ -435,7 +435,7 @@ Both renderers exist and are channel-parametric. NO new code.
 caffeinate -dimsu .venv/bin/python -u historyrecapped/scripts/render_long_form.py \
     --channel cosmosdecoded --slug eddington-1919-eclipse
 
-# Shorts (9:16, 50-60s) — letterboxes still_ken_burns/16:9 windows to 9:16
+# Shorts (9:16, 50-60s) — letterboxes still_image/16:9 windows to 9:16
 .venv/bin/python -u historyrecapped/scripts/render_footage_only.py \
     --channel cosmosdecoded --slug eddington-1919-eclipse-short
 ```

@@ -13,7 +13,7 @@ Modes:
                        as one ffmpeg invocation with -filter_complex.
 * ``assemble-clips`` — multiple mp4s, assembled per the EDL shot list.
                        Each shot is trim+filter, then concat+xfade.
-* ``assemble-stills``— image sequence with Ken Burns + crossfade. Each
+* ``assemble-stills``— image sequence with slow zoom + crossfade. Each
                        shot is image2pipe → loop → zoompan → scale,
                        then concat+xfade. Audio is silent unless
                        ``audio.music`` is set.

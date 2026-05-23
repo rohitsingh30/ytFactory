@@ -19,8 +19,9 @@ spot for narrated Shorts (research/2026-05 — see
 docs/panel_pacing_research_2026-05.md: 7-10 PPM body / 25 PPM hook
 for short-form storytime). The cadence is shorter than long-form's
 ~25 s/panel because Shorts viewers swipe; long-form viewers stay.
-Both formats now run static stills with hard cuts (no Ken Burns)
-since 2026-05-23.
+Both formats run static stills with hard cuts (no on-clip motion,
+no crossfade) on the long-form path; Shorts use a per-image punch-in
++ slow-drift zoom in pipeline/compose.py.
 """
 
 from __future__ import annotations

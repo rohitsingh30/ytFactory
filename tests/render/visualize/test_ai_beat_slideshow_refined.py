@@ -1,7 +1,8 @@
 """Tests for the refined-prompt integration in
 ``pipeline.render.visualize.ai_beat_slideshow``.
 
-Added 2026-05-14 alongside the FLUX.2 [klein] prompt-refiner pre-step.
+Added 2026-05-14 alongside the prompt-refiner pre-step (originally
+FLUX.2 [klein]; rewritten 2026-05-23 for Z-Image-Turbo).
 Exercises:
 
 * :func:`_load_prompts_json` — best-effort prompts.json loading that

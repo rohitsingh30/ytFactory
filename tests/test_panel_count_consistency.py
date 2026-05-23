@@ -25,8 +25,6 @@ This module pins:
    panels when present and falls back to per-section otherwise.
 5. Channel YAML's ``long_form.panel_max_count`` is the cap that
    ``_aggregate`` enforces (not the legacy hardcoded 60).
-6. The Ken-Burns / xfade kwargs on ``build_image_panels_video`` are
-   accepted but ignored — back-compat only.
 """
 
 from __future__ import annotations
@@ -296,35 +294,6 @@ class LongformPanelsResolveTest(unittest.TestCase):
         spec.extra["authored_long_form_panels"] = []
         out = self.plugin._panels_from_timeline(self.timeline, spec)
         assert len(out) == 2  # per-section
-
-
-# ---------------------------------------------------------------------------
-# 5. Ken-Burns / xfade kwargs are accepted but ignored
-# ---------------------------------------------------------------------------
-
-
-class KenBurnsKwargsBackCompatTest(unittest.TestCase):
-    def test_build_image_panels_video_accepts_legacy_kwargs(self):
-        """Old call sites pass crossfade_s / zoom_factor — must not raise.
-        2026-05-23: the kwargs are silently ignored (back-compat only).
-        """
-        from pipeline.render.shared import long_form_lib
-        # We're not actually calling it (would need real images / ffmpeg);
-        # we just inspect the signature.
-        import inspect
-        sig = inspect.signature(long_form_lib.build_image_panels_video)
-        assert "crossfade_s" in sig.parameters
-        assert "zoom_factor" in sig.parameters
-
-    def test_assemble_panel_kenburns_alias_still_resolves(self):
-        """Tests / external callers that import the old symbol still work."""
-        from pipeline.render.shared import long_form_lib
-        assert hasattr(long_form_lib, "_assemble_panel_kenburns")
-        assert hasattr(long_form_lib, "_assemble_panel_static")
-
-    def test_image_to_static_clip_alias_exists(self):
-        from pipeline import compose
-        assert compose.image_to_static_clip is compose.image_to_kenburns_clip
 
 
 if __name__ == "__main__":

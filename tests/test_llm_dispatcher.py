@@ -161,8 +161,9 @@ class TierMappingTest(unittest.TestCase):
 
 
 class PromptRefineStageTest(unittest.TestCase):
-    """The prompt_refine stage was added 2026-05-14 for the FLUX.2 [klein]
-    DALL-E 3-style refiner (see pipeline/images/prompt_refiner.py).
+    """The prompt_refine stage was added 2026-05-14 for the DALL-E 3-style
+    refiner (originally FLUX.2 [klein]; rewritten 2026-05-23 for
+    Z-Image-Turbo — see pipeline/images/prompt_refiner.py).
 
     Pin its dispatcher defaults so future budget / model retuning doesn't
     silently break the cheap-tier optimisation that gives the refiner its

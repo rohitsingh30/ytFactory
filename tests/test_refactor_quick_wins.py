@@ -189,7 +189,7 @@ class Libx264ThreadsCapWiringTests(unittest.TestCase):
     def test_footage_only_silent_video_jobs_pass_threads_3(self):
         from pipeline.render.shared import footage_only_lib as footage_only
         src = self._read(footage_only)
-        # _build_silent_video has 3 job variants (image ken-burns,
+        # _build_silent_video has 3 job variants (image still,
         # passthrough scale, letterbox). All run under run_parallel.
         self.assertGreaterEqual(
             src.count('"-threads", "3"'), 3,

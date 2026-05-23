@@ -1,8 +1,10 @@
 """Tests for the refined-prompt mode of
 ``pipeline.images.images.build_full_prompt``.
 
-Added 2026-05-14 alongside the FLUX.2 [klein] DALL-E 3 prompt-refiner
-pre-step. The refiner emits structured fields
+Added 2026-05-14 alongside the prompt-refiner pre-step (originally
+FLUX.2 [klein] DALL-E 3-style; rewritten 2026-05-23 for Z-Image-Turbo,
+see pipeline/images/prompt_refiner.py:80 REFINER_VERSION='v2-zturbo').
+The refiner emits structured fields
 ``{refined_visual, refined_scene, style_block}`` per beat;
 ``build_full_prompt`` accepts them as kwargs and assembles a prompt that
 preserves the post-2026-05-14-audit invariants (era_anchor + character

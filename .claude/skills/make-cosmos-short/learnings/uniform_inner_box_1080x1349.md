@@ -1,13 +1,13 @@
 ---
 name: Uniform 1080x1349 inner box for 9:16 stills — cover-crop instead of fit-with-padding
-description: pipeline/cosmos_footage_prep.py::_kenburns used to fit-with-padding so portraits filled ~70% of frame height while landscapes filled ~32%. Photo-to-photo size jumps felt jarring (LIGO short v4 user crit "when barry photo came it was shown large, it should be consistent"). Fix: cover-crop every 9:16 source to a fixed 1080x1349 (4:5) inner box, then letterbox to 1080x1920 outer. Trade-off: landscapes lose left/right edges to the crop.
+description: pipeline/cosmos_footage_prep.py::_still_to_video used to fit-with-padding so portraits filled ~70% of frame height while landscapes filled ~32%. Photo-to-photo size jumps felt jarring (LIGO short v4 user crit "when barry photo came it was shown large, it should be consistent"). Fix: cover-crop every 9:16 source to a fixed 1080x1349 (4:5) inner box, then letterbox to 1080x1920 outer. Trade-off: landscapes lose left/right edges to the crop.
 type: feedback
 ---
 
 # Uniform 1080x1349 inner box for 9:16 stills
 
 **Rule:** every 9:16 still produced by
-`pipeline/cosmos_footage_prep.py::_kenburns` cover-crops to a fixed
+`pipeline/cosmos_footage_prep.py::_still_to_video` cover-crops to a fixed
 **1080x1349 (4:5)** inner box, then letterboxes to 1080x1920 outer.
 Eliminates the visible-image-height inconsistency between portrait
 and landscape sources.
@@ -22,7 +22,7 @@ consistent width and height of the actual image we are going to keep"*.
 
 **How to apply (shipped 2026-05-08):**
 
-In `pipeline/cosmos_footage_prep.py::_kenburns`, the 9:16 path now
+In `pipeline/cosmos_footage_prep.py::_still_to_video`, the 9:16 path now
 uses cover-crop to a uniform 1080x1349 inner box:
 
 ```python

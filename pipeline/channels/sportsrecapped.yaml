@@ -46,8 +46,9 @@ tts_voice: pipeline/voice_refs/sarah.wav
 tts_ref_text: "Anthropic just plugged Claude directly into Photoshop, Blender, and Ableton. They're called Connectors. Nine of them, shipped together, available on every Claude plan today."
 tts_speed: 0.98
 
-# Visuals — static-image-per-beat slideshow path (Ken Burns zoom in
-# compose). Z-Image-Turbo 6B via mflux, same provider as today_in_history.
+# Visuals — static-image-per-beat slideshow path with a punch-in +
+# slow-drift zoom in compose. Z-Image-Turbo 6B via mflux, same provider
+# as today_in_history.
 # DO NOT switch to motion_provider here — the channel design is static
 # cartoon imagery between footage cuts, and the AnimateDiff path was
 # explicitly rejected for this channel.

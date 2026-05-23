@@ -108,7 +108,7 @@ def _populate_authored_long_form_panels(
     plugin iterated the per-section ``timeline`` and emitted ONE panel
     per timeline segment, ignoring the LLM-authored ``script.panels[]``
     entirely. For a 30-min long-form that meant 10 panels @ ~125s
-    Ken-Burns each — the headline panel-count bug. The plugin now
+    each — the headline panel-count bug. The plugin now
     reads this key when present and falls back to per-section
     behavior only when it's empty/missing.
 

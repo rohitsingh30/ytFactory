@@ -139,9 +139,9 @@ OUTPUT — return ONE JSON object with EXACTLY these keys:
                     panel cues. Produce EXACTLY {panel_count_target}
                     panel_briefs TOTAL across the whole video
                     (one image per ~{panel_seconds_target} seconds of
-                    narration — empirically tuned for Ken-Burns
-                    animated-stills retention; see
-                    docs/panel_pacing_research_2026-05.md). Distribute
+                    narration — empirically tuned for animated-stills
+                    retention; see docs/panel_pacing_research_2026-05.md).
+                    Distribute
                     them roughly evenly across sections — aim for
                     {panel_min_per_section}+ panels per section so no
                     section sits on one image.
@@ -464,8 +464,8 @@ def _planned_sections_and_panels(
 
     Panel cadence: reads ``channel_cfg.long_form.panel_seconds_target``
     (default 25s — one panel per ~25 s of narration, ≈2.4 PPM). Tuned
-    empirically against Ken-Burns animated-stills retention research
-    (see docs/panel_pacing_research_2026-05.md). Previously hardcoded
+    empirically against animated-stills retention research (see
+    docs/panel_pacing_research_2026-05.md). Previously hardcoded
     at 7s, which over-requested 257 panels for a 30-min long-form;
     the LLM ignored that and emitted ~25, the renderer dropped that
     to 10 (one per section) — see /Users/rohit/.copilot/session-state/

@@ -271,7 +271,7 @@ class VisualTrack:
     - Avoids costly concat-mux passes in the engine (a single track
       means the FinalMux just ``-i visuals -i audio -i overlays...``,
       not ``concat 30 clips together first``).
-    - Lets a producer emit a Ken Burns "pan across one image" that
+    - Lets a producer emit a single zoom-and-pan over one image that
       spans 5 segments, or an entirely-different visual that ignores
       segment boundaries (e.g., footage_filler cycling b-roll
       regardless of beats).

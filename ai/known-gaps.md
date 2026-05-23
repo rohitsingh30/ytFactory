@@ -72,13 +72,27 @@ These are cleanup/documentation items with minimal impact.
 
 ---
 
+## Content-Quality Gaps (producer-side; surfaced via /critique-video → /critique-to-bugs)
+
+These don't produce silent-bad-ship infra failures; they produce shippable-looking mp4s with low retention/engagement quality. Surfaced through critic loops, not audit docs.
+
+| # | Title | Source | Description | Blast Radius | Cost | Code Anchor |
+|---|---|---|---|---|---|---|
+| 31 | `captions_layout` global default is CENTER_WORD_BY_WORD; wrong for prose-narrative channels | data/bug-reports/2026-05-23.md#1 | `pipeline/render/spec.py:448` defaults `captions_layout = CENTER_WORD_BY_WORD` and no prose-channel YAML overrides it. Word-by-word makes the punchline phrase unreadable in muted-feed scrolling — a muted viewer sees one yellow word at a time and can't reconstruct the sentence. Confirmed on TIFU short 24c5887a; ~all MyStoriesAnimated shorts ship with this default. | content-quality | small | pipeline/render/spec.py:448; pipeline/channels/mystoriesanimated.yaml (no override) |
+| 32 | No programmatic validator for composition variety; prompt rule #10 exists only as text | data/bug-reports/2026-05-23.md#2 | `pipeline/llm/prompts.py:288-301` instructs the LLM to vary shot size/angle across rolling 3-beat windows. No validator in `prompt_lint.py` enforces this. Critic 2026-05-23 (tifu 24c5887a) saw 12 distinct compositions all rendered MS at eye-level for 46s. Highest-leverage content fix — affects every image_panels channel (5+ channels, all shorts and all long-form panel sequences). | content-quality | medium | pipeline/llm/prompt_lint.py::check_prompts (validator missing); pipeline/llm/prompts.py:805 (_SHOT_TYPE_LEADS — reuse for token parsing) |
+| 33 | `opening_image_directives` uses generic example tokens; hook beat passes gate without depicting story premise | data/bug-reports/2026-05-23.md#4 | `pipeline/llm/prompts.py:565-573` formats `opening_block` from channel-level `example_tokens` (e.g. "dorm room, phone in hand, coffee mug"). LLM picks any 2 generic nouns and satisfies the count. Hook never visualizes the title's actual premise (TIFU 24c5887a: title is about music + bedroom + girlfriend; frame 0 is generic sad-girl-waving). Fails Hoyos thumbnail test + MrBeast clickbait-match on every render. | content-quality | medium | pipeline/llm/prompts.py:565-573 (opening_block); cloud/render-worker-v2/entrypoint.py:1397 (_author_prompts_for_engine); pipeline/llm/prompt_lint.py (validator missing) |
+| 34 | Beat schema has no `is_climax` / `is_punchline` flag; punchline beat gets same shot-size guidance as setup | data/bug-reports/2026-05-23.md#5 | `pipeline/llm/script_schema.py::Beat` has no flag for the narrative peak. `_author_prompts_for_engine` treats every beat the same. TIFU 24c5887a punchline beat (t_33-36, girlfriend laughing) got generic MLS instead of ECU/reaction-shot. Affects every story-driven channel. | content-quality | medium | pipeline/llm/script_schema.py::Beat; pipeline/llm/rewrite.py (rewrite prompt); pipeline/llm/prompts.py (climax-aware prompt branch); pipeline/llm/script_check.py (_validate_climax_present) |
+
+---
+
 ## Summary statistics
 
-- **Total gaps:** 30 items
+- **Total gaps:** 34 items
 - **Silent-bad-ship:** 8 (highest severity)
 - **Wasted-compute:** 8
 - **Dev-friction:** 7
 - **Cosmetic:** 7
+- **Content-quality:** 4 (new tier, 2026-05-23)
 
 **Top-3 silent-bad-ship by impact:**
 1. **#1** — Short-form rewrite has no upstream length gate (post-cleanup writeback removed the check)

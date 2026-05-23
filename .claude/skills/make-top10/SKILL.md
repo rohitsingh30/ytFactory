@@ -356,8 +356,9 @@ forbidden — its presence blocks emit (gate G11).
 - The watermark scan (G16) catches what the domain check misses
 
 The `kind` field drives renderer behaviour: `doc_cutting` + `photo_pan`
-get a Ken Burns motion path; `archival` + `news_clip` get the blurred-
-letterbox + warm-firelight grade; `stock` passes through unmolested.
+get a slow zoom/pan motion path; `archival` + `news_clip` get the
+blurred-letterbox + warm-firelight grade; `stock` passes through
+unmolested.
 
 **Per-rank window minimums** (G14): ≥3 windows per rank (intro can have
 ≥2, closer ≥1, mid-bridge ≥1). A rank with 1 window will go static for

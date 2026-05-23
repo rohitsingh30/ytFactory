@@ -1,10 +1,9 @@
 """ytFactory Image — Z-Image-Turbo 6B server (Cloud Run GPU L4).
 
-Apache 2.0. Parity / risk-insurance lane next to FLUX.2 klein 4B
-(2026-05-07 research, see docs/research/image_gen_2026.md). Same
-checkpoint we ship today via mflux on the laptop, so the
-`force_positive` prompting trick + style range transfer byte-stably
-between the two paths.
+Apache 2.0. Sole production image-gen lane (the prior FLUX.2 klein 4B
+canary lane, 2026-05-07 research per docs/research/image_gen_2026.md,
+was retired 2026-05-23 — Z-Image-Turbo won on prompt adherence,
+positive-construction discipline, and per-render token economy).
 
 Loads weights from `gs://ytfactory-prod-v3-model-weights/flat/Tongyi-MAI/
 Z-Image-Turbo/` mounted at `/models/hf/flat/...` via GCS Fuse.

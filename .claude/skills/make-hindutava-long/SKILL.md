@@ -1,6 +1,6 @@
 ---
 name: make-hindutava-long
-description: Author a 10-15 min animated Hindi mythology long-form for HindutavaAnimated — Mahabharat / Ramayan / Puraan / Krishna-leela developed across 8-12 chapters with proper setup, character development, escalation, climax, and lesson (vs the staccato Shorts format). Amar Chitra Katha AI panels via Cloud Run FLUX.2 klein with Ken-Burns motion, IndicF5 cloud TTS with hindi-female-iitm-anchor voice-clone, sentence-level Devanagari captions, soft tabla/sitar bed, two embedded support asks. Produces hindutavaanimated/narrations/<slug>.json + chapters/<slug>.json + optional cast/<slug>.json, then hands off to historyrecapped/scripts/render_long_form.py --channel hindutavaanimated --aspect 16:9. Use when the user says "make me a hindutava long-form", "10 min Krishna leela video", "long-form Mahabharat", "animated mythology long-form", or names a Mahabharat/Ramayan/Puraan episode and wants it "long-form". For 50-60s Shorts use /make-hindutava-short. For 50-70 min footage-only kathaa use /make-katha.
+description: Author a 10-15 min animated Hindi mythology long-form for HindutavaAnimated — Mahabharat / Ramayan / Puraan / Krishna-leela developed across 8-12 chapters with proper setup, character development, escalation, climax, and lesson (vs the staccato Shorts format). Amar Chitra Katha AI panels via Cloud Run FLUX.2 klein (static stills + hard cuts), IndicF5 cloud TTS with hindi-female-iitm-anchor voice-clone, sentence-level Devanagari captions, soft tabla/sitar bed, two embedded support asks. Produces hindutavaanimated/narrations/<slug>.json + chapters/<slug>.json + optional cast/<slug>.json, then hands off to historyrecapped/scripts/render_long_form.py --channel hindutavaanimated --aspect 16:9. Use when the user says "make me a hindutava long-form", "10 min Krishna leela video", "long-form Mahabharat", "animated mythology long-form", or names a Mahabharat/Ramayan/Puraan episode and wants it "long-form". For 50-60s Shorts use /make-hindutava-short. For 50-70 min footage-only kathaa use /make-katha.
 ---
 
 # /make-hindutava-long — 10-15 min animated Hindi mythology long-form for HindutavaAnimated
@@ -23,8 +23,8 @@ climax, aftermath, and lesson** — the way Amar Chitra Katha
 narrates a chapter end-to-end.
 
 You wear three hats: **Mythology Researcher → Kathaa-Vyaas (long-form
-writer) → Visual Director (panel notes for AI image gen with Ken-Burns
-motion)**.
+writer) → Visual Director (panel notes for AI image gen, static stills
+with hard cuts)**.
 
 The output is two or three JSON files —
 `hindutavaanimated/narrations/<slug>.json` (always),
@@ -252,8 +252,9 @@ For each panel, author:
   `dialogue` | `action` | `escalation` | `centerpiece` | `aftermath`
   | `chapter_title` | `lesson` | `cta` | `blessing`
 - `shot_size` — `wide` | `medium` | `close` | `extreme_close` —
-  drives Ken-Burns motion (wide → slow zoom-in, close → slight
-  pan, extreme-close → static or breath-pulse)
+  advisory metadata (renderer uses static stills + hard cuts; the
+  shot_size is consumed only by the LLM panel-author to inform
+  composition).
 - `notes` — Amar Chitra Katha panel description (visual content
   only, no quoted phrases, no caption-region references, no
   Devanagari)
@@ -265,7 +266,7 @@ visible. Vary the framing (left-leading / centered / right-leading).
 
 **Centerpieces — 2-3 per long-form** (vs 1 per Short). Mark them
 with `scene_kind: "centerpiece"` AND `notes` containing "ICONIC
-FRAME". These get extra hold time + larger Ken-Burns motion budget.
+FRAME". These get extra hold time on the cut.
 
 **Diffusion safety rules** (literal from
 `hindutavaanimated/learnings/diffusion_quoted_phrase_leak.md` and
@@ -361,8 +362,8 @@ set -a && . .env && set +a && \
 ```
 
 The renderer reads `hindutavaanimated/config.yaml:long_form_animated`
-for output_resolution, caption_mode, ken_burns flag, music_bed_db,
-closer_hold_s. It will:
+for output_resolution, caption_mode, music_bed_db, closer_hold_s.
+It will:
 
 1. **Load** narration + chapters + cast from
    `hindutavaanimated/{narrations,chapters,cast}/<slug>.json`.
@@ -380,10 +381,9 @@ closer_hold_s. It will:
    style prefix auto-prepended); falls back to local mflux on cloud
    failure. Cast tokens + appearance_lock from `cast/<slug>.json`
    inlined per panel. Per-render circuit breaker on cloud failure.
-6. **Apply Ken-Burns motion** per panel via existing
-   `pipeline/footage.py` zoompan helpers. `wide` → slow zoom-in,
-   `medium` → slight pan, `close` → static-with-breath-pulse,
-   `extreme_close` → static.
+6. **Hold each panel as a static still** with hard cuts between
+   panels — no zoompan, no crossfade. `shot_size` advises the
+   panel-author's composition but doesn't drive motion.
 7. **Render sentence-level Devanagari captions** via
    `pipeline.captions` in `caption_mode: sentence`. Each caption
    shows one full Hindi sentence at a time, yellow italic on
@@ -565,7 +565,7 @@ length bands into one rewriter.
 same long-form duration ballpark — but **footage strategy is the
 incompatible primitive**. `/make-katha` is 50-70 min footage-only
 (Wikimedia / archive.org / CC0 stock photography of temples, devotional
-iconography, Ken-Burns on still icons), NO AI image gen. The kathaa
+iconography, slow zoom/pan on still icons), NO AI image gen. The kathaa
 aesthetic is meditative-calming with a slow lecturing voice for sleep-
 or-meditation viewing. `/make-hindutava-long` is 10-15 min animated
 Amar Chitra Katha AI panels with a dramatic-storytelling voice for
@@ -592,7 +592,7 @@ learnings_consulted:
   - hindutavaanimated/config.yaml
   - historyrecapped/learnings/long_form_support_asks.md (2-asks cadence)
   - historyrecapped/learnings/long_form_captions.md (sentence-level captions)
-  - historyrecapped/learnings/long_form_visual_signature.md (Ken-Burns motion)
+  - historyrecapped/learnings/long_form_visual_signature.md (visual signature)
   - historyrecapped/learnings/long_form_trim_aspect_short_circuit.md
   - docs/voice_catalog.md (named-voice catalog)
   - docs/av_sync_invariants.md (pipeline owns A↔V sync)

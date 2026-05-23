@@ -170,6 +170,12 @@ export interface Job {
   // Slice 1 — resolved RenderSpec. Lets the UI show "the system
   // interpreted your inputs as kind=long_form, aspect=16:9".
   render_spec?: Record<string, unknown> | null;
+  // B4 — retry chain linkage. ``retry_of`` is set on a doc that was
+  // spawned by ``POST /api/jobs/<old>/retry``; ``retried_as`` is set on
+  // the original ``<old>`` once the retry doc is created. Used by the
+  // job-detail page to render "Retried from / Retried as" links.
+  retry_of?: string | null;
+  retried_as?: string | null;
 }
 
 export interface JobListResponse {

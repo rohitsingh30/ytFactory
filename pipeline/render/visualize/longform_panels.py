@@ -29,11 +29,10 @@ from pipeline.render.shared.ffmpeg_helpers import probe_duration
 class LongformPanels:
     """One Flux panel per ~25 s of narration, static held + hard cuts.
 
-    2026-05-23: Ken-Burns / zoompan / xfade REMOVED (user directive).
     Static stills only; the panel-count cadence in
-    ``_planned_sections_and_panels`` was bumped from 7s/panel (target
-    257 panels for 30 min — never honored) to 25s/panel (target ~72)
-    so the lack of motion doesn't dwell too long per still.
+    ``_planned_sections_and_panels`` is 25s/panel (target ~72 for a
+    30-min long-form) so each still doesn't dwell long enough to
+    register as a frozen frame.
     """
 
     def produce(
@@ -101,9 +100,9 @@ class LongformPanels:
         # Pre-fix the asr_anchors plugin could emit overlapping
         # segments (each ``end_s = total_s``); ``_panels_from_timeline``
         # then derived ``hold_s = end_s - start_s`` which produced
-        # 1415s per panel for a 1500s render — kenburns then
-        # rendered 42,456 ffmpeg frames for ONE panel before the
-        # next started, blowing through the cloud-run JOB wall.
+        # 1415s per panel for a 1500s render — ffmpeg then rendered
+        # 42,456 frames for ONE panel before the next started, blowing
+        # through the cloud-run JOB wall.
         # asr_anchors's 2-pass refactor (same v16) is the root-cause
         # fix; this call is the belt-and-braces net so any future
         # TimelineBuilder regression cannot reproduce the disaster.
@@ -189,9 +188,9 @@ class LongformPanels:
         Notes on the older multi-line backstory below (kept for grep
         when the next regression hits):
 
-        2026-05-15 — include hold_s so _assemble_panel_kenburns can
+        2026-05-15 — include hold_s so _assemble_panel_static can
         size each clip to the timeline segment. Pre-fix this only
-        passed scene + start_s/end_s; the kenburns helper read
+        passed scene + start_s/end_s; the assembly helper read
         panel.get("hold_s", 20) which defaulted to 20s per panel.
 
         2026-05-15 (P2) — derive a non-empty scene fallback when

@@ -107,11 +107,11 @@ def _resolve_channel_yaml(channel: str) -> Optional[Path]:
 def _providers_for_channel(channel: Optional[str]) -> tuple[set[str], set[str]]:
     """Return (tts_targets, image_targets) for the warm scripts."""
     if not channel:
-        return ({"chatterbox"}, {"flux"})  # default English Shorts pair
+        return ({"chatterbox"}, {"zimage"})  # default English Shorts pair
     yaml_path = _resolve_channel_yaml(channel)
     if not yaml_path:
         logger.info("warm: no yaml for channel=%s, using defaults", channel)
-        return ({"chatterbox"}, {"flux"})
+        return ({"chatterbox"}, {"zimage"})
 
     cfg = _read_yaml(yaml_path)
     tts_targets: set[str] = set()
@@ -176,7 +176,7 @@ def warm_for_channel(
 
     Args:
         channel: Channel slug or path to channel.yaml. ``None`` uses
-            the default English Shorts pair (chatterbox + flux).
+            the default English Shorts pair (chatterbox + zimage).
         timeout_s: Per-script timeout (each warm script is a /readyz
             probe with retries; usually completes in < 30s if warm,
             up to ~7 min if cold).
@@ -198,8 +198,8 @@ def warm_for_channel(
         for t in tts_targets
     )
     has_any_img_url = bool(
-        (image_targets and "flux" in image_targets and os.environ.get("CLOUDRUN_IMAGE_FLUX2_KLEIN_URL"))
-        or (image_targets and "zimage" in image_targets and os.environ.get("CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL"))
+        image_targets and "zimage" in image_targets
+        and os.environ.get("CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL")
     )
     has_editing_url = bool(
         include_editing and os.environ.get("CLOUDRUN_EDITING_AGENT_URL")

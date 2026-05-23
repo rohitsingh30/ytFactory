@@ -103,15 +103,14 @@ class BeatSlideshowMux:
         # overrun (cleaner than a black hold, but still a static tail).
         #
         # 2026-05-18 (round 7) — replaced tpad-clone with setpts stretch.
-        # After the image_to_kenburns_clip frame-cap fix in compose.py,
+        # After the image_to_static_clip frame-cap fix in compose.py,
         # the AI beat slideshow is now exactly ``sum(beat_durations) +
         # XFADE_per_beat`` ≈ 27s for a 13-preliminary-beat AITA Short.
         # Audio is 41s. tpad-clone would freeze 14s of the last image
         # (beat_012 static tail) — viewer registers it as a frozen-frame
         # bug. setpts smoothly stretches the slideshow PTS so all 13
-        # Ken-Burns'd beats spread across the entire audio duration. Ken
-        # Burns motion plays ~1.5× slower but stays continuous; no
-        # frozen tail.
+        # beats spread across the entire audio duration. The per-image
+        # zoom plays ~1.5× slower but stays continuous; no frozen tail.
         #
         # When visual_dur >= audio.duration_s (longer authored scripts
         # or post-ASR re-stitch), stretch_factor=1.0 and setpts is a
@@ -120,7 +119,7 @@ class BeatSlideshowMux:
         # 2026-05-17 ASS subtitle burn — after the scale/fps/setpts
         # chain, append ``subtitles=<path>`` for each ASS overlay so
         # libass renders the word-by-word captions in a single pass on
-        # top of all image overlays + Ken Burns motion. Up to thousands
+        # top of all image overlays + per-image zoom. Up to thousands
         # of events; no filter_complex blowup.
         w, h = spec.output_resolution
         visual_dur = max(0.001, visuals.duration_s)

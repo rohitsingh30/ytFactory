@@ -389,8 +389,8 @@ JSONs land on disk:
 
 What it does (same as /make-cosmos-long Section 7) — resolves Wikimedia
 File: pages, NASA images.nasa.gov assets, archive.org metadata,
-direct .mp4/.jpg/.png/.webp URLs; runs ffmpeg zoompan for `still_ken_burns`
-entries to produce 1080x1920 9:16 mp4s. Returns structured report:
+direct .mp4/.jpg/.png/.webp URLs; converts `still_image` entries
+to 1080x1920 9:16 mp4s via ffmpeg. Returns structured report:
 `✓ fetched`, `✓ skipped`, `⚠ manual fallback`, `✗ errors`. Manual
 fallback is expected for paywalled hosts; surface the list to the
 user and walk them through saving each asset.

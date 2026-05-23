@@ -10,8 +10,8 @@ existing critic-axes schema (see :mod:`pipeline.llm.critic_axes`):
   beats).
 * ``temporal_flickering`` — frame-to-frame mean-squared error in static
   regions. Catches **frozen frames** (compose-stage stall holds the
-  last image for 3 s) AND **jittery transitions** (the Ken Burns plugin
-  jumping between unrelated subjects every 0.4 s).
+  last image for 3 s) AND **jittery transitions** (the per-image
+  zoom plugin jumping between unrelated subjects every 0.4 s).
 * ``imaging_quality`` — MUSIQ image-quality predictor across sampled
   frames. Catches **gibberish on-image text** (FLUX.2 hallucinated
   Devanagari that's actually nonsense glyphs) + low-quality diffusion

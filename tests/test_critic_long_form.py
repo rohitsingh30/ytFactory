@@ -207,9 +207,7 @@ def test_check_panel_holds_passes_at_default():
 
 
 def test_check_panel_holds_hard_fails_above_60s():
-    """C5 — caps raised 2026-05-23 (Ken-Burns removed). 90s exceeds the
-    new 60s hard ceiling and must hard-fail.
-    """
+    """C5 — 90s exceeds the 60s hard ceiling and must hard-fail."""
     panels = [{"scene": "x", "hold_s": 90.0} for _ in range(10)]
     out = critic.check_panel_holds(panels)
     assert len(out) == 1
@@ -314,9 +312,8 @@ def test_validate_long_form_envelope_catches_job_0c05c335_violations():
     The other three CLASS-OF-BUG violations (niche, panel_hold,
     stock_anecdote) still hard-fail as before.
 
-    2026-05-23: ``panel_hold_too_long`` cap raised from 12s to 60s
-    (Ken-Burns removed). Bumped fixture hold_s 30 → 90 so the panel
-    cap still fires.
+    2026-05-23: ``panel_hold_too_long`` cap raised from 12s to 60s.
+    Bumped fixture hold_s 30 → 90 so the panel cap still fires.
     """
     env = {
         "long_form": {

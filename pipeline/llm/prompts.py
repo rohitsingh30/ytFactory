@@ -419,9 +419,10 @@ Hard rules (violations make the rendered Short worse):
     Lighting is the single highest-impact dial on diffusion renders
     after subject placement.
 
-16. POSITIVE-ONLY CONSTRAINTS. Z-Image-Turbo + FLUX.2 [klein] have NO
-    negative-prompt support. Phrase every constraint as PRESENCE, not
-    absence. "no harsh shadows" is silently ignored; "soft falloff" is
+16. POSITIVE-ONLY CONSTRAINTS. Z-Image-Turbo is CFG-distilled at
+    guidance_scale=0 and has NO negative-prompt support at the
+    model level. Phrase every constraint as PRESENCE, not absence.
+    "no harsh shadows" is silently ignored; "soft falloff" is
     rendered. "no clutter" is ignored; "plain wood counter" is rendered.
     Rule 1's banned-tokens list is enforced by post-author lint
     (images.strip_text_bait) — you don't need to write "no text" or
@@ -1424,10 +1425,12 @@ def author_beat_prompts(
         cast_narrator_desc=cast_narrator_desc,
     )
 
-    # Optional refiner pass — FLUX.2 [klein] DALL-E 3 playbook. Behind a
-    # feature flag so the canary lands without surprising production
-    # renders. Pure additive — even if the refiner LLM fails, the
-    # cleaned beats are untouched and the renderer falls back.
+    # Optional refiner pass — Z-Image-Turbo DALL-E 3 playbook (rewritten
+    # 2026-05-23 from the prior FLUX.2 [klein] calibration, see
+    # pipeline/images/prompt_refiner.py:80 REFINER_VERSION='v2-zturbo').
+    # Behind a feature flag so the canary lands without surprising
+    # production renders. Pure additive — even if the refiner LLM fails,
+    # the cleaned beats are untouched and the renderer falls back.
     cleaned = _maybe_refine_prompts(
         cleaned,
         era_anchor_prefix=era_anchor_prefix,

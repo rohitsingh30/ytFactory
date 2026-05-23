@@ -297,9 +297,8 @@ class AnchoredSegmentsAreNonOverlappingTest(unittest.TestCase):
     ``end_s`` defaulted to ``total_s`` and only narrowed if a LATER
     section's anchor was found. With NO later anchors → every segment
     overlapped → ``hold_s = end_s - start_s`` produced massive
-    1400+ s holds for sub-30s sections → ffmpeg kenburns rendered
-    42,456 frames per panel → cloud-run JOB hit its 1-hour wall and
-    was killed.
+    1400+ s holds for sub-30s sections → ffmpeg rendered 42,456 frames
+    per panel → cloud-run JOB hit its 1-hour wall and was killed.
 
     Surfaced by Pompeii long-form (job ba3e7578) on the v15 deploy
     after asr_anchors started successfully populating segment text

@@ -5,14 +5,14 @@ Pre-Slice-3 ``pipeline.compose`` had module-level ``WIDTH=1080``,
 ``HEIGHT=1920``, ``FPS=30`` constants that were threaded into every
 ffmpeg filter chain. That made it impossible for the unified renderer
 to ask compose for a 16:9 1920×1080 long-form mp4 — even after the
-spec said so, compose would emit ``s=1080x1920`` in zoompan and
-``-r 30`` regardless.
+spec said so, compose would emit ``s=1080x1920`` and ``-r 30``
+regardless.
 
 These tests pin the new contract: every public compose function takes
 a ``Resolution`` kwarg and bakes its width/height/fps into the
 emitted ffmpeg command. Tested via the pure-string filter helpers
-(``_kenburns_filter``, ``_clip_filter``) so we don't have to invoke
-ffmpeg in a unit test.
+(``_punch_drift_zoom_filter``, ``_clip_filter``) so we don't have to
+invoke ffmpeg in a unit test.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from pipeline.compose import (
     Resolution,
     _DEFAULT_RES,
     _clip_filter,
-    _kenburns_filter,
+    _punch_drift_zoom_filter,
 )
 
 
@@ -70,37 +70,37 @@ def test_resolution_from_cfg_malformed_falls_back():
 
 
 # ---------------------------------------------------------------------------
-# _kenburns_filter — the central place WIDTH/HEIGHT/FPS leaked
+# _punch_drift_zoom_filter — the central place WIDTH/HEIGHT/FPS leaked
 # ---------------------------------------------------------------------------
 
 
-def test_kenburns_default_emits_shorts_dimensions():
-    f = _kenburns_filter(2.0, beat_index=0)
+def test_zoom_default_emits_shorts_dimensions():
+    f = _punch_drift_zoom_filter(2.0, beat_index=0)
     # Pre-Slice-3 hardcoded "s=1080x1920".
     assert "s=1080x1920" in f
     assert "fps=30" in f
 
 
-def test_kenburns_long_form_emits_landscape_dimensions():
-    f = _kenburns_filter(2.0, beat_index=0, resolution=Resolution.long_form())
+def test_zoom_long_form_emits_landscape_dimensions():
+    f = _punch_drift_zoom_filter(2.0, beat_index=0, resolution=Resolution.long_form())
     assert "s=1920x1080" in f
     assert "fps=30" in f
 
 
-def test_kenburns_custom_fps_threaded_through():
-    f = _kenburns_filter(
+def test_zoom_custom_fps_threaded_through():
+    f = _punch_drift_zoom_filter(
         2.0, beat_index=0, resolution=Resolution(1920, 1080, 24),
     )
     assert "fps=24" in f
 
 
-def test_kenburns_pre_scale_doubles_long_dimension():
-    """The pre-scale before zoompan needs to be ~2× the larger output
+def test_zoom_pre_scale_doubles_long_dimension():
+    """The pre-scale before the zoom needs to be ~2× the larger output
     dim. Pre-Slice-3 it was hardcoded scale=2400:-1 (assumes
     portrait). Now it picks max(w, h) × 2 so landscape gets a 3840-wide
     intermediate instead of being height-truncated."""
-    short_filter = _kenburns_filter(2.0, 0, resolution=Resolution.shorts())
-    long_filter = _kenburns_filter(2.0, 0, resolution=Resolution.long_form())
+    short_filter = _punch_drift_zoom_filter(2.0, 0, resolution=Resolution.shorts())
+    long_filter = _punch_drift_zoom_filter(2.0, 0, resolution=Resolution.long_form())
     # 9:16 → max(1080,1920)*2 = 3840
     assert "scale=3840:-1" in short_filter
     # 16:9 → max(1920,1080)*2 = 3840 (same since long_form is just rotated)

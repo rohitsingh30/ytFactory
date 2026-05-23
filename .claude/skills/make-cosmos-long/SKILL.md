@@ -349,8 +349,8 @@ What it does, automatically, per shotlist entry:
 - Resolves `images.nasa.gov/details/<id>` → highest-res asset via NASA images-api.
 - Resolves `archive.org/details/<id>` → mp4 via `archive.org/metadata/<id>`.
 - Direct `.mp4`/`.jpg`/`.png`/`.webp` URLs → urllib download.
-- For `source_type: still_ken_burns` entries: ffmpeg zoompan (1.00→1.18)
-  to produce an N-second 1920x1080 mp4.
+- For `source_type: still_image` entries: ffmpeg scale+pad to an
+  N-second 1920x1080 mp4 (static still).
 
 It returns a structured report: `✓ fetched`, `✓ skipped`, `⚠ manual fallback`,
 `✗ errors`. **Manual fallback is the expected outcome for paywalled hosts**

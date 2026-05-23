@@ -339,7 +339,7 @@ long_form:
   image_steps: 9         # Z-Image-Turbo spec sweet spot (was 4 — unified 2026-05-23)
   image_width: 1344      # Z-Image-Turbo cap; compose upscales to 1920x1080
   image_height: 768
-  beat_target_s: 20      # 18-22s per panel = slow Ken Burns hold
+  beat_target_s: 20      # 18-22s per panel hold
   beat_max_s: 25
 
   # ---- Long-form upload metadata ------------------------------------------

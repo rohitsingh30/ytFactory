@@ -16,14 +16,14 @@ from pipeline.compose import (
     _caption_window,
     _clip_filter,
     _ffprobe_duration,
-    _kenburns_filter,
+    _punch_drift_zoom_filter,
     _materialise_rank_chips,
     _video_timing,
     _wipe_stale_per_beat_artefacts,
     compose,
     compose_clips,
     compose_hybrid,
-    image_to_kenburns_clip,
+    image_to_static_clip,
     prerender_word_captions,
     wipe_stale_per_beat_artefacts,
 )
@@ -84,20 +84,20 @@ def _fail_ffmpeg_run(cmd, *args, **kwargs):
 # Pure functions
 # ---------------------------------------------------------------------------
 
-class TestKenburnsFitler(unittest.TestCase):
+class TestPunchDriftZoomFilter(unittest.TestCase):
     def test_returns_string(self):
-        s = _kenburns_filter(2.0, 0)
+        s = _punch_drift_zoom_filter(2.0, 0)
         self.assertIsInstance(s, str)
         self.assertIn("zoompan", s)
 
     def test_short_clip(self):
         # Very short clip — frames should be at least 1
-        s = _kenburns_filter(0.01, 0)
+        s = _punch_drift_zoom_filter(0.01, 0)
         self.assertIn("zoompan", s)
 
     def test_beat_index_ignored(self):
-        s1 = _kenburns_filter(2.0, 0)
-        s2 = _kenburns_filter(2.0, 99)
+        s1 = _punch_drift_zoom_filter(2.0, 0)
+        s2 = _punch_drift_zoom_filter(2.0, 99)
         self.assertEqual(s1, s2)
 
 
@@ -364,10 +364,10 @@ class TestComposeFfprobeDuration(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# image_to_kenburns_clip
+# image_to_static_clip
 # ---------------------------------------------------------------------------
 
-class TestImageToKenburnClip(unittest.TestCase):
+class TestImageToStaticClip(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         self.root = Path(self.td.name)
@@ -379,13 +379,13 @@ class TestImageToKenburnClip(unittest.TestCase):
 
     def test_success(self):
         with patch("subprocess.run", side_effect=_fake_ffmpeg_run):
-            result = image_to_kenburns_clip(self.img, 3.0, self.out)
+            result = image_to_static_clip(self.img, 3.0, self.out)
         self.assertEqual(result, self.out)
 
     def test_ffmpeg_failure(self):
         with patch("subprocess.run", side_effect=_fail_ffmpeg_run):
             with self.assertRaises(RuntimeError) as ctx:
-                image_to_kenburns_clip(self.img, 3.0, self.out)
+                image_to_static_clip(self.img, 3.0, self.out)
         self.assertIn("image→clip ffmpeg failed", str(ctx.exception))
 
 

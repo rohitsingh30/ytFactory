@@ -431,8 +431,8 @@ class LongformPanelsAdjustHoldsToNarrationTest(unittest.TestCase):
     Pre-v16, an upstream TimelineBuilder bug (asr_anchors emitted
     overlapping segments — every end_s = total_s) made
     _panels_from_timeline produce 1415s holds for a 1500s render →
-    ffmpeg kenburns rendered 42,456 frames per panel → cloud-run JOB
-    killed at the 1-hour wall.
+    ffmpeg rendered 42,456 frames per panel → cloud-run JOB killed
+    at the 1-hour wall.
 
     The asr_anchors 2-pass refactor is the root-cause fix; THIS test
     pins the belt-and-braces defense so any future TimelineBuilder

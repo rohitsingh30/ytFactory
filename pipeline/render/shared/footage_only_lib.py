@@ -86,17 +86,11 @@ LETTERBOX_FILTER = LETTERBOX_FILTER_9_16
 ASPECT_DIMS: dict[str, tuple[int, int]] = {"9:16": (1080, 1920), "16:9": (1920, 1080)}
 
 
-def _ken_burns_filter(aspect: str, duration_s: float, fps: int = 30) -> str:
+def _blurred_letterbox_filter(aspect: str, duration_s: float, fps: int = 30) -> str:
     """Composite one still image onto a blurred-letterbox background of the
     same image. Used for image-only windows (Wikimedia stills / manuscript
-    scans / museum open-access).
-
-    Speed-tuned 2026-05-05: previously used a `zoompan` motion filter
-    which is pathologically slow on looped stills (a single 10s
-    portrait clip took 30+ minutes to encode at full HD on M2 Max).
-    Replaced with a static composite — no on-clip zoom motion, but the
-    cuts between beats provide enough motion for a ~5-15s/beat cadence,
-    and the cosmosdecoded long-form prep pipeline assumed this anyway."""
+    scans / museum open-access). Static composite — no on-clip motion;
+    beat cuts at ~5-15s cadence carry the visual change."""
     w, h = ASPECT_DIMS[aspect]
     return (
         "[0:v]split=2[bg][fg];"
@@ -429,9 +423,9 @@ def _build_silent_video(channel: str, slug: str, shotlist: dict, scratch: Path) 
 
         if asset_kind == "image":
             duration = max(0.05, out_s - in_s)
-            kb_filter = _ken_burns_filter(aspect, duration)
+            still_filter = _blurred_letterbox_filter(aspect, duration)
 
-            def _job(asset=asset_path, dur=duration, clip=clip_path, idx=i, filt=kb_filter):
+            def _job(asset=asset_path, dur=duration, clip=clip_path, idx=i, filt=still_filter):
                 cmd = [
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                     "-loop", "1", "-framerate", "30", "-t", f"{dur:.3f}",
@@ -443,7 +437,7 @@ def _build_silent_video(channel: str, slug: str, shotlist: dict, scratch: Path) 
                     "-threads", "3",
                     str(clip),
                 ]
-                print(f"[footage] image {idx}/{n_windows-1}: {dur:.1f}s ken-burns → {clip.name}")
+                print(f"[footage] image {idx}/{n_windows-1}: {dur:.1f}s static → {clip.name}")
                 subprocess.run(cmd, check=True)
 
             pending_jobs.append(_job)

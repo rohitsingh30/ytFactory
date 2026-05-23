@@ -336,8 +336,8 @@ def _generate_cloudrun(
     # Append the anti-text suffix to suppress diffusion's natural
     # tendency to render gibberish text inside panels — see
     # ``ANTI_TEXT_SUFFIX`` for the full rationale and per-distilled-model
-    # justification (FLUX.2 klein is guidance-distilled, so a true
-    # negative_prompt has no effect; in-prompt negation does).
+    # justification (Z-Image-Turbo is CFG-distilled at guidance_scale=0,
+    # so a true negative_prompt has no effect; in-prompt negation does).
     payload = {
         "prompt": _append_anti_text_suffix(prompt, model=model),
         "width": width,
@@ -475,7 +475,7 @@ def _local_fallback(
     raise CloudRunUnavailable(
         "local image fallback was removed 2026-05-09 (laptop nuclear "
         "cleanup); cloud is the only image-gen path. Set "
-        "CLOUDRUN_IMAGE_FLUX2_KLEIN_URL to a healthy service or wait "
+        "CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL to a healthy service or wait "
         "for the cloud outage to clear."
     )
 

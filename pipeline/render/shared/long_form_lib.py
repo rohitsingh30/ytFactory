@@ -488,6 +488,13 @@ def synth_long_narration(
                 shutil.copy2(raw, stretched)
             else:
                 _atempo(raw, stretched, atempo)
+            # B2 — persist the stretched chunk to GCS for retry-free
+            # re-renders after a worker SIGKILL.
+            try:
+                from pipeline.cloud.cache import persist_artifact  # noqa: PLC0415
+                persist_artifact(stretched, kind="tts_chunks")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[tts] cache.persist failed (non-fatal): {exc}")
             return (i, time.time() - t0)
 
         print(f"[tts] cloud fan-out: {len(work)} chunks × {parallel_workers} workers")
@@ -531,6 +538,12 @@ def synth_long_narration(
                 shutil.copy2(raw, stretched)
             else:
                 _atempo(raw, stretched, atempo)
+            # B2 — persist after each chunk (serial path).
+            try:
+                from pipeline.cloud.cache import persist_artifact  # noqa: PLC0415
+                persist_artifact(stretched, kind="tts_chunks")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[tts] cache.persist failed (non-fatal): {exc}")
 
     narration_wav = cache_dir / "narration.wav"
     _wav_concat_with_silence(final_chunks, join_silence_s, narration_wav)
@@ -579,21 +592,97 @@ def _generate_panel_stills(
     can launch it on a :class:`pipeline.stage_overlap.StageOverlap`
     worker BEFORE awaiting :func:`synth_long_narration`. See
     ``docs/parallel_stage_overlap.md`` for the pattern.
+
+    **Parallel cloud fan-out** — for cloud image providers, panels are
+    generated in parallel via ``ThreadPoolExecutor`` with
+    ``W = ceil(N/4)`` workers. ``cloudrun_z_image_turbo`` is deployed
+    with ``max-instances=4, containerConcurrency=1`` so Cloud Run's
+    load balancer queues any overflow against the 4 GPU instances.
+    Per-call cost is unchanged (same total GPU-seconds) but wall time
+    drops ~4× (e.g. 60 panels: 36 min → ~9 min).
+
+    Local providers fall back to the serial loop — running multiple
+    diffusion ops on the laptop's M2 Max unified-memory GPU just
+    serialises + fragments memory.
+
+    Override the worker count via ``YTFACTORY_CLOUD_IMAGE_WORKERS``
+    (default = ``ceil(N/4)``, capped at 8). Set to 1 to force serial.
+
+    Before fan-out, a single ``/readyz`` prewarm hit amortises cold-
+    start across all parallel requests (mirrors the TTS prewarm
+    pattern at :func:`synth_long_narration`).
     """
     from pipeline import images
 
     panel_dir = cache_dir / "panels"
     panel_dir.mkdir(parents=True, exist_ok=True)
 
+    # Build the work plan: skip panels already cached on disk. Mirrors
+    # the cache-skip pattern from synth_long_narration so a hydrated
+    # cache (per-call GCS persistence — see bug B2 follow-up) makes a
+    # retry effectively free.
     panel_pngs: list[Path] = []
+    work: list[tuple[int, Path, str, int]] = []
     for i, p in enumerate(panels):
         png = panel_dir / f"panel_{i:03d}.png"
-        if not png.exists() or png.stat().st_size < 4096:
-            scene = (p.get("scene") or "").strip()
-            if not scene:
-                raise ValueError(f"panel {i} missing 'scene' field")
-            seed = int(image_seed) + int(p.get("seed_offset", i))
-            print(f"[panel] {i+1}/{len(panels)} gen → {png.name} (seed {seed})")
+        panel_pngs.append(png)
+        if png.exists() and png.stat().st_size >= 4096:
+            continue
+        scene = (p.get("scene") or "").strip()
+        if not scene:
+            raise ValueError(f"panel {i} missing 'scene' field")
+        seed = int(image_seed) + int(p.get("seed_offset", i))
+        work.append((i, png, scene, seed))
+
+    if not work:
+        return panel_pngs
+
+    is_cloud = image_provider.startswith("cloudrun_")
+    n_remaining = len(work)
+    n_total = len(panels)
+
+    parallel_workers = 1
+    if is_cloud and n_remaining > 1:
+        default_w = max(1, math.ceil(n_remaining / 4))
+        try:
+            parallel_workers = int(os.environ.get(
+                "YTFACTORY_CLOUD_IMAGE_WORKERS", str(default_w),
+            ))
+        except ValueError:
+            parallel_workers = default_w
+        parallel_workers = max(1, min(parallel_workers, 8))
+
+    if parallel_workers > 1:
+        # Prewarm: one /readyz hit so the first ``parallel_workers``
+        # panels don't all pay simultaneous cold-start. Best-effort —
+        # log and continue on failure rather than blocking the render.
+        try:
+            from pipeline.images.images_cloudrun import _service_url  # noqa: PLC0415
+            from pipeline.cloud.cloudrun_auth import get_id_token  # noqa: PLC0415
+            import urllib.request  # noqa: PLC0415
+
+            model = image_provider.removeprefix("cloudrun_")
+            url = _service_url(model)
+            token = get_id_token(url)
+            req = urllib.request.Request(
+                url=f"{url}/readyz",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                info = resp.read().decode("utf-8")[:120]
+                print(f"[panel] cloud /readyz: {info}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[panel] prewarm /readyz failed (will pay cold-start "
+                  f"per instance): {exc}")
+
+        print(f"[panel] cloud fan-out: {n_remaining}/{n_total} panels × "
+              f"{parallel_workers} workers")
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415
+
+        def _gen_one(item: tuple[int, Path, str, int]) -> int:
+            i, png, scene, seed = item
+            print(f"[panel] {i+1}/{n_total} gen → {png.name} (seed {seed})")
             images.generate(
                 prompt=scene,
                 style_prefix=style_prefix,
@@ -604,7 +693,44 @@ def _generate_panel_stills(
                 steps=int(image_steps),
                 provider=image_provider,
             )
-        panel_pngs.append(png)
+            # B2 — persist the freshly-generated PNG to GCS so a retry
+            # after a worker SIGKILL doesn't re-pay for this panel.
+            try:
+                from pipeline.cloud.cache import persist_artifact  # noqa: PLC0415
+                persist_artifact(png, kind="panels")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[panel] cache.persist failed (non-fatal): {exc}")
+            return i
+
+        with ThreadPoolExecutor(max_workers=parallel_workers) as pool:
+            futures = [pool.submit(_gen_one, item) for item in work]
+            completed = 0
+            for fut in as_completed(futures):
+                i = fut.result()  # re-raises any per-panel exception
+                completed += 1
+                print(f"[panel] done {completed}/{n_remaining} "
+                      f"(panel_{i:03d}.png)")
+    else:
+        for i, png, scene, seed in work:
+            print(f"[panel] {i+1}/{n_total} gen → {png.name} (seed {seed})")
+            images.generate(
+                prompt=scene,
+                style_prefix=style_prefix,
+                seed=seed,
+                out_path=png,
+                width=int(image_width),
+                height=int(image_height),
+                steps=int(image_steps),
+                provider=image_provider,
+            )
+            # B2 — persist after each panel (serial path mirrors the
+            # parallel path so local-on-cloud renders also cache).
+            try:
+                from pipeline.cloud.cache import persist_artifact  # noqa: PLC0415
+                persist_artifact(png, kind="panels")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[panel] cache.persist failed (non-fatal): {exc}")
+
     return panel_pngs
 
 
@@ -619,7 +745,7 @@ def _adjust_panel_holds_to_dur(
     Behaviour identical to the inline math previously in :func:`main`
     (pre-2026-05-13). Extracted so the parallel-overlap path can run
     it AFTER the TTS branch yields ``dur`` but BEFORE
-    :func:`_assemble_panel_kenburns` consumes the adjusted holds.
+    :func:`_assemble_panel_static` consumes the adjusted holds.
     """
     if not panels:
         return
@@ -651,19 +777,13 @@ def _assemble_panel_static(
     """Build per-panel static-still segments and hard-cut concat them
     into ``video.mp4``.
 
-    2026-05-23 (user directive): replaces the legacy
-    ``_assemble_panel_kenburns`` which used a zoompan filter + xfade
-    chain. That path was the largest CPU sink in long-form rendering
-    (~118s wall per 125s segment on Cloud Run CPU because zoompan
-    re-encodes every output frame from a single input) and was the
-    direct cause of the 60-min Cloud Run task-timeout failures on
-    long-form jobs. Static loops render at ~30-50× realtime; concat
-    demuxer with ``-c copy`` adds essentially zero wall.
-
-    No motion, no crossfade. The pipeline-side compensation is denser
-    panel cadence (more panels at shorter holds) so static stills
-    don't dwell long enough to register as "frozen video" — see
-    docs/panel_pacing_research_2026-05.md.
+    Static loops render at ~30-50× realtime; concat demuxer with
+    ``-c copy`` adds essentially zero wall — enough headroom for
+    long-form jobs to finish inside the Cloud Run 3600s task timeout.
+    No motion, no crossfade. The pipeline-side compensation for
+    stillness is denser panel cadence (more panels at shorter holds)
+    so each still doesn't dwell long enough to register as "frozen
+    video" — see docs/panel_pacing_research_2026-05.md.
     """
     seg_dir = cache_dir / "panel_segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
@@ -715,33 +835,6 @@ def _assemble_panel_static(
     return video_path
 
 
-# Back-compat alias — the legacy name still resolves so anything that
-# imports ``_assemble_panel_kenburns`` (tests, snapshots) keeps working,
-# but the body is the new static + concat implementation.
-def _assemble_panel_kenburns(
-    *,
-    panel_pngs: list[Path],
-    panels: list[dict[str, Any]],
-    cache_dir: Path,
-    out_w: int,
-    out_h: int,
-    fps: int,
-    crossfade_s: float = 0.0,  # noqa: ARG001 — ignored; back-compat only
-    zoom_factor: float = 1.0,  # noqa: ARG001 — ignored; back-compat only
-) -> Path:
-    """Back-compat shim. ``crossfade_s`` / ``zoom_factor`` are ignored.
-    Delegates to :func:`_assemble_panel_static`.
-    """
-    return _assemble_panel_static(
-        panel_pngs=panel_pngs,
-        panels=panels,
-        cache_dir=cache_dir,
-        out_w=out_w,
-        out_h=out_h,
-        fps=fps,
-    )
-
-
 @obs.traced("video_panels.long_form", category="render",
             capture=["out_w", "out_h", "fps"])
 def build_image_panels_video(
@@ -756,16 +849,10 @@ def build_image_panels_video(
     out_w: int = 1920,
     out_h: int = 1080,
     fps: int = 30,
-    crossfade_s: float = 0.0,  # noqa: ARG001 — ignored; back-compat only
-    zoom_factor: float = 1.0,  # noqa: ARG001 — ignored; back-compat only
 ) -> Path:
     """Path B render: comic-illustrated panels via Z-Image-Turbo, hard cuts.
 
-    2026-05-23: Ken Burns + xfade removed (see
-    :func:`_assemble_panel_static`). ``crossfade_s`` / ``zoom_factor``
-    kwargs are kept for back-compat with callers / tests but ignored.
-
-    Backwards-compatible thin wrapper that runs the two extracted halves
+    Thin wrapper that runs the two extracted halves
     (:func:`_generate_panel_stills` then :func:`_assemble_panel_static`)
     sequentially. The orchestrator's parallel path (long-form ``main``)
     calls the halves directly with a :class:`StageOverlap` between them

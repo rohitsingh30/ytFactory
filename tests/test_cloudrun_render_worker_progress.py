@@ -226,15 +226,15 @@ class ClassifyLongFormRendererLineTests(unittest.TestCase):
 
     def test_lf_panel_seg_render(self):
         ev = self.ep._classify_renderer_line(
-            "[seg ] 12/24 8.0s zoom→1.10 (240f) → seg_012.mp4"
+            "[seg ] 12/24 8.0s static → seg_012.mp4"
         )
-        self.assertEqual(ev, ("images", "Rendering panel 12/24 (8.0s Ken-Burns)"))
+        self.assertEqual(ev, ("images", "Rendering panel 12/24 (8.0s static)"))
 
-    def test_lf_panel_xfade(self):
+    def test_lf_panel_concat(self):
         ev = self.ep._classify_renderer_line(
-            "[xfade] 24 panels → video_track.mp4 (crossfade=0.5s)"
+            "[concat] 24 panels → video_track.mp4 (hard cuts)"
         )
-        self.assertEqual(ev, ("images", "Crossfading 24 panel segments → video track"))
+        self.assertEqual(ev, ("images", "Concatenating 24 panel segments → video track"))
 
     def test_lf_video_done(self):
         ev = self.ep._classify_renderer_line(

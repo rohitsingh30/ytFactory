@@ -4,8 +4,8 @@ Background
 ----------
 
 Render ``/tmp/render-41d3233a/short.mp4`` shipped a 42-second video that
-was the SAME kitchen + shrugging-girl + soup-bowl image Ken-Burns'd for
-the entire body. Root cause: the LLM author had emitted a ``prompts.json``
+was the SAME kitchen + shrugging-girl + soup-bowl image looping for the
+entire body. Root cause: the LLM author had emitted a ``prompts.json``
 whose entries shared 1-2 unique ``key_visual`` strings across all beats.
 
 The existing bijectivity guard in ``AiBeatSlideshow.produce`` only

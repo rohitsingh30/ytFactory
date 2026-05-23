@@ -250,10 +250,10 @@ class WordCaptionPngs:
            output_resolution so the PlayRes coord system IS the output
            coord system and font_size is in real output pixels.
 
-        2. **Alignment=5 drifts with the Ken-Burns zoom.** Alignment=5
+        2. **Alignment=5 drifts with the on-clip zoom.** Alignment=5
            is middle-center (libass numpad layout) — the caption sat
            at the visual center, which on a 9:16 Short overlapped the
-           character's face/torso/crotch as the Ken-Burns zoom pushed
+           character's face/torso/crotch as the per-image zoom pushed
            subjects around the frame. Fix: Alignment=2 (bottom-center)
            with ``MarginV = play_res_y * 0.15`` (~288px on a 1920-tall
            output) anchors captions to the BOTTOM of the OUTPUT frame
@@ -301,7 +301,7 @@ class WordCaptionPngs:
 
         # 2026-05-17 (round 4, fix #2): Alignment=2 = bottom-center
         # (libass numpad layout). Pre-fix this was Alignment=5
-        # (middle-center) — captions drifted with the Ken-Burns zoom
+        # (middle-center) — captions drifted with the on-clip zoom
         # because the visual subject moved relative to the frame center
         # over the zoom's duration. Bottom-anchor + a generous MarginV
         # (15% of frame height ≈ TikTok chin-clearance) makes captions

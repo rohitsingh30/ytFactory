@@ -404,7 +404,7 @@ Cheat sheet (do NOT hardcode — read on each run, channels evolve):
 | AITA / Reddit story / animated character art | `mystoriesanimated/reddit_amitheasshole` |
 | Reddit story + Subway-Surfers / Minecraft strip | `scrollpulse` |
 | Hindi mythology / Mahabharat / Ramayan | `hindutavaanimated` |
-| Sleep-cadence history narration, slow Ken Burns | `historyrecapped/sleep` |
+| Sleep-cadence history narration, slow zoom/pan | `historyrecapped/sleep` |
 | Top-5 / countdown / sports highlights | `sportsrecapped/ranked` |
 | Last-N head-to-head sports | `sportsrecapped` (use /make-last5) |
 | Cosmos / space / NASA explainer | `cosmosdecoded` |

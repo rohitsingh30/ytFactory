@@ -160,10 +160,10 @@ class AsrAnchors:
         # in narration, so first-6-words sliding-window match fails),
         # every section's end_s stayed at ``total_s`` → segments
         # overlapped → ``Segment.end_s - start_s`` produced
-        # ``hold_s`` values like 1415s for a 1500s narration → the
-        # downstream ffmpeg kenburns rendered 42,456 frames for ONE
-        # panel before the next started, the cloud-run JOB hit its
-        # 1-hour wall, render killed.
+        # ``hold_s`` values like 1415s for a 1500s narration →
+        # downstream ffmpeg rendered 42,456 frames for ONE panel
+        # before the next started, the cloud-run JOB hit its 1-hour
+        # wall, render killed.
         #
         # Surfaced by Pompeii long-form (job ba3e7578) on the 2026-
         # 05-15 v15 deploy: panels gen'd correctly (10/10) but

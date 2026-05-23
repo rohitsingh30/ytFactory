@@ -1,5 +1,7 @@
-"""Tests for pipeline.images.prompt_refiner — the FLUX.2 [klein] DALL-E 3-style
-prompt-refiner pre-step.
+"""Tests for pipeline.images.prompt_refiner — the Z-Image-Turbo
+DALL-E 3-style prompt-refiner pre-step (rewritten 2026-05-23 from the
+retired FLUX.2 [klein] calibration; see prompt_refiner.py:80
+REFINER_VERSION='v2-zturbo').
 
 The refiner makes ONE batched LLM call per render. These tests exercise:
 

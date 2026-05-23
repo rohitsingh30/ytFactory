@@ -60,8 +60,7 @@ class TestFfmpegStderrCapture(unittest.TestCase):
 
     def test_no_timeout_passes_none(self):
         """Default behaviour: no timeout (preserve existing multi-minute
-        panel kenburns / long-form compose calls that legitimately run
-        for >30 min)."""
+        long-form compose calls that legitimately run for >30 min)."""
         fake_proc = mock.MagicMock(returncode=0, stderr="", stdout="")
         with mock.patch.object(lf.subprocess, "run", return_value=fake_proc) as m_run:
             lf._ffmpeg(["-i", "in.wav", "out.wav"])

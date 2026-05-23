@@ -37,7 +37,7 @@ def _mock_urlopen(data: bytes, *, content_type: str = "video/mp4"):
     return resp
 
 
-def _minimal_shotlist(kind="still_ken_burns", aspect="16:9", source_url=None):
+def _minimal_shotlist(kind="still_image", aspect="16:9", source_url=None):
     entry = {
         "source": "clip01.mp4",
         "source_url": source_url or "https://upload.wikimedia.org/test.jpg",
@@ -513,10 +513,10 @@ class TestResolveUrl(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# _kenburns
+# _still_to_video
 # ---------------------------------------------------------------------------
 
-class TestKenburns(unittest.TestCase):
+class TestStillToVideo(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
 
@@ -529,8 +529,8 @@ class TestKenburns(unittest.TestCase):
         still = Path(self.td.name) / "still.jpg"
         still.touch()
         out = Path(self.td.name) / "out.mp4"
-        from pipeline.cosmos_footage_prep import _kenburns
-        _kenburns(still, out, duration_s=5.0, aspect="9:16")
+        from pipeline.cosmos_footage_prep import _still_to_video
+        _still_to_video(still, out, duration_s=5.0, aspect="9:16")
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
         self.assertIn("1080", " ".join(str(c) for c in cmd))
@@ -541,8 +541,8 @@ class TestKenburns(unittest.TestCase):
         still = Path(self.td.name) / "still.jpg"
         still.touch()
         out = Path(self.td.name) / "out.mp4"
-        from pipeline.cosmos_footage_prep import _kenburns
-        _kenburns(still, out, duration_s=8.0, aspect="16:9")
+        from pipeline.cosmos_footage_prep import _still_to_video
+        _still_to_video(still, out, duration_s=8.0, aspect="16:9")
         mock_run.assert_called_once()
 
 
@@ -589,7 +589,7 @@ class TestPrepShotlist(unittest.TestCase):
 
     @patch("subprocess.run")
     @patch("urllib.request.urlopen")
-    def test_still_kenburns_path(self, mock_open, mock_run):
+    def test_still_still_to_video_path(self, mock_open, mock_run):
         # Set up still download response using proper BytesIO-backed response
         resp = _mock_urlopen(b"img-data", content_type="image/jpeg")
         mock_open.return_value = resp
@@ -600,7 +600,7 @@ class TestPrepShotlist(unittest.TestCase):
                 {
                     "source": "clip01.mp4",
                     "source_url": "https://upload.wikimedia.org/test.jpg",
-                    "source_type": "still_ken_burns",
+                    "source_type": "still_image",
                     "in_s": 0.0,
                     "out_s": 5.0,
                 }
@@ -616,13 +616,13 @@ class TestPrepShotlist(unittest.TestCase):
 
     @patch("subprocess.run")
     @patch("urllib.request.urlopen")
-    def test_still_kenburns_already_exists_skipped(self, mock_open, mock_run):
+    def test_still_still_to_video_already_exists_skipped(self, mock_open, mock_run):
         shotlist = {
             "clips": [
                 {
                     "source": "clip01.mp4",
                     "source_url": "https://upload.wikimedia.org/test.jpg",
-                    "source_type": "still_ken_burns",
+                    "source_type": "still_image",
                     "in_s": 0.0,
                     "out_s": 5.0,
                 }
@@ -750,7 +750,7 @@ class TestPrepShotlist(unittest.TestCase):
                 {
                     "source": "clip_err.mp4",
                     "source_url": "https://upload.wikimedia.org/test.jpg",
-                    "source_type": "still_ken_burns",
+                    "source_type": "still_image",
                     "in_s": 0.0,
                     "out_s": 5.0,
                 }
@@ -776,7 +776,7 @@ class TestPrepShotlist(unittest.TestCase):
                 {
                     "source": "clip01.mp4",
                     "source_url": "https://upload.wikimedia.org/test.jpg",
-                    "source_type": "still_ken_burns",
+                    "source_type": "still_image",
                     "in_s": 0.0,
                     "out_s": 5.0,
                 }
@@ -871,7 +871,7 @@ class TestMain(unittest.TestCase):
                 {
                     "source": "clip.mp4",
                     "source_url": "https://upload.wikimedia.org/test.jpg",
-                    "source_type": "still_ken_burns",
+                    "source_type": "still_image",
                     "in_s": 0.0,
                     "out_s": 5.0,
                 }
@@ -897,7 +897,7 @@ class TestMain(unittest.TestCase):
                 {
                     "source": "clip.mp4",
                     "source_url": "https://upload.wikimedia.org/test.jpg",
-                    "source_type": "still_ken_burns",
+                    "source_type": "still_image",
                     "in_s": 0.0,
                     "out_s": 5.0,
                 }

@@ -213,8 +213,8 @@ upload:
 # Added 2026-05-12 (Slice 2 of unified-renderer rollout). Mythology
 # kathaa long-form (60-90 min) — calming devotional narration of
 # Mahabharat / Ramayan / Puraan chapters, image_panels of Amar Chitra
-# Katha-style art with Ken-Burns motion. See /make-katha skill for the
-# narration authoring side.
+# Katha-style art (static stills, hard cuts). See /make-katha skill for
+# the narration authoring side.
 long_form:
   render_mode: image_panels
   tts_provider: cloudrun_indicf5
@@ -247,5 +247,4 @@ long_form:
     crimson), traditional Indian iconography (lotus motifs, mandalas,
     temple architecture). 16:9 horizontal composition with the central
     deity / scene weighted left-of-centre.
-  # Ken-Burns / crossfade REMOVED 2026-05-23 (see mystoriesanimated.yaml).
   music_bed_default: bhajan_low.mp3

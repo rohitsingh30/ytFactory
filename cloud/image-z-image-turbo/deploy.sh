@@ -65,8 +65,25 @@ echo "==> Deploying ${SERVICE} to Cloud Run (L4 GPU, ${REGION})"
 # 32Gi mem + 8 CPU kept INTACT — we know this fits the load with
 # low_cpu_mem_usage=True (multiple successful loads in prior logs).
 # Shrinking to 16Gi/4CPU risks OOM on model load; that's the explicit
-# constraint from the operator. concurrency=1, max-instances=1 to cap GPU
-# spend; min-instances=0 since weights load fast from local SSD now.
+# constraint from the operator.
+#
+# concurrency=1 — one inference per L4 (Z-Image-Turbo's diffusion graph
+# saturates the GPU; running 2 in-instance has caused OOMs before).
+#
+# max-instances=4 — fan-out target. Long-form panel gen
+# (pipeline/render/shared/long_form_lib.py::_generate_panel_stills) and
+# short-engine image gen (pipeline/render/visualize/ai_beat_slideshow.py)
+# both dispatch images in parallel via ThreadPoolExecutor with up to
+# ~ceil(N/4) workers; capping at 4 instances bounds wall-time at
+# ~per_call_s × ceil(N/4) ≈ 30s × 15 = 7.5 min for a 60-panel long-form.
+# Pre-2026-05-23 this was max-instances=1 and a 60-panel render took 36
+# minutes serially, which caused job a0aac53e to overflow the worker's
+# 60-min Cloud Run task-timeout and SIGKILL mid-compose. Cost ceiling is
+# total GPU-seconds, not max-instances — running 4 parallel for 9 min
+# costs the same as 1 serial for 36 min (~$0.02 either way) but doesn't
+# blow the task budget.
+#
+# min-instances=0 since weights load fast from local SSD now.
 #
 # No more --add-volume gcsfuse mount — weights are baked into the image.
 gcloud run deploy "${SERVICE}" \

@@ -214,7 +214,7 @@ class StageOverlap:
         # multi-branch failures.
 
         # Now run dur-dependent assembly with both inputs ready.
-        video_path = _assemble_kenburns(panel_pngs, dur, ...)
+        video_path = _assemble_panel_static(panel_pngs, dur, ...)
 
     The ``label`` is included in the worker thread name (visible in
     :command:`py-spy` / Cloud Trace) AND the structured log lines this

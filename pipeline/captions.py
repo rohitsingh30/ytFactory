@@ -248,7 +248,7 @@ def render_word_caption(
     # Without this, a 260pt "KETCHUP" produces a 1362×300 PNG; the
     # compose stage overlays at ``x=(W-w)/2 = (1080-1362)/2 = -141``
     # — ffmpeg accepts negative x but the visible window crops both
-    # ends of the word. Worse: with the Ken Burns mp4 path (post
+    # ends of the word. Worse: with the still-mp4 overlay path (post
     # 2026-05-17) the overlay can sit ENTIRELY off-screen for
     # long words at large font sizes, which is what produced the
     # "where are my captions?" symptom on cloud renders. Scale the

@@ -7,7 +7,7 @@ Three bugs render-41d3233a exposed in the ASS subtitle path of
    output_resolution. Fix: PlayRes always equals spec.output_resolution
    so libass renders in real output pixels.
 
-2. Alignment=5 (middle-center) drifted with the Ken-Burns zoom because
+2. Alignment=5 (middle-center) drifted with the on-clip zoom because
    captions tracked the visual subject. Fix: Alignment=2 (bottom-center)
    with MarginV = play_res_y * 0.15 anchors captions to the FRAME
    bottom — immune to anything happening in the visualize chain.
@@ -97,7 +97,7 @@ class CaptionPlayResMatchesOutputResolutionTest(unittest.TestCase):
 
 class CaptionAnchoredToBottomTest(unittest.TestCase):
     """Alignment=2 + MarginV ≈ 15% of output_h pins captions to the
-    bottom of the FRAME (immune to Ken-Burns zoom)."""
+    bottom of the FRAME (immune to any on-clip zoom)."""
 
     def _style_line(self, ass_text: str) -> str:
         m = re.search(r"^Style: Default,.*$", ass_text, re.M)

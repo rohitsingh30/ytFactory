@@ -70,7 +70,7 @@ Rules:
 - target_duration_s MUST land within {duration_band}.
 - For polish: keep the original shot order; cuts only trim dead air.
 - For assemble-stills: hold each image >=1.8s, <=4.0s. Use zoompan for
-  Ken Burns motion (slow zoom-in OR slow zoom-out, never both).
+  a slow zoom-in OR slow zoom-out (pick one, never both in one shot).
 - For assemble-clips/mixed: pick the strongest 4-12 shots, hold each
   1.5-3.5s. Tag transition_out for every shot except the last.
 - xfade transitions REQUIRE transition_out.to_idx = next shot's idx.

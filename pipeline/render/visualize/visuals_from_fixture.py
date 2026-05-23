@@ -1,8 +1,8 @@
 """Test-only VisualProducer that loads a pre-rendered mp4.
 
 Used by engine integration tests to isolate engine wiring from real
-visual_mode plugins (which call Flux cloud + Ken Burns + ffmpeg
-chains, all slow + non-deterministic for CI).
+visual_mode plugins (which call Flux cloud + ffmpeg chains, all
+slow + non-deterministic for CI).
 
 Fixture path read from ``spec.extra['visuals_fixture_path']``.
 """

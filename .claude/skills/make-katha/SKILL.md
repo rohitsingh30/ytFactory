@@ -1,6 +1,6 @@
 ---
 name: make-katha
-description: Author a 50-70 minute Hindu scripture kathaa for the HindutavaAnimated channel — soothing, calming, premier-quality Hindi narration of Mahabharat / Ramayan / Bhagavad Gita / Puraan chapters, with footage-only visuals (stock photography, Wikimedia / public-domain temple imagery, archive.org devotional footage, slow Ken Burns on still icons) and NO AI image gen. You become the kathaa-vyaas — investigative scripture-writer + devotional curator + audio-first showrunner — and produce narrations/<slug>.json + shotlist/<slug>.json, then hand off to historyrecapped/scripts/render_footage_only.py with --aspect 16:9. Use when the user says "make me a kathaa", "1 hour Hindu scripture video", "Gita adhyay 2 narration", "Ramayan Sundarkand", "Mahabharat Bhishma parva", or any "long-form devotional" / "calming Hindu narration" ask. For 50-60s mythology Shorts use /make-script. For Top-10 list long-form use /make-top10. For sports docs use /make-sports-doc.
+description: Author a 50-70 minute Hindu scripture kathaa for the HindutavaAnimated channel — soothing, calming, premier-quality Hindi narration of Mahabharat / Ramayan / Bhagavad Gita / Puraan chapters, with footage-only visuals (stock photography, Wikimedia / public-domain temple imagery, archive.org devotional footage, slow zoom/pan on still icons) and NO AI image gen. You become the kathaa-vyaas — investigative scripture-writer + devotional curator + audio-first showrunner — and produce narrations/<slug>.json + shotlist/<slug>.json, then hand off to historyrecapped/scripts/render_footage_only.py with --aspect 16:9. Use when the user says "make me a kathaa", "1 hour Hindu scripture video", "Gita adhyay 2 narration", "Ramayan Sundarkand", "Mahabharat Bhishma parva", or any "long-form devotional" / "calming Hindu narration" ask. For 50-60s mythology Shorts use /make-script. For Top-10 list long-form use /make-top10. For sports docs use /make-sports-doc.
 ---
 
 # /make-katha — long-form Hindu scripture kathaa for HindutavaAnimated
@@ -192,7 +192,7 @@ chapters), find a real visual. Prefer in this order:
 - **NO AI image gen.** No Z-Image-Turbo, no diffusion. The whole
   premise of this skill is footage-only fast-production. If you
   cannot source a visual for a beat, reframe the beat to one you
-  can source (a static manuscript scan with a slow Ken Burns is
+  can source (a static manuscript scan with a slow zoom/pan is
   always available).
 - **NO faces from the diffusion-quoted-phrase-leak class** —
   Z-Image-Turbo issues don't apply because we are not generating,
@@ -203,7 +203,7 @@ chapters), find a real visual. Prefer in this order:
 For each shotlist window write:
 `{in_s, out_s, match_text, kind, source_url, _license_note,
 chapter, _design_notes}`. Hold each visual **long** (30-90s slow
-Ken Burns) — jarring cuts wake a viewer who is using this for
+zoom/pan) — jarring cuts wake a viewer who is using this for
 sleep / meditation. Mirror
 `historyrecapped/learnings/long_form_channel.md` continuous-window
 rule.
@@ -393,7 +393,7 @@ Reuses the existing footage-only shotlist schema (matches
       "source_url": "https://commons.wikimedia.org/wiki/File:Krishna_Holding_Flute.jpg",
       "_license_note": "Wikimedia Commons — Public Domain",
       "chapter": "mangalaacharan",
-      "_design_notes": "Slow 90s Ken Burns push-in on Krishna iconography. Audio-led."
+      "_design_notes": "Slow 90s zoom push-in on Krishna iconography. Audio-led."
     },
     {
       "in_s": 5.0, "out_s": 60.0,

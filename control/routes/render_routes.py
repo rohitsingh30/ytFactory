@@ -277,6 +277,12 @@ class JobView(BaseModel):
     # "the system interpreted your inputs as kind=long_form, aspect=16:9"
     # alongside the live previews.
     render_spec: dict | None = None
+    # B4 — retry chain linkage. ``retry_of`` set on the retry doc;
+    # ``retried_as`` set on the original failed doc once the retry
+    # is created. Both surface in the UI as cross-links so the
+    # operator can walk the retry chain.
+    retry_of: str | None = None
+    retried_as: str | None = None
 
 
 def _doc_to_view(job_id: str, doc: dict) -> JobView:
@@ -334,6 +340,8 @@ def _doc_to_view(job_id: str, doc: dict) -> JobView:
         preview_url=preview_url,
         artifacts=doc.get("artifacts"),
         render_spec=doc.get("render_spec"),
+        retry_of=doc.get("retry_of"),
+        retried_as=doc.get("retried_as"),
     )
 
 
@@ -734,13 +742,26 @@ async def get_queue_state() -> QueueResponse:
     before its first ``jobs_mod.update(...)`` writeback (e.g.
     "Internal error running task" pre-stage-rendering) leaves the
     doc permanently at ``status=pending, stage=dispatching`` and
-    this endpoint surfaces it in the Queued column forever. The
-    existing ``web/server.py::_periodic_queue_reaper`` only walks
-    ``agent_tasks/*`` (cloud render-worker JOB leases). Mitigation
-    design in ``docs/jobs_collection_reaper.md`` (Option A: extend
-    that loop to walk ``jobs/*`` and cross-check ``cloud_execution``
-    against ``run_v2.ExecutionsClient``; Option B: SIGTERM/atexit
-    writeback in the render entrypoints)."""
+    this endpoint surfaces it in the Queued column forever.
+
+    FIXED 2026-05-23 (B3a + B3b in the silent-death docket):
+
+    * Soft path — the render-worker now installs a SIGTERM handler
+      (``cloud/render-worker-v2/entrypoint.py::_on_sigterm``) that
+      writes ``status=failed`` during the Cloud Run 10s grace window
+      before SIGKILL.
+    * Hard path — ``control.core.reconciler.reconcile_stuck_jobs``
+      sweeps Firestore every 5 min via the
+      ``com.ytfactory.job-reconciler.plist`` LaunchAgent (and is also
+      exposed as ``POST /api/admin/reconcile_jobs`` for manual runs).
+      It cross-checks ``cloud_execution`` against
+      ``run_v2.ExecutionsClient`` and marks the doc failed iff the
+      Cloud Run Execution itself reports failure / cancellation /
+      not-found.
+
+    Together the two cover SIGKILL, OOM, host eviction, kernel panic,
+    network partition between worker and Firestore — anything the
+    Python interpreter can't catch before dying."""
     backend = jobs_mod.get_jobs()
     queued: list[dict] = []
     running: list[dict] = []
@@ -1250,3 +1271,233 @@ async def health() -> dict:
         "cloudrun": cloud_run.status(),
         "sim_worker": sim_status(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Cloud Run JOB reconciler — B3b in 2026-05-23 docket.
+#
+# Fixes the "known gap" cited at line 732-743 above: render-worker JOBs
+# that crash before writing their first stage update leave the Firestore
+# doc permanently at ``status=rendering`` / ``status=pending``. The
+# reconciler sweeps those, cross-checking the Cloud Run Execution to
+# decide failed vs cancelled vs still-running.
+#
+# Invoked by:
+#   * Manual: POST /api/admin/reconcile_jobs
+#   * Cron:   com.ytfactory.job-reconciler.plist (every 5 min on laptop)
+# ---------------------------------------------------------------------------
+
+class ReconcileRequest(BaseModel):
+    max_age_minutes: int = Field(120, ge=10, le=10080)
+    batch_size: int = Field(50, ge=1, le=500)
+    dry_run: bool = False
+
+
+@router.post("/api/admin/reconcile_jobs")
+async def reconcile_jobs(
+    body: ReconcileRequest | None = None,
+    _: None = Depends(require_pin),
+) -> dict:
+    """Sweep Firestore for jobs stuck mid-pipeline whose Cloud Run JOB
+    execution has finished failing — mark them failed.
+
+    Returns the structured summary from
+    ``control.core.reconciler.reconcile_stuck_jobs``.
+    """
+    from control.core.reconciler import reconcile_stuck_jobs  # noqa: PLC0415
+
+    req = body or ReconcileRequest()
+    # Push the sync Firestore + Cloud Run Admin API calls off the event
+    # loop so a slow sweep can't stall the rest of the server.
+    import asyncio  # noqa: PLC0415
+    summary = await asyncio.to_thread(
+        reconcile_stuck_jobs,
+        max_age_minutes=req.max_age_minutes,
+        batch_size=req.batch_size,
+        dry_run=req.dry_run,
+    )
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# B4 — Retry a failed/cancelled job, reusing the B2 persistent cache
+# ---------------------------------------------------------------------------
+#
+# A failed long-form render burns ~₹15-20 of image+TTS work. Pre-B2 the
+# only way to recover was a fresh /api/render with the same proposal,
+# which paid for every panel + chunk over again. With B2 the artifacts
+# live at gs://<bucket>/jobs/<old_job_id>/cache/, so a retry can copy
+# them to gs://<bucket>/jobs/<new_job_id>/cache/ (cheap same-bucket
+# rewrite) and the new render hydrates them on startup — the only fresh
+# cost is whatever wasn't yet uploaded before the SIGKILL.
+
+
+class RetryResponse(BaseModel):
+    retry_job_id: str
+    retry_of: str
+    cache_objects_copied: int
+    cloud_execution: str | None = None
+
+
+@router.post("/api/jobs/{job_id}/retry", response_model=RetryResponse)
+async def retry_job(
+    job_id: str,
+    request: Request,
+    _pin: None = Depends(require_pin),
+) -> RetryResponse:
+    """Re-render a failed/cancelled job, reusing the persisted cache.
+
+    Steps:
+      1. Load original Firestore doc.
+      2. Build new job_id, copy proposal/channel/topic into a new doc
+         with ``retry_of: <old>``.
+      3. Server-side GCS copy ``jobs/<old>/cache/**`` → ``jobs/<new>/cache/**``.
+      4. Trigger Cloud Run JOB for the new job_id.
+      5. Stamp ``retried_as: <new>`` on the original.
+
+    Only allowed when the original is ``failed`` or ``cancelled`` —
+    don't allow retrying a job that's still rendering (queue dupes).
+
+    Audit S1.7: owner check inherited from the original doc.
+    """
+    import asyncio  # noqa: PLC0415
+    import uuid  # noqa: PLC0415
+
+    doc = jobs_mod.get_job(job_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    _job_owner_check(request, doc)
+
+    status = (doc.get("status") or "").lower()
+    if status not in ("failed", "cancelled"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"job {job_id} is in status {status!r} — retry is only "
+                f"allowed for failed/cancelled jobs (re-run for status "
+                f"rendering would race the worker; retry of done is "
+                f"redundant)"
+            ),
+        )
+
+    proposal_dict = doc.get("proposal") or {}
+    if not proposal_dict.get("channel") or not proposal_dict.get("topic"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"job {job_id} has no proposal stored — cannot retry "
+                f"(create a fresh render via /api/render instead)"
+            ),
+        )
+
+    new_job_id = uuid.uuid4().hex
+    owner_uid = doc.get("owner_uid")
+
+    # Server-side GCS copy of the cache prefix. Cheap (same bucket,
+    # same region) and atomic per-blob. We do this BEFORE the new doc
+    # exists so a failure here doesn't leave a stranded retry doc.
+    copied = await asyncio.to_thread(_copy_cache_prefix, job_id, new_job_id)
+
+    # Build the new doc. Preserve proposal verbatim so the retry uses
+    # the same channel/topic/length/notes. Tag both directions of the
+    # parent-child link so the dashboard can render "Retried from" /
+    # "Retried as" navigation.
+    jobs_mod.create_job(
+        new_job_id,
+        channel=proposal_dict.get("channel"),
+        topic=proposal_dict.get("topic"),
+        proposal=proposal_dict,
+        owner_uid=owner_uid,
+        slug=doc.get("slug"),
+        render_kind=doc.get("render_kind"),
+    )
+    jobs_mod.get_jobs().update(new_job_id, retry_of=job_id)
+
+    # Dispatch — same path as a fresh /api/render.
+    cloud_execution: str | None = None
+    try:
+        from control.core import cloud_run as _cloud_run  # noqa: PLC0415
+        backend = _cloud_run.render_backend()
+        if backend == "cloudrun":
+            ref = await asyncio.to_thread(_cloud_run.trigger_render_job, new_job_id)
+            cloud_execution = getattr(ref, "execution_name", None)
+            jobs_mod.get_jobs().update(
+                new_job_id,
+                stage="dispatching",
+                cloud_execution=cloud_execution,
+            )
+        else:
+            # sim / laptop backend: enqueue a task envelope, matching
+            # the behaviour of _enqueue_render_job for non-cloud modes.
+            from control.core.queue import get_queue, new_task_id  # noqa: PLC0415
+            from control.core.schema import TaskEnvelope, TaskKind  # noqa: PLC0415
+
+            payload = dict(proposal_dict)
+            payload["job_id"] = new_job_id
+            get_queue().enqueue(TaskEnvelope(
+                task_id=new_task_id(),
+                job_id=new_job_id,
+                kind=TaskKind.RENDER_SHORT,
+                payload=payload,
+            ))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("retry dispatch failed for new_job=%s", new_job_id)
+        jobs_mod.mark_failed(
+            new_job_id, stage="dispatch",
+            error=f"retry dispatch failed: {exc}",
+        )
+        raise HTTPException(status_code=502, detail=f"retry dispatch failed: {exc}")
+
+    # Back-reference on the original. Best-effort — if the firestore
+    # update fails the retry is still live; we just lose the link.
+    try:
+        jobs_mod.get_jobs().update(job_id, retried_as=new_job_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("failed to stamp retried_as on old job=%s", job_id)
+
+    return RetryResponse(
+        retry_job_id=new_job_id,
+        retry_of=job_id,
+        cache_objects_copied=copied,
+        cloud_execution=cloud_execution,
+    )
+
+
+def _copy_cache_prefix(old_job_id: str, new_job_id: str) -> int:
+    """Server-side copy gs://<bucket>/jobs/<old>/cache/** to <new>/cache/**.
+
+    Returns the count of objects copied. Never raises — a missing or
+    empty source prefix just returns 0 (a first-attempt cache or a
+    job that died before any panel was generated).
+
+    Uses ``bucket.copy_blob(source_blob, destination_bucket=bucket, new_name=...)``
+    which is a metadata operation at GCS — no data egress, no rewrites.
+    """
+    bucket_name = os.environ.get("YTFACTORY_BUCKET", "ytfactory-prod-v3-artifacts")
+    try:
+        from google.cloud import storage  # noqa: PLC0415
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        src_prefix = f"jobs/{old_job_id}/cache/"
+        dst_prefix = f"jobs/{new_job_id}/cache/"
+        count = 0
+        for blob in bucket.list_blobs(prefix=src_prefix):
+            rel = blob.name[len(src_prefix):]
+            if not rel or rel.endswith("/"):
+                continue
+            new_name = dst_prefix + rel
+            bucket.copy_blob(blob, bucket, new_name=new_name)
+            count += 1
+        if count:
+            logger.info(
+                "retry cache copy: %d objects %s → %s",
+                count, src_prefix, dst_prefix,
+            )
+        return count
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "retry cache copy failed for old=%s new=%s: %s — proceeding "
+            "with empty cache (retry will pay full cost)",
+            old_job_id, new_job_id, exc,
+        )
+        return 0

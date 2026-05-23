@@ -519,15 +519,32 @@ def _collect_overlays(
         except Exception as exc:  # noqa: BLE001
             _logger.warning("anchored_footage overlay skipped: %s", exc)
 
-    # Closer panel — opt-in CTA card held at the tail (P5.1, R4).
-    # Without this dispatch the plugin was registered but never invoked.
-    if getattr(spec, "closer_panel", False):
+    # Closer panel — CTA card held at the tail (P5.1, R4).
+    #
+    # Activation rule (2026-05-23, user direction "no excuses"):
+    # The closer is REQUIRED whenever the variant declares a
+    # `closer_format` string in spec.extra. The explicit
+    # `spec.closer_panel = True` flag is retained for back-compat but
+    # `closer_format` ALONE is sufficient to activate. Declaring the
+    # CTA text without rendering it was the foot-gun that caused the
+    # tifu render (job 24c5887a) to ship without its LIKE/COMMENT
+    # split — the configured engagement-bait silently vanished.
+    closer_format = (spec.extra or {}).get("closer_format")
+    closer_activated = bool(getattr(spec, "closer_panel", False)) or bool(closer_format)
+    if closer_activated:
+        # Import for side-effect so the plugin registers itself.
+        from pipeline.render.overlays import closer_panel as _cp  # noqa: PLC0415, F401
         try:
-            # Import for side-effect so the plugin registers itself.
-            from pipeline.render.overlays import closer_panel as _cp  # noqa: PLC0415, F401
             out.extend(get_plugin("overlays", "closer_panel").produce(spec, timeline, audio))
         except Exception as exc:  # noqa: BLE001
-            _logger.warning("closer_panel overlay skipped: %s", exc)
+            raise RenderFailedError(
+                f"closer_panel overlay failed but the variant declared "
+                f"closer_format={closer_format!r} (or spec.closer_panel=True). "
+                f"Engagement-bait must render on every short with a configured "
+                f"closer — refusing to ship without it. "
+                f"site=pipeline/render/short_engine.py:_collect_overlays "
+                f"(closer_panel branch). Original cause: {exc!r}"
+            ) from exc
 
     return out
 

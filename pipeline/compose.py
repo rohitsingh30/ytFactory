@@ -1,7 +1,8 @@
 """Stage 7 — compose final 9:16 vertical video via ffmpeg.
 
-Each image gets its beat's exact duration, with Ken Burns zoom+pan and
-crossfade between images. Captions are rendered as PNGs (see captions.py)
+Each image gets its beat's exact duration, with a punch-in + slow-drift
+zoom and crossfade between images. Captions are rendered as PNGs (see
+captions.py)
 and overlaid with ffmpeg's `overlay` filter, since this Homebrew ffmpeg
 build lacks `drawtext` and `subtitles`/libass.
 
@@ -280,13 +281,13 @@ ZOOM_MAX = 1.12
 ZOOM_DRIFT_END = 1.16  # +4% over the post-punch hold
 
 
-def _kenburns_filter(
+def _punch_drift_zoom_filter(
     clip_duration: float,
     beat_index: int,
     *,
     resolution: Resolution = _DEFAULT_RES,
 ) -> str:
-    """zoompan: a punch-in followed by a slow drift, never frozen."""
+    """ffmpeg zoompan: a punch-in followed by a slow drift, never frozen."""
     del beat_index  # all beats share one motion shape
     res = resolution
     frames = max(1, int(round(clip_duration * res.fps)))
@@ -488,12 +489,12 @@ def _compose_with_word_captions(
     inputs: list[str] = []
     filter_chains: list[str] = []
 
-    # Image inputs + Ken Burns chain.
+    # Image inputs + zoom chain.
     for i, img in enumerate(image_paths):
         clip_t = video_dur[i] + XFADE
         inputs += ["-loop", "1", "-t", f"{clip_t:.3f}", "-i", str(img)]
         filter_chains.append(
-            f"[{i}:v]{_kenburns_filter(clip_t, i, resolution=resolution)}[v{i}]"
+            f"[{i}:v]{_punch_drift_zoom_filter(clip_t, i, resolution=resolution)}[v{i}]"
         )
 
     # Crossfade chain — audio-anchored offsets.
@@ -761,7 +762,7 @@ def compose(
         )
         caption_paths.append(cp)
 
-    # 2. Build ffmpeg input list and per-image Ken Burns chain.
+    # 2. Build ffmpeg input list and per-image zoom chain.
     #    Each image is held for video_dur[i] + XFADE so the next xfade
     #    has the overlap it needs.
     inputs: list[str] = []
@@ -770,7 +771,7 @@ def compose(
         clip_t = video_dur[i] + XFADE
         inputs += ["-loop", "1", "-t", f"{clip_t:.3f}", "-i", str(img)]
         filter_chains.append(
-            f"[{i}:v]{_kenburns_filter(clip_t, i, resolution=res)}[v{i}]"
+            f"[{i}:v]{_punch_drift_zoom_filter(clip_t, i, resolution=res)}[v{i}]"
         )
 
     # 3. Crossfade in sequence. Offset is anchored to the audio
@@ -957,8 +958,8 @@ def _clip_filter(
 ) -> str:
     """Filter chain for a per-beat animation clip.
 
-    Unlike the slideshow path, animated clips don't need Ken Burns —
-    the motion is already in the frames. We just upscale to the output
+    Unlike the slideshow path, animated clips don't need an on-clip
+    zoom — the motion is already in the frames. We just upscale to the output
     resolution, normalise SAR, and trim/pad to ``clip_duration``
     (which already includes the XFADE overlap) so the next clip's
     xfade has overlap to consume.
@@ -978,31 +979,26 @@ def _clip_filter(
     )
 
 
-def image_to_kenburns_clip(
+def image_to_static_clip(
     image_path: Path,
     duration_s: float,
     out_path: Path,
     *,
     resolution: Resolution | None = None,
 ) -> Path:
-    """Render a still image to a static-still mp4 clip at ``resolution``.
+    """Render a still image to a static held-frame mp4 clip at ``resolution``.
 
-    2026-05-23 (user directive): Ken-Burns / zoompan motion REMOVED.
-    The function name is kept for back-compat (callers still import
-    ``image_to_kenburns_clip``) but the body now produces a static
-    held frame — no zoom, no pan, no drift. Justification:
-      * Ken-Burns zoompan was the single largest CPU sink in long-form
-        seg rendering (~118s per 125s seg, vs ~3s for a static loop).
-        Long-form jobs were hitting the Cloud Run 3600s task timeout.
-      * The pipeline-side compensation is denser panel cadence (more
-        panels at shorter holds) so static stills don't dwell long
-        enough to register as "frozen video".
+    No zoom, no pan, no drift — the image is scaled-and-cropped to fill
+    the target frame, then held for ``duration_s`` seconds via an
+    ffmpeg loop. Designed to be cheap on Cloud Run CPU (~3s per 125s
+    output segment) so long-form jobs finish inside the 3600s task
+    timeout; the pipeline-side compensation for stillness is dense
+    panel cadence (more panels at shorter holds).
 
     Used by ``ai_beat_slideshow._stitch_images`` (the unified-renderer
-    short-engine visual path). ``compose_hybrid`` (legacy, dead) was
-    the other caller.
+    short-engine visual path) and by ``compose_hybrid``.
 
-    ``resolution`` defaults to Shorts (1080×1920 @ 30 fps) for back-compat.
+    ``resolution`` defaults to Shorts (1080×1920 @ 30 fps).
     """
     res = resolution or _DEFAULT_RES
     # Hold time = beat duration. No +XFADE padding — downstream is
@@ -1035,17 +1031,12 @@ def image_to_kenburns_clip(
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print("[compose] image_to_kenburns_clip ffmpeg stderr (last 2000):")
+        print("[compose] image_to_static_clip ffmpeg stderr (last 2000):")
         print(result.stderr[-2000:])
         raise RuntimeError(
             f"image→clip ffmpeg failed (exit {result.returncode})"
         )
     return out_path
-
-
-# Back-compat alias — the new canonical name. Old callers (and the
-# function symbol) still work; new code should use this.
-image_to_static_clip = image_to_kenburns_clip
 
 
 def _ffprobe_duration(path: Path) -> float:
@@ -1199,13 +1190,13 @@ def compose_hybrid(
 
     ``beat_resolutions`` is a per-beat ``(kind, path)`` list:
 
-      * ``("image", path/to/img_NN.png)``  — Ken Burns over the image.
+      * ``("image", path/to/img_NN.png)``  — static still mp4 from the image.
       * ``("footage", path/to/clip_NN.mp4)`` — real broadcast clip,
         produced by ``pipeline.footage.fetch_clip``. Trusted to be
         already 1080x1920 and roughly the right duration; this function
         does NOT re-trim or rescale.
 
-    For each image beat we render a Ken Burns mp4 into the cache; for
+    For each image beat we render a static-still mp4 into the cache; for
     each footage beat we use the supplied mp4 directly. Then we hand the
     unified clip list to ``compose_clips`` which already knows how to
     crossfade-stitch + caption-overlay + tail-hold.
@@ -1241,7 +1232,7 @@ def compose_hybrid(
             # duration. compose_clips loops/trims clips that don't match
             # video_dur[i], but giving it the right length up front keeps
             # the xfade math clean.
-            image_to_kenburns_clip(
+            image_to_static_clip(
                 src_path, video_dur[i], clip_dst,
                 resolution=resolution,
             )
@@ -1295,7 +1286,7 @@ def compose_clips(
     """Render the final Short from per-beat animated clips (mp4s).
 
     Mirrors ``compose()`` but consumes pre-rendered video clips instead
-    of static images: skips the Ken Burns zoompan, keeps the xfade chain
+    of static images: skips the per-image zoom, keeps the xfade chain
     + caption overlay logic. Clips that are shorter than their beat get
     looped; longer clips get trimmed.
 

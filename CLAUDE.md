@@ -92,6 +92,32 @@ is `cli`.
 .venv/bin/pytest tests/ -x -q
 ```
 
+## Post-render: critique is the default
+
+After **every** completed cloud render, the default flow is:
+
+1. **Download** the mp4 to the canonical laptop path:
+   ```
+   gs://ytfactory-prod-v3-artifacts/jobs/<job_id>/short.mp4
+   → data/<channel>/<niche_state_dir>/shorts/<slug>.mp4
+   ```
+   Example: a mystoriesanimated/tifu render at job `24c5887a...` lands
+   at `data/mystoriesanimated/reddit_tifu/shorts/<slug>.mp4`.
+   Use the `niche_channel_map()[<variant>][0]` value for the niche dir
+   (see `pipeline/channels.py::niche_channel_map`).
+2. **Run `/critique-video <path>`** on the downloaded mp4. The skill
+   samples 1fps + 0.3s/0.8s hook frames, watches through 17 lenses,
+   writes `data/critiques/<slug>.md` with a per-frame fix table +
+   class-of-bug system fixes.
+3. **Address the CLASS-OF-BUG fixes** before the next render —
+   one-offs can stay logged; class-of-bug fixes lift the next 100
+   shorts, not just this one.
+
+Don't ship without critiquing. Don't queue more renders without
+addressing the class-of-bug findings from the previous critique.
+
+See `.claude/skills/critique-video/SKILL.md` for the full lens list.
+
 ## Working principles
 
 - Read the code before writing or editing. Comments and docstrings can
@@ -116,10 +142,26 @@ a real GCP bill that bit us. Full background in
 `docs/optimization_checklist.md` (sections 3.4, 5.6, 5.7).
 
 1. **`min-instances=0`** on every GPU service. Idle = ₹0.
-2. **`max-instances=1`** on every GPU service. The render pipeline
-   calls each provider serially per chunk; `concurrency=2` already
-   covers in-instance pipelining. A second instance just doubles the
-   L4 spend.
+2. **`max-instances` matches the caller's fan-out shape.** Pick ONE
+   of these patterns and document the choice in the `deploy.sh` next
+   to the flag:
+   - **Serial-only services** (TTS chunks, ASR chunks, anything the
+     caller hits with a single in-flight request) → `max-instances=1`.
+     A second instance would just double L4 spend.
+   - **Fan-out services** (image gen — called in parallel from
+     `pipeline/render/visualize/ai_beat_slideshow.py` and
+     `pipeline/render/shared/long_form_lib.py::_generate_panel_stills`
+     via `ThreadPoolExecutor`) → `max-instances=4`. Cost ceiling
+     is total GPU-seconds, NOT instance count: 4 parallel for 9 min
+     costs the same as 1 serial for 36 min, but doesn't blow the
+     worker's 60-min Cloud Run `--task-timeout`. The 2026-05-23 SIGKILL
+     of job `a0aac53e` was caused by drift between the comment
+     (which said `max-instances=1`) and the actual deployed config
+     (`max-instances=4`) on `ytfactory-image-z-image-turbo`: the
+     PIPELINE was serial because the developer trusted the comment,
+     so all 60 panels queued through a single instance and the
+     render hit the task-timeout. Now the deploy.sh comments
+     explicitly call out which class each service belongs to.
 3. **`--region=asia-southeast1`** on every `gcloud builds submit`.
    Without it, the build runs in the global pool (US Iowa) and the
    image push to `asia-southeast1` AR crosses the Pacific — that's

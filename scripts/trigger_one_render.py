@@ -46,7 +46,7 @@ proposal = ShortProposal(
     source_kind="user_text",
     source_ref=None,
     length_s=15,  # 2026-05-17 (round 2): cut to 15s for FAST iteration on
-                  # the caption + Ken Burns fixes. Cloud cycle ~5-7 min
+                  # the caption + visual fixes. Cloud cycle ~5-7 min
                   # at 15s instead of ~15 min at 25s.
     notes=NOTES,
     internal_only=True,  # do not auto-publish

@@ -134,9 +134,9 @@ class VisualMode(str, Enum):
                                      of external mp4 clips. ``visual_source=
                                      footage`` form input + shotlist.
     - ``longform_panels``          — long-form sectioned narration → 1
-                                     Flux panel per ~30-60 s with
-                                     Ken Burns motion. Default long-form
-                                     for animated channels.
+                                     Flux panel per ~30-60 s (static
+                                     stills, hard cuts). Default long-
+                                     form for animated channels.
     - ``archival_shotlist``        — long-form sectioned narration matched
                                      to a curated archive.org/Wikimedia
                                      shotlist. Default long-form for
