@@ -44,7 +44,7 @@ BUILD_ID=$(gcloud builds submit . \
   --project="${PROJECT}" \
   --timeout=5400s \
   --async \
-  --format="value(id)" 2>/dev/null)
+  --format="value(id)")
 if [ -z "${BUILD_ID}" ] || ! echo "${BUILD_ID}" | grep -qE '^[a-f0-9-]{20,}$'; then
   echo "ERROR: failed to submit build (got '${BUILD_ID}')" >&2
   exit 1

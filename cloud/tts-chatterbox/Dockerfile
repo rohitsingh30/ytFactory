@@ -56,6 +56,7 @@ RUN python -c "from huggingface_hub import snapshot_download; \
 
 WORKDIR /app
 COPY server.py ./
+COPY _tel_track_io.py ./
 COPY cloud_run_json_exporter.py ./
 COPY otel_init.py ./
 

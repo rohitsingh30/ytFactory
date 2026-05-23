@@ -62,6 +62,7 @@ RUN python -c "from faster_whisper import WhisperModel; \
 
 WORKDIR /app
 COPY server.py ./
+COPY _tel_track_io.py ./
 COPY cloud_run_json_exporter.py ./
 COPY otel_init.py ./
 

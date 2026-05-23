@@ -18,13 +18,11 @@
 #   instance's local SSD via the read-only image layer, so cold-load drops
 #   to ~30 s with predictable behavior.
 #
-# OOM budget:
-#   - Build VM: E2_HIGHCPU_32 = 32 GiB RAM + 32 vCPUs.
-#     `gcloud storage cp` and `docker build` stream to disk, not RAM, so peak
-#     RAM stays well below the 32 GiB cap.
-#   - Disk: 200 GiB. Weights ~33 GiB on /workspace + Docker layer cache
-#     (~40 GiB across base, deps, weights, app) + image manifest assembly
-#     = ~75 GiB worst case. 200 GiB leaves >2x headroom.
+# Build VM sizing: see the inline comments next to `machineType` and
+# `diskSizeGb` in the `options:` block at the bottom — both have a
+# specific incident write-up explaining why the value is what it is.
+# RAM is not a constraint (gcloud storage cp + docker build stream to
+# disk, not RAM).
 
 steps:
   # Step 1 — pre-stage the 33 GiB Z-Image-Turbo weights to the shared
@@ -108,8 +106,38 @@ images:
   - ${_IMAGE}
 
 options:
-  machineType: E2_HIGHCPU_32
-  diskSizeGb: 200
+  # E2_HIGHCPU_8 (NOT _32) — forced by GCP quota policy on 2026-05-23.
+  # Background: builds prior to 2026-05-16 ran on E2_HIGHCPU_32. From
+  # 2026-05-23 onwards a fresh submit fails with
+  #   FAILED_PRECONDITION: due to quota restrictions, Cloud Build
+  #   cannot run builds of this machine type in this region
+  # in asia-southeast1. The public Cloud Quotas API does NOT expose this
+  # lever (OngoingBuildCPUsPerProjectPerRegionPerOrigin already grants 40
+  # CPUs, well above HIGHCPU_32's 32 vCPU need — so it's a machine-type
+  # availability gate, not CPU headroom). A quota-preference request was
+  # filed 2026-05-23 (traceId 47f4df65-6149-4536-9744-f6b2c5c6c14b);
+  # the actual restoration requires a Google Cloud Customer Care case.
+  # HIGHCPU_8 is the workable substitute today: the build is I/O-bound
+  # on the 33-GiB weight staging + COPY, NOT CPU-bound, so wall-clock
+  # impact is ~20-25 min instead of ~15. Do NOT raise this to _32 unless
+  # the support case has been resolved (check the traceId above).
+  machineType: E2_HIGHCPU_8
+  # 400 GiB (NOT 200) — disk-exhaustion failure on 2026-05-23.
+  # On that day a build failed at the `COPY _weights → /opt/model` step with
+  #   ENOSPC: no space left on device while writing
+  #   diffusion_pytorch_model-00002-of-00003.safetensors
+  # The peak disk consumers at COPY-time:
+  #   - /workspace/_weights staged from GCS:           ~33 GiB
+  #   - BuildKit context transfer buffer (same data):  ~33 GiB
+  #   - `docker pull :latest` for --cache-from:        ~40-50 GiB (this
+  #     has grown over time — every build since 2026-05-16 added telemetry
+  #     code + pip deps that the cache image now carries)
+  #   - apt + cuda base + buildkit scratch:            ~5-10 GiB
+  #   - COPY destination layer + overlay2 CoW expand:  ~33-66 GiB
+  # Sum at COPY-time: 145-190 GiB. 200 GiB had no headroom for the CoW
+  # spike on the last weight shard. 400 GiB gives ~2x headroom and the
+  # incremental Cloud Build cost is trivial (~₹2 per build).
+  diskSizeGb: 400
   logging: CLOUD_LOGGING_ONLY
 
 timeout: 5400s
