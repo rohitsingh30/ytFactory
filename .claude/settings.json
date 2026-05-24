@@ -10,5 +10,40 @@
       "Bash(gcloud org-policies describe *)",
       "mcp__playwright__browser_snapshot"
     ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/rohit/ytFactory/.claude/hooks/userprompt_init.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|TaskCreate|Agent|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/rohit/ytFactory/.claude/hooks/pretool_audit.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/rohit/ytFactory/.claude/hooks/stop_audit.sh"
+          }
+        ]
+      }
+    ]
   }
 }
