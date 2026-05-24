@@ -50,7 +50,7 @@ output_resolution: [1080, 1920]
 # per row. Task #30 (2026-05-24): without this override every TIH
 # short shipped with the AITA closer because variant YAML's
 # closer_format wasn't being read by the spec.extra backfill.
-closer_format: "LIKE if you learned, SUBSCRIBE for more history"
+closer_format: "LIKE if you learned something new, SUBSCRIBE for more daily history."
 closer_hold_s: 1.0
 
 # Source defaults — feed_type "selected" mirrors Wikipedia's main page picks.

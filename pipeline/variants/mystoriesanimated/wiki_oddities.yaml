@@ -53,7 +53,7 @@ output_resolution: [1080, 1920]
 # Task #30 (2026-05-24): without this override every wiki-oddities
 # short shipped with the AITA closer because variant YAML's
 # closer_format wasn't being read by the spec.extra backfill.
-closer_format: "LIKE if surprising, SUBSCRIBE for more oddities"
+closer_format: "LIKE if this fact surprised you, SUBSCRIBE for more strange-but-true."
 closer_hold_s: 1.0
 
 # Source defaults — what the /make-script skill should pull by default.

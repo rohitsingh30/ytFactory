@@ -251,6 +251,40 @@ def _assert_non_aita_subscribe_closer(closer: str, variant: str) -> None:
         f"COMMENT to the closer panel duplicates the script's ask. "
         f"User rule 2026-05-24. Got: {closer!r}"
     )
+    # User rule 2026-05-24 (after the research-sourced closer
+    # rewrite): each clause must be a complete predicate, and the
+    # whole closer must end with terminal punctuation ('.', '!', or
+    # '?'). Fragments like "LIKE if you learned, SUBSCRIBE for more
+    # history" read as chips, not sentences.
+    stripped = closer.rstrip()
+    assert stripped.endswith((".", "!", "?")), (
+        f"{variant} closer must end with terminal punctuation "
+        f"('.', '!', or '?') — viewers read it as a sentence, not "
+        f"a chip-list. User rule 2026-05-24 after the closer-CTA "
+        f"research pass. Got: {closer!r}"
+    )
+    # Both clauses must contain a verb-ish token (LIKE / SUBSCRIBE /
+    # FOLLOW already enforced above) plus enough content past the
+    # action verb that the clause isn't just the verb alone.
+    # "SUBSCRIBE" alone = fragment; "SUBSCRIBE for X" = predicated.
+    clauses = [c.strip() for c in closer.split(",") if c.strip()]
+    assert len(clauses) >= 2, (
+        f"{variant} closer must split on comma into >=2 clauses for "
+        f"the 2-row panel. Got {len(clauses)} clause(s): {closer!r}"
+    )
+    for i, c in enumerate(clauses):
+        # A fully-predicated clause has at least 4 words past the
+        # action verb. "LIKE if X" alone is 3 words and reads thin;
+        # "LIKE if you learned something new" is 6 and reads
+        # complete. Threshold of >=4 words total per clause caught
+        # the regression the user flagged 2026-05-24.
+        word_count = len(c.split())
+        assert word_count >= 4, (
+            f"{variant} closer clause {i+1} is too thin "
+            f"({word_count} words) — reads as a fragment, not a "
+            f"complete predicate. Aim for >=4 words per clause. "
+            f"Got clause {i+1}: {c!r} (full closer: {closer!r})"
+        )
 
 
 def test_today_in_history_closer_shape() -> None:
