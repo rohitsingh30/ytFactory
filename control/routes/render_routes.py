@@ -283,6 +283,12 @@ class JobView(BaseModel):
     # operator can walk the retry chain.
     retry_of: str | None = None
     retried_as: str | None = None
+    # Surfaced for the dashboard PREFLIGHT badge. Sourced from either
+    # the root ``internal_only`` field (legacy) or ``proposal.internal_only``
+    # (current; set by scripts/trigger_one_render.py + the test-fixture
+    # auto-flagger). Frontend reads this to render a badge so smoke-tests
+    # are visible AND distinguishable from real renders.
+    internal_only: bool = False
 
 
 def _doc_to_view(job_id: str, doc: dict) -> JobView:
@@ -342,6 +348,10 @@ def _doc_to_view(job_id: str, doc: dict) -> JobView:
         render_spec=doc.get("render_spec"),
         retry_of=doc.get("retry_of"),
         retried_as=doc.get("retried_as"),
+        internal_only=(
+            doc.get("internal_only") is True
+            or (doc.get("proposal") or {}).get("internal_only") is True
+        ),
     )
 
 
@@ -1245,26 +1255,17 @@ async def get_queue_state() -> QueueResponse:
     # we sort here instead — cheap on ≤200 rows.)
     docs.sort(key=lambda jd: str(jd[1].get("updated_at") or ""), reverse=True)
 
-    # ``internal_only=True`` docs are smoke-tests / dev fixtures
-    # fired by scripts/trigger_one_render.py and the test-fixture
-    # auto-flagger (see control/core/scheduler.py::is_test_fixture_topic).
-    # They should NEVER appear on the operator dashboard — pre-2026-05-24
-    # the queue route ignored the flag entirely and 31 internal_only
-    # "ketchup on slow-cooked beef stew" smoke renders cluttered the
-    # Completed column. Filter them out here. The internal_only flag
-    # lives at ``doc.proposal.internal_only`` (set by
-    # control/core/jobs.py:411) but for back-compat we also accept
-    # a flat ``doc.internal_only`` field in case any pre-flag-flag
-    # rows wrote it at the root.
-    def _is_internal_only(doc: dict) -> bool:
-        if doc.get("internal_only") is True:
-            return True
-        p = doc.get("proposal") or {}
-        return p.get("internal_only") is True
-
+    # ``internal_only=True`` docs are smoke-tests / dev fixtures fired
+    # by scripts/trigger_one_render.py and the test-fixture auto-flagger
+    # (see control/core/scheduler.py::is_test_fixture_topic). Pre-2026-05-24
+    # the queue route showed them mixed with real renders and 31 "ketchup
+    # on slow-cooked beef stew" smoke renders cluttered the Completed
+    # column; we then filtered them out entirely. Post-2026-05-24 the
+    # user wanted COMPLETE TRANSPARENCY — show every row, including
+    # smoke-tests, but tag them so they're distinguishable. The flag
+    # rides on JobView.internal_only (set in _doc_to_view) and the
+    # frontend renders a PREFLIGHT badge against it.
     for jid, d in docs:
-        if _is_internal_only(d):
-            continue
         s = d.get("status")
         view = _doc_to_view(jid, d).model_dump()
         if s == "pending":
@@ -1273,8 +1274,6 @@ async def get_queue_state() -> QueueResponse:
             running.append(view)
 
     for jid, d in terminal_docs:
-        if _is_internal_only(d):
-            continue
         completed.append(_doc_to_view(jid, d).model_dump())
 
     # Holds: walk every channel/_holds.json on disk (cheap; ≤ 8 files).

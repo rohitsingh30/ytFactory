@@ -191,8 +191,16 @@ function QueueRow({ job, showCancel }: { job: Job; showCancel?: boolean }) {
     >
       <ChannelIcon channel={job.channel ?? ""} size="sm" />
       <div className="min-w-0 flex-1">
-        <div className="truncate text-[12.5px] font-medium tracking-tight">
-          {job.topic ?? "(untitled)"}
+        <div className="flex items-center gap-1.5 text-[12.5px] font-medium tracking-tight">
+          {job.internal_only ? (
+            <span
+              className="shrink-0 rounded-sm bg-amber-500/15 px-1 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-300"
+              title="Internal-only preflight / smoke-test render. Not auto-published."
+            >
+              preflight
+            </span>
+          ) : null}
+          <span className="truncate">{job.topic ?? "(untitled)"}</span>
         </div>
         <div className="mt-0.5 truncate font-mono text-[10.5px] text-muted-foreground">
           {channelLabel(job.channel)} · {job.stage ?? "—"}

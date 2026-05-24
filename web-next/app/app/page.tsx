@@ -168,8 +168,16 @@ function RecentRenders({ rows }: { rows: Job[] | null }) {
           >
             <ChannelIcon channel={j.channel ?? ""} size="sm" />
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[13px] font-medium tracking-tight">
-                {j.topic ?? "Untitled"}
+              <div className="flex items-center gap-1.5 text-[13px] font-medium tracking-tight">
+                {j.internal_only ? (
+                  <span
+                    className="shrink-0 rounded-sm bg-amber-500/15 px-1 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-300"
+                    title="Internal-only preflight / smoke-test render. Not auto-published."
+                  >
+                    preflight
+                  </span>
+                ) : null}
+                <span className="truncate">{j.topic ?? "Untitled"}</span>
               </div>
               <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
                 <span>{channelLabel(j.channel)}</span>

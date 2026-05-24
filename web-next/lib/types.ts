@@ -176,6 +176,10 @@ export interface Job {
   // job-detail page to render "Retried from / Retried as" links.
   retry_of?: string | null;
   retried_as?: string | null;
+  // True for smoke-test / preflight renders (set by
+  // scripts/trigger_one_render.py + the test-fixture auto-flagger).
+  // UI surfaces these mixed with real renders + a PREFLIGHT badge.
+  internal_only?: boolean;
 }
 
 export interface JobListResponse {

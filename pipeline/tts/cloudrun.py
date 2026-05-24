@@ -250,6 +250,26 @@ def _inject_trace_headers(headers: dict[str, str]) -> None:
         pass
 
 
+def _track_synth_http_call(
+    *, url: str, service: str, status_code: int | None,
+    latency_ms: int, success: bool,
+) -> None:
+    # Per-call telemetry so cost attribution can group TTS GPU-seconds
+    # by job_id. Mirrors pipeline/images/images_cloudrun.py:_track_http_call.
+    try:
+        from pipeline import observability as _obs  # noqa: PLC0415
+        _obs.track_io(
+            "http.call",
+            category="http",
+            success=success,
+            duration_ms=latency_ms,
+            input_meta={"service": service, "method": "POST", "url": url},
+            output_meta={"status_code": status_code, "latency_ms": latency_ms},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 
 def _post_synth(payload: dict) -> dict:
     """POST to /synth with retry/backoff, return parsed JSON.
@@ -309,10 +329,20 @@ def _post_synth(payload: dict) -> dict:
     max_attempts = 5
     last_http_error: urllib.error.HTTPError | None = None
     last_net_error: Exception | None = None
+    service = f"tts-{payload.get('model') or 'chatterbox'}"
     for attempt in range(max_attempts):
+        t0 = time.time()
+        latency_ms = 0
+        status_code: int | None = None
         try:
             with urllib.request.urlopen(req, timeout=_timeout_s()) as resp:
                 raw = resp.read()
+                status_code = getattr(resp, "status", 200) or 200
+                latency_ms = int((time.time() - t0) * 1000)
+                _track_synth_http_call(
+                    url=f"{url}/synth", service=service,
+                    status_code=status_code, latency_ms=latency_ms, success=True,
+                )
                 try:
                     return json.loads(raw)
                 except ValueError as e:
@@ -322,6 +352,11 @@ def _post_synth(payload: dict) -> dict:
         except urllib.error.HTTPError as e:
             last_http_error = e
             code = getattr(e, "code", None)
+            latency_ms = int((time.time() - t0) * 1000)
+            _track_synth_http_call(
+                url=f"{url}/synth", service=service,
+                status_code=code, latency_ms=latency_ms, success=False,
+            )
             # 429/502/503 → retry with exponential backoff. 502 added
             # 2026-05-13 after canary 9b96e438 hit a chatterbox cold-
             # start 502: the service had scaled to zero between
@@ -372,6 +407,11 @@ def _post_synth(payload: dict) -> dict:
             # tests/test_tts_cloudrun_full.py
             # ::TestSynthCloudRunIncompleteReadRetry.
             last_net_error = e
+            latency_ms = int((time.time() - t0) * 1000)
+            _track_synth_http_call(
+                url=f"{url}/synth", service=service,
+                status_code=None, latency_ms=latency_ms, success=False,
+            )
             if attempt + 1 >= max_attempts:
                 raise CloudRunUnavailable(
                     f"cloud /synth network error after {max_attempts} "
