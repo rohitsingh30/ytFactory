@@ -483,6 +483,192 @@ ADR-027).
 - **Effort:** **S** (one-line change per deploy.sh; ~5 min × 5 scripts).
 - **Where:** every `cloud/<svc>/deploy.sh`.
 
+### O33. Move reconciler off laptop-LaunchAgent onto Cloud Scheduler (2026-05-24)
+
+- **What:** Today the job reconciler runs on the laptop via
+  `com.ytfactory.job-reconciler.plist` at 5-min intervals. If the
+  laptop is closed, asleep, or rebooted, stuck jobs accumulate
+  forever. Move the trigger to Cloud Scheduler → Cloud Run cron job
+  so it survives laptop state.
+- **Why:** F27's investigation showed the reconciler hadn't run on
+  this laptop AT ALL since the LaunchAgent was never installed. Stuck
+  jobs are a "operator forgot to install the plist on machine N"
+  class today; laptop-independent removes the bootstrap step.
+- **Effort:** **M** (~2-3 h). Need: enable `cloudscheduler.googleapis.com`,
+  small Cloud Run JOB that imports `control.core.reconciler`, Cloud
+  Scheduler cron every 5 min, decommission the laptop plist.
+- **Where:** new `cloud/reconciler-cron/` service + Scheduler config.
+- **Incident:** 2026-05-24 — F27, job `82682e8e` stuck 24h+.
+
+### O34. Bootstrap step: deploy `firestore.indexes.json` on fresh GCP project (2026-05-24)
+
+- **What:** Add `scripts/bootstrap_gcp_project.sh` (or a runbook
+  line) that runs `firebase deploy --only firestore:indexes` (or
+  gcloud equivalent) when a new project comes online. Today
+  `firestore.indexes.json` is the spec but nothing enforces it
+  matches deployed state. `gcloud firestore indexes composite list`
+  showed 0 indexes on `ytfactory-prod-v3` before 2026-05-24.
+- **Why:** Without it, every Firestore-backed feature depending on a
+  composite index silently 400s on first call. The web UI handles
+  it gracefully (operator banner); the reconciler silently no-ops.
+- **Effort:** **S** (~30 min).
+- **Where:** `scripts/bootstrap_gcp_project.sh` (new) + setup docs.
+- **Counter-test:** verification step: `diff <(gcloud firestore
+  indexes composite list --format=json) firestore.indexes.json`
+  (normalised).
+- **Incident:** 2026-05-24 — F27, /api/queue Completed column dead.
+
+### O35. `verify_web_runner.sh` — distinguish absent from unreadable (2026-05-24)
+
+- **What:** Every `_check_*` helper in `cloud/iam/verify_web_runner.sh`
+  uses `gcloud ... 2>/dev/null || true` which silently swallows
+  PermissionDenied and reports the binding as MISSING. Replace with
+  explicit error-handling: capture gcloud's exit code; if non-zero
+  AND the stderr indicates permission denied (rather than "not found"
+  or auth missing), emit a SPECIFIC error and exit with code 3
+  ("cannot verify — grant the deployer SA roles/iam.securityReviewer
+  or run as project owner"). Don't let "I can't tell" masquerade as
+  "absent".
+- **Why:** F28 — false MISSING report blocked a deploy whose bindings
+  were actually present. Wasted 30+ min on a non-bug. Violates
+  `feedback_silent_fallback_unshippable_output`.
+- **Effort:** **S** (~45 min). Per-helper exit-code check + a unit
+  test stubbing gcloud-read to fail with PermissionDenied.
+- **Where:** `cloud/iam/verify_web_runner.sh` +
+  `tests/test_cloud_deploy_hardening.py`.
+- **Incident:** 2026-05-24 — `cloud/web-server/deploy.sh` blocked
+  for ~30 min on false MISSING report despite all 8 bindings
+  verified present as owner.
+
+### O36. Route long-form image-gen through the refiner (2026-05-24)
+
+- **What:** `pipeline/render/shared/long_form_lib.py::_generate_panel_stills`
+  builds the wire prompt via `images.build_full_prompt(refined_visual,
+  refined_scene, style_block)` — same shape `ai_beat_slideshow.py`
+  (shorts) uses. New `_refine_long_form_panels` helper invokes
+  `refine_prompts_batch` once for the panel batch; per-beat empty
+  fallback keeps the legacy path for individual slots; whole-batch
+  failure RAISES per `feedback_silent_fallback_unshippable_output`.
+- **Why:** F29 — the long-form path never reached the refiner, so
+  the channel's `style_block`, character continuity, and the
+  refiner's "no readable text in image." anti-text prefix were all
+  lost. Two consecutive renders shipped with ~58% floating-jersey
+  panels.
+- **Effort:** **M** — ~224 LoC of new wiring across `long_form_lib.py`,
+  `longform_panels.py`, `prompt_refiner.py`, `prompts.py`,
+  `entrypoint.py`. Done in `fdc5f65`.
+- **Where:** `pipeline/render/shared/long_form_lib.py:598-940` +
+  five adjacent files.
+- **Counter-test:** `tests/render/shared/test_long_form_refiner_routing.py`
+  (6 tests).
+- **Status:** **SHIPPED** 2026-05-24 in `fdc5f65`.
+
+### O37. Verb-led anti-text safety SUFFIX (2026-05-24)
+
+- **What:** `pipeline/images/images_cloudrun.py::ANTI_TEXT_SUFFIX` —
+  replaced 190-char noun-tag prefix ("Clean surface, unmarked, blank
+  jersey, smooth fabric, plain backgrounds, unmarked book covers,
+  unlabeled bottles, no signage, no banners, no watermark, no logo,
+  no caption, no street signs.") with a 232-char verb-led safety
+  clause appended-not-prepended ("Render the scene with no readable
+  printed text anywhere in the image, no visible logos on clothing
+  or objects, no captions baked into the frame, no street signs or
+  banners with readable letters."). Backward-compat aliases kept.
+- **Why:** F29 symptom layer — the prior nouns ("blank jersey",
+  "smooth fabric", "unmarked book covers", "unlabeled bottles")
+  were concrete clothing/fabric/paper-product nouns z-image-turbo
+  treated as draw-subjects. Verbs/adverbs don't compete for
+  subject attention the way noun tags did.
+- **Effort:** **S** (~60 LoC + docstring) — done in `fdc5f65`.
+- **Where:** `pipeline/images/images_cloudrun.py:478-560`.
+- **Counter-test:** `tests/test_anti_text_suffix_shape.py` (9 tests
+  pinning forbidden-noun absence, length ≤250, verb-led, appended-
+  not-prepended, idempotent on legacy + refiner + double-apply).
+- **Status:** **SHIPPED** 2026-05-24 in `fdc5f65`.
+
+### O38. Per-channel `default_scene_anchor` for scene-only panels (2026-05-24)
+
+- **What:** New top-level field `default_scene_anchor: …` on
+  `pipeline/channels/<channel>.yaml`. Threaded through the refiner
+  via the new `scene_anchor` parameter (REFINER_VERSION bumped
+  v2-zturbo → v3-scene-anchor so cached refined fields auto-
+  invalidate at render time via the hash mismatch). Refiner weaves
+  the anchor into `refined_scene` when the beat lacks a setting.
+- **Why:** On long-form renders, ~75% of panels are scene-only
+  (no character token in the brief, just one short sentence like
+  "Cloud-filled sky from airplane wing.") — without a setting
+  anchor the model has nothing to compose around and falls back to
+  the "blank product photo on plain background" attractor. Adding
+  a channel-level setting anchor gives the model concrete
+  grounding for every scene-only panel.
+- **Effort:** **S** (~30 LoC + per-channel YAML entries).
+- **Where:** `pipeline/images/prompt_refiner.py` (scene_anchor
+  param + rule 3a). `pipeline/channels/mystoriesanimated.yaml` —
+  shipped. Pending: `hindutavaanimated.yaml`, `historyrecapped.yaml`,
+  `sportsrecapped.yaml`, `cosmosdecoded.yaml`.
+- **Counter-test:** `tests/test_prompt_refiner.py` — anchor
+  threaded through, hash includes anchor, omitted when unset.
+- **Status:** **partially shipped** 2026-05-24 in `fdc5f65`.
+  Wiring complete; mystoriesanimated YAML field set; 4 other
+  in-rotation channel YAMLs still need their per-channel anchor.
+
+### O39. Z-Image-Turbo `max_sequence_length=1024` to fit refined prompts (2026-05-24)
+
+- **What:** `cloud/image-z-image-turbo/server.py` — pass
+  `max_sequence_length=1024` to `ZImagePipeline.__call__`. Default
+  is 512.
+- **Why:** Our refined prompts + character description + verb-led
+  safety SUFFIX can exceed 512 tokens; the SUFFIX is the first
+  thing the Qwen3-4B encoder truncates if so, removing the safety
+  guard. Tongyi-MAI staff in HF Discussion #8 explicitly: "Locally,
+  you can set `max_sequence_length=1024` to accommodate longer
+  prompts."
+- **Effort:** **S** (1 LoC + comment).
+- **Where:** `cloud/image-z-image-turbo/server.py` `/generate` handler.
+- **Counter-test:** `tests/test_z_image_turbo_quality_pins.py::
+  test_server_passes_max_sequence_length_1024_to_pipe`.
+- **Source:** https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/discussions/8
+- **Status:** **SHIPPED** 2026-05-24 in `fdc5f65`.
+
+### O40. Z-Image-Turbo in-domain resolution buckets (2026-05-24)
+
+- **What:** `cloud/image-z-image-turbo/server.py::_ASPECT_DIMS` —
+  9:16 = 720×1280, 16:9 = 1280×720 (was 768×1344 / 1344×768).
+  Aligned client default in `pipeline/images/images.py::generate`.
+- **Why:** Tongyi-MAI staff (QJerry) in HF Discussion #28: "use
+  more as long as both width & height are divided by 16 and not
+  exceeded 256 pixels fluctuation of 1024 resolution grid (like 768
+  ~ 1280)". The prior 768×1344 / 1344×768 buckets were ~64 px
+  off-domain on the long side. Side benefit: ~10-12% fewer pixels
+  → ~10-12% faster per-panel inference.
+- **Effort:** **S** (2 dict entries + 2 default values).
+- **Where:** `cloud/image-z-image-turbo/server.py:_ASPECT_DIMS` +
+  `pipeline/images/images.py:generate()` width/height defaults.
+- **Counter-test:** `tests/test_z_image_turbo_quality_pins.py::
+  {test_server_aspect_dims_are_in_domain, test_client_default_width_height_match_in_domain}`.
+- **Source:** https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/discussions/28
+  + https://github.com/SaTaNoob/ComfyUI-Z-Image-Turbo-Resolutions
+- **Status:** **SHIPPED** 2026-05-24 in `fdc5f65`.
+
+### O41. Z-Image-Turbo `_native_flash` attention backend (~25% speedup) (2026-05-24)
+
+- **What:** `cloud/image-z-image-turbo/server.py::_pipe()` — after
+  `enable_attention_slicing()`, call `pipe.transformer.set_attention_
+  backend("_native_flash")`. Fails open (try/except logs and keeps
+  default SDPA).
+- **Why:** Tongyi-MAI HF Discussion #139: "25% faster — saved
+  about 52 seconds on a 50-step Full-HD generation" on Blackwell.
+  L4 (Ada SM89) lacks FA-3 (Hopper-only) but the "_native_flash"
+  backend uses PyTorch SDPA's flash kernel which IS available on
+  Ada. Cost ~0, no new dependency.
+- **Effort:** **S** (~6 LoC including the try/except + log).
+- **Where:** `cloud/image-z-image-turbo/server.py::_pipe()`.
+- **Counter-test:** `tests/test_z_image_turbo_quality_pins.py::
+  test_server_sets_native_flash_attention_backend`.
+- **Source:** https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/discussions/139
+  + https://huggingface.co/docs/diffusers/main/en/optimization/attention_backends
+- **Status:** **SHIPPED** 2026-05-24 in `fdc5f65`.
+
 ---
 
 ## Prioritisation guidance

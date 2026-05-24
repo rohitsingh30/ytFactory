@@ -96,6 +96,23 @@ image_style_prefix: |
   blank background motif. ZERO printed text or numerals in the
   rendered frame; the caption overlay is added by post-processing.
 
+# 2026-05-24 — default_scene_anchor closes the floating-jersey
+# failure mode (F29) for long-form scene-only panels on this
+# channel. See pipeline/channels/mystoriesanimated.yaml for the
+# bug context. Channel-appropriate setting for Hindu mythology:
+# the stories are set in Mahabharat-era / Ramayan-era India and
+# need a concrete period-Indian backdrop on panels whose authored
+# scene is short ("Distant mountain at dusk." → without the
+# anchor the model defaults to product-photo blank-background).
+default_scene_anchor: >
+  An ancient Indian setting drawn in the channel's Amar Chitra
+  Katha comic-book style — palace courtyards with carved sandstone
+  pillars, temple sanctums with oil-lamp glow, sacred-river
+  ghats at dawn, forest hermitages with banyan trees, royal
+  council halls with marigold garlands, mountain passes at dusk.
+  Render the visible setting around the action, never an isolated
+  object on a plain studio background.
+
 # Per-story character lock (cast.json overrides). The fallback below
 # only applies when a story has no cast.json yet.
 character_description: |

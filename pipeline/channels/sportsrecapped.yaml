@@ -81,6 +81,22 @@ image_style_prefix: |
   numerals on shirts, no scoreline overlays. ZERO printed text or
   numerals in the rendered frame; all engagement panels are added
   post-diffusion.
+
+# 2026-05-24 — default_scene_anchor closes the floating-jersey
+# failure mode (F29) for long-form scene-only panels on this
+# channel. Sports stories need a concrete pitch/stadium/locker-
+# room context on panels whose authored scene is short
+# ("Final whistle." → without the anchor the model defaults to a
+# blank-background product-photo jersey).
+default_scene_anchor: >
+  A football-match setting drawn in the channel's hand-illustrated
+  zine style — stadium pitch with painted touchlines and goal
+  posts, locker-room interior with wooden benches and lockers,
+  manager's technical area beside the dugout, training-ground
+  drill on a chalk-marked pitch, tunnel walkway, sideline
+  sidelines from behind the bench. Render the visible setting
+  around the action, never an isolated jersey or boot on a plain
+  studio background.
 image_seed: 1872  # year the FA Cup was first contested
 image_steps: 9    # Z-Image-Turbo spec sweet spot (was 4 — stale laptop carryover).
 

@@ -721,6 +721,248 @@ the rev shipped cleanly.
 
 ---
 
+## F27. Reconciler silently no-ops because `completion_time` is a `datetime`, not a proto Timestamp (2026-05-24)
+
+**Where:** `control/core/reconciler.py:_reconcile_one`.
+
+**Why fragile:** `google-cloud-run` (the `run_v2` client) uses
+`proto-plus`, which auto-converts proto3 `Timestamp` to a
+`DatetimeWithNanoseconds` (a `datetime` subclass). A `datetime` has
+NO `.seconds` attribute, so `getattr(..., "seconds", 0)` returned
+`0` for **every** real completion — every completed execution was
+labelled `still_running` and never reconciled. Tests passed in
+isolation because the fakes used the old raw-proto shape with a
+`.seconds` attribute.
+
+**Compounding failure modes** in the same incident:
+
+1. `firestore.indexes.json` had ZERO indexes deployed to
+   `ytfactory-prod-v3`. `/api/queue` Completed column 400'd.
+2. Reconciler needed an extra index — `jobs(status ASC, updated_at
+   ASC)` — that wasn't in the spec.
+3. Reconciler swallowed per-status query failures silently.
+4. `com.ytfactory.job-reconciler.plist` was never installed.
+5. Plist used `curl POST http://127.0.0.1:8090/...` — no-op when
+   laptop FastAPI server is down.
+
+**Counter-test:** `tests/test_control_reconciler.py::`
+- `test_completion_time_as_datetime_marks_job_failed`
+- `test_unset_completion_time_as_epoch_datetime_is_still_running`
+- `test_all_status_query_failures_surface_error`
+
+**Incident:** 2026-05-24 — job `82682e8e5d1e4c8bae8ad35ec5468250`
+(mystoriesanimated tifu) sat queued for 24h+ before noticed.
+
+**Status:** fixed 2026-05-24.
+
+* `control/core/reconciler.py` — completion_time handles both
+  proto-plus datetime and raw-proto seconds shapes.
+* `summary["error"]` + `per_status_errors` populated on scan failure.
+* `firestore.indexes.json` — added missing `jobs(status, updated_at
+  ASC)`. All 3 indexes deployed via gcloud.
+* `com.ytfactory.job-reconciler.plist` — Python-direct invocation
+  (no HTTP localhost dep); installed + `launchctl bootstrap`ed.
+
+Tracked further as **O33** (move reconciler to Cloud Scheduler) and
+**O34** (bootstrap script for `firestore.indexes.json`) in
+`/ai/improvement-opportunities.md`.
+
+---
+
+## F28. `verify_web_runner.sh` false-reports MISSING when impersonated SA can't read IAM (2026-05-24)
+
+**Where:** `cloud/iam/verify_web_runner.sh` — every `_check_*` uses
+`gcloud ... 2>/dev/null || true`.
+
+**Why fragile:** The deployer SA (via `cloud/_shared/auth_setup.sh`
+impersonation) doesn't have `resourcemanager.projects.getIamPolicy`
+/ `iam.serviceAccounts.getIamPolicy` /
+`secretmanager.secrets.getIamPolicy`. Every gcloud read silently
+returns empty → the script counts the binding as MISSING. Result:
+deploy.sh fails preflight with all 8 bindings flagged MISSING
+**even when they are actually present**. Violates
+`feedback_silent_fallback_unshippable_output`: "missing" and
+"unreadable" must be distinguishable.
+
+**Counter-test:** None. Need a test that stubs gcloud-read to fail
+with PermissionDenied and asserts the script exits non-zero with a
+"cannot read IAM — grant the deployer SA roles/iam.securityReviewer"
+message instead of false "MISSING".
+
+**Incident:** 2026-05-24 — `cloud/web-server/deploy.sh` blocked at
+preflight; bindings verified present as owner identity but the
+deployer SA's silent read-fail looked identical to "absent".
+Workaround: `CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=""
+CLOUDSDK_AUTH_ACCESS_TOKEN=$(gcloud auth print-access-token) bash
+cloud/web-server/deploy.sh` to run the deploy under operator's
+owner identity.
+
+**Status:** workaround applied; **O35** tracks the script fix
+(distinguish absent from unreadable).
+
+---
+
+## F29. Long-form image-gen bypasses the refiner; bare scene + noun-tag anti-text prefix collapses to floating-jersey product photos (2026-05-24)
+
+**Where:**
+- `pipeline/render/shared/long_form_lib.py::_generate_panel_stills`
+  (pre-fix lines 598-771) — called `images.generate(prompt=scene,
+  style_prefix=…)` with the raw authored `scene` text.
+- `pipeline/images/images_cloudrun.py::ANTI_TEXT_PREFIX` (pre-fix
+  lines 492-499) — prepended 190 chars of comma-separated noun tags
+  ("Clean surface, unmarked, blank jersey, smooth fabric, plain
+  backgrounds, unmarked book covers, unlabeled bottles, no signage,
+  no banners, no watermark, no logo, no caption, no street signs.")
+  to every cloud-z-image-turbo prompt.
+- `pipeline/render/visualize/ai_beat_slideshow.py::_resolve_prompt_for_beat`
+  (lines 167-235) — the **shorts** path *did* route through the
+  refiner via `refined_fields_for_render` + `images.build_full_prompt`.
+  Long-form had a parallel, refiner-blind path.
+
+**Why fragile:** The refiner's `refined_scene` starts with the literal
+substring `"no readable text in image."`; the anti-text-suffix
+idempotence check on that substring meant refiner-emitted prompts
+were a no-op for the prepend. **The bare-scene long-form path never
+hit that substring**, so the noun-tag prefix prepended for every
+panel. With short scene tails ("Cloud-filled sky from airplane
+wing." = 41 chars), the 190 chars of "blank jersey, smooth fabric,
+plain backgrounds, unmarked book covers, unlabeled bottles" was
+56-82% of the prompt by length. z-image-turbo's text encoder reads
+comma-separated noun tags as subject candidates; **"blank jersey"
+is the strongest concrete clothing-subject noun in image-model
+training distribution**, so the model rendered a literal floating
+product-photo white tee on a plain background, with the panel-
+specific scene tail relegated to the background (e.g. clouds
+behind the t-shirt). The author's design rationale ("positive
+framing at the front because distilled models are left-weighted")
+was structurally correct; the choice of noun tags as the framing
+was the bug.
+
+**What trips it:** Every long-form render on every channel that uses
+the `longform_panels` visualize plugin (mystoriesanimated long-form,
+hindutavaanimated long-form, cosmosdecoded long-form). The shorts
+path was unaffected because it routed through the refiner.
+
+**Counter-test:** `tests/test_anti_text_suffix_shape.py` pins the
+verb-led SUFFIX shape (forbidden subject-nouns absent, ≤250 chars,
+verb-led, appended-not-prepended, idempotent on legacy + refiner +
+double-apply paths). `tests/render/shared/test_long_form_refiner_routing.py`
+pins that long-form routes through `build_full_prompt` with the
+refined fields when the flag is on, falls back per-beat when a slot
+is empty, RAISES on whole-batch refiner failure.
+
+**Incident:** 2026-05-23 + 2026-05-24 — two consecutive
+mystoriesanimated/nosleep long-form renders (job `76508d12…` and
+`845bdb0d…`) shipped ~45-46 of 77 panels as floating headless white
+t-shirts. See:
+- `data/critiques/i-ve-been-flying-for-almost-thirty-hours-and-the-flight-atte-845bdb0d.md`
+- `.claude/skills/diagnose-render/learnings/845bdb0df20e4ba3885ca33c7749e74d.md`
+- `data/critiques/i-ve-been-flying-for-almost-thirty-hours-and-the-flight-atte-845bdb0d.bugs.md` Bug A
+- Memory `project_z_image_turbo_verb_led_prompts.md` Rule 16 ("no X / no Y" negations stuffed into positive prompt) and the bootstrap example in `learnings/_index.md`.
+
+**Status:** fixed 2026-05-24 in `fdc5f65`.
+- `pipeline/images/images_cloudrun.py:492-555` — ANTI_TEXT_SUFFIX
+  replaced with a 232-char verb-led safety clause, appended-not-
+  prepended. Backward-compat aliases kept.
+- `pipeline/render/shared/long_form_lib.py` — `_refine_long_form_panels`
+  helper + rewritten `_generate_panel_stills` builds wire prompts
+  via `build_full_prompt(refined_visual, refined_scene, style_block)`
+  (same as shorts). Whole-batch refiner failure RAISES per
+  `feedback_silent_fallback_unshippable_output`.
+- Tracked further as **O36** (refiner routing — shipped) and
+  **O37** (verb-led SUFFIX — shipped) in
+  `/ai/improvement-opportunities.md`.
+
+---
+
+## F30. Style propagation gap — no style anchor reaches the wire prompt; same render contains five mutually-incompatible aesthetics (2026-05-24)
+
+**Where:**
+- `pipeline/channels/<channel>.yaml` carries `image_style_prefix:`
+  with a rich per-channel description ("Warm hand-drawn 2D
+  illustration in the style of modern indie webcomics. Confident
+  ink line work…").
+- The shorts path passed it through `images.build_full_prompt(...,
+  style_prefix=…, style_block=…)` correctly, but the long-form
+  path (F29) discarded it along with the rest of the refined
+  fields. The refiner's `style_block` output was unreachable from
+  long-form panels.
+
+**Why fragile:** Without a style anchor in the prompt, z-image-turbo
+free-styles per panel — picking whatever aesthetic best matches each
+panel's content. Same character renders as 2D flat illustration,
+3D Pixar cartoon, photoreal stock-photo, and floating-product-tee
+across the same 26-minute video. No editorial pass can repair
+multi-style output; it has to be prevented at refiner time.
+
+**What trips it:** Same code path as F29 — every long-form render
+on every visual channel.
+
+**Counter-test:** Per-panel substring scan in the diagnose-render
+pass: every panel's `final_prompt` must contain at least one
+style token (`photoreal | illustrated | animated | cinematic |
+cartoon | realistic | studio | stock photo | film | hand-drawn`)
+matching the channel's declared `image_style_prefix`. The 845bdb0d
+render scored **0/77** on this scan; post-fix should score **77/77**.
+
+**Incident:** 2026-05-24 — `data/critiques/i-ve-been-flying-...-
+845bdb0d.md` confirmed 5 distinct visual styles in the same 26-min
+render (vector illustration, 3D Pixar cartoon, photoreal stock,
+floating product tee, plus headless-cropped-torso variants).
+
+**Status:** fixed 2026-05-24 in `fdc5f65` (composes with the F29
+refiner routing fix — the channel's `image_style_prefix` now flows
+into `style_block` which lands in `build_full_prompt`'s first
+~150 chars per memory `project_z_image_turbo_verb_led_prompts.md`).
+
+---
+
+## F31. `pipeline/render/overlays/sentence_caption_ass.py::SentenceCaptionAss.produce` calls `build_captions_ass` with kwargs that don't exist in the signature → runtime TypeError every time `bottom_one_line` / `bottom_two_line` is selected (2026-05-24)
+
+**Where:**
+- `pipeline/render/overlays/sentence_caption_ass.py:70-76` (pre-fix)
+  called `build_captions_ass(cues=…, out_path=…, total_duration_s=…,
+  play_res_x=…, play_res_y=…)`.
+- `pipeline/render/shared/long_form_lib.py:1703` actual signature:
+  `def build_captions_ass(out_ass, *, narration_text=…, chunk_wavs=…,
+  max_lines=2, …)`.
+
+**Why fragile:** None of the wrapper's kwargs (`cues`, `out_path`,
+`total_duration_s`, `play_res_x`, `play_res_y`) existed on the actual
+function. Any render that selected `CaptionsLayout.BOTTOM_ONE_LINE`
+or `BOTTOM_TWO_LINE` would hit `TypeError: build_captions_ass() got
+an unexpected keyword argument 'cues'`. Bug went unobserved because
+the most-used layout is `CENTER_WORD_BY_WORD`, routed to the
+separate `word_caption_pngs` plugin, never reaching this code path.
+Also: the wrapper never passed `max_lines`, so the 1-line vs 2-line
+UI distinction was structurally unrespected even if the call had
+worked.
+
+**What trips it:** Any render whose `RenderSpec.captions_layout` is
+`BOTTOM_ONE_LINE` or `BOTTOM_TWO_LINE`. Both shorts and long-form
+engines use the same `_captions_plugin_for_layout` router so both
+were exposed.
+
+**Counter-test:** `tests/test_caption_layout_ui_respected.py` —
+9 tests pinning (a) routing per layout, (b) sentence_caption_ass
+does NOT crash on real Timeline + Audio, (c) `max_lines=1` truncates
+with ellipsis (no `\N`), (d) `max_lines=2` wraps with `\N`, (e)
+aspect-aware font size scales `caption_style.font_size` for the
+actual `play_res_y`.
+
+**Incident:** Latent. The bug never surfaced in production because
+all observed renders used `CENTER_WORD_BY_WORD`. Surfaced 2026-05-
+24 during the post-845bdb0d code audit while checking that the UI's
+caption-layout selection was actually honored end-to-end.
+
+**Status:** fixed 2026-05-24 in `fdc5f65`. Rewrite is self-contained
+— writes the ASS file directly from the Timeline's segments, no
+dependency on `build_captions_ass`. Honors `max_lines` from
+`CaptionsLayout`, aspect-aware font size, uses `spec.caption_style`
+fields verbatim.
+
+---
+
 ## Cross-cutting pattern
 
 Every entry above shares one root: **error handling is calibrated for
