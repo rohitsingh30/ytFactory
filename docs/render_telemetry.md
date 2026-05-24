@@ -126,13 +126,26 @@ list-shaped kinds). Layout enforced by
 | `refiner_io` | `jobs/<job>/refiner_io/refiner_io.json` | Inside `refine_prompts_batch` | Full request to LLM + raw LLM response — bug B forensics |
 | `image_meta` | `jobs/<job>/image_meta/<NNNNN>.json` | Per panel | Final prompt + seed + cfg + cache_hit + bytes |
 | `tts_chunks` | `jobs/<job>/tts_chunks/<NNNNN>.json` | Per chunk | text + voice + audio_seconds |
-| `asr_alignment` | `jobs/<job>/asr_alignment/asr.json` | After ASR | word-by-word alignment |
-| `timeline` | `jobs/<job>/timeline/timeline.json` | After beat mapping | beat→time bounds |
-| `music` | `jobs/<job>/music/music.json` | After music stage | track, mood, duck curve |
-| `compose` | `jobs/<job>/compose/compose.json` | After compose | ffmpeg arg vector + output stats |
+| `compose` | `jobs/<job>/compose/compose.json` | After compose | mp4 path + duration_s + output_bytes + ffmpeg.call event count. Per-invocation ffmpeg args live in Cloud Logging under `event=ffmpeg.call`, joined by `job_id` — this artifact is a summary pointer. |
 | `render_plan` | `jobs/<job>/render_plan/plan.json` | After engine pick | RenderSpec dict |
 | `decision_log` | `jobs/<job>/decision_log/decision_log.json` | At upload | All `decision.*` events for this job |
 | `events_log` | `jobs/<job>/events_log/events.jsonl` | At upload | EventsBuffer flush — every event this run emitted |
+
+### Future / planned kinds (NOT currently emitted)
+
+The kinds below are reserved in `KNOWN_KINDS` (so the registry accepts
+them) but have no emit site as of 2026-05-24. Don't `gsutil cat`
+these expecting a file — Cloud Logging is the only source for the
+underlying data right now. Each one is a candidate for promotion to
+"emitted" when there's a diagnostic recipe that actually needs the
+aggregate JSON; until then, the per-chunk events plus Firestore
+`stages.*` summary are sufficient.
+
+| Kind | Status | Where the data lives today |
+|---|---|---|
+| `asr_alignment` | future | Per-chunk events `asr.chunk` / `asr.server` in Cloud Logging. No render path currently aggregates the per-chunk alignments into one JSON. |
+| `timeline` | future | The renderer builds the beat→time mapping in-memory and consumes it inline in compose. No standalone artifact. Cloud Logging `timeline.beat_map` carries the summary. |
+| `music` | future | Music decisions emit `music.pick` / `music.duck` events into Cloud Logging. No standalone JSON. |
 
 **Every** stage uploads at least one artifact via the
 `@stage_envelope` decorator. If a stage adds none, that's a telemetry
@@ -341,21 +354,30 @@ gcloud logging read \
 
 ### Recipe F — "ASR misaligned beats / captions drift"
 
+`asr_alignment/asr.json` and `timeline/timeline.json` are reserved
+kinds but not yet emitted as aggregate artifacts (see § 3 "Future /
+planned kinds"). Both signals are reachable through Cloud Logging.
+
 ```bash
-# Step 1 — per-word alignment (the raw faster-whisper output)
-gsutil cat gs://$BUCKET/jobs/$JOB/asr_alignment/asr.json \
-  | jq '.words[:20]'
+# Step 1 — per-chunk ASR server events (includes word_count, gpu_seconds,
+# audio_seconds; one entry per chunk)
+gcloud logging read \
+  "jsonPayload.event=\"asr.server\" AND jsonPayload.job_id=\"$JOB\"" \
+  --project=$PROJECT --limit=50 --format=json --order=asc \
+  | jq '.[].jsonPayload | {ts: .timestamp, audio_s: .metadata.audio_seconds, words: .metadata.word_count, lang: .metadata.language, preview: .metadata.output_preview}'
 
-# Step 2 — how the renderer mapped beats to seconds
-gsutil cat gs://$BUCKET/jobs/$JOB/timeline/timeline.json \
-  | jq '.beats[] | {idx, text_preview, start, end, anchored, anchor_source}'
-
-# Step 3 — count unanchored beats (those that fell back to fixed timing)
+# Step 2 — beat-map summary (how the renderer mapped beats to seconds)
 gcloud logging read \
   "jsonPayload.event=\"timeline.beat_map\" AND jsonPayload.job_id=\"$JOB\"" \
   --project=$PROJECT --limit=5 --format=json \
   | jq '.[].jsonPayload.metadata | {beat_count, unanchored_count, total_seconds}'
 #   Any unanchored_count > 0 is a probable cause of caption drift.
+
+# Step 3 — caption overlay event (was an authored-alignment fallback hit?)
+gcloud logging read \
+  "jsonPayload.event=\"overlay.render\" AND jsonPayload.job_id=\"$JOB\"" \
+  --project=$PROJECT --limit=10 --format=json \
+  | jq '.[].jsonPayload.metadata'
 ```
 
 ### Recipe G — "wrong engine ran" (short instead of long, or vice versa)

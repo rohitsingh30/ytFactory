@@ -2425,6 +2425,30 @@ def _author_prompts_for_engine(
         prompts_payload = authored_prompts if isinstance(authored_prompts, list) else []
     _emit_prompts_author_gate(prompts_payload, slug=slug, prompts_path=prompts_path)
 
+    # F32 (2026-05-24): emit prompts_raw artifact. This is the
+    # pre-refiner author output that the refiner will then refine. The
+    # corresponding ``prompts_refined`` artifact is emitted by the
+    # @stage_envelope("prompts", ...) decorator on the prompts handler.
+    # Pre-fix this file existed on the worker FS only — operators
+    # could see the refined output but not what was fed in, blocking
+    # recipe A step 2 / step 3 diagnosis (was it a bad author or a
+    # bad refiner?).
+    try:
+        from pipeline.render.artifacts import emit_artifact  # noqa: PLC0415
+        job_id = job.get("job_id") or os.environ.get("YTFACTORY_JOB_ID", "")
+        if job_id and prompts_path.exists():
+            emit_artifact(
+                job_id=job_id, kind="prompts_raw", local_path=prompts_path,
+                extras={
+                    "slug": slug or "",
+                    "n_prompts": (
+                        len(prompts_payload) if isinstance(prompts_payload, list) else 0
+                    ),
+                },
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("prompts_raw artifact emit failed: %s", exc)
+
     out["prompts_path"] = str(prompts_path)
     if era_anchor_prefix:
         out["era_anchor_prefix"] = era_anchor_prefix
@@ -2597,7 +2621,7 @@ def _run_renderer_via_engines(
             progress_cb=progress_cb,
         )
 
-@stage_envelope("compose", artifact_kind="render_plan", artifact_extractor=_extract_render_spec_artifact)
+@stage_envelope("render_substages", artifact_kind="render_plan", artifact_extractor=_extract_render_spec_artifact)
 def _stage_render_real(
     job: dict,
     work_dir: Path,
@@ -2607,6 +2631,16 @@ def _stage_render_real(
     """Composite stage that covers images + tts + asr + compose by
     delegating to ``pipeline.render.shorts``. Returns the mp4 path
     via job['_real_mp4'].
+
+    Naming note (F33 fix, 2026-05-24): pre-fix this carried
+    ``@stage_envelope("compose", …)`` which lied to operators reading
+    the event stream — only ONE ``stage.start`` / ``stage.end`` pair
+    fired for what is actually 4 substages (tts/asr/images/compose).
+    The outer envelope is now ``render_substages`` (an honest umbrella
+    name); per-substage envelopes are emitted from
+    :func:`_compose_progress` in the dispatch loop as it sees each
+    substage transition. See ``tests/test_stage_envelope_coverage.py``
+    (ShortFormEnvelopeContract) for the regression guard.
 
     When ``progress_cb`` is supplied, the renderer's stdout is tailed
     in a background thread and each notable substep is forwarded as
@@ -2750,6 +2784,38 @@ def _stage_render_real(
                 job_id=job_id, kind="video", local_path=mp4,
                 extras={"slug": slug, "duration_s": round(vdur, 2)},
             )
+
+            # F32 (2026-05-24): compose.json summary artifact. Per-
+            # invocation ffmpeg args + stderr live in Cloud Logging
+            # under ``event=ffmpeg.call`` joined by ``job_id`` (the
+            # full argv would be ~50KB per render and Cloud Logging
+            # already retains it). This artifact is a fast-path
+            # pointer for the post-mortem: mp4 path + duration +
+            # output bytes, with a hint to query Cloud Logging for
+            # the full ffmpeg command vector.
+            try:
+                from pipeline.render.artifacts import emit_artifact_json  # noqa: PLC0415
+                mp4_path = Path(mp4)
+                output_bytes = (
+                    mp4_path.stat().st_size if mp4_path.exists() else 0
+                )
+                emit_artifact_json(
+                    job_id=job_id, kind="compose",
+                    data={
+                        "slug": slug,
+                        "mp4_path": str(mp4_path),
+                        "duration_s": round(vdur, 2),
+                        "output_bytes": int(output_bytes),
+                        "ffmpeg_args_hint": (
+                            "see Cloud Logging: "
+                            f"jsonPayload.event=\"ffmpeg.call\" AND "
+                            f"jsonPayload.job_id=\"{job_id}\""
+                        ),
+                    },
+                    filename="compose.json",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("compose artifact emit failed: %s", exc)
             if thumb.exists():
                 emit_artifact(
                     job_id=job_id, kind="thumb", local_path=thumb,
@@ -3558,6 +3624,56 @@ def _main_from_firestore(job_id: str) -> int:
                 # transition (≤ 40 writes/min per the tailer).
                 substage_t0: dict[str, float] = {}
 
+                # F33 (2026-05-24): per-substage envelope events for
+                # the SHORT-form render. Pre-fix the umbrella was
+                # ``@stage_envelope("compose", …)`` on
+                # ``_stage_render_real`` — operators reading the event
+                # stream for a short-form render saw exactly one
+                # ``stage.start`` / ``stage.end`` pair (labelled
+                # ``compose``) for 4 substages of work (tts → asr →
+                # images → compose). Mirror the long-form pattern at
+                # ~L3306 (``_lf_emit_start`` / ``_lf_emit_end``) — emit
+                # ``stage.start`` the first time we see a substage in
+                # the progress callback, and ``stage.end`` for every
+                # earlier substage we transition off, plus ``stage.end``
+                # for everything in the final cleanup loop. On exception
+                # we emit ``stage.failed`` for whichever substage was
+                # in flight.
+                #
+                # Regression guard:
+                # ``tests/test_stage_envelope_coverage.py::ShortFormEnvelopeContract``.
+                sf_env_t0: dict[str, float] = {}
+                sf_env_meta = {
+                    "slug": job.get("_slug") or "",
+                    "channel": proposal.get("channel") or "",
+                    "variant": (proposal.get("format") or "").strip(),
+                    "mode": job.get("mode") or "real",
+                }
+                sf_in_flight: list[str] = []  # track currently-running substage
+
+                def _sf_emit_start(stage_name: str, **extra: Any) -> None:
+                    sf_env_t0[stage_name] = time.perf_counter()
+                    _safe_track_event(
+                        "stage.start", category="render",
+                        job_id=job_id,
+                        metadata={"stage": stage_name, **sf_env_meta, **extra},
+                    )
+
+                def _sf_emit_end(
+                    stage_name: str, *, success: bool = True, **extra: Any,
+                ) -> None:
+                    t0_local = sf_env_t0.get(stage_name)
+                    duration_ms = (
+                        int((time.perf_counter() - t0_local) * 1000) if t0_local else 0
+                    )
+                    _safe_track_event(
+                        "stage.end" if success else "stage.failed",
+                        category="render", success=success,
+                        duration_ms=duration_ms,
+                        job_id=job_id,
+                        metadata={"stage": stage_name, **sf_env_meta, **extra},
+                    )
+
                 def _compose_progress(stage: str, msg: str) -> None:
                     nonlocal timeline
                     if stage not in _RENDERER_SUBSTAGES:
@@ -3571,7 +3687,10 @@ def _main_from_firestore(job_id: str) -> int:
                     # Mark every earlier sub-stage that's still
                     # "running" or "pending" as "done", stamped with
                     # how long it actually ran (or "—" if we never
-                    # saw it start).
+                    # saw it start). Also emit ``stage.end`` envelope
+                    # events for the priors we transitioned off
+                    # (only those we actually emitted ``stage.start``
+                    # for — ``sf_env_t0`` tracks that).
                     for prior in _RENDERER_SUBSTAGES[:new_idx]:
                         prior_status = next(
                             (s.get("status") for s in timeline
@@ -3586,11 +3705,18 @@ def _main_from_firestore(job_id: str) -> int:
                             else "—"
                         )
                         timeline = _set_stage(timeline, prior, "done", prior_msg)
+                        if prior in sf_env_t0 and prior in sf_in_flight:
+                            _sf_emit_end(prior)
+                            sf_in_flight.remove(prior)
                     # Stamp the start of THIS sub-stage the first
                     # time we see it so its eventual "done · Xs" is
-                    # accurate.
+                    # accurate. Emit ``stage.start`` envelope event
+                    # on first sight too.
                     if stage not in substage_t0:
                         substage_t0[stage] = now
+                    if stage not in sf_env_t0:
+                        _sf_emit_start(stage)
+                        sf_in_flight.append(stage)
                     timeline = _set_stage(timeline, stage, "running", msg)
                     _update_job(
                         job_id,
@@ -3598,13 +3724,36 @@ def _main_from_firestore(job_id: str) -> int:
                         stage=stage,
                         timeline=timeline,
                     )
-                _stage_render_real(job, work_dir, progress_cb=_compose_progress)
+
+                try:
+                    _stage_render_real(job, work_dir, progress_cb=_compose_progress)
+                except BaseException as _sf_exc:
+                    # Emit ``stage.failed`` for whichever substages we
+                    # saw start but didn't see finish. The outer
+                    # ``@stage_envelope("render_substages")`` on
+                    # ``_stage_render_real`` also emits a top-level
+                    # failure event; this loop adds substage-level
+                    # granularity for the post-mortem.
+                    err_meta = {
+                        "error": str(_sf_exc)[:500],
+                        "error_type": type(_sf_exc).__name__,
+                        "traceback": traceback.format_exc()[-3000:],
+                    }
+                    for sub in list(sf_in_flight):
+                        _sf_emit_end(sub, success=False, **err_meta)
+                    sf_in_flight.clear()
+                    raise
+
                 # Final safety net: if the renderer finished without
                 # emitting markers for some sub-stages (e.g. the TTS
                 # cache hit fired BEFORE the tailer's first poll
                 # cycle picked up the log), mark every sub-stage
                 # "done" so the timeline never leaves a pill in
-                # "running" or "pending" forever.
+                # "running" or "pending" forever. Mirror with
+                # ``stage.end`` envelope events for substages we saw
+                # start. For substages we never saw at all, emit
+                # ``stage.start`` + ``stage.end`` with ``skipped=True``
+                # so the event stream carries a pair for every substage.
                 final_now = time.time()
                 for sub in _RENDERER_SUBSTAGES:
                     sub_status = next(
@@ -3613,6 +3762,11 @@ def _main_from_firestore(job_id: str) -> int:
                         None,
                     )
                     if sub_status == "done":
+                        # Already emitted stage.end above when we
+                        # transitioned off — guard via sf_in_flight.
+                        if sub in sf_in_flight:
+                            _sf_emit_end(sub)
+                            sf_in_flight.remove(sub)
                         continue
                     sub_t0 = substage_t0.get(sub)
                     sub_msg = (
@@ -3620,6 +3774,17 @@ def _main_from_firestore(job_id: str) -> int:
                         else "(skipped)"
                     )
                     timeline = _set_stage(timeline, sub, "done", sub_msg)
+                    if sub in sf_in_flight:
+                        _sf_emit_end(sub)
+                        sf_in_flight.remove(sub)
+                    elif sub not in sf_env_t0:
+                        # Never saw it start — emit a degenerate
+                        # start+end pair with skipped=True so post-
+                        # mortem tooling sees a complete substage set.
+                        _sf_emit_start(sub, skipped=True,
+                                       skip_reason="no progress signal observed")
+                        _sf_emit_end(sub, skipped=True,
+                                     skip_reason="no progress signal observed")
                 _update_job(
                     job_id,
                     status="rendering",

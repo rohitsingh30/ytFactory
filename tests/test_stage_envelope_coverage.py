@@ -63,6 +63,22 @@ LONG_FORM_ENVELOPED_STAGES = (
     "upload",
 )
 
+# F33 (2026-05-24): the SHORT-form dispatch path collapses the same
+# substages into one ``_stage_render_real`` call. Pre-fix that call
+# carried ``@stage_envelope("compose", ...)`` — operators reading the
+# event stream saw exactly ONE ``stage.start`` / ``stage.end`` pair
+# (labelled "compose") for 4 substages of work. Now: the outer
+# envelope is renamed to ``render_substages`` and the dispatch loop's
+# ``_compose_progress`` closure emits per-substage envelopes from the
+# progress signal. Final cleanup emits a degenerate start+end pair
+# (``skipped=True``) for any substage we never observed.
+SHORT_FORM_ENVELOPED_SUBSTAGES = (
+    "tts",
+    "asr",
+    "images",
+    "compose",
+)
+
 
 class StageEnvelopeHelperShape(unittest.TestCase):
     """The dispatch-loop helper ``_stage_envelope_events`` must emit
@@ -215,6 +231,156 @@ class LongFormEnvelopeContract(unittest.TestCase):
             "Long-form tts failure path must emit stage.failed via "
             "_lf_emit_end. See Fix #7 (2026-05-24).",
         )
+
+
+class ShortFormEnvelopeContract(unittest.TestCase):
+    """F33 (2026-05-24) — the short-form dispatch must emit per-substage
+    envelope events, not a single umbrella "compose" pair.
+
+    Pre-fix ``_stage_render_real`` carried ``@stage_envelope("compose",
+    ...)``; a short-form render produced ONE ``stage.start`` and ONE
+    ``stage.end`` for 4 substages. The fix:
+
+    1. Renames the decorator to ``@stage_envelope("render_substages",
+       ...)`` — an honest umbrella name (not "compose", which is one
+       of the 4 substages).
+    2. In the dispatch loop's ``_compose_progress`` closure, emit
+       ``stage.start`` the first time we see a substage, and
+       ``stage.end`` for every prior substage we transition off.
+    3. Final cleanup loop emits ``stage.end`` for in-flight pills and
+       a degenerate ``stage.start + stage.end`` (``skipped=True``) for
+       substages we never observed.
+    4. Exception path emits ``stage.failed`` for whichever substages
+       were in flight.
+
+    We can't run the dispatch loop without Firestore + a real
+    renderer, so we static-analyse for the contract markers.
+    """
+
+    def setUp(self) -> None:
+        self.entrypoint_source = ENTRYPOINT_PATH.read_text(encoding="utf-8")
+
+    def test_outer_decorator_renamed_from_compose(self) -> None:
+        """The pre-fix ``@stage_envelope("compose", ...)`` lied — it
+        was actually wrapping all 4 substages. Must be renamed to
+        ``render_substages``."""
+        self.assertIn(
+            '@stage_envelope("render_substages",',
+            self.entrypoint_source,
+            "F33 regression: short-form outer decorator must be "
+            '@stage_envelope("render_substages", ...) — not "compose".',
+        )
+
+    def test_short_form_emits_per_substage_envelopes(self) -> None:
+        """Each of tts/asr/images/compose must have a ``_sf_emit_start``
+        call site in the short-form dispatch block."""
+        import re
+        # We use a permissive regex: the closure either takes the
+        # substage name as a string literal first arg, or builds it
+        # in a loop. Both patterns count.
+        loop_pattern = re.compile(
+            r"for\s+\w+\s+in\s+_RENDERER_SUBSTAGES.*?_sf_emit_start",
+            re.DOTALL,
+        )
+        has_loop_emit = bool(loop_pattern.search(self.entrypoint_source))
+
+        has_direct_emit = "_sf_emit_start(stage" in self.entrypoint_source
+
+        self.assertTrue(
+            has_loop_emit or has_direct_emit,
+            "F33 regression: short-form dispatch must emit "
+            "_sf_emit_start for each substage (either in a "
+            "_RENDERER_SUBSTAGES loop or via the progress callback).",
+        )
+
+    def test_short_form_emits_failed_on_render_exception(self) -> None:
+        """The try/except around ``_stage_render_real`` must emit
+        ``stage.failed`` (success=False) for in-flight substages."""
+        # Check that the short-form dispatch wraps the call in try/except
+        # and emits success=False via _sf_emit_end.
+        self.assertIn(
+            "_sf_emit_end(sub, success=False",
+            self.entrypoint_source,
+            "F33 regression: short-form exception handler must emit "
+            "stage.failed (success=False) for in-flight substages.",
+        )
+        # And the wrapping try/except must exist.
+        self.assertIn(
+            "try:\n                    _stage_render_real(",
+            self.entrypoint_source,
+            "F33 regression: short-form dispatch must wrap "
+            "_stage_render_real in try/except to catch BaseException.",
+        )
+
+    def test_short_form_emits_skipped_pair_for_never_observed_substages(self) -> None:
+        """Final cleanup must emit a degenerate ``stage.start`` +
+        ``stage.end`` with ``skipped=True`` for substages we never saw
+        — so the event stream carries a complete substage set even
+        when the progress signal was lossy."""
+        # The skip-reason string is the explicit marker the fix uses.
+        self.assertIn(
+            '"no progress signal observed"',
+            self.entrypoint_source,
+            "F33 regression: cleanup loop must emit start+end with "
+            "skipped=True for never-observed substages. See "
+            "_compose_progress final cleanup loop.",
+        )
+
+
+class ArtifactKindEmitContract(unittest.TestCase):
+    """F32 (2026-05-24) — every kind in KNOWN_KINDS either has an
+    emit site or is documented as ``future`` in docs/render_telemetry.md.
+
+    The five kinds promised by the docs but missing emit sites pre-fix:
+    prompts_raw, asr_alignment, timeline, music, compose. Of those:
+
+    * prompts_raw → now emitted from _author_prompts_for_engine
+    * compose    → now emitted from _stage_render_real post-mp4
+    * asr_alignment, timeline, music → documented as ``future`` in
+      docs/render_telemetry.md § 3
+    """
+
+    def setUp(self) -> None:
+        self.entrypoint_source = ENTRYPOINT_PATH.read_text(encoding="utf-8")
+        self.docs_source = (
+            REPO_ROOT / "docs" / "render_telemetry.md"
+        ).read_text(encoding="utf-8")
+
+    def test_prompts_raw_emit_site_exists(self) -> None:
+        self.assertIn(
+            'kind="prompts_raw"',
+            self.entrypoint_source,
+            "F32 regression: prompts_raw artifact has no emit site. "
+            "See _author_prompts_for_engine.",
+        )
+
+    def test_compose_artifact_emit_site_exists(self) -> None:
+        self.assertIn(
+            'kind="compose"',
+            self.entrypoint_source,
+            "F32 regression: compose artifact has no emit site. "
+            "See _stage_render_real post-mp4 block.",
+        )
+
+    def test_unemitted_kinds_documented_as_future(self) -> None:
+        """asr_alignment / timeline / music are reserved in
+        KNOWN_KINDS but have no emit site. docs/render_telemetry.md
+        must label them as future / planned so an operator doesn't
+        ``gsutil cat`` expecting a file."""
+        self.assertIn(
+            "Future / planned kinds",
+            self.docs_source,
+            "F32 regression: docs/render_telemetry.md must have a "
+            "'Future / planned kinds' section listing the unemitted "
+            "registry kinds.",
+        )
+        for kind in ("asr_alignment", "timeline", "music"):
+            self.assertIn(
+                f"`{kind}`",
+                self.docs_source,
+                f"F32 regression: kind '{kind}' not documented in "
+                f"docs/render_telemetry.md",
+            )
 
 
 if __name__ == "__main__":

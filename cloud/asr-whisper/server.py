@@ -304,6 +304,11 @@ def align(req: AlignRequest, request: Request) -> AlignResponse:
     else:  # anchors
         segments = _match_anchors(words, anchors=req.anchors, total_s=duration_s)
 
+    # F34 (2026-05-24): join the per-word transcript so the body
+    # capture surface carries the actual whisper decoding.
+    transcript_text = " ".join(
+        (w.get("text") or "").strip() for w in words if w.get("text")
+    ).strip() or None
     _emit_asr_server_telemetry(
         req=req,
         request=request,
@@ -312,6 +317,7 @@ def align(req: AlignRequest, request: Request) -> AlignResponse:
         word_count=len(words),
         gpu_seconds=gpu_seconds,
         success=True,
+        transcript_text=transcript_text,
     )
     return AlignResponse(
         duration_s=duration_s,
@@ -337,7 +343,23 @@ def _emit_asr_server_telemetry(
     gpu_seconds: float,
     success: bool,
     error: str | None = None,
+    transcript_text: str | None = None,
 ) -> None:
+    """Emit the per-request ASR telemetry event.
+
+    F34 (2026-05-24): ``transcript_text`` is now passed so the body
+    capture surface (``output_preview``) actually carries the
+    whisper-decoded text — pre-fix this called ``track_io`` with
+    ``output_text=None`` and a Cloud Run operator looking at a
+    suspected ASR pronunciation issue had no quick way to see what
+    whisper actually decoded. The body-capture infra already redacts
+    secrets and truncates to ``YTFACTORY_TEL_BODY_MAX_CHARS`` (4000
+    by default), so passing the full transcript is safe — the cap
+    fires inside ``track_io``. We pre-truncate to 4000 here as
+    defence-in-depth in case the body cap is disabled. ``input_text``
+    carries a short audio descriptor (duration + model + mode) — NOT
+    the audio itself.
+    """
     try:
         if _tel_track_io is None:
             return
@@ -347,12 +369,22 @@ def _emit_asr_server_telemetry(
             metadata["traceparent"] = traceparent
         if error:
             metadata["error"] = error[:500]
+        input_descriptor = (
+            f"audio: {audio_seconds:.2f}s mode={req.mode} "
+            f"model={req.model or _MODEL_NAME}"
+        )
+        # Trim transcript defensively. The body-capture pipeline also
+        # caps at YTFACTORY_TEL_BODY_MAX_CHARS, but a 30-minute
+        # narration can decode to ~30 KB and we'd rather log-cap here.
+        capped_transcript: str | None = None
+        if transcript_text:
+            capped_transcript = transcript_text[:4000]
         _tel_track_io(
             "asr.server",
             category="asr",
             success=success,
-            input_text=None,
-            output_text=None,
+            input_text=input_descriptor,
+            output_text=capped_transcript,
             input_meta={
                 "audio_seconds": audio_seconds,
                 "model": req.model or _MODEL_NAME,
