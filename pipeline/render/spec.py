@@ -78,7 +78,7 @@ import logging
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import yaml
 
@@ -387,6 +387,147 @@ class FillerConfig:
 class NetworkConfig:
     """Network-bound knobs (e.g. ffprobe timeout)."""
     timeout_s: int = 30
+
+
+# ---------------------------------------------------------------------------
+# RenderSpec.extra known-key registry (F2 in /ai/known-fragility.md)
+#
+# ``RenderSpec.extra`` carries load-bearing state across the 6 plugin slots
+# (audio / timeline / visualize / overlays / music / compose) as a free-form
+# dict. Pre-2026-05-24 a typo in spec_enrich.py (e.g. ``caracter_description``)
+# silently produced empty character lock, the render kept going, and the only
+# signal was protagonist drift across panels with no diagnostic. This
+# TypedDict is the closed-form registry of every key that production code
+# actually reads / writes on ``spec.extra``. Pinned by
+# ``tests/test_spec_extra_typed_keys.py`` — any new production-code reference
+# to ``spec.extra["foo"]`` / ``spec.extra.get("foo")`` MUST be added here, or
+# the test fails with a clear message naming the offending site.
+#
+# total=False because every key is optional — the dict is built incrementally
+# by spec_enrich.py and various form-override pass-through paths. Marking
+# them all NotRequired keeps the runtime contract identical to the prior
+# ``dict[str, Any]`` while giving readers a single grep target for "every
+# key that exists in this namespace."
+# ---------------------------------------------------------------------------
+
+
+class RenderSpecExtras(TypedDict, total=False):
+    """Closed-form registry of every key production code reads/writes on
+    ``RenderSpec.extra``. See module-level comment above for rationale.
+
+    Adding a new key here is the only hard requirement when a new producer
+    or consumer site is introduced — the pin test catches anything that's
+    referenced in production code but missing from this TypedDict.
+    """
+
+    # -- spec_enrich.py writers (consumed by visualize plugins) ------------
+    era_anchor_prefix: str
+    """Code-prepended ``[ERA — <costume tokens>]`` string. Written by
+    ``spec_enrich.populate_render_extras``; read at every prompt-assembly
+    site (shorts + long-form). Anchors historical period BEFORE any
+    character/scene token can drift modern."""
+
+    character_description: str
+    """The protagonist's appearance lock (age + hair + clothing + face).
+    Single string, ~50-100 words. Read by ``ai_beat_slideshow`` for the
+    F32-aware ``build_full_prompt`` invocation."""
+
+    character_descriptions: list[dict]
+    """Per-character spec strings for multi-cast renders (AITA antagonist,
+    mythology supporting cast). Companion to ``character_description``."""
+
+    authored_long_form_panels: list[dict]
+    """LLM-authored ``[{scene, hold_s, key_visual?, seed_offset?}, ...]``
+    blueprint for long-form panel slideshow. Bypasses the
+    ASR-beat-driven path."""
+
+    # -- visualize plugin reads --------------------------------------------
+    image_provider: str
+    """Override for the canonical image provider. Defaults to
+    ``CANONICAL_IMAGE_PROVIDER`` (``cloudrun_z_image_turbo``)."""
+
+    image_style_prefix: str
+    """Channel/variant YAML's image style description (≥60 words per
+    ``project_channel_richness_gate`` memory). Becomes ``style_prefix``
+    in ``build_full_prompt``."""
+
+    image_seed: int
+    """Base seed for per-beat image generation. Each beat adds an offset
+    (``image_seed_stride`` × index)."""
+
+    image_steps: int
+    """Diffusion step count. Z-Image-Turbo sweet spot is 4-8 (Turbo
+    distilled model)."""
+
+    image_seed_stride: int
+    """Stride added to ``image_seed`` per beat. Prevents identical seeds
+    when narration text alone differs between beats."""
+
+    default_scene_anchor: str
+    """Channel-level setting string the refiner weaves into
+    ``refined_scene`` when the beat lacks an explicit setting (O38)."""
+
+    mood: str
+    """Channel mood token passed to the prompt refiner as informational
+    context."""
+
+    prompts_path: str
+    """Filesystem path to a pre-authored ``prompts.json``. When set,
+    ``ai_beat_slideshow`` reads beats from this file instead of the
+    in-memory cache."""
+
+    shotlist_path: str
+    """Filesystem path to a ``shotlist.json`` for archival_shotlist /
+    footage_windows visual modes."""
+
+    footage_plan_path: str
+    """Filesystem path to ``footage_plan.json`` for anchored_footage
+    overlay producer (sports_doc shape)."""
+
+    # -- audio / music / timeline -----------------------------------------
+    music_dir: str
+    """Override for the channel's music bed directory. Default is
+    ``<channel>/music/``; tests set this to a tmp dir."""
+
+    narration_path: str
+    """Path to the final narration WAV. Read by ``ducked_loop`` to size
+    the sidechain duck envelope."""
+
+    # -- fixture paths (engine goldens / fixture-mode tests) --------------
+    timeline_fixture_path: str
+    """Path to a pre-built Timeline JSON; bypasses real TTS+ASR.
+    Engine-test fixture only."""
+
+    audio_fixture_path: str
+    """Path to a pre-rendered narration wav; bypasses TTS. Engine-test
+    fixture only."""
+
+    visuals_fixture_path: str
+    """Path to a directory of pre-rendered beat PNGs; bypasses
+    image-gen. Engine-test fixture only."""
+
+    # -- plugin-swap overrides (engine goldens) ---------------------------
+    timeline_plugin: str
+    """Override the timeline-stage plugin selection — used by engine
+    goldens to swap in fixture variants."""
+
+    # -- closer panel (CTA card) ------------------------------------------
+    closer_format: str
+    """Channel YAML's CTA closer string (e.g. ``"LIKE if YTA, COMMENT
+    if NTA"``). Read by ``closer_panel`` overlay producer."""
+
+    # -- observability / orchestration ------------------------------------
+    topic: str
+    """Render topic — surfaced in span attributes for tracing."""
+
+    job_id: str
+    """Render job ID (32-char hex). Mirrors ``YTFACTORY_JOB_ID`` env when
+    set; used by per-image telemetry."""
+
+    _critic_backend: str
+    """Internal flag: when ``"laptop"``, the engine opts into the critic
+    loop on laptop (otherwise cloud-only). Underscore-prefixed to mark
+    as private/internal."""
 
 
 @dataclass
@@ -1154,6 +1295,7 @@ def _aspect_from_resolution(res: Any) -> str | None:
 __all__ = [
     # Top-level types
     "RenderSpec",
+    "RenderSpecExtras",
     "RenderKind",
     "VisualMode",
     "AudioMode",
