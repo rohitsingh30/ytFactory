@@ -112,3 +112,150 @@ def test_aita_animated_variant_declares_closer_format() -> None:
         f"declare a non-empty closer_format. Got "
         f"{cfg.get('closer_format')!r}."
     )
+
+
+# ---------------------------------------------------------------------
+# Task #30 (2026-05-24): per-variant closer_format must reach spec.extra
+# ---------------------------------------------------------------------
+# Surfaced in the 88d98126 preflight aftermath: user pointed out
+# "YTA for tifu, amzzing, are you stupid?" — meaning a TIFU short
+# shipped with the AITA YTA/NTA closer despite tifu.yaml declaring
+# its own override. Root cause: _backfill_yaml_image_keys loaded only
+# the CHANNEL YAML; the variant overlay was never read for the backfill
+# scan. Fix threads spec.source_variant_yaml as a second YAML overlay.
+
+
+def test_backfill_accepts_variant_yaml_path() -> None:
+    """The fix signature must take ``variant_yaml_path``. Source-level
+    pin since the entrypoint module imports cloud-only deps."""
+    src = _ENTRYPOINT_PATH.read_text(encoding="utf-8")
+    m = re.search(
+        r"def _backfill_yaml_image_keys\(\s*\n"
+        r"(?P<sig>(?:\s+[^\n]+\n)+?)"
+        r"\)\s*->\s*dict:",
+        src,
+    )
+    assert m, "could not locate _backfill_yaml_image_keys() signature"
+    sig = m.group("sig")
+    assert "variant_yaml_path" in sig, (
+        "fix regressed: _backfill_yaml_image_keys must accept a "
+        "variant_yaml_path parameter so the variant overlay can shadow "
+        "the channel default for closer_format. Pre-fix the variant "
+        "YAML was completely ignored by this backfill and every TIFU "
+        "render shipped with the AITA YTA/NTA closer."
+    )
+
+
+def test_backfill_loads_variant_yaml_in_body() -> None:
+    """Source-level pin: the body must read the variant YAML and merge
+    it on top of the channel cfg before scanning the backfill key list.
+    Without the merge, ``variant_yaml_path`` would be ignored and the
+    fix would be cosmetic."""
+    src = _ENTRYPOINT_PATH.read_text(encoding="utf-8")
+    m = re.search(
+        r"def _backfill_yaml_image_keys\([^)]*?\)[^:]*:\s*\n"
+        r"(?P<body>(?:.*\n)*?)"
+        r"(?=\ndef |\nclass |\n@)",
+        src,
+    )
+    assert m, "could not locate _backfill_yaml_image_keys() body"
+    body = m.group("body")
+    assert "variant_yaml_path" in body and "cfg.update" in body, (
+        "fix regressed: the body must read the variant YAML and call "
+        "cfg.update(v_cfg) so variant keys shadow channel keys before "
+        "the backfill scan. Without cfg.update, the variant overlay is "
+        "read but never applied — TIFU still gets the AITA closer."
+    )
+
+
+def test_call_site_threads_source_variant_yaml() -> None:
+    """The call site at _main_from_firestore must pass
+    ``spec.source_variant_yaml`` into the backfill. Without this hop,
+    even a correct backfill function would never see the variant
+    overlay."""
+    src = _ENTRYPOINT_PATH.read_text(encoding="utf-8")
+    # Find every call to _backfill_yaml_image_keys.
+    calls = re.findall(
+        r"_backfill_yaml_image_keys\([^)]*\)", src,
+    )
+    assert calls, "expected at least one call site for _backfill_yaml_image_keys"
+    threaded = [c for c in calls if "variant_yaml" in c]
+    assert threaded, (
+        "fix regressed: every call to _backfill_yaml_image_keys must "
+        "thread the variant YAML path (typically spec.source_variant_yaml) "
+        f"so the override actually reaches spec.extra. Calls found: {calls}"
+    )
+
+
+def test_tifu_variant_closer_differs_from_channel_default() -> None:
+    """Sanity: the whole point of task #30 is that tifu.yaml's
+    closer is DIFFERENT from the channel default. If they ever
+    converge, the backfill fix is meaningless and a future edit
+    might silently roll back the override."""
+    import yaml
+    chan = yaml.safe_load(
+        (_REPO_ROOT / "pipeline" / "channels" / "mystoriesanimated.yaml")
+        .read_text(encoding="utf-8")
+    )
+    tifu = yaml.safe_load(
+        (_REPO_ROOT / "pipeline" / "variants" / "mystoriesanimated" / "tifu.yaml")
+        .read_text(encoding="utf-8")
+    )
+    assert chan.get("closer_format") != tifu.get("closer_format"), (
+        "tifu.yaml's closer_format must differ from the channel "
+        "default — that's the whole reason task #30 exists. Channel: "
+        f"{chan.get('closer_format')!r}, TIFU: {tifu.get('closer_format')!r}"
+    )
+    # AITA-shape guard: the channel default is AITA-specific; TIFU's
+    # override must NOT contain YTA/NTA tokens.
+    tifu_closer = (tifu.get("closer_format") or "").upper()
+    assert "YTA" not in tifu_closer and "NTA" not in tifu_closer, (
+        f"tifu.yaml's closer must not contain AITA tokens. "
+        f"Got: {tifu.get('closer_format')!r}"
+    )
+
+
+def test_today_in_history_declares_non_aita_closer() -> None:
+    """Today-In-History is informational, not a moral dispute — the
+    AITA YTA/NTA closer doesn't fit. The variant must declare its
+    own closer_format that omits AITA tokens."""
+    import yaml
+    p = (
+        _REPO_ROOT / "pipeline" / "variants" / "mystoriesanimated"
+        / "today_in_history.yaml"
+    )
+    cfg = yaml.safe_load(p.read_text(encoding="utf-8"))
+    closer = cfg.get("closer_format")
+    assert closer, (
+        f"today_in_history.yaml must declare a non-empty closer_format. "
+        f"Without it, the backfill inherits the channel-default AITA "
+        f"closer ('LIKE if YTA, COMMENT if NTA') which is wrong for "
+        f"informational history content. Got: {closer!r}"
+    )
+    upper = closer.upper()
+    assert "YTA" not in upper and "NTA" not in upper and "AITA" not in upper, (
+        f"today_in_history closer must not contain AITA tokens. Got: {closer!r}"
+    )
+
+
+def test_wiki_oddities_declares_non_aita_closer() -> None:
+    """Wiki-Oddities is strange-but-true facts, not a moral dispute —
+    the AITA YTA/NTA closer doesn't fit. The variant must declare its
+    own closer_format that omits AITA tokens."""
+    import yaml
+    p = (
+        _REPO_ROOT / "pipeline" / "variants" / "mystoriesanimated"
+        / "wiki_oddities.yaml"
+    )
+    cfg = yaml.safe_load(p.read_text(encoding="utf-8"))
+    closer = cfg.get("closer_format")
+    assert closer, (
+        f"wiki_oddities.yaml must declare a non-empty closer_format. "
+        f"Without it, the backfill inherits the channel-default AITA "
+        f"closer which is wrong for strange-but-true facts. "
+        f"Got: {closer!r}"
+    )
+    upper = closer.upper()
+    assert "YTA" not in upper and "NTA" not in upper and "AITA" not in upper, (
+        f"wiki_oddities closer must not contain AITA tokens. Got: {closer!r}"
+    )

@@ -39,6 +39,17 @@ beat_max_s: 3.2
 duration_target_s: [12, 22]
 output_resolution: [1080, 1920]
 
+# Closer CTA — Today-In-History native. The channel-default AITA
+# YTA/NTA verdict frame is wrong here (the narrator isn't asking
+# who's wrong; the story is informational). Two-clause split
+# mirrors AITA's panel layout — pipeline.captions._split_closer_format
+# breaks on the comma. Task #30 (2026-05-24): without this override
+# every TIH short shipped with the AITA closer because the variant
+# YAML's closer_format wasn't being read by the spec.extra backfill
+# (the channel default leaked through).
+closer_format: "LIKE if you learned, COMMENT another event."
+closer_hold_s: 1.0
+
 # Source defaults — feed_type "selected" mirrors Wikipedia's main page picks.
 source:
   feed: selected

@@ -2087,6 +2087,7 @@ def _capture_renderer_stdout(
 def _backfill_yaml_image_keys(
     current_extra: dict | None,
     channel_yaml_path: Path,
+    variant_yaml_path: Path | None = None,
 ) -> dict:
     """Copy YAML image_* keys into ``spec.extra`` if not already present.
 
@@ -2104,6 +2105,17 @@ def _backfill_yaml_image_keys(
     the gaps. Returns the updated dict (mutates in place when
     ``current_extra`` is provided; returns a fresh dict otherwise).
 
+    Variant overlay (task #30, 2026-05-24): when ``variant_yaml_path``
+    is supplied, the variant YAML is shallow-merged ON TOP of the
+    channel YAML before the backfill scan. This makes per-variant
+    overrides (e.g. ``tifu.yaml::closer_format = "LIKE if you've
+    been there, COMMENT your worst."``) actually reach
+    ``spec.extra["closer_format"]`` — pre-fix the variant YAML was
+    completely ignored by this backfill and every TIFU render shipped
+    with the AITA-style YTA/NTA closer pulled from the channel
+    default. Caught on the 88d98126 preflight aftermath when the
+    user pointed out ``YTA for tifu, amzzing, are you stupid?``.
+
     Best-effort: a corrupted/unreadable YAML logs a warning and the
     return is whatever ``current_extra`` already had — the engine
     still runs (with possibly degraded style), nothing crashes.
@@ -2118,6 +2130,23 @@ def _backfill_yaml_image_keys(
             exc,
         )
         return out
+    # Variant overlay shallow-merge — variant keys win over channel
+    # keys for the scalar config we backfill (closer_format,
+    # default_scene_anchor, image_*). Failure to read the variant is
+    # also best-effort: warn + proceed with channel-only.
+    if variant_yaml_path is not None:
+        try:
+            if Path(variant_yaml_path).exists():
+                import yaml  # noqa: PLC0415
+                v_cfg = yaml.safe_load(Path(variant_yaml_path).read_text()) or {}
+                if isinstance(v_cfg, dict):
+                    cfg.update(v_cfg)
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.warning(
+                "image-key backfill: variant YAML %s unreadable (%s) — "
+                "channel defaults used for backfill",
+                variant_yaml_path, exc,
+            )
     # The engine's ai_beat_slideshow + image dispatcher read these off
     # spec.extra. Keep the list in sync with their .get() call sites.
     #
@@ -2490,7 +2519,18 @@ def _run_renderer_via_engines(
     # and the visualize plugin renders without channel style — silent
     # quality loss vs the legacy renderer. Hop the channel YAML once and
     # backfill any image_* knobs ``build_spec`` didn't already populate.
-    spec.extra = _backfill_yaml_image_keys(spec.extra, Path(channel_yaml))
+    # Task #30 (2026-05-24): thread spec.source_variant_yaml so per-
+    # variant overrides for closer_format / default_scene_anchor /
+    # image_* actually reach spec.extra. Pre-fix, tifu.yaml's
+    # closer_format ("LIKE if you've been there, COMMENT your worst.")
+    # was completely ignored — every TIFU render shipped with the AITA
+    # YTA/NTA closer from the channel default.
+    _variant_yaml_for_backfill = (
+        Path(spec.source_variant_yaml) if getattr(spec, "source_variant_yaml", None) else None
+    )
+    spec.extra = _backfill_yaml_image_keys(
+        spec.extra, Path(channel_yaml), variant_yaml_path=_variant_yaml_for_backfill,
+    )
 
     style_prefix = spec.extra.get("image_style_prefix", "") if spec.extra else ""
     # O37 / O40 (2026-05-24) — the channel-level scene_anchor lands in

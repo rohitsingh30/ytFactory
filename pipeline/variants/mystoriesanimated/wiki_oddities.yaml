@@ -42,6 +42,17 @@ beat_max_s: 3.0
 duration_target_s: [12, 22]
 output_resolution: [1080, 1920]
 
+# Closer CTA — Wiki-Oddities native. The channel-default AITA
+# YTA/NTA verdict frame is wrong here (these are strange-but-true
+# facts, not moral disputes). Two-clause split mirrors AITA's panel
+# layout — pipeline.captions._split_closer_format breaks on the
+# comma. Task #30 (2026-05-24): without this override every wiki-
+# oddities short shipped with the AITA closer because the variant
+# YAML's closer_format wasn't being read by the spec.extra
+# backfill (channel default leaked through).
+closer_format: "LIKE if surprising, COMMENT a weirder one."
+closer_hold_s: 1.0
+
 # Source defaults — what the /make-script skill should pull by default.
 source:
   page: unusual_deaths_21c   # preset key in sources/wikipedia.py
