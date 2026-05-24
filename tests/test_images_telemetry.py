@@ -1,8 +1,12 @@
 """P2c — image-gen telemetry verification.
 
-* ``images.generate(...)`` emits an ``image_gen`` span with the
-  expected attributes (provider, prompt_chars, width, height, steps,
-  seed).
+* ``images.generate(...)`` emits exactly ONE ``image.gen`` event via
+  ``track_io`` with the expected attributes (provider, prompt_chars,
+  width, height, steps, seed).
+* The legacy ``image_gen`` (underscore) span emit was removed
+  2026-05-24 to close F28 (845bdb0d render duplicate-emit; 77+77
+  events for 77 panels). See ``tests/test_image_gen_event_dedupe.py``
+  for the dedicated regression guard.
 * The cloud-image circuit breaker emits a
   ``image_circuit_breaker_tripped`` event when first tripped, and is
   idempotent on the second trip within the same render.
@@ -38,7 +42,7 @@ class _Base(unittest.TestCase):
 
 
 class TestGenerateSpan(_Base):
-    def test_generate_emits_image_gen_span(self) -> None:
+    def test_generate_emits_one_image_gen_event(self) -> None:
         # Patch the cloud provider implementation to avoid network I/O.
         with patch(
             "pipeline.images.images_cloudrun._generate_cloudrun_z_image_turbo",
@@ -55,27 +59,43 @@ class TestGenerateSpan(_Base):
                 provider="cloudrun_z_image_turbo",
             )
 
-        spans = self._spans()
-        names = [s.name for s in spans]
-        self.assertIn("image_gen", names)
-        s = next(s for s in spans if s.name == "image_gen")
-        self.assertEqual(s.attributes["ytfactory.meta.provider"],
-                         "cloudrun_z_image_turbo")
-        self.assertEqual(s.attributes["ytfactory.meta.width"], 768)
-        self.assertEqual(s.attributes["ytfactory.meta.height"], 1344)
-        self.assertEqual(s.attributes["ytfactory.meta.steps"], 4)
-        self.assertEqual(s.attributes["ytfactory.meta.seed"], 42)
-        # prompt_chars = len("a sketched character holding a torch")
-        self.assertEqual(s.attributes["ytfactory.meta.prompt_chars"], 36)
+        # Canonical event name is dot-separated ``image.gen``; the
+        # legacy ``image_gen`` underscore variant was deleted
+        # 2026-05-24 to close F28 (845bdb0d render emitted 77+77
+        # duplicates).
+        evts = [e for e in self._events() if e["event"] == "image.gen"]
+        legacy = [e for e in self._events() if e["event"] == "image_gen"]
+        self.assertEqual(
+            len(evts), 1,
+            f"expected exactly one image.gen event, got {len(evts)}: {evts}",
+        )
+        self.assertEqual(
+            len(legacy), 0,
+            f"legacy image_gen (underscore) emit must not return — "
+            f"got {len(legacy)} events",
+        )
+        e = evts[0]
+        meta = e.get("metadata", {})
+        self.assertEqual(meta.get("model"), "cloudrun_z_image_turbo")
+        self.assertEqual(meta.get("width"), 768)
+        self.assertEqual(meta.get("height"), 1344)
+        self.assertEqual(meta.get("steps"), 4)
+        self.assertEqual(meta.get("seed"), 42)
+        self.assertIsNotNone(e.get("duration_ms"))
 
-    def test_unknown_provider_fails_span(self) -> None:
+    def test_unknown_provider_emits_failed_image_gen(self) -> None:
         with self.assertRaises(ValueError):
             images_mod.generate(
                 "x", "y", seed=1, out_path=Path("/tmp/q.png"),
                 provider="not_real",
             )
-        s = next(s for s in self._spans() if s.name == "image_gen")
-        self.assertFalse(s.status.is_ok)
+        # Even on failure, exactly one image.gen event fires (in the
+        # finally block) with success=False.
+        evts = [e for e in self._events() if e["event"] == "image.gen"]
+        legacy = [e for e in self._events() if e["event"] == "image_gen"]
+        self.assertEqual(len(evts), 1)
+        self.assertEqual(len(legacy), 0)
+        self.assertFalse(evts[0]["success"])
 
 
 class TestBreakerTripEvent(_Base):

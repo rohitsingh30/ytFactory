@@ -178,6 +178,23 @@ def _pipe():
             pipe.enable_attention_slicing()
         except Exception:
             pass
+        # O-Z3 (2026-05-24) — Force PyTorch's native FlashAttention path
+        # on the transformer. Community report: ~25% faster on Blackwell
+        # ("saved ~52 s on a 50-step Full-HD generation"). L4 (Ada
+        # SM89) doesn't have FA-3 (Hopper-only) but the "_native_flash"
+        # backend uses PyTorch SDPA's flash kernel which IS available
+        # on Ada. Fails open: if the diffusers / torch combo doesn't
+        # expose this API, we keep the default SDPA path silently.
+        # Source: https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/discussions/139
+        #         https://huggingface.co/docs/diffusers/main/en/optimization/attention_backends
+        try:
+            pipe.transformer.set_attention_backend("_native_flash")
+            logger.info("set_attention_backend('_native_flash') succeeded")
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "set_attention_backend('_native_flash') unavailable "
+                "(will use default SDPA path): %s", exc,
+            )
         logger.info(
             "ZImagePipeline loaded in %.2fs (boot+%.2fs) with model_cpu_offload",
             time.monotonic() - t0,
@@ -189,11 +206,20 @@ def _pipe():
         return _PIPE
 
 
-# Z-Image native dim is 1024². Vertical 9:16 = 768x1344 (multiples of
-# 16 keep the patch grid clean).
+# O-Z2 (2026-05-24) — In-domain aspect buckets per Tongyi-MAI staff
+# (QJerry) Discussion #28: "use more as long as both width & height
+# are divided by 16 (8×vae + 2×patch) and not exceeded 256 pixels
+# fluctuation of 1024 resolution grid (like 768 ~ 1280)". The prior
+# 9:16=768×1344 + 16:9=1344×768 buckets were ~64px off-domain on the
+# long side; canonical 9:16 is 720×1280 (or 864×1536 on the larger
+# tier). Switching to 720×1280 keeps the patch grid clean (both
+# divisible by 16) and lands inside the trained-resolution band.
+# Side benefit: ~10-12% fewer pixels → ~10-12% faster per-panel
+# inference. Source: https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/discussions/28
+# canonical table: https://github.com/SaTaNoob/ComfyUI-Z-Image-Turbo-Resolutions
 _ASPECT_DIMS = {
-    "9:16": (768, 1344),
-    "16:9": (1344, 768),
+    "9:16": (720, 1280),
+    "16:9": (1280, 720),
     "1:1":  (1024, 1024),
     "4:3":  (1152, 896),
     "3:4":  (896, 1152),
@@ -278,6 +304,17 @@ def generate(req: GenerateIn, request: Request) -> JSONResponse:
                 height=h, width=w,
                 guidance_scale=req.guidance_scale,
                 num_inference_steps=req.steps,
+                # O-Z1 (2026-05-24) — diffusers default is 512; Tongyi-MAI
+                # staff in HF Discussion #8 say 1024 is safe locally:
+                # "Locally, you can set max_sequence_length=1024 to
+                # accommodate longer prompts." Our refiner emits up to
+                # ~250-word prompts; with the 2026-05-24 verb-led anti-
+                # text safety SUFFIX (images_cloudrun.py:520-528) the
+                # safety clause is the first thing the Qwen3-4B encoder
+                # truncates if we exceed 512 tokens. Bumping to 1024 makes
+                # the safety clause always survive.
+                # Source: https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/discussions/8
+                max_sequence_length=1024,
                 generator=generator,
             )
     except Exception as e:

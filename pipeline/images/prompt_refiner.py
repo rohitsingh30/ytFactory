@@ -131,9 +131,13 @@ def _emit_refiner_io_artifact(
         pass
 
 
-REFINER_VERSION = "v2-zturbo"  # 2026-05-23 P4.1: bumped from v1 (klein) to
-# v2-zturbo so cached refined-* fields from the klein era auto-invalidate
-# at render time via the input-hash mismatch in ``refined_fields_for_render``.
+REFINER_VERSION = "v3-scene-anchor"  # 2026-05-24 P4.2: bumped from v2-zturbo
+# so caches predating the ``scene_anchor`` channel-level setting (e.g. the
+# nosleep airplane-cabin anchor) auto-invalidate. The refiner now weaves
+# the channel's ``default_scene_anchor`` into refined_scene when the beat's
+# authored scene lacks an explicit setting — closes the 75%-no-character
+# floating-product-photo failure mode behind job 845bdb0d. The hash adds
+# ``scene_anchor`` so any change to the channel anchor force-refreshes.
 
 # Camera rotation per beat — composition vocabulary that elicits distinct
 # latents on Z-Image-Turbo. Cycling through forces visual diversity across
@@ -228,6 +232,7 @@ def compute_input_hash(
     character_description: str | None,
     style: str | None,
     mood: str | None,
+    scene_anchor: str | None = None,
 ) -> str:
     """Stable 16-char hash of the refiner inputs for a single beat.
 
@@ -235,8 +240,9 @@ def compute_input_hash(
     cached beat and recomputes via this function, a mismatch means the
     cache is stale (the authored ``scene`` was critic-patched, the cast
     description changed, the era anchor was retuned, the channel mood
-    moved, or :data:`REFINER_VERSION` was bumped). Stale → fall back to
-    the legacy path for that beat.
+    moved, the channel-level ``scene_anchor`` changed, or
+    :data:`REFINER_VERSION` was bumped). Stale → fall back to the legacy
+    path for that beat.
 
     Why 16 chars: collision rate at our volume (millions of beats over
     the channel lifetime) is negligible; full 64-char SHA256 is wasteful
@@ -250,6 +256,7 @@ def compute_input_hash(
         (character_description or "").strip(),
         (style or "").strip(),
         (mood or "").strip(),
+        (scene_anchor or "").strip(),
     )
     # Unit-separator joins so accidental whitespace in one field can't
     # collide with another field's content.
@@ -317,6 +324,18 @@ the caller, and that beat falls back to the legacy non-refined path):
    office overhead", "candlelit warm tungsten". Vary across beats —
    repeating the same lighting two beats in a row defeats the purpose.
 
+3a. SCENE ANCHOR — when the user message provides a channel-level
+   ``scene_anchor`` (an environment/setting hint such as "inside the
+   cabin of a long-haul international flight, dim ambient lighting"),
+   weave it into refined_scene WHEN the beat's authored scene has no
+   explicit setting of its own. Concrete setting tokens (room names,
+   indoor/outdoor, time-of-day) already in the authored scene win — do
+   NOT overwrite them. Otherwise lead refined_scene with the anchor so
+   environment-only beats (no human subject in the prompt) still resolve
+   to the channel's intended location instead of Z-Image-Turbo's
+   default product-photo backdrop. The anchor is OPTIONAL — when not
+   supplied, refined_scene is composed from the authored scene alone.
+
 4. NEVER write any of: speech bubble, thought bubble, comic panel,
    chalkboard, whiteboard, computer screen showing text, phone screen
    showing text, sign, billboard, poster, label, license plate, name tag,
@@ -363,12 +382,14 @@ def _build_user_prompt(
     character_description: str | None,
     style: str | None,
     mood: str | None,
+    scene_anchor: str | None = None,
 ) -> str:
     """Assemble the user-facing message for the refiner LLM call.
 
     The system prompt above contains the contract; this function inlines
-    the per-render context (era, cast description, style, mood) and the
-    per-beat content (with attractors already sanitised).
+    the per-render context (era, cast description, style, mood,
+    scene_anchor) and the per-beat content (with attractors already
+    sanitised).
     """
     lines: list[str] = []
     if era_anchor_prefix and era_anchor_prefix.strip():
@@ -380,6 +401,14 @@ def _build_user_prompt(
         )
     lines.append(f"STYLE: {(style or 'neutral').strip()}")
     lines.append(f"MOOD: {(mood or 'neutral').strip()}")
+    if scene_anchor and scene_anchor.strip():
+        # Channel-level setting hint — see system-prompt rule 3a. Weave
+        # into refined_scene only when the per-beat authored scene lacks
+        # its own explicit setting; concrete setting tokens always win.
+        lines.append(
+            f"SCENE_ANCHOR (channel-level setting; weave into refined_scene "
+            f"when the beat lacks its own setting): {scene_anchor.strip()}"
+        )
     lines.append("")
     lines.append("SHOT ROTATION (beat_index → shot_type):")
     for i, shot in enumerate(SHOT_ROTATION):
@@ -451,6 +480,7 @@ def refine_prompts_batch(
     style: str | None,
     mood: str | None,
     channel_key: str | None = None,
+    scene_anchor: str | None = None,
     llm_call: Callable[..., Any] | None = None,
 ) -> list[dict[str, str]]:
     """Refine a batch of authored beats in ONE LLM call.
@@ -508,6 +538,7 @@ def refine_prompts_batch(
         character_description=character_description,
         style=style,
         mood=mood,
+        scene_anchor=scene_anchor,
     )
     full_prompt = _REFINER_SYSTEM + "\n\n---\n\n" + user_prompt
     input_batch = {
@@ -516,6 +547,7 @@ def refine_prompts_batch(
         "character_description": character_description,
         "style": style,
         "mood": mood,
+        "scene_anchor": scene_anchor,
         "beats": beats,
         "prompt": full_prompt,
     }
@@ -596,6 +628,7 @@ def refine_prompts_batch(
                 character_description=character_description,
                 style=style,
                 mood=mood,
+                scene_anchor=scene_anchor,
             ),
         })
     fallback_count = sum(1 for slot in out if not slot)
@@ -626,6 +659,7 @@ def refined_fields_for_render(
     character_description: str | None,
     style: str | None,
     mood: str | None,
+    scene_anchor: str | None = None,
     env_flag_name: str = "YTFACTORY_PROMPT_REFINER",
 ) -> tuple[str | None, str | None, str | None]:
     """Render-time gate for the cached refined fields on a single beat.
@@ -667,6 +701,7 @@ def refined_fields_for_render(
         character_description=character_description,
         style=style,
         mood=mood,
+        scene_anchor=scene_anchor,
     )
     if beat.get("refined_input_hash") != expected_hash:
         return (None, None, None)

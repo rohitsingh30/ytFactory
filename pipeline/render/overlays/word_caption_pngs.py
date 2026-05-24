@@ -274,10 +274,23 @@ class WordCaptionPngs:
             else str(spec.captions_density)
         )
         if density_value == "minimal":
-            return spec.caption_style.font_size_minimal
-        if density_value == "dense":
-            return spec.caption_style.font_size_dense
-        return spec.caption_style.font_size_standard
+            base = spec.caption_style.font_size_minimal
+        elif density_value == "dense":
+            base = spec.caption_style.font_size_dense
+        else:
+            base = spec.caption_style.font_size_standard
+        # 2026-05-24 — aspect-aware sizing. The font_size_*
+        # defaults (320/260/200 px) are calibrated for a 1920-tall
+        # 9:16 shorts canvas; on a 1080-tall 16:9 long-form canvas
+        # those same pixel values give ~30/24/19% of frame height —
+        # the words would dominate the frame. Scale by the actual
+        # canvas height vs the 1920-tall reference, with a floor at
+        # 50% so very small canvases stay legible. Channels that want
+        # an absolute fixed size can still pin their per-density
+        # values in caption_style.
+        play_res_y = int(getattr(spec.caption_style, "play_res_y", 1920))
+        scale = max(0.5, min(1.0, play_res_y / 1920.0))
+        return max(48, int(round(base * scale)))
 
     def _build_word_caption_ass(
         self,

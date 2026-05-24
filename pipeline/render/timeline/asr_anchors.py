@@ -33,6 +33,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from pipeline.beats import Word
 from pipeline.render.contracts import (
     AudioResult,
     Segment,
@@ -43,6 +44,83 @@ from pipeline.render.contracts import (
 from pipeline.render.telemetry_helpers import emit_timeline_telemetry
 
 _logger = logging.getLogger(__name__)
+
+
+# ---- per-word timing synthesis -----------------------------------------
+#
+# 2026-05-24 — synthesize uniform per-word timings on Segments that
+# don't carry ASR-derived word timings. The long-form path skips
+# ASR (it uses authored TTS chunk timings or the title-match anchor
+# path), so every Segment shipped with ``words=None``. Downstream,
+# the ``overlays.word_caption_pngs`` plugin detected the missing
+# word timings and fell through to a "render the whole section as
+# one PNG" path → one ~150-second-wide static text strip per section
+# burned across the bottom of the frame for the entire 26-minute
+# render (Bug C in
+# data/critiques/i-ve-been-flying-…-845bdb0d.bugs.md).
+#
+# The shorts path (asr_beats) emits real Word objects from ASR and
+# must NOT be synthesised over — synthesis only fires when
+# ``words is None or len(words) == 0``.
+
+
+def _synthesize_word_timings(
+    text: str,
+    start_s: float,
+    end_s: float,
+) -> list[Word]:
+    """Split ``text`` on whitespace and distribute uniformly across
+    ``[start_s, end_s]``.
+
+    Tokens that are pure-punctuation (no alphanumeric content) are
+    dropped — ASR streams occasionally emit standalone "/" or ","
+    tokens and the synthesizer must not turn them into 0.5s floating
+    glyphs. Punctuation attached to a word ("1990.", "10,000") is
+    kept verbatim.
+
+    Returns ``[]`` when text is empty/whitespace-only OR when the
+    span is non-positive. Callers (``_ensure_word_timings`` /
+    overlays.word_caption_pngs) must handle the empty case
+    gracefully — a zero-duration segment can't have word timings.
+    """
+    span = float(end_s) - float(start_s)
+    if span <= 0.0:
+        return []
+    raw_tokens = (text or "").split()
+    # Drop pure-punctuation tokens (no alphanumerics).
+    tokens = [t for t in raw_tokens if any(ch.isalnum() for ch in t)]
+    if not tokens:
+        return []
+    per_word = span / len(tokens)
+    out: list[Word] = []
+    cursor = float(start_s)
+    for i, tok in enumerate(tokens):
+        # The final word ends EXACTLY at end_s to absorb float drift
+        # across very long spans (otherwise a 26-minute section split
+        # into 4000 words could drift by tens of milliseconds).
+        word_end = float(end_s) if i == len(tokens) - 1 else cursor + per_word
+        out.append(Word(text=tok, start=cursor, end=word_end))
+        cursor = word_end
+    return out
+
+
+def _ensure_word_timings(segments: list[Segment]) -> list[Segment]:
+    """For each segment, fill in synthesized per-word timings IF the
+    segment doesn't already carry ASR-emitted word timings.
+
+    Real ASR-emitted ``words`` (the short-engine ``asr_beats`` path)
+    pass through verbatim — this function never replaces them.
+
+    Mutates each segment IN PLACE and also returns the list so
+    callers can use it inline at every ``return`` point in
+    ``AsrAnchors.build``.
+    """
+    for seg in segments:
+        if seg.words is None or len(seg.words) == 0:
+            seg.words = _synthesize_word_timings(
+                seg.text, seg.start_s, seg.end_s,
+            )
+    return segments
 
 
 class AsrAnchors:
@@ -82,7 +160,7 @@ class AsrAnchors:
                 unanchored_count=0,
                 anchor_method="single_section",
             )
-            return timeline
+            return _ensure_word_timings(timeline)
 
         kind = "chapter" if "chapters" in script else "section"
         anchors = [(s.get("title") or "").strip() for s in sections]
@@ -129,7 +207,7 @@ class AsrAnchors:
                     unanchored_count=max(0, len(sections) - len(cloud_segs)),
                     anchor_method="cloud_anchors",
                 )
-                return cloud_segs
+                return _ensure_word_timings(cloud_segs)
         except Exception as exc:  # noqa: BLE001
             if os.environ.get("CLOUDRUN_ASR_DISABLE_FALLBACK") == "1":
                 raise
@@ -155,7 +233,7 @@ class AsrAnchors:
                 unanchored_count=0,
                 anchor_method="local_anchors",
             )
-            return timeline
+            return _ensure_word_timings(timeline)
         except Exception as exc:  # noqa: BLE001
             # Cloud whisper down + no laptop whisper available.
             # Fall back to chunk_timings if present, else equal-share.
@@ -168,7 +246,7 @@ class AsrAnchors:
                 unanchored_count=len(sections),
                 anchor_method="chunk_or_equal_fallback",
             )
-            return timeline
+            return _ensure_word_timings(timeline)
 
     def _anchor_sections_to_words(
         self,

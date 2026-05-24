@@ -95,6 +95,19 @@ class LongformPanels:
         seed_base = int((spec.extra or {}).get("image_seed", 42))
         steps = int((spec.extra or {}).get("image_steps", 4))
 
+        # O37 / Fix #2 (2026-05-24) — refiner context for the long-form
+        # panel path. Mirrors the keys ai_beat_slideshow reads off
+        # spec.extra so the two paths agree on which auxiliary inputs
+        # the prompt refiner sees. ``default_scene_anchor`` is the new
+        # channel-level setting string (O40) — see
+        # pipeline.images.prompt_refiner for how it weaves into
+        # refined_scene when the beat's authored scene lacks a setting.
+        era_anchor_prefix = (spec.extra or {}).get("era_anchor_prefix")
+        character_description = (spec.extra or {}).get("character_description")
+        mood = (spec.extra or {}).get("mood")
+        scene_anchor = (spec.extra or {}).get("default_scene_anchor")
+        channel_key = getattr(spec, "channel", None)
+
         # 2026-05-15 (v16) — defensively rescale ``hold_s`` so the
         # sum of holds matches the timeline's narrated duration.
         # Pre-fix the asr_anchors plugin could emit overlapping
@@ -138,6 +151,11 @@ class LongformPanels:
                 out_w=spec.output_resolution[0],
                 out_h=spec.output_resolution[1],
                 fps=spec.output_fps,
+                era_anchor_prefix=era_anchor_prefix,
+                character_description=character_description,
+                mood=mood,
+                scene_anchor=scene_anchor,
+                channel_key=channel_key,
             )
         except Exception as exc:  # noqa: BLE001 — wrap and re-raise via _fallback_solid_color
             import logging as _logging  # noqa: PLC0415

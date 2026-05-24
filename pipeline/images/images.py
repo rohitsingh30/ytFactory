@@ -691,8 +691,14 @@ def generate(
     style_prefix: str,
     seed: int,
     out_path: Path,
-    width: int = 768,
-    height: int = 1344,
+    # O-Z2 (2026-05-24) — Default to in-domain 9:16 = 720×1280 per
+    # Tongyi-MAI staff (QJerry) HF Discussion #28. The previous
+    # 768×1344 default was off-domain by ~64 px on the long side
+    # (training band is 1024 ± 256). Server-side _ASPECT_DIMS now
+    # carries the same value; keep client + server aligned so explicit
+    # width/height overrides at the call site are still possible.
+    width: int = 720,
+    height: int = 1280,
     steps: int = 4,
     *,
     provider: str = "cloudrun_z_image_turbo",
@@ -706,11 +712,25 @@ def generate(
 ) -> Path:
     """Generate one image. Dispatches on ``provider``.
 
-    Public entry — wraps :func:`_generate_impl` in an OTel
-    ``image_gen`` span so the dashboard can chart per-provider p95,
-    cold-load impact, and per-render image counts. The span carries
-    ``provider``, ``prompt_chars``, ``width``, ``height``, ``steps``,
-    ``seed`` as attrs.
+    Public entry — measures wall-clock duration and emits exactly ONE
+    ``image.gen`` event via :func:`_record_image_gen_telemetry` (which
+    delegates to ``observability.track_io``). The duration + provider
+    + prompt sha + bytes_out land on that single canonical event.
+
+    Pre-2026-05-24 this function ALSO opened an
+    ``_obs.timed("image_gen", …)`` context manager around
+    ``_generate_impl``, which emitted a second span/log record with
+    name ``image_gen`` (underscore variant). The ``image.gen`` event
+    in the ``finally`` block then emitted again with dot-separated
+    name. Result: every panel produced TWO telemetry records — see
+    845bdb0d render's 77 + 77 duplicate emit on Cloud Logging.
+    Telemetry consumers (``/diagnose-render``) had to dedupe by
+    ``panel_index + duration``; counters double-counted.
+
+    The dot-separated ``image.gen`` matches the rest of the
+    pipeline's naming convention (``stage.start``, ``tts.chunk``,
+    ``llm.call``); the underscore alias has been retired. See
+    ``tests/test_image_gen_event_dedupe.py`` for the regression guard.
     """
     assembled_prompt = _assemble_final_prompt(
         prompt=prompt,
@@ -721,46 +741,32 @@ def generate(
     final_prompt = _wire_prompt_for_provider(assembled_prompt, provider)
     negative_prompt = _normalise_prompt_list(extra_negative)
     effective_job_id = _current_job_id(job_id)
-    metadata = {
-        "provider": provider,
-        "prompt_chars": len(prompt or ""),
-        "style_chars": len(style_prefix or ""),
-        "width": width,
-        "height": height,
-        "steps": steps,
-        "seed": seed,
-        "out_path": str(out_path),
-        "panel_index": panel_index,
-        "cache_hit": bool(cache_hit),
-    }
     start = _time.perf_counter()
     result: Path | None = None
     bytes_out: int | None = None
     success = False
     error: str | None = None
     try:
-        with _obs.timed("image_gen", category="image", job_id=effective_job_id, metadata=metadata) as t:
-            result = _generate_impl(
-                prompt=prompt,
-                style_prefix=style_prefix,
-                seed=seed,
-                out_path=out_path,
-                width=width,
-                height=height,
-                steps=steps,
-                provider=provider,
-                ip_adapter_image=ip_adapter_image,
-                ip_adapter_scale=ip_adapter_scale,
-                extra_negative=extra_negative,
-                force_positive=force_positive,
-            )
-            try:
-                bytes_out = result.stat().st_size
-                t.add(metadata={"out_bytes": bytes_out})
-            except Exception:  # noqa: BLE001
-                pass
-            success = True
-            return result
+        result = _generate_impl(
+            prompt=prompt,
+            style_prefix=style_prefix,
+            seed=seed,
+            out_path=out_path,
+            width=width,
+            height=height,
+            steps=steps,
+            provider=provider,
+            ip_adapter_image=ip_adapter_image,
+            ip_adapter_scale=ip_adapter_scale,
+            extra_negative=extra_negative,
+            force_positive=force_positive,
+        )
+        try:
+            bytes_out = result.stat().st_size
+        except Exception:  # noqa: BLE001
+            pass
+        success = True
+        return result
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}: {exc}"[:1000]
         raise

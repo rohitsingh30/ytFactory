@@ -595,6 +595,77 @@ def _track_panel_gen(panel_index: int, prompt: str, *, success: bool) -> None:
         pass
 
 
+def _refine_long_form_panels(
+    panels: list[dict[str, Any]],
+    *,
+    era_anchor_prefix: str | None,
+    character_description: str | None,
+    style: str | None,
+    mood: str | None,
+    scene_anchor: str | None,
+    channel_key: str | None,
+) -> tuple[list[dict[str, str]], bool]:
+    """Run the prompt refiner over the long-form panel list.
+
+    Returns ``(refined_slots, refiner_attempted)``. ``refined_slots`` is
+    parallel to ``panels`` — each entry is either a populated dict with
+    ``refined_visual / refined_scene / style_block / refined_version /
+    refined_input_hash`` or an empty dict (per-panel fallback).
+
+    ``refiner_attempted`` is ``True`` iff the env flag was on AND at
+    least one panel was eligible. When ``False`` the caller should NOT
+    treat an all-empty result as a failure (the kill switch is by
+    design).
+
+    The refiner is gated by ``YTFACTORY_PROMPT_REFINER``. When OFF,
+    returns ``([{}] * N, False)`` so the caller falls back to the
+    legacy bare-scene path identically to pre-O37 behavior — zero
+    regression for shipped renders until the flag is enabled.
+    """
+    if not panels:
+        return [], False
+    if os.environ.get("YTFACTORY_PROMPT_REFINER", "").strip().lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        return [{} for _ in panels], False
+
+    # Refiner consumes ``key_visual`` + ``scene``; panel dicts have
+    # ``scene`` only. Synthesise a per-panel key_visual from the first
+    # ~12 words of the scene so the refiner has the verb-led subject
+    # token it expects — same shape the shorts path produces via the
+    # LLM prompts authoring stage.
+    pseudo_beats: list[dict[str, Any]] = []
+    for p in panels:
+        scene = (p.get("scene") or "").strip()
+        kv = (p.get("key_visual") or "").strip()
+        if not kv and scene:
+            kv = " ".join(scene.split()[:12])
+        pseudo_beats.append({"key_visual": kv, "scene": scene})
+
+    try:
+        from pipeline.images.prompt_refiner import refine_prompts_batch  # noqa: PLC0415
+        slots = refine_prompts_batch(
+            pseudo_beats,
+            era_anchor_prefix=era_anchor_prefix,
+            character_description=character_description,
+            style=style,
+            mood=mood,
+            channel_key=channel_key,
+            scene_anchor=scene_anchor,
+        )
+    except Exception as exc:  # noqa: BLE001 — refiner is best-effort
+        print(f"[panel] refiner pre-step FAILED ({exc}); "
+              "all panels fall back to legacy bare-scene path")
+        return [{} for _ in panels], True
+
+    if len(slots) != len(panels):
+        # Refiner contract: slots is parallel to input. A length
+        # mismatch means the LLM emitted the wrong shape; the refiner
+        # already logged the failure mode. Fall back uniformly.
+        return [{} for _ in panels], True
+    return slots, True
+
+
 def _generate_panel_stills(
     *,
     panels: list[dict[str, Any]],
@@ -605,6 +676,11 @@ def _generate_panel_stills(
     image_width: int,
     image_height: int,
     cache_dir: Path,
+    era_anchor_prefix: str | None = None,
+    character_description: str | None = None,
+    mood: str | None = None,
+    scene_anchor: str | None = None,
+    channel_key: str | None = None,
 ) -> list[Path]:
     """Render every panel still to disk. Independent of TTS — only
     reads ``scene`` / ``seed_offset`` from each panel dict.
@@ -613,6 +689,31 @@ def _generate_panel_stills(
     can launch it on a :class:`pipeline.stage_overlap.StageOverlap`
     worker BEFORE awaiting :func:`synth_long_narration`. See
     ``docs/parallel_stage_overlap.md`` for the pattern.
+
+    Refiner-aware path (O37, 2026-05-24)
+    ------------------------------------
+
+    When ``YTFACTORY_PROMPT_REFINER=1`` is set, the function batches
+    ``panels`` through :func:`pipeline.images.prompt_refiner.refine_prompts_batch`
+    ONCE at the top, then assembles each per-panel wire prompt via
+    :func:`pipeline.images.images.build_full_prompt` with the refined
+    ``refined_visual / refined_scene / style_block`` fields. This brings
+    the long-form path to parity with the shorts path
+    (``ai_beat_slideshow``), closing F29 — the load-bearing wiring bug
+    behind the floating-white-tee render on job 845bdb0d.
+
+    Per-panel fallback: when the refiner returns an empty slot for a
+    panel (LLM-side validation failure, attractor sneak-back, etc.) that
+    panel falls back to the legacy ``prompt=scene + style_prefix=...``
+    path. Logged as a warning at the panel level.
+
+    Whole-batch fallback: when the refiner was attempted but ZERO panels
+    received refined fields, RAISES — the cost of running 77 panels
+    through Z-Image-Turbo with bare-scene prompts is the floating-tee
+    failure mode we're closing. Per
+    ``feedback_silent_fallback_unshippable_output.md``, a stage that
+    cannot produce its real output must raise rather than ship a render
+    that looks successful but is visibly broken.
 
     **Parallel cloud fan-out** — for cloud image providers, panels are
     generated in parallel via ``ThreadPoolExecutor`` with
@@ -638,23 +739,90 @@ def _generate_panel_stills(
     panel_dir = cache_dir / "panels"
     panel_dir.mkdir(parents=True, exist_ok=True)
 
+    # ---- O37: refine once for the whole panel batch ----
+    refined_slots, refiner_attempted = _refine_long_form_panels(
+        panels,
+        era_anchor_prefix=era_anchor_prefix,
+        character_description=character_description,
+        style=style_prefix,
+        mood=mood,
+        scene_anchor=scene_anchor,
+        channel_key=channel_key,
+    )
+
     # Build the work plan: skip panels already cached on disk. Mirrors
     # the cache-skip pattern from synth_long_narration so a hydrated
     # cache (per-call GCS persistence — see bug B2 follow-up) makes a
     # retry effectively free.
+    #
+    # ``wire_prompt`` is the final string fed to ``images.generate``:
+    #   - refined slot non-empty → build_full_prompt(refined_*)
+    #   - refined slot empty (per-panel fallback OR refiner disabled) →
+    #       bare ``scene``; ``images.generate(style_prefix=...)`` will
+    #       append the channel style as it did pre-O37.
+    # ``style_for_gen`` mirrors the shorts path: when build_full_prompt
+    # has already inlined the style_block we MUST pass style_prefix=""
+    # to avoid double-applying the style.
     panel_pngs: list[Path] = []
-    work: list[tuple[int, Path, str, int]] = []
+    # work tuple shape: (panel_index, png_path, wire_prompt, seed,
+    # style_for_gen, refined_used)
+    work: list[tuple[int, Path, str, int, str, bool]] = []
+    refined_used_count = 0
     for i, p in enumerate(panels):
         png = panel_dir / f"panel_{i:03d}.png"
         panel_pngs.append(png)
-        if png.exists() and png.stat().st_size >= 4096:
-            _track_panel_gen(i, (p.get("scene") or "").strip(), success=True)
-            continue
         scene = (p.get("scene") or "").strip()
         if not scene:
             raise ValueError(f"panel {i} missing 'scene' field")
+        if png.exists() and png.stat().st_size >= 4096:
+            _track_panel_gen(i, scene, success=True)
+            continue
         seed = int(image_seed) + int(p.get("seed_offset", i))
-        work.append((i, png, scene, seed))
+
+        slot = refined_slots[i] if i < len(refined_slots) else {}
+        rv = (slot.get("refined_visual") or "").strip()
+        rs = (slot.get("refined_scene") or "").strip()
+        sb = (slot.get("style_block") or "").strip()
+        if rv and rs and sb:
+            wire_prompt = images.build_full_prompt(
+                style_prefix=style_prefix,
+                character_description=character_description,
+                key_visual=(p.get("key_visual") or "").strip() or None,
+                scene=scene,
+                era_anchor_prefix=era_anchor_prefix,
+                refined_visual=rv,
+                refined_scene=rs,
+                style_block=sb,
+            )
+            style_for_gen = ""
+            refined_used = True
+            refined_used_count += 1
+        else:
+            if refiner_attempted:
+                print(
+                    f"[panel] {i} refiner slot empty — falling back to "
+                    "legacy bare-scene path for this panel"
+                )
+            wire_prompt = scene
+            style_for_gen = style_prefix
+            refined_used = False
+        work.append((i, png, wire_prompt, seed, style_for_gen, refined_used))
+
+    # Whole-batch refiner fallback gate — see docstring + feedback memo
+    # ``silent_fallback_unshippable_output.md``. If the refiner was
+    # asked for refinements but ZERO panels got them, raising loud is
+    # the right move: shipping 77 bare-scene panels through Z-Image-
+    # Turbo is the documented floating-tee failure mode (job 845bdb0d).
+    if refiner_attempted and work and refined_used_count == 0:
+        raise RuntimeError(
+            "long_form_lib._generate_panel_stills: refiner was attempted "
+            f"(YTFACTORY_PROMPT_REFINER on, {len(work)} panels eligible) "
+            "but 0 panels received refined fields — every panel would "
+            "fall back to bare-scene Z-Image-Turbo, which produced the "
+            "floating-product-photo render on job 845bdb0d. Refusing "
+            "to ship. Check refiner_io.json artifact for the LLM "
+            "response shape and fix the refiner before retrying."
+        )
 
     if not work:
         return panel_pngs
@@ -703,13 +871,14 @@ def _generate_panel_stills(
 
         from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415
 
-        def _gen_one(item: tuple[int, Path, str, int]) -> int:
-            i, png, scene, seed = item
-            print(f"[panel] {i+1}/{n_total} gen → {png.name} (seed {seed})")
+        def _gen_one(item: tuple[int, Path, str, int, str, bool]) -> int:
+            i, png, wire_prompt, seed, style_for_gen, refined_used = item
+            tag = "refined" if refined_used else "legacy"
+            print(f"[panel] {i+1}/{n_total} gen ({tag}) → {png.name} (seed {seed})")
             try:
                 images.generate(
-                    prompt=scene,
-                    style_prefix=style_prefix,
+                    prompt=wire_prompt,
+                    style_prefix=style_for_gen,
                     seed=seed,
                     out_path=png,
                     width=int(image_width),
@@ -726,10 +895,10 @@ def _generate_panel_stills(
                     persist_artifact(png, kind="panels")
                 except Exception as exc:  # noqa: BLE001
                     print(f"[panel] cache.persist failed (non-fatal): {exc}")
-                _track_panel_gen(i, scene, success=True)
+                _track_panel_gen(i, wire_prompt, success=True)
                 return i
             except Exception:
-                _track_panel_gen(i, scene, success=False)
+                _track_panel_gen(i, wire_prompt, success=False)
                 raise
 
         with ThreadPoolExecutor(max_workers=parallel_workers) as pool:
@@ -741,12 +910,13 @@ def _generate_panel_stills(
                 print(f"[panel] done {completed}/{n_remaining} "
                       f"(panel_{i:03d}.png)")
     else:
-        for i, png, scene, seed in work:
-            print(f"[panel] {i+1}/{n_total} gen → {png.name} (seed {seed})")
+        for i, png, wire_prompt, seed, style_for_gen, refined_used in work:
+            tag = "refined" if refined_used else "legacy"
+            print(f"[panel] {i+1}/{n_total} gen ({tag}) → {png.name} (seed {seed})")
             try:
                 images.generate(
-                    prompt=scene,
-                    style_prefix=style_prefix,
+                    prompt=wire_prompt,
+                    style_prefix=style_for_gen,
                     seed=seed,
                     out_path=png,
                     width=int(image_width),
@@ -763,9 +933,9 @@ def _generate_panel_stills(
                     persist_artifact(png, kind="panels")
                 except Exception as exc:  # noqa: BLE001
                     print(f"[panel] cache.persist failed (non-fatal): {exc}")
-                _track_panel_gen(i, scene, success=True)
+                _track_panel_gen(i, wire_prompt, success=True)
             except Exception:
-                _track_panel_gen(i, scene, success=False)
+                _track_panel_gen(i, wire_prompt, success=False)
                 raise
 
     return panel_pngs
@@ -886,6 +1056,12 @@ def build_image_panels_video(
     out_w: int = 1920,
     out_h: int = 1080,
     fps: int = 30,
+    *,
+    era_anchor_prefix: str | None = None,
+    character_description: str | None = None,
+    mood: str | None = None,
+    scene_anchor: str | None = None,
+    channel_key: str | None = None,
 ) -> Path:
     """Path B render: comic-illustrated panels via Z-Image-Turbo, hard cuts.
 
@@ -894,6 +1070,13 @@ def build_image_panels_video(
     sequentially. The orchestrator's parallel path (long-form ``main``)
     calls the halves directly with a :class:`StageOverlap` between them
     so stills generation overlaps with TTS chunked synthesis.
+
+    New kwargs (O37, 2026-05-24) route the refiner context through to
+    ``_generate_panel_stills`` so long-form panels get the same
+    refined_visual / refined_scene / style_block / character continuity
+    the shorts path enjoys. All four kwargs default to ``None`` for
+    backwards-compat with callers (tests, the historyrecapped CLI
+    legacy entry point) that don't yet thread the channel context.
     """
     panel_pngs = _generate_panel_stills(
         panels=panels,
@@ -904,6 +1087,11 @@ def build_image_panels_video(
         image_width=image_width,
         image_height=image_height,
         cache_dir=cache_dir,
+        era_anchor_prefix=era_anchor_prefix,
+        character_description=character_description,
+        mood=mood,
+        scene_anchor=scene_anchor,
+        channel_key=channel_key,
     )
     return _assemble_panel_static(
         panel_pngs=panel_pngs,

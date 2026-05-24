@@ -475,49 +475,83 @@ def _generate_cloudrun(
 #   - Ronaldinho jerseys: fake "FCO" Barcelona crest, "CHCASYQUEB"
 #     across the chest.
 #
-# Z-Image-Turbo is guidance-distilled (CFG=0), so the standard
-# ``negative_prompt`` parameter is a no-op. But distilled models parse
-# in-prompt instructions, so we prepend an anti-text directive to every
+# Anti-text safety clause.
+#
+# Z-Image-Turbo is guidance-distilled (CFG=0), so the API's standard
+# ``negative_prompt`` parameter is a no-op. The model parses in-prompt
+# instructions instead, so we attach an anti-text directive to every
 # positive prompt.
 #
 # Per-channel override: a channel YAML can set
 # ``image.anti_text_suffix: ""`` to disable (e.g. for a "screenshot
 # of a tweet" channel where text IS the content).
 #
-# Distilled models are left-weighted — earlier tokens get more
-# attention. Negations ("no readable text") are linguistic-only and
-# lose to training-data attractors when placed at the SUFFIX. Use
-# POSITIVE surface framing at the FRONT.
+# 2026-05-24 — boilerplate rewrite.
+#
+# Prior version (2026-05 through 2026-05-23) PREPENDED a noun-tag
+# boilerplate ("Clean surface, unmarked, blank jersey, smooth fabric,
+# plain backgrounds, unmarked book covers, unlabeled bottles, no
+# signage, no banners, no watermark, no logo, no caption, no street
+# signs.") on the rationale that distilled / left-weighted models give
+# the prefix higher cross-attention than the suffix. That rationale
+# was correct; the noun choice was not — z-image-turbo treats comma-
+# separated noun tags as subject candidates, and "blank jersey" /
+# "smooth fabric" / "unmarked book covers" / "unlabeled bottles" are
+# concrete clothing / fabric / paper-product nouns strongly attested
+# in training data. When the panel-specific scene tail was short (e.g.
+# "Cloud-filled sky seen from airplane wing."), the noun-tag prefix
+# dominated the model's subject selection and the result was a literal
+# floating product-photo white t-shirt against the requested
+# background. See data/critiques/i-ve-been-flying-…-845bdb0d.md and
+# .claude/skills/diagnose-render/learnings/845bdb0df20e4ba3885ca33c7749e74d.md
+# for the symptom; ~45 of 77 panels on that render rendered as
+# headless floating tees.
+#
+# Replacement: a single verb-led safety sentence, appended as a SUFFIX.
+# Verbs and adjectives don't compete with the scene for subject
+# attention the way noun tags did. Suffix attention is lower than
+# prefix attention on left-weighted models, but a weak guard at the
+# end is dramatically better than an actively-harmful subject-noun
+# list at the front. Combined with the refiner-routed long-form path
+# (see _generate_panel_stills), the model's primary signal is now the
+# actual scene + character + style_prefix description, not the safety
+# clause.
 
-ANTI_TEXT_PREFIX = (
-    "Clean surface, unmarked, blank jersey, smooth fabric, plain backgrounds, "
-    "unmarked book covers, unlabeled bottles, no signage, no banners, "
-    "no watermark, no logo, no caption, no street signs."
+ANTI_TEXT_SUFFIX = (
+    "Render the scene with no readable printed text anywhere in the image, "
+    "no visible logos on clothing or objects, no captions baked into the frame, "
+    "no street signs or banners with readable letters."
 )
 
-# Backward-compat alias — some callers still import the old name.
-ANTI_TEXT_SUFFIX = ANTI_TEXT_PREFIX
+# Backward-compat aliases — historic callers still import the old names.
+ANTI_TEXT_PREFIX = ANTI_TEXT_SUFFIX
+ANTI_TEXT_BOILERPLATE = ANTI_TEXT_SUFFIX
 
 
 def _append_anti_text_suffix(prompt: str, *, model: str) -> str:
-    """Apply the positive-framing anti-text directive to a prompt.
+    """Attach the anti-text safety clause to a positive prompt.
 
-    For guidance-distilled / left-weighted models (z_image_turbo),
-    this PREPENDS the positive framing because suffix position has
-    near-zero cross-attention weight on these models.
+    Appends as a SUFFIX (2026-05-24 onward). Function name kept for
+    backward-compat with import sites; the new behaviour is "append
+    verb-led safety clause", not "prepend noun-tag framing".
 
-    Function name kept for backward-compat; the behaviour is
-    "prepend positive framing", not "append negation".
-
-    Idempotent: if the prefix substring is already present anywhere
-    in the prompt, returns unchanged.
+    Idempotent — returns unchanged if either the current safety
+    substring or any of the legacy substrings is already present.
+    This keeps the refiner-emitted ``refined_scene`` (which starts
+    with "no readable text in image.") collapsing to a no-op, and
+    keeps cached pre-2026-05-24 prompts from being double-suffixed.
     """
     if not prompt:
         return prompt
-    if "Clean surface, unmarked" in prompt or "no readable text in image" in prompt.lower():
-        # Already applied OR already carries the legacy negation phrasing.
+    lower = prompt.lower()
+    if (
+        "no readable text" in lower
+        or "no readable printed text" in lower
+        or "Clean surface, unmarked" in prompt
+    ):
+        # Already carries some form of the safety clause.
         return prompt
-    return f"{ANTI_TEXT_PREFIX} {prompt.lstrip()}"
+    return f"{prompt.rstrip().rstrip('.')}. {ANTI_TEXT_SUFFIX}"
 
 
 # ------------------------------------------------------- per-model wrappers

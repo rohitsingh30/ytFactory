@@ -284,6 +284,123 @@ class ComputeInputHashTest(unittest.TestCase):
         # uniquely.
         self.assertNotEqual(h1, h2)
 
+    def test_hash_changes_when_scene_anchor_changes(self):
+        """O40: changing the channel-level scene_anchor MUST invalidate
+        cached refined fields. Without this, a YAML edit to switch the
+        nosleep anchor from 'airplane cabin' to 'forest trail' would
+        leave old refined_* fields in place and the render would still
+        evoke airplane cabins for every panel."""
+        common = dict(
+            beat=self._beat(),
+            era_anchor_prefix=None, character_description=None,
+            style=None, mood=None,
+        )
+        h_no_anchor = pr.compute_input_hash(**common)
+        h_plane = pr.compute_input_hash(
+            scene_anchor="inside the cabin of a long-haul flight", **common,
+        )
+        h_forest = pr.compute_input_hash(
+            scene_anchor="forest trail at dusk", **common,
+        )
+        # All three must be distinct.
+        self.assertNotEqual(h_no_anchor, h_plane)
+        self.assertNotEqual(h_plane, h_forest)
+        self.assertNotEqual(h_no_anchor, h_forest)
+
+
+class RefineBatchScenseAnchorTest(unittest.TestCase):
+    """O40: refine_prompts_batch accepts a scene_anchor and threads it
+    into the LLM user prompt + the cached input hash. If the wire is
+    dropped, the channel anchor never reaches the LLM and the cached
+    fields don't auto-invalidate when the channel changes anchors.
+    """
+
+    def setUp(self):
+        _install_strip(self)
+
+    def test_scene_anchor_appears_in_user_prompt(self):
+        """The refiner's user message must mention the channel-level
+        anchor so the LLM can weave it into refined_scene. Pin by
+        capturing the call's first positional argument (the prompt)."""
+        captured_prompts: list[str] = []
+
+        def fake_llm(prompt, *, output_json=False, **_kw):
+            captured_prompts.append(prompt)
+            return [
+                _good_item("a cup", "subject in setting"),
+            ]
+
+        pr.refine_prompts_batch(
+            [{"key_visual": "cup", "scene": "stir"}],
+            era_anchor_prefix=None,
+            character_description=None,
+            style="comic",
+            mood="dramatic",
+            scene_anchor="inside an airplane cabin at night",
+            llm_call=fake_llm,
+        )
+        self.assertEqual(len(captured_prompts), 1)
+        self.assertIn(
+            "inside an airplane cabin at night", captured_prompts[0],
+            msg=("scene_anchor missing from refiner user prompt \u2014 the "
+                 "channel-level setting hint is not reaching the LLM"),
+        )
+        # The label must also appear so the LLM knows what the field is.
+        self.assertIn("SCENE_ANCHOR", captured_prompts[0])
+
+    def test_scene_anchor_omitted_when_unset(self):
+        """No anchor \u2192 no SCENE_ANCHOR line in the user prompt.
+        Required so channels that don't set the YAML field don't get a
+        confusing empty hint line in the LLM prompt."""
+        captured_prompts: list[str] = []
+
+        def fake_llm(prompt, *, output_json=False, **_kw):
+            captured_prompts.append(prompt)
+            return [_good_item("a cup", "scene tail")]
+
+        pr.refine_prompts_batch(
+            [{"key_visual": "cup", "scene": "stir"}],
+            era_anchor_prefix=None,
+            character_description=None,
+            style="comic",
+            mood="dramatic",
+            scene_anchor=None,
+            llm_call=fake_llm,
+        )
+        self.assertEqual(len(captured_prompts), 1)
+        self.assertNotIn("SCENE_ANCHOR", captured_prompts[0])
+
+    def test_refined_input_hash_includes_scene_anchor(self):
+        """The hash baked into the returned refined slot MUST include
+        the scene_anchor so render-time gates can detect drift."""
+
+        def fake_llm(_prompt, *, output_json=False, **_kw):
+            return [_good_item("a cup", "scene tail")]
+
+        out_a = pr.refine_prompts_batch(
+            [{"key_visual": "cup", "scene": "stir"}],
+            era_anchor_prefix=None, character_description=None,
+            style=None, mood=None,
+            scene_anchor="airplane cabin",
+            llm_call=fake_llm,
+        )
+        out_b = pr.refine_prompts_batch(
+            [{"key_visual": "cup", "scene": "stir"}],
+            era_anchor_prefix=None, character_description=None,
+            style=None, mood=None,
+            scene_anchor="forest trail",
+            llm_call=fake_llm,
+        )
+        self.assertEqual(len(out_a), 1)
+        self.assertEqual(len(out_b), 1)
+        # Different anchors \u2192 different cached hashes.
+        self.assertNotEqual(
+            out_a[0]["refined_input_hash"],
+            out_b[0]["refined_input_hash"],
+            "refined_input_hash must encode scene_anchor; without this, "
+            "a YAML edit to switch anchors silently keeps stale cache.",
+        )
+
 
 # ---------------------------------------------------------------------------
 # refine_prompts_batch — the main entry point

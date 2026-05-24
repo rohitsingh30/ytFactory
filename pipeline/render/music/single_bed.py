@@ -94,9 +94,50 @@ class SingleBed:
                 except Exception as exc:  # noqa: BLE001
                     _logger.warning("single_bed: failed to loop bed %s (%s) "
                                     "— falling back to synth", bed_path, exc)
+            else:
+                # Silent-fallback audit (Fix #6, 2026-05-24): the
+                # channel YAML named a real ``music_bed_default`` and
+                # the asset is missing. Pre-fix ``SingleBed`` silently
+                # fell through to ffmpeg-lavfi synth ambient — the
+                # render shipped under the WRONG audio mix (synth
+                # tones, not the configured bed). Same anti-pattern as
+                # the captionless-mp4 silent-fallback class closed in
+                # the 2026-05-15 audit.
+                #
+                # Opt-out: ``music_bed_default: off`` (the outer
+                # ``bed_name != "off"`` branch) routes to the synth
+                # path explicitly. Operators who genuinely want the
+                # synth ambient set ``music_bed_default: off``.
+                track = {
+                    "track_id": "silent",
+                    "mood": "none",
+                    "source": "missing_bed",
+                    "duration_s": narration_duration_s,
+                    "configured_bed": bed_name,
+                    "resolved_path": str(bed_path) if bed_path else None,
+                }
+                track_event("music.pick", category="pipeline",
+                            success=False, metadata=track)
+                emit_json_artifact(
+                    "music",
+                    {"track": track, "mood": "none", "duck_curve": None,
+                     "error": "music_bed_missing"},
+                )
+                raise FileNotFoundError(
+                    f"single_bed: configured music_bed_default={bed_name!r} "
+                    f"not found on disk (resolved={bed_path}). The render "
+                    f"would have silently swapped to synth ambient — "
+                    f"refusing to ship under the wrong audio mix. Either "
+                    f"drop the bed mp3/wav into the channel's music/ dir, "
+                    f"set music_bed_default: off (which intentionally "
+                    f"routes to synth ambient), or override "
+                    f"music_policy=none on the proposal. See memory "
+                    f"feedback_silent_fallback_unshippable_output."
+                )
 
-        # No bed file → synth the ambient drone. Same fallback shape
-        # legacy long_form.build_music_bed used.
+        # bed_name is None or "off" → operator explicitly opted in to
+        # the synth ambient drone. Same fallback shape legacy
+        # long_form.build_music_bed used.
         track = {
             "track_id": "ambient_synth",
             "mood": "ambient",

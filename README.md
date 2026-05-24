@@ -126,8 +126,10 @@ A new visual mode = one new file + one `register_plugin(...)` call.
 
 ## Image model
 
-Production image-gen is **Z-Image-Turbo** (Tongyi-MAI, 6B S3-DiT,
-CFG-distilled). Key facts the refiner and prompts are calibrated for:
+Production image-gen is **Z-Image-Turbo** (Tongyi-MAI, 6B
+**Scalable Single-Stream DiT** (S3-DiT), Qwen3-4B text encoder,
+CFG-distilled via Decoupled-DMD). Key facts the refiner and prompts
+are calibrated for:
 
 - Negative prompts ignored (`guidance_scale=0.0`). Use positive
   framing only (`"correct anatomy"`, not `"no extra fingers"`).

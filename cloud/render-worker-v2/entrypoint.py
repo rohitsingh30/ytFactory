@@ -156,6 +156,99 @@ def _safe_track_event(
         pass
 
 
+# ---------------------------------------------------------------------
+# Stage envelope coverage (Fix #7, 2026-05-24)
+# ---------------------------------------------------------------------
+#
+# The 845bdb0d render emitted exactly ONE ``stage.start`` and ONE
+# ``stage.end`` event — both for ``stage=upload``. The other six
+# stages (rewrite / cast / images / tts / asr / compose) completed
+# but emitted no envelope events because:
+#
+#   * In LONG-FORM mode, the dispatch loop at the bottom of
+#     ``_main_from_firestore`` short-circuits (``lf_done`` → skip
+#     every key except ``upload``). The long-form bypass above the
+#     loop calls ``_video.render_long_form`` as one monolithic step,
+#     never touching the ``@stage_envelope``-decorated handlers.
+#   * In SHORT mode, the dispatch loop only invokes
+#     ``_stage_render_real`` (which IS decorated as ``compose``);
+#     the other stages run as ``_run_stage_stub`` no-ops (rewrite /
+#     cast / editing_agent might run real handlers but tts / asr /
+#     images explicitly ``continue`` at lines 3251-3252).
+#
+# Result: ``/diagnose-render`` cannot reconstruct per-stage timing
+# from events; F25 (telemetry-trust gap) widens; every future
+# diagnose-render burns hours falling back to Firestore ``timeline[]``
+# for what should be queryable from Cloud Logging in seconds.
+#
+# Fix shape: a context manager that emits ``stage.start`` on enter,
+# ``stage.end`` on exit (or ``stage.failed`` on exception), with the
+# same metadata shape the worker's existing ``@stage_envelope``
+# decorator produces. Called from the dispatch loop AND from the
+# long-form bypass for every pipeline stage.
+#
+# Regression guard: ``tests/test_stage_envelope_coverage.py`` enumerates
+# every stage that must emit envelope events and fails if any go
+# missing.
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _stage_envelope_events(stage_name: str, job: dict | None = None):
+    """Emit ``stage.start`` and ``stage.end`` / ``stage.failed`` events.
+
+    Mirrors the metadata shape of the worker's ``@stage_envelope``
+    decorator (slug / channel / variant / mode) so post-mortems treat
+    the dispatch-loop-emitted events the same as decorator-emitted
+    events.
+    """
+    job = job or {}
+    proposal = (job.get("proposal") or {}) if isinstance(job, dict) else {}
+    ctx_md = {
+        "stage": stage_name,
+        "slug": (job.get("_slug") or "") if isinstance(job, dict) else "",
+        "channel": proposal.get("channel") or "",
+        "variant": (proposal.get("format") or "").strip(),
+        "mode": (job.get("mode") or "real") if isinstance(job, dict) else "real",
+    }
+    job_id = _current_job_id(job)
+    t0 = time.perf_counter()
+    _safe_track_event(
+        "stage.start",
+        category="render",
+        job_id=job_id,
+        metadata=dict(ctx_md),
+    )
+    try:
+        yield
+    except BaseException as exc:
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        _safe_track_event(
+            "stage.failed",
+            category="render",
+            success=False,
+            duration_ms=duration_ms,
+            job_id=job_id,
+            metadata={
+                **ctx_md,
+                "error": str(exc)[:500],
+                "error_type": type(exc).__name__,
+                "traceback": traceback.format_exc()[-3000:],
+            },
+        )
+        raise
+    duration_ms = int((time.perf_counter() - t0) * 1000)
+    _safe_track_event(
+        "stage.end",
+        category="render",
+        duration_ms=duration_ms,
+        job_id=job_id,
+        metadata=dict(ctx_md),
+    )
+
+
 def _safe_read_json(path: str | Path | None) -> Any:
     if not path:
         return None
@@ -2027,10 +2120,17 @@ def _backfill_yaml_image_keys(
         return out
     # The engine's ai_beat_slideshow + image dispatcher read these off
     # spec.extra. Keep the list in sync with their .get() call sites.
+    #
+    # ``default_scene_anchor`` (O37 / O40, 2026-05-24) is the channel-
+    # level setting string the prompt refiner weaves into refined_scene
+    # when the beat's authored scene lacks an explicit setting. Read by
+    # both the long-form refiner pass (long_form_lib._refine_long_form_panels)
+    # AND the shorts refiner pass (llm.prompts.author_beat_prompts).
     for key in (
         "image_provider", "image_style_prefix",
         "image_seed", "image_steps",
         "force_positive",
+        "default_scene_anchor",
     ):
         if key in cfg and out.get(key) in (None, ""):
             out[key] = cfg[key]
@@ -2044,6 +2144,7 @@ def _author_prompts_for_engine(
     channel_yaml_path: Path,
     work_dir: Path,
     style_prefix: str,
+    scene_anchor: str | None = None,
     progress_cb: Callable[[str, str], None] | None = None,
 ) -> dict:
     """Author ``prompts.json`` + collect refiner context for the engine.
@@ -2250,6 +2351,7 @@ def _author_prompts_for_engine(
                 era_anchor_prefix=era_anchor_prefix,
                 mood=mood,
                 channel_key=script_dict.get("channel") or metadata.get("channel"),
+                scene_anchor=scene_anchor,
             )
             last_exc = None
             break
@@ -2378,11 +2480,17 @@ def _run_renderer_via_engines(
     spec.extra = _backfill_yaml_image_keys(spec.extra, Path(channel_yaml))
 
     style_prefix = spec.extra.get("image_style_prefix", "") if spec.extra else ""
+    # O37 / O40 (2026-05-24) — the channel-level scene_anchor lands in
+    # spec.extra via _backfill_yaml_image_keys above. Thread it into
+    # the refiner so the shorts path picks up the same setting hint the
+    # long-form path uses.
+    scene_anchor = spec.extra.get("default_scene_anchor") if spec.extra else None
     extra_updates = _author_prompts_for_engine(
         script_dict=script_dict,
         channel_yaml_path=Path(channel_yaml),
         work_dir=work_dir,
         style_prefix=style_prefix,
+        scene_anchor=scene_anchor,
         progress_cb=progress_cb,
     )
     if extra_updates:
@@ -3105,13 +3213,65 @@ def _main_from_firestore(job_id: str) -> int:
             asr_skipped = _caption_align != "whisper"
 
             substage_t0: dict[str, float] = {}
+            # Stage envelope coverage (Fix #7, 2026-05-24): the long-form
+            # bypass below collapses rewrite/tts/asr/images/compose into
+            # one ``_video.render_long_form`` call, which means the
+            # ``@stage_envelope``-decorated handlers (``_stage_rewrite_real``,
+            # ``_stage_render_real``, etc.) are NEVER invoked for long-form.
+            # Pre-fix only ``stage=upload`` emitted ``stage.start``/
+            # ``stage.end`` (845bdb0d render: 1 start, 1 end in 371 events
+            # — see learnings/845bdb...md Finding 4).
+            #
+            # We emit envelope events at this level: ``cast`` and ``asr``
+            # (when skipped) emit start+end immediately with skip reason;
+            # ``rewrite`` / ``tts`` / ``images`` / ``compose`` get
+            # ``stage.start`` here, with the matching ``stage.end`` (or
+            # ``stage.failed``) emitted after ``_video.render_long_form``
+            # returns (or raises).
+            lf_env_t0: dict[str, float] = {}
+            lf_env_meta = {
+                "slug": job.get("_slug") or "",
+                "channel": proposal.get("channel") or "",
+                "variant": (proposal.get("format") or "").strip(),
+                "mode": job.get("mode") or "real",
+            }
+
+            def _lf_emit_start(stage_name: str, **extra: Any) -> None:
+                lf_env_t0[stage_name] = time.perf_counter()
+                _safe_track_event(
+                    "stage.start", category="render",
+                    metadata={"stage": stage_name, **lf_env_meta, **extra},
+                )
+
+            def _lf_emit_end(
+                stage_name: str, *, success: bool = True, **extra: Any,
+            ) -> None:
+                t0 = lf_env_t0.get(stage_name)
+                duration_ms = (
+                    int((time.perf_counter() - t0) * 1000) if t0 else 0
+                )
+                _safe_track_event(
+                    "stage.end" if success else "stage.failed",
+                    category="render", success=success,
+                    duration_ms=duration_ms,
+                    metadata={"stage": stage_name, **lf_env_meta, **extra},
+                )
+
             # coverage: timeline pre-mark wiring inside long-form dispatch closure — exercises the pure _set_stage helper (tested by progress suite); the closure binding is exercised end-to-end by the cloud render run
             substage_t0["rewrite"] = time.time()
+            _lf_emit_start("rewrite")
             # coverage: rewrite pre-mark — _set_stage is unit-tested in isolation; this call site lives inside _main_from_firestore's long-form branch and is exercised by the cloud render run
             timeline = _set_stage(
                 timeline, "rewrite", "running",
                 "long-form rewriter authoring envelope",
             )
+            # Cast: skipped on long-form. Emit start + end with skip reason
+            # so the event stream has a stage.end for every stage, not
+            # just upload.
+            _lf_emit_start("cast", skipped=True,
+                           skip_reason="long-form has no cast stage")
+            _lf_emit_end("cast", skipped=True,
+                         skip_reason="long-form has no cast stage")
             # coverage: cast pre-mark — _set_stage is unit-tested in isolation; this call site lives inside _main_from_firestore's long-form branch and is exercised by the cloud render run
             timeline = _set_stage(
                 timeline, "cast", "done",
@@ -3119,6 +3279,14 @@ def _main_from_firestore(job_id: str) -> int:
             )
             # coverage: conditional asr pre-mark — pure asr_skipped branch tested by LfAdvanceTimelineTests indirectly via the seed_timeline fixture; the if-statement wiring is exercised by the cloud render run
             if asr_skipped:
+                _lf_emit_start(
+                    "asr", skipped=True,
+                    skip_reason="captions aligned from authored TTS chunk timings",
+                )
+                _lf_emit_end(
+                    "asr", skipped=True,
+                    skip_reason="captions aligned from authored TTS chunk timings",
+                )
                 timeline = _set_stage(
                     timeline, "asr", "done",
                     "skipped — captions aligned from authored TTS chunk timings",
@@ -3164,13 +3332,49 @@ def _main_from_firestore(job_id: str) -> int:
             # delegated long-form to ``render_long_form`` and
             # raised on every other kind. Calling the destination
             # directly removes one indirection layer.
-            mp4_path = _video.render_long_form(
-                spec=spec_obj,
-                proposal=proposal_for_video,
-                work_dir=work_dir,
-                job_id=job_id,
-                progress_cb=_lf_progress,
-            )
+            #
+            # Stage envelope (Fix #7): emit stage.start for the three
+            # composite substages BEFORE render_long_form runs so any
+            # exception inside the monolithic call produces a matching
+            # stage.failed for the substage we believe was in flight.
+            # On success, emit stage.end for all three in order at the
+            # bottom (render_long_form runs them serially per
+            # _LF_SUBSTAGES_ORDER except for the tts/images overlap).
+            _lf_emit_start("tts")
+            _lf_emit_start("images")
+            _lf_emit_start("compose")
+            try:
+                mp4_path = _video.render_long_form(
+                    spec=spec_obj,
+                    proposal=proposal_for_video,
+                    work_dir=work_dir,
+                    job_id=job_id,
+                    progress_cb=_lf_progress,
+                )
+            except BaseException as _lf_exc:
+                # Emit stage.failed for the in-flight substages so the
+                # event stream carries the failure point. End rewrite
+                # too (it would've completed before render_long_form's
+                # tts started, but we have no signal so we mark it
+                # failed-along-with).
+                err_meta = {
+                    "error": str(_lf_exc)[:500],
+                    "error_type": type(_lf_exc).__name__,
+                    "traceback": traceback.format_exc()[-3000:],
+                }
+                _lf_emit_end("rewrite", success=False, **err_meta)
+                _lf_emit_end("tts", success=False, **err_meta)
+                _lf_emit_end("images", success=False, **err_meta)
+                _lf_emit_end("compose", success=False, **err_meta)
+                raise
+            # Render returned successfully — emit stage.end for the
+            # three composite substages plus rewrite (which finished
+            # before tts kicked off; render_long_form runs them serially
+            # internally).
+            _lf_emit_end("rewrite")
+            _lf_emit_end("tts")
+            _lf_emit_end("images")
+            _lf_emit_end("compose")
             job["_real_mp4"] = str(mp4_path)
 
             # Mark every long-form substage done — render_long_form

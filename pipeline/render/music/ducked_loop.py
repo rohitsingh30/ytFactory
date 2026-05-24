@@ -94,22 +94,55 @@ class DuckedLoop:
         # we read from spec.extra (channel YAML loader populates it).
         bed_path = self._resolve_bed_path(spec, bed_name)
         if bed_path is None or not bed_path.exists():
-            _logger.warning("ducked_loop: bed %r not found at %s — falling "
-                            "back to silent", bed_name, bed_path)
+            # Silent-fallback audit (Fix #6, 2026-05-24): when the
+            # channel YAML names a real ``music_bed_default`` and the
+            # asset is missing on disk (typically Dockerfile-COPY
+            # drift, F24), the pre-2026-05-24 behaviour was to log a
+            # warning, emit ``music.pick source=missing_bed
+            # track_id=silent``, and ship an mp4 with dead silence
+            # under the narration. That violates the
+            # ``silent_fallback_unshippable_output`` user-directive:
+            # "When a stage failure can produce unshippable output (vs
+            # degraded-but-watchable), retry-then-RAISE — never
+            # ``return {}`` silently." A configured music bed is part
+            # of the channel's audio-mix contract; shipping without it
+            # is unshippable on channels that lean on ambient
+            # atmosphere (sleep history, nosleep long-form on
+            # mystoriesanimated). RAISE so the cloud worker surfaces
+            # ``stage=compose_failed`` in Firestore + the events log
+            # carries a clear ``music_bed_missing`` signal, instead of
+            # a successful-looking mp4 of narration over silence.
+            #
+            # Opt-out: callers that genuinely want silence must set
+            # ``spec.music_policy = MusicPolicy.NONE`` (routes through
+            # ``SilentMusic`` directly) or ``music_bed_default: off``
+            # in the channel YAML (handled by the ``bed_name == "off"``
+            # branch above).
             track = {
                 "track_id": "silent",
                 "mood": "none",
                 "source": "missing_bed",
                 "duration_s": narration_duration_s,
+                "configured_bed": bed_name,
+                "resolved_path": str(bed_path) if bed_path else None,
             }
-            track_event("music.pick", category="pipeline", metadata=track)
-            from pipeline.render.music.silent import SilentMusic  # noqa: PLC0415
-            result = SilentMusic().compose(spec, narration_duration_s)
+            track_event("music.pick", category="pipeline",
+                        success=False, metadata=track)
             emit_json_artifact(
                 "music",
-                {"track": track, "mood": "none", "duck_curve": None},
+                {"track": track, "mood": "none", "duck_curve": None,
+                 "error": "music_bed_missing"},
             )
-            return result
+            raise FileNotFoundError(
+                f"ducked_loop: configured music_bed_default={bed_name!r} "
+                f"not found on disk (resolved={bed_path}). The render "
+                f"would have shipped narration over silence — refusing "
+                f"to silently degrade. Either drop the bed mp3/wav into "
+                f"the channel's music/ dir, set music_bed_default: off "
+                f"in the channel YAML, or override music_policy=none "
+                f"on the proposal. See memory "
+                f"feedback_silent_fallback_unshippable_output."
+            )
 
         # Find the narration WAV the audio stage produced (the engine
         # passes its parent path via spec.extra in tests; in production

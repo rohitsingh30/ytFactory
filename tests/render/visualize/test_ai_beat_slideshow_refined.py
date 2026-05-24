@@ -449,5 +449,115 @@ class AiBeatSlideshowProduceIntegrationTest(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# scene_anchor wiring — added 2026-05-24 with O37/O40.
+#
+# The shorts path reads ``spec.extra["default_scene_anchor"]`` and threads
+# it into ``_resolve_prompt_for_beat`` → ``refined_fields_for_render``.
+# When set, the gate's hash check must include scene_anchor; when the
+# scene_anchor changes between author-time and render-time, the cached
+# refined fields auto-invalidate (mirror of the critic-patch-scene
+# regression test above).
+
+
+class ShortsScenseAnchorWiringTest(unittest.TestCase):
+    """Pin that spec.extra['default_scene_anchor'] reaches the refined
+    gate on the SHORTS path. If a future refactor drops the wire,
+    long-form gets the anchor but shorts silently falls back to the
+    no-anchor refined fields, defeating the symmetric-channel contract.
+    """
+
+    def setUp(self):
+        # Use the marker-stubbed build_full_prompt so we can distinguish
+        # the refined-mode vs legacy-mode branch from the returned
+        # string (same setup as ResolvePromptForBeatTest).
+        _install_marker(self)
+
+    def test_resolve_prompt_passes_scene_anchor_to_render_gate(self):
+        """_resolve_prompt_for_beat MUST thread scene_anchor into the
+        render-time hash check. We pin this by computing the cached
+        beat's hash WITH the anchor; without the wire, the gate would
+        recompute WITHOUT the anchor → mismatch → legacy fallback.
+        """
+        from pipeline.images.prompt_refiner import compute_input_hash, REFINER_VERSION
+
+        anchor = "inside an airplane cabin, dim ambient lighting"
+        beat = {
+            "key_visual": "kv",
+            "scene": "sc",
+            "refined_visual": "RV_with_anchor",
+            "refined_scene": "no readable text in image. RS",
+            "style_block": "Style: a. Mood: b.",
+            "refined_version": REFINER_VERSION,
+        }
+        # Cache the hash WITH the anchor present (mirrors what the
+        # refiner did at author-time).
+        beat["refined_input_hash"] = compute_input_hash(
+            beat=beat,
+            era_anchor_prefix="ERA",
+            character_description="adult",
+            style="cartoon",
+            mood="dramatic",
+            scene_anchor=anchor,
+        )
+
+        with _patch_env("YTFACTORY_PROMPT_REFINER", "1"):
+            out = abs_mod._resolve_prompt_for_beat(
+                beat=beat,
+                fallback_text="ignored",
+                style_prefix="cartoon",
+                character_description="adult",
+                era_anchor_prefix="ERA",
+                mood="dramatic",
+                scene_anchor=anchor,
+            )
+        # Anchor matched on both sides → refined path wins.
+        self.assertIn("REFINED", out, msg=(
+            "scene_anchor not threaded through _resolve_prompt_for_beat. "
+            "Render-time hash check sees no scene_anchor while the cache "
+            "was computed WITH it, so the gate mismatches and falls back "
+            "to legacy — defeating the O40 channel-anchor contract."
+        ))
+        self.assertIn("RV_with_anchor", out)
+
+    def test_anchor_mismatch_drops_to_legacy(self):
+        """When the channel anchor changes between author-time and
+        render-time (a YAML edit), cached refined fields MUST be
+        invalidated by the hash check — same shape as the critic-patch
+        regression. Without the anchor in the hash, this test would
+        wrongly assert REFINED."""
+        from pipeline.images.prompt_refiner import compute_input_hash, REFINER_VERSION
+
+        cached_anchor = "inside an airplane cabin"
+        new_anchor = "outdoor mountain pass at dusk"
+        beat = {
+            "key_visual": "kv",
+            "scene": "sc",
+            "refined_visual": "RV",
+            "refined_scene": "no readable text in image. RS",
+            "style_block": "Style: a. Mood: b.",
+            "refined_version": REFINER_VERSION,
+        }
+        beat["refined_input_hash"] = compute_input_hash(
+            beat=beat,
+            era_anchor_prefix=None, character_description=None,
+            style=None, mood=None,
+            scene_anchor=cached_anchor,
+        )
+        with _patch_env("YTFACTORY_PROMPT_REFINER", "1"):
+            out = abs_mod._resolve_prompt_for_beat(
+                beat=beat,
+                fallback_text="bare scene",
+                style_prefix="",
+                character_description=None,
+                era_anchor_prefix=None,
+                mood=None,
+                scene_anchor=new_anchor,  # different from cached
+            )
+        # Hash mismatch → legacy path with the original key_visual/scene.
+        self.assertIn("LEGACY", out)
+        self.assertNotIn("REFINED", out)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1336,6 +1336,7 @@ def author_beat_prompts(
     era_anchor_prefix: str | None = None,
     mood: str | None = None,
     channel_key: str | None = None,
+    scene_anchor: str | None = None,
 ) -> list[dict]:
     """Author per-beat image prompts via the claude CLI and cache to
     ``out_path`` (typically ``data/cache/<slug>/prompts.json``).
@@ -1449,6 +1450,7 @@ def author_beat_prompts(
         style=style_prefix,
         mood=mood,
         channel_key=channel_key,
+        scene_anchor=scene_anchor,
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1466,6 +1468,7 @@ def _maybe_refine_prompts(
     style: str | None,
     mood: str | None,
     channel_key: str | None,
+    scene_anchor: str | None = None,
 ) -> list[dict]:
     """Optional second-pass refiner — gated by ``YTFACTORY_PROMPT_REFINER``.
 
@@ -1529,6 +1532,7 @@ def _maybe_refine_prompts(
             style=style,
             mood=mood,
             channel_key=channel_key,
+            scene_anchor=scene_anchor,
         )
     except Exception as exc:  # noqa: BLE001 — refiner is best-effort
         print(

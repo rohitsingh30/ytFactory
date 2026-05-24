@@ -48,6 +48,33 @@ image_style_prefix: |
   the rendered frame — the caption pill overlay is added by post-
   processing after diffusion.
 
+# 2026-05-24 — default_scene_anchor closes the floating-jersey
+# failure mode for long-form scene-only panels. The 845bdb0d render
+# (r/nosleep "30-hour flight") shipped with 58/77 panels carrying
+# no character token and only a short scene sentence ("Cloud-filled
+# sky from airplane wing.") — with the noun-tag anti-text boilerplate
+# dominating the prompt, every such panel rendered as a floating
+# white t-shirt. The new refiner pipeline
+# (pipeline/images/prompt_refiner.py, REFINER_VERSION=v3-scene-anchor)
+# weaves this string into refined_scene whenever the beat's authored
+# scene lacks a setting; that gives the model a concrete grounding
+# instead of the blank-product-photo attractor.
+#
+# Pick a value generic enough to apply to most stories this channel
+# tells (Reddit nosleep / AITA / TIFU / wiki oddities). Per-variant
+# override lives in pipeline/variants/mystoriesanimated/<variant>.yaml
+# if the variant has a fixed setting (e.g. a courtroom-cliffhanger
+# variant could pin "inside a wood-panelled courtroom, fluorescent
+# overhead light").
+default_scene_anchor: >
+  An everyday domestic / urban / public-space setting drawn in the
+  channel's warm hand-illustrated style; never a product-photo studio
+  or blank backdrop. Render the room or location implied by the scene
+  with visible furniture, props, and depth — kitchen counters, office
+  desks, transit interiors, walking paths, living rooms — so the
+  panel reads as a moment inside a story, not an isolated object on a
+  plain background.
+
 # Backwards-compat fallback for stories rendered before per-story cast
 # authoring (pipeline/cast.py writes data/intermediate/<channel>/cast/<slug>.json).
 # Rewritten 2026-05-17 with rich face/clothing detail tokens so the

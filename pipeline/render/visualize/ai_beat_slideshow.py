@@ -174,6 +174,7 @@ def _resolve_prompt_for_beat(
     era_anchor_prefix: str | None,
     mood: str | None,
     beat_index: int | None = None,
+    scene_anchor: str | None = None,
 ) -> str:
     """Assemble the final image-gen prompt for one beat.
 
@@ -203,6 +204,7 @@ def _resolve_prompt_for_beat(
             character_description=character_description,
             style=style_prefix,
             mood=mood,
+            scene_anchor=scene_anchor,
         )
         source = "refined" if (rv and rs and sb) else "legacy_build_full_prompt"
         scene_text = beat.get("scene", "") or fallback_text
@@ -271,6 +273,11 @@ class AiBeatSlideshow:
         era_anchor_prefix = spec.extra.get("era_anchor_prefix")
         character_description = spec.extra.get("character_description")
         mood = spec.extra.get("mood")
+        # O37 / O40 (2026-05-24) — channel-level setting hint for the
+        # refiner. When set, the refiner weaves it into refined_scene for
+        # beats whose authored scene has no explicit setting. See
+        # pipeline.images.prompt_refiner for the contract.
+        scene_anchor = spec.extra.get("default_scene_anchor")
 
         # 2026-05-17 (round 4) prompts-uniqueness fail-loud gate.
         #
@@ -448,6 +455,7 @@ class AiBeatSlideshow:
                 era_anchor_prefix=era_anchor_prefix,
                 mood=mood,
                 beat_index=i,
+                scene_anchor=scene_anchor,
             )
             # When a beat dict is present, _resolve_prompt_for_beat
             # used build_full_prompt which already inlines the style
@@ -525,6 +533,7 @@ class AiBeatSlideshow:
                     era_anchor_prefix=era_anchor_prefix,
                     mood=mood,
                     beat_index=i,
+                    scene_anchor=scene_anchor,
                 )
                 style_for_generate = "" if beat is not None else style_prefix
                 # Bump by an extra stride so the retry lands in a
