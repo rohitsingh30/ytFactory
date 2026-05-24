@@ -260,6 +260,58 @@ if printf '%s' "$USER_PROMPT_LOWER" | grep -qE "tell me what|give me what|just (
     fi
 fi
 
+# === 11c. Doc-citation-requires-read (P29 — added 2026-05-24) ===
+# If the response cites a /docs/*.md or docs/*.md path (a doc-style
+# citation, not a code-file reference), the Read tool must have been
+# invoked on that exact path in this turn. Otherwise this is the
+# citation-theatre pattern: 'per docs/foo.md...' without having read
+# foo.md. Replaces 'memory cited but not retrieved' with 'doc cited
+# and proven retrieved'.
+CITED_DOCS="$(printf '%s' "$LAST_ASST_TEXT" | grep -oE '(^|[^a-zA-Z0-9_/-])(docs/[a-zA-Z0-9_.-]+\.md)' 2>/dev/null | sed -E 's/^[^a-zA-Z0-9_/-]//' | sort -u)"
+if [ -n "$CITED_DOCS" ]; then
+    READS_JSON="$(state_get reads_or_greps 2>/dev/null)"
+    UNREAD_DOCS=""
+    while IFS= read -r doc; do
+        [ -z "$doc" ] && continue
+        # Trim leading non-alnum
+        doc="$(printf '%s' "$doc" | sed -E 's/^[^a-zA-Z0-9]+//')"
+        # Check whether any reads_or_greps state entry ENDS with this doc path
+        if ! printf '%s' "$READS_JSON" | jq -e --arg d "$doc" 'any(. != null and (endswith($d)))' >/dev/null 2>&1; then
+            UNREAD_DOCS="${UNREAD_DOCS}\n  - ${doc}"
+        fi
+    done <<< "$CITED_DOCS"
+    if [ -n "$UNREAD_DOCS" ]; then
+        violations+=("P29 doc-citation-requires-read: response cites docs/*.md files that were not Read this turn:")
+        violations+=("$(printf '%b' "$UNREAD_DOCS")")
+        recurrences_to_bump+=("doc_citation_unread")
+    fi
+fi
+
+# === 11d. Forced-skill-invocation (P30 — added 2026-05-24) ===
+# If the turn invoked a render trigger (gcloud run jobs execute
+# ytfactory-render-worker / trigger_one_render.py / Firestore job
+# write) AND the response makes a verification claim about a render
+# (verified / working / passed / no floating-tees etc.), the
+# /diagnose-render Skill MUST have been invoked in the same turn.
+# This replaces the failure where I ran a preflight and called it
+# verified without consulting refiner_io.json — exactly what
+# feedback_verify_refiner_with_fallback_count.md was written to
+# prevent.
+RENDER_TRIGGERED="false"
+if tail -500 "$TRANSCRIPT" 2>/dev/null | grep -qE 'trigger_one_render\.py|gcloud run jobs execute ytfactory-render-worker|_enqueue_render_job'; then
+    RENDER_TRIGGERED="true"
+fi
+if [ "$RENDER_TRIGGERED" = "true" ]; then
+    # Did the response make a verification-class claim about a render?
+    if printf '%s' "$LAST_ASST_TEXT" | grep -qiE '\b(no floating[- ]?tee|render.*(verified|works|shipped|passing)|fix.*verified|panels are coherent|critique passes)\b'; then
+        # Did /diagnose-render fire this turn (Skill tool invocation)?
+        if ! tail -500 "$TRANSCRIPT" 2>/dev/null | grep -qE '"skill":\s*"diagnose-render"'; then
+            violations+=("P30 forced-skill-invocation: turn triggered a render and claimed render-verification, but /diagnose-render was not invoked. Run /diagnose-render <job_id> on the result before any verification claim. See feedback_verify_refiner_with_fallback_count.md.")
+            recurrences_to_bump+=("forced_skill_skipped")
+        fi
+    fi
+fi
+
 # === 11b. Multichoice-required (P28 — added 2026-05-24 per user) ===
 # If the response contains 3+ option-shaped items (numbered or
 # markdown-table or letter-labeled), the agent MUST also invoke

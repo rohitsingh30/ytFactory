@@ -7,7 +7,15 @@
 # session = $CLAUDE_SESSION_ID (set by the harness on every hook invocation)
 # turn_num = monotonic counter inside the session, stored in the file itself
 
-set -euo pipefail
+set -uo pipefail
+# NOTE: do NOT enable -e (errexit). Helpers sourced by other scripts
+# inherit -e and then any pipeline that returns non-zero (grep with no
+# match, etc.) kills the parent hook silently. Hooks rely on pipelines
+# that legitimately may return non-zero (grep -q / -c on absent
+# patterns) to make boolean decisions. Letting -e kill the script
+# turned the doc-citation P29 check into a silent no-op for cases
+# where LAST_ASST_TEXT had no docs/ mentions — caught 2026-05-24
+# while testing P30 forced-skill-invocation.
 
 # Paths — absolute so hooks work regardless of cwd at invocation time.
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -83,7 +83,11 @@ state_set "scope_broad" "$([ "$SCOPE_BROAD" = 1 ] && echo true || echo false)"
 
 # 5. Inject state digest. This is the stdout that Claude Code prepends
 # to the agent's context.
-DIGEST="$("$PYTHON" "$LIB/state_digest.py" 2>/dev/null || true)"
+#
+# 2026-05-24 — pass the user's prompt as USER_PROMPT env so the digest
+# can do keyword-matched memory-content injection (the body of the top
+# 3 most-relevant memory files, not just the slug list).
+DIGEST="$(USER_PROMPT="$PROMPT" "$PYTHON" "$LIB/state_digest.py" 2>/dev/null || true)"
 if [ -n "$DIGEST" ]; then
     printf '%s\n' "$DIGEST"
 fi
