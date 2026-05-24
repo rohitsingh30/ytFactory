@@ -352,6 +352,64 @@ if printf '%s' "$LAST_ASST_TEXT" | grep -qE "^## Watching |^# Watching |## What 
     fi
 fi
 
+# === 12. P32 overclaim-without-sweep ===
+# Behavior-level check (NOT class-specific) — when the response uses
+# absolute quantifiers ("all X", "every Y", "complete", "fixed
+# everywhere", "no more Z"), the turn state MUST contain sweep
+# evidence (Glob, Grep on a directory, or a sweep-style Bash command:
+# grep -r / find / rg / pytest <dir>). Without sweep evidence the
+# claim is unsupported by scope-audit.
+#
+# Established 2026-05-24 after the user's correction: 'This is just
+# patching after I point out, tell me what are you doing to not miss
+# the things again? Also you misunderstood my requests for to do the
+# fix in your behaviour but you just keep writing tests for things
+# pointed out, not following engineering principle'.
+#
+# Pattern caught: I edit N specific files (closer_format on 2 yamls)
+# and declare 'all of the yamls are clean' without grepping the rest
+# (11 other yamls had broken closers). This was the same shape as
+# 88d98126 (had fallback_count: 14 in artifact, never opened it) —
+# confident framing on partial data. P32 makes the audit step a
+# deterministic precondition for the absolute-quantifier claim shape.
+#
+# Opt-out: include an explicit scope statement
+# ('scope: N of M', 'audited X of Y', 'remaining: ...') in the
+# response. The hook then treats the response as scoped-and-honest,
+# not overclaim.
+# Python-backed overclaim count — BSD grep -E's handling of optional
+# alternation groups like '(of |the )?' is buggy (doesn't match "all OF
+# THE yamls" because the optional matches only one of of/the). Using
+# python's re module for reliability.
+OVERCLAIM_HITS="$("$PYTHON" - "$LAST_ASST_TEXT" << 'PY' 2>/dev/null || echo 0
+import re, sys
+t = sys.argv[1] if len(sys.argv) > 1 else ""
+pat = re.compile(
+    r'\b('
+    r'all (of )?(the )?(yamls?|files?|variants?|channels?|closers?|tests?|services?|configs?|stages?|beats?|cases?|panels?|hooks?|checks?|commits?|fixes?|patterns?|axes|items?)'
+    r'|every (yaml|file|variant|channel|closer|test|service|config|stage|beat|case|panel|hook|check|commit|fix|pattern)'
+    r'|fixed everywhere|done everywhere|complete across|verified across|shipped to all'
+    r'|no more (broken|bugs|fragments|missing)|done now right'
+    r')\b',
+    re.IGNORECASE,
+)
+print(len(pat.findall(t)))
+PY
+)"
+OVERCLAIM_HITS="$(printf '%s' "$OVERCLAIM_HITS" | tr -dc '0-9' || echo 0)"
+OVERCLAIM_HITS="${OVERCLAIM_HITS:-0}"
+if [ "$OVERCLAIM_HITS" -gt 0 ]; then
+    SWEEPS_COUNT="$(state_get sweeps_done | jq 'if . == null then 0 else length end' 2>/dev/null || echo 0)"
+    SWEEPS_COUNT="${SWEEPS_COUNT:-0}"
+    HAS_SCOPE_STMT="$(printf '%s' "$LAST_ASST_TEXT" | grep -ciE 'scope:|audited [0-9]+ of [0-9]+|touched [0-9]+ of [0-9]+|swept [0-9]+|remaining: ?\[|of (the )?[0-9]+ (yaml|file|variant|channel|closer)' 2>/dev/null || echo 0)"
+    HAS_SCOPE_STMT="$(printf '%s' "$HAS_SCOPE_STMT" | tr -dc '0-9' || echo 0)"
+    HAS_SCOPE_STMT="${HAS_SCOPE_STMT:-0}"
+    if [ "$SWEEPS_COUNT" = "0" ] && [ "$HAS_SCOPE_STMT" = "0" ]; then
+        violations+=("P32 overclaim-without-sweep: response uses absolute quantifier ('all/every/done/complete/fixed everywhere') $OVERCLAIM_HITS time(s) but turn state has 0 sweep evidence (no Glob, no directory-Grep, no 'grep -r' / 'find' / 'pytest tests/' bash) AND no explicit scope statement. Either run a class-wide sweep before claiming, or restate with explicit scope ('touched N of M files; remaining: [...]'). Established 2026-05-24 after the closer_format miss pattern.")
+        recurrences_to_bump+=("overclaim_without_sweep")
+    fi
+fi
+
 # === If any violations, block ===
 if [ "${#violations[@]}" -gt 0 ]; then
     # Bump recurrence counters

@@ -105,6 +105,44 @@ if [ "$TOOL_NAME" = "Read" ] || [ "$TOOL_NAME" = "Grep" ] || [ "$TOOL_NAME" = "G
     state_append "reads_or_greps" "$(printf '%s' "$TARGET" | jq -Rs '.')"
 fi
 
+# === P32 sweep-evidence tracking ===
+# A "sweep" is a tool call that walks an entire class of files/configs/
+# events — the evidence required before claiming "all X are fixed" /
+# "every Y is done". Without a sweep in the turn state, the Stop hook
+# rejects overclaim quantifiers.
+#
+# Counts as a sweep:
+#   - Glob (always — that's literally a sweep)
+#   - Grep with a path argument that's a directory (not a single file)
+#   - Bash command containing: grep -r / grep --include / find / rg /
+#     pytest <dir> / pytest -k <pattern> / gsutil ls -r / gcloud
+#     logging read with no severity narrowing
+#
+# Recorded as state.sweeps_done = [{"kind": "...", "target": "..."}, ...]
+if [ "$TOOL_NAME" = "Glob" ]; then
+    G_PATTERN="$(printf '%s' "$TOOL_INPUT" | jq -r '.pattern // empty' 2>/dev/null)"
+    G_PATH="$(printf '%s' "$TOOL_INPUT" | jq -r '.path // empty' 2>/dev/null)"
+    state_append "sweeps_done" "$(jq -nc --arg k "glob" --arg t "${G_PATH}/${G_PATTERN}" '{kind:$k,target:$t}')"
+fi
+if [ "$TOOL_NAME" = "Grep" ]; then
+    GR_PATH="$(printf '%s' "$TOOL_INPUT" | jq -r '.path // empty' 2>/dev/null)"
+    GR_PATTERN="$(printf '%s' "$TOOL_INPUT" | jq -r '.pattern // empty' 2>/dev/null)"
+    # Treat as sweep if path is a directory OR is empty (Grep defaults to cwd recursive)
+    if [ -z "$GR_PATH" ] || [ -d "$GR_PATH" ]; then
+        state_append "sweeps_done" "$(jq -nc --arg k "grep" --arg t "${GR_PATH:-.}::${GR_PATTERN}" '{kind:$k,target:$t}')"
+    fi
+fi
+if [ "$TOOL_NAME" = "Bash" ]; then
+    B_CMD="$(printf '%s' "$TOOL_INPUT" | jq -r '.command // empty' 2>/dev/null)"
+    # Recognize multi-file sweep commands.
+    SWEEP_REGEX='(grep -[rR]|grep --include|^find |\srg [-A-Za-z]+ |\srg \"|pytest tests/|pytest [a-z]+/|gsutil ls -r|gcloud logging read)'
+    if printf '%s' "$B_CMD" | grep -qE "$SWEEP_REGEX" 2>/dev/null; then
+        # Truncate the command for storage
+        B_CMD_SHORT="$(printf '%s' "$B_CMD" | head -c 200)"
+        state_append "sweeps_done" "$(jq -nc --arg k "bash" --arg t "$B_CMD_SHORT" '{kind:$k,target:$t}')"
+    fi
+fi
+
 # === P04 research-before-creative ===
 # Block Write on data/critiques/, docs/, and PIL imaging tool calls
 # unless WebSearch was invoked earlier in this turn — catches the
