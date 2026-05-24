@@ -2126,11 +2126,24 @@ def _backfill_yaml_image_keys(
     # when the beat's authored scene lacks an explicit setting. Read by
     # both the long-form refiner pass (long_form_lib._refine_long_form_panels)
     # AND the shorts refiner pass (llm.prompts.author_beat_prompts).
+    #
+    # ``closer_format`` (2026-05-24, post-c4aed485 audit) is the
+    # like/subscribe CTA text the shorts engine activates at the tail
+    # of every render via the ``closer_panel`` overlay. Read by
+    # ``pipeline/render/short_engine.py::_collect_overlays`` from
+    # ``spec.extra["closer_format"]``. Without this in the backfill,
+    # the channel + variant YAMLs declare ``closer_format`` but the
+    # value never reaches spec.extra — every shorts render shipped
+    # without a CTA (preflight 88d98126 had the AITA gesture but no
+    # subscribe/like prompt; the channel YAML and aita_animated
+    # variant YAML both set ``closer_format`` correctly, the bug was
+    # purely in this backfill list).
     for key in (
         "image_provider", "image_style_prefix",
         "image_seed", "image_steps",
         "force_positive",
         "default_scene_anchor",
+        "closer_format",
     ):
         if key in cfg and out.get(key) in (None, ""):
             out[key] = cfg[key]
@@ -3003,13 +3016,35 @@ def _main_from_firestore(job_id: str) -> int:
             time.sleep(1.0)
 
     if snap is None or not snap.exists:
+        # 2026-05-24: do NOT write a zombie doc here. _update_job uses
+        # ``set(merge=True)`` which CREATES the doc if absent. Before
+        # this fix, every execution dispatched with a YTFACTORY_JOB_ID
+        # that wasn't backed by a Firestore doc (manual `gcloud run
+        # jobs execute --update-env-vars=YTFACTORY_JOB_ID=<uuid>` smoke
+        # tests, prior-session leftovers, etc.) minted a context-less
+        # "(untitled) — · bootstrap · failed" row in the dashboard's
+        # Completed column. 50+ such zombies accumulated; the operator
+        # could not distinguish them from real failures.
+        #
+        # The 3-attempt retry above already covers the original race
+        # (worker boots before the API's `set()` of the new doc fully
+        # propagates — typically 200-500 ms). If we STILL don't find
+        # the doc after 3 s, it means the doc was never written — and
+        # writing a fake one here just hides the real bug (whatever
+        # dispatched the execution without first creating the doc).
+        # Log loudly + exit non-zero. The Cloud Run Execution itself
+        # records failure; the reconciler will NOT touch this code
+        # path (no Firestore doc → no candidate to reconcile).
         err_msg = (
             f"job doc not found after 3 attempts (last_err={last_err})"
             if last_err else "job doc not found after 3 attempts"
         )
-        logger.error("job %s not found in Firestore: %s", job_id, err_msg)
-        _update_job(job_id, status="failed", stage="bootstrap",
-                    error=err_msg)
+        logger.error(
+            "job %s not found in Firestore: %s — refusing to mint a "
+            "zombie doc; exiting 1. Dispatcher must call create_job() "
+            "BEFORE trigger_render_job() (see control/core/jobs.py).",
+            job_id, err_msg,
+        )
         return 1
     job = snap.to_dict() or {}
     job["job_id"] = job_id
