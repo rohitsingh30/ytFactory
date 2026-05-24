@@ -466,20 +466,33 @@ class RefineBatchHappyPathTest(unittest.TestCase):
             self.assertIn("refined_input_hash", slot)
             self.assertEqual(len(slot["refined_input_hash"]), 16)
 
-    def test_refined_scene_keeps_anti_text_prefix(self):
+    def test_refined_scene_passes_without_anti_text_prefix(self):
+        # 2026-05-24: anti-text PREFIX requirement removed. Scenes that do
+        # NOT start with "no readable text in image." must now validate
+        # cleanly. The actual anti-text mechanism is the verb-led
+        # ANTI_TEXT_SUFFIX appended at generate-time
+        # (images_cloudrun.ANTI_TEXT_SUFFIX); the in-prompt prefix
+        # contributed zero suppression power and collided with
+        # strip_text_bait on the literal word "text" (job 39d1ec2d
+        # fallback_count=16/16). See /ai/known-fragility.md F26 + F32.
         beats = [{"key_visual": "x", "scene": "y"}]
         def llm_call(*a, **k):  # noqa: ARG001
-            return [_good_item("x", "medium shot, soft light, neutral posture")]
+            return [{
+                "refined_visual": "medium shot of the protagonist",
+                "refined_scene": "modest family kitchen with afternoon window light",
+                "style_block": "Style: warm illustration. Mood: contemplative.",
+            }]
         out = pr.refine_prompts_batch(
             beats,
             era_anchor_prefix=None, character_description=None,
             style=None, mood=None,
             llm_call=llm_call,
         )
-        self.assertTrue(
-            out[0]["refined_scene"].lower().startswith("no readable text in image"),
-            f"got: {out[0]['refined_scene']!r}",
-        )
+        # Validation passes despite no anti-text prefix.
+        self.assertTrue(out[0], f"slot must not be empty; got: {out[0]!r}")
+        self.assertIn("refined_scene", out[0])
+        self.assertNotIn("no readable text in image",
+                         out[0]["refined_scene"].lower())
 
 
 class RefineBatchValidationTest(unittest.TestCase):
@@ -504,12 +517,16 @@ class RefineBatchValidationTest(unittest.TestCase):
         self.assertEqual(out[0], {})
         self.assertTrue(out[1])
 
-    def test_item_missing_anti_text_prefix_clears_that_beat(self):
+    def test_item_without_anti_text_prefix_passes_validation(self):
+        # 2026-05-24: was test_item_missing_anti_text_prefix_clears_that_beat.
+        # The prefix requirement was removed (see F26 / F32 fix log on
+        # job 39d1ec2d). Scenes that DO NOT carry the prefix must now
+        # validate cleanly — the inverse of the prior contract.
         beats = [{"key_visual": "a", "scene": "b"}]
         def llm_call(*a, **k):  # noqa: ARG001
             return [{
-                "refined_visual": "a",
-                "refined_scene": "medium shot, no anti-text prefix here",
+                "refined_visual": "medium shot of protagonist",
+                "refined_scene": "kitchen with afternoon light",
                 "style_block": "Style: x. Mood: y.",
             }]
         out = pr.refine_prompts_batch(
@@ -518,7 +535,8 @@ class RefineBatchValidationTest(unittest.TestCase):
             style=None, mood=None,
             llm_call=llm_call,
         )
-        self.assertEqual(out[0], {})
+        self.assertTrue(out[0], f"slot must not be empty; got: {out[0]!r}")
+        self.assertIn("refined_visual", out[0])
 
     def test_item_not_an_object_clears_that_beat(self):
         beats = [{"key_visual": "a", "scene": "b"}, {"key_visual": "c", "scene": "d"}]
@@ -535,17 +553,29 @@ class RefineBatchValidationTest(unittest.TestCase):
 
     def test_post_llm_strip_text_bait_clears_beat_that_leaked_banned_word(self):
         # The refiner LLM emitted "speech bubble" again — our deterministic
-        # post-pass must catch it and clear the slot so render falls back.
+        # post-pass must catch it and clear the affected slot so the render
+        # falls back for THAT beat only (other beats keep their refined
+        # fields). Use a 2-beat batch so the partial-fallback case is
+        # exercised cleanly — a 1-beat batch with the same failure would
+        # trip the F26 / silent-fallback-unshippable raise gate (all-beats
+        # fallback case), which is correct behaviour but masks the
+        # per-beat strip_text_bait contract this test pins.
         _install_strip(self, behaviour={
             "evil-visual": ("evil-visual", ["speech bubble"]),
         })
-        beats = [{"key_visual": "a", "scene": "b"}]
+        beats = [
+            {"key_visual": "a", "scene": "b"},
+            {"key_visual": "c", "scene": "d"},
+        ]
         def llm_call(*a, **k):  # noqa: ARG001
-            return [{
-                "refined_visual": "evil-visual",
-                "refined_scene": "no readable text in image. ok",
-                "style_block": "Style: x. Mood: y.",
-            }]
+            return [
+                {
+                    "refined_visual": "evil-visual",
+                    "refined_scene": "ok-scene",
+                    "style_block": "Style: x. Mood: y.",
+                },
+                _good_item("c", "wide shot, soft light, calm"),
+            ]
         out = pr.refine_prompts_batch(
             beats,
             era_anchor_prefix=None, character_description=None,
@@ -553,49 +583,241 @@ class RefineBatchValidationTest(unittest.TestCase):
             llm_call=llm_call,
         )
         self.assertEqual(out[0], {})
+        self.assertTrue(out[1])
 
 
 class RefineBatchKillSwitchTest(unittest.TestCase):
-    """Whole-batch failure → [{}] * N. Render falls through to legacy path."""
+    """Whole-batch failure → raises RuntimeError.
+
+    2026-05-24: was "returns [{}] * N for silent legacy-path fallback."
+    Inverted per F26 / silent-fallback-unshippable-output: the legacy
+    build_full_prompt path prepends the protagonist character_description
+    onto every panel and produces cast-collapse on any non-protagonist
+    beat (job 39d1ec2d). Every whole-batch failure path now raises so
+    the failure is Firestore-visible instead of degrading silently.
+    """
 
     def setUp(self):
         _install_strip(self)
 
-    def test_llm_raises_returns_empty_dicts(self):
+    def test_llm_raises_propagates_as_runtime_error(self):
+        # Path 1: LLM transport exception.
         beats = [{"key_visual": "a", "scene": "b"} for _ in range(3)]
         def llm_call(*a, **k):  # noqa: ARG001
-            raise RuntimeError("network down")
-        out = pr.refine_prompts_batch(
-            beats,
-            era_anchor_prefix=None, character_description=None,
-            style=None, mood=None,
-            llm_call=llm_call,
-        )
-        self.assertEqual(out, [{}, {}, {}])
+            raise ConnectionError("network down")
+        with self.assertRaisesRegex(RuntimeError, "LLM call failed"):
+            pr.refine_prompts_batch(
+                beats,
+                era_anchor_prefix=None, character_description=None,
+                style=None, mood=None,
+                llm_call=llm_call,
+            )
 
-    def test_llm_returns_non_list_returns_empty_dicts(self):
+    def test_llm_returns_non_list_raises(self):
+        # Path 2a: dict_returned — the Shape-C symptom. Pre-2026-05-24
+        # this returned [{}] silently; now raises.
         beats = [{"key_visual": "a", "scene": "b"}]
         def llm_call(*a, **k):  # noqa: ARG001
-            return {"refined_visual": "oops, not a list"}
-        out = pr.refine_prompts_batch(
-            beats,
-            era_anchor_prefix=None, character_description=None,
-            style=None, mood=None,
-            llm_call=llm_call,
-        )
-        self.assertEqual(out, [{}])
+            return {"refined_visual": "oops, not a wrapper"}
+        with self.assertRaisesRegex(
+            RuntimeError, "(dict_returned|reason=dict_returned)"
+        ):
+            pr.refine_prompts_batch(
+                beats,
+                era_anchor_prefix=None, character_description=None,
+                style=None, mood=None,
+                llm_call=llm_call,
+            )
 
-    def test_llm_returns_wrong_length_returns_empty_dicts(self):
+    def test_llm_returns_wrong_length_raises(self):
+        # Path 2b: length_mismatch — LLM emitted fewer beats than asked.
         beats = [{"key_visual": "a", "scene": "b"} for _ in range(3)]
         def llm_call(*a, **k):  # noqa: ARG001
             return [_good_item("only one", "wide shot, light, calm")]
+        with self.assertRaisesRegex(
+            RuntimeError, "(length_mismatch|reason=length_mismatch)"
+        ):
+            pr.refine_prompts_batch(
+                beats,
+                era_anchor_prefix=None, character_description=None,
+                style=None, mood=None,
+                llm_call=llm_call,
+            )
+
+    def test_llm_call_failed_on_retry_raises_chained(self):
+        # Path 1b: legacy injection seam that doesn't accept the
+        # json_schema kwarg, retry without it, retry ALSO fails.
+        beats = [{"key_visual": "a", "scene": "b"}]
+        call_count = [0]
+        def llm_call(*a, **k):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call: simulate "doesn't accept json_schema kwarg".
+                raise TypeError(
+                    "llm_call() got an unexpected keyword argument "
+                    "'json_schema'"
+                )
+            # Retry call: actual network failure.
+            raise ConnectionError("network down on retry")
+        with self.assertRaisesRegex(RuntimeError, "LLM call failed on retry"):
+            pr.refine_prompts_batch(
+                beats,
+                era_anchor_prefix=None, character_description=None,
+                style=None, mood=None,
+                llm_call=llm_call,
+            )
+
+
+class RefineBatchAllFallbackRaisesTest(unittest.TestCase):
+    """F26 / silent-fallback-unshippable-output: when EVERY beat falls
+    back at the per-item validation/strip_text_bait pass, the downstream
+    legacy build_full_prompt path collapses every panel onto the
+    protagonist (job 39d1ec2d cast-collapse). The refiner now raises
+    instead of returning [{}, {}, ...] so the failure is Firestore-
+    visible and the F32 author-gate fix is not silently bypassed.
+
+    These tests pin the raise-when-all-fall-back contract introduced
+    2026-05-24 alongside the anti-text-prefix removal.
+    """
+
+    def setUp(self):
+        _install_strip(self)
+
+    def test_all_items_fail_strip_text_bait_raises(self):
+        # Every beat's refined_visual leaks "speech bubble" — strip pass
+        # clears every slot, fallback_count == n, gate fires.
+        _install_strip(self, behaviour={
+            "evil": ("evil", ["speech bubble"]),
+        })
+        beats = [{"key_visual": "a", "scene": "b"} for _ in range(3)]
+        def llm_call(*a, **k):  # noqa: ARG001
+            return [
+                {
+                    "refined_visual": "evil",
+                    "refined_scene": "ok-scene",
+                    "style_block": "Style: x. Mood: y.",
+                }
+                for _ in range(3)
+            ]
+        with self.assertRaisesRegex(
+            RuntimeError, "every beat in the batch fell back"
+        ):
+            pr.refine_prompts_batch(
+                beats,
+                era_anchor_prefix=None, character_description=None,
+                style=None, mood=None,
+                llm_call=llm_call,
+            )
+
+    def test_all_items_fail_validation_raises(self):
+        # Every beat has an empty refined_visual — validator rejects all.
+        beats = [{"key_visual": "a", "scene": "b"} for _ in range(3)]
+        def llm_call(*a, **k):  # noqa: ARG001
+            return [
+                {
+                    "refined_visual": "",
+                    "refined_scene": "ok-scene",
+                    "style_block": "Style: x. Mood: y.",
+                }
+                for _ in range(3)
+            ]
+        with self.assertRaisesRegex(
+            RuntimeError, "every beat in the batch fell back"
+        ):
+            pr.refine_prompts_batch(
+                beats,
+                era_anchor_prefix=None, character_description=None,
+                style=None, mood=None,
+                llm_call=llm_call,
+            )
+
+    def test_partial_fallback_does_not_raise(self):
+        # 2 of 3 succeed, 1 falls back — raise gate must NOT fire.
+        _install_strip(self, behaviour={
+            "evil": ("evil", ["speech bubble"]),
+        })
+        beats = [{"key_visual": f"kv{i}", "scene": f"s{i}"} for i in range(3)]
+        def llm_call(*a, **k):  # noqa: ARG001
+            return [
+                {
+                    "refined_visual": "evil",
+                    "refined_scene": "ok-scene-0",
+                    "style_block": "Style: x. Mood: y.",
+                },
+                _good_item("clean1", "medium shot, soft light, calm"),
+                _good_item("clean2", "wide shot, golden hour, contemplative"),
+            ]
         out = pr.refine_prompts_batch(
             beats,
             era_anchor_prefix=None, character_description=None,
             style=None, mood=None,
             llm_call=llm_call,
         )
-        self.assertEqual(out, [{}, {}, {}])
+        self.assertEqual(out[0], {})
+        self.assertTrue(out[1])
+        self.assertTrue(out[2])
+
+
+class RefineBatch39d1ec2dRegressionTest(unittest.TestCase):
+    """Pinned regression for job 39d1ec2d (2026-05-24): a properly-shaped
+    refiner output was rejected 16/16 because every refined_scene started
+    with the mandatory anti-text prefix "no readable text in image." and
+    strip_text_bait flagged the literal word "text" in that prefix as
+    hard-bait. The prefix requirement has been removed and strip_text_bait
+    now runs against the refined fields without that self-defeating
+    collision. This test reproduces the 39d1ec2d artifact shape with the
+    REAL strip_text_bait (not the noop stub) so a future revert to the
+    prefix contract — or a regression in strip_text_bait that re-conflicts
+    with the body — breaks loudly.
+    """
+
+    def test_refined_scenes_with_no_anti_text_prefix_validate_with_real_strip(self):
+        # NB: no _install_strip — use the real strip_text_bait. This is
+        # the actual production path. After the 2026-05-24 fix, refined
+        # scenes that contain no anti-text prefix (and no other bait
+        # words) must validate cleanly.
+        beats = [
+            {"key_visual": f"kv{i}", "scene": f"s{i}"} for i in range(3)
+        ]
+
+        def llm_call(*a, **k):  # noqa: ARG001
+            return [
+                {
+                    "refined_visual": (
+                        "medium shot of the protagonist in a kitchen, "
+                        "leaning over a dining table with arms crossed"
+                    ),
+                    "refined_scene": (
+                        "modest family kitchen with a scratched oak dining "
+                        "table dominating the center. Dusty afternoon "
+                        "window light enters from the left, soft diffused "
+                        "daylight casting gentle shadows."
+                    ),
+                    "style_block": (
+                        "Style: warm hand-drawn 2D illustration with "
+                        "confident ink line work. Mood: contemplative, "
+                        "tense, observational."
+                    ),
+                }
+                for _ in range(3)
+            ]
+
+        out = pr.refine_prompts_batch(
+            beats,
+            era_anchor_prefix=None, character_description=None,
+            style=None, mood=None,
+            llm_call=llm_call,
+        )
+        self.assertEqual(len(out), 3)
+        for i, slot in enumerate(out):
+            self.assertTrue(
+                slot,
+                f"beat {i} fell back unexpectedly; got {slot!r}. "
+                "The 2026-05-24 anti-text-prefix removal is broken.",
+            )
+            self.assertIn("refined_visual", slot)
+            self.assertIn("refined_scene", slot)
+            self.assertIn("style_block", slot)
 
 
 class RefineBatchAttractorSanitisationTest(unittest.TestCase):

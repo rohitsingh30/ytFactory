@@ -290,6 +290,7 @@ def build_full_prompt(
     refined_visual: str | None = None,
     refined_scene: str | None = None,
     style_block: str | None = None,
+    subject: str | None = None,
 ) -> str:
     """Compose the final prompt string fed to the diffusion model.
 
@@ -327,16 +328,32 @@ def build_full_prompt(
     z-image-turbo adherence (positive-rephrased negations, explicit
     shot type + lighting, structured style/mood block).
 
-    Critical invariants (post-2026-05-14 audit):
+    Critical invariants (post-2026-05-14 audit, revised 2026-05-24 / F32):
 
     - ``era_anchor_prefix`` STILL prepends regardless of refined mode —
       it is code-owned, never delegated to the refiner LLM.
-    - ``character_description`` STILL prepends regardless — the cast
-      lock must survive even if the refiner forgets it.
+    - ``character_description`` prepends in refined mode ONLY when the
+      per-beat ``subject`` is the protagonist (or unset, for backward
+      compat with pre-v5 caches that lack the field). When ``subject``
+      is ``"partner"`` / ``"secondary_<name>"`` / ``"scene"`` the
+      refiner has already injected the correct non-protagonist subject
+      lead into ``refined_visual`` (see
+      :func:`pipeline.images.prompt_refiner._subject_lead`), and
+      prepending the protagonist description on top would dominate the
+      left-weighted Z-Image-Turbo encoder and collapse the secondary
+      character into a copy of the protagonist (F32 in
+      ``/ai/known-fragility.md``; cast-collapse symptom on job
+      39d1ec2d). Legacy mode (refined_* not supplied) still prepends
+      unconditionally — the safety belt remains for the no-refiner
+      path because there's no per-beat subject lead to substitute it.
 
-    Refined assembly:
+    Refined assembly (subject is protagonist or unset):
 
         {era_anchor_prefix} {character_description}. {refined_visual}. {refined_scene}. {style_block}
+
+    Refined assembly (subject != protagonist):
+
+        {era_anchor_prefix} {refined_visual}. {refined_scene}. {style_block}
 
     Legacy assembly (unchanged when refined_* not supplied):
 
@@ -359,10 +376,29 @@ def build_full_prompt(
         and style_block and style_block.strip()
     )
 
+    # F32: in refined mode, skip the protagonist's character_description
+    # when the per-beat subject is explicitly non-protagonist. The refiner
+    # has already injected the correct subject lead into refined_visual
+    # via _subject_lead; prepending the protagonist description on top
+    # would dominate Z-Image-Turbo's left-weighted encoder and collapse
+    # the secondary character into a clone of the protagonist (job
+    # 39d1ec2d cast-collapse). subject=None or empty/whitespace preserves
+    # legacy behaviour for pre-v5 cached prompts that lack the field.
+    subject_normalised = (subject or "").strip().lower()
+    skip_cast_for_subject = (
+        using_refined
+        and subject_normalised
+        and subject_normalised != "protagonist"
+    )
+
     parts: list[str] = []
     if era_anchor_prefix and era_anchor_prefix.strip():
         parts.append(era_anchor_prefix.strip())
-    if character_description and character_description.strip():
+    if (
+        character_description
+        and character_description.strip()
+        and not skip_cast_for_subject
+    ):
         parts.append(character_description.strip())
 
     if using_refined:

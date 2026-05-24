@@ -642,27 +642,32 @@ def _refine_long_form_panels(
             kv = " ".join(scene.split()[:12])
         pseudo_beats.append({"key_visual": kv, "scene": scene})
 
-    try:
-        from pipeline.images.prompt_refiner import refine_prompts_batch  # noqa: PLC0415
-        slots = refine_prompts_batch(
-            pseudo_beats,
-            era_anchor_prefix=era_anchor_prefix,
-            character_description=character_description,
-            style=style,
-            mood=mood,
-            channel_key=channel_key,
-            scene_anchor=scene_anchor,
-        )
-    except Exception as exc:  # noqa: BLE001 — refiner is best-effort
-        print(f"[panel] refiner pre-step FAILED ({exc}); "
-              "all panels fall back to legacy bare-scene path")
-        return [{} for _ in panels], True
-
-    if len(slots) != len(panels):
-        # Refiner contract: slots is parallel to input. A length
-        # mismatch means the LLM emitted the wrong shape; the refiner
-        # already logged the failure mode. Fall back uniformly.
-        return [{} for _ in panels], True
+    # 2026-05-24: refiner now RAISES RuntimeError on whole-batch failure
+    # (Path 1: LLM transport; Path 2: shape regression; Path 3: all-
+    # per-item-failed). Let the exception propagate instead of silently
+    # falling back to bare-scene prompts — those would render through
+    # the legacy build_full_prompt path and produce cast-collapse /
+    # floating-tee panels (job 39d1ec2d / 845bdb0d). Per
+    # /ai/known-fragility.md F26 + memory
+    # silent-fallback-unshippable-output: every unshippable path
+    # surfaces as a job failure.
+    from pipeline.images.prompt_refiner import refine_prompts_batch  # noqa: PLC0415
+    slots = refine_prompts_batch(
+        pseudo_beats,
+        era_anchor_prefix=era_anchor_prefix,
+        character_description=character_description,
+        style=style,
+        mood=mood,
+        channel_key=channel_key,
+        scene_anchor=scene_anchor,
+    )
+    # Length check is defensive — refiner contract guarantees parallel
+    # output, and a length mismatch would have raised inside the
+    # refiner. Kept as a belt-and-suspenders assertion.
+    assert len(slots) == len(panels), (
+        f"refine_prompts_batch contract violation: "
+        f"len(slots)={len(slots)} != len(panels)={len(panels)}"
+    )
     return slots, True
 
 
@@ -784,6 +789,10 @@ def _generate_panel_stills(
         rs = (slot.get("refined_scene") or "").strip()
         sb = (slot.get("style_block") or "").strip()
         if rv and rs and sb:
+            # F32: thread the authored per-panel ``subject`` so the
+            # protagonist character_description is skipped when the panel
+            # focal subject is a non-protagonist; refiner's _subject_lead
+            # already led refined_visual with the correct subject.
             wire_prompt = images.build_full_prompt(
                 style_prefix=style_prefix,
                 character_description=character_description,
@@ -793,6 +802,7 @@ def _generate_panel_stills(
                 refined_visual=rv,
                 refined_scene=rs,
                 style_block=sb,
+                subject=p.get("subject"),
             )
             style_for_gen = ""
             refined_used = True

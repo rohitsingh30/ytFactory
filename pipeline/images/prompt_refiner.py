@@ -27,17 +27,20 @@ Output schema (per beat)
 
     {
       "refined_visual":      "<polished noun phrase, 4-10 words>",
-      "refined_scene":       "no readable text in image. <shot>, <lighting>, <posture/action>, <setting>",
+      "refined_scene":       "<shot>, <lighting>, <posture/action>, <setting>",
       "style_block":         "Style: <s>. Mood: <m>.",
       "refined_version":     "v1",
       "refined_input_hash":  "<sha256[:16] of stable input tuple>"
     }
 
-``refined_scene`` starts with the literal canonical anti-text wording so
-the existing
-:func:`pipeline.images.images_cloudrun._append_anti_text_suffix`
-idempotence check (line 418, ``"no readable text in image" in prompt.lower()``)
-collapses to a no-op and we don't double-suffix.
+The anti-text safety mechanism is the verb-led ``ANTI_TEXT_SUFFIX``
+appended by :func:`pipeline.images.images_cloudrun._append_anti_text_suffix`
+at generate-time. The refined_scene no longer carries an "anti-text
+prefix" — Z-Image-Turbo is CFG-distilled so true negative_prompt is a
+no-op, and the prior in-prompt prefix contributed zero suppression
+power while colliding with :func:`pipeline.images.images.strip_text_bait`
+on the literal word "text" (job 39d1ec2d fallback_count=16/16, see
+F26 / F32 in /ai/known-fragility.md and the 2026-05-24 fix log).
 
 Render-time consumer rules
 --------------------------
@@ -56,12 +59,21 @@ A render uses the refined fields only when **all** of the following hold
 Failure modes
 -------------
 
-- Whole-batch LLM failure → returns ``N`` empty dicts → every beat falls
-  back to the legacy path. Zero regression.
-- Per-beat malformed output (missing field, anti-text prefix missing,
-  text-bait sneaks back in after refining) → that beat's slot becomes
-  ``{}`` → that beat only falls back. Other beats keep their refined
-  fields.
+- Whole-batch LLM failure (transport exception, malformed JSON, length
+  mismatch, dict-instead-of-wrapper) → **raises** ``RuntimeError``.
+  Pre-2026-05-24 this returned ``[{} for _ in range(n)]`` and the
+  render proceeded via the legacy ``build_full_prompt`` path. The
+  legacy path prepends the protagonist's ``character_description`` to
+  every panel, which collapses any non-protagonist beat onto the
+  protagonist (cast-collapse, job 39d1ec2d). Per
+  ``/ai/known-fragility.md`` F26 + memory
+  ``silent-fallback-unshippable-output``: every unshippable failure
+  path now raises so the failure is Firestore-visible.
+- Per-beat malformed output (missing field, text-bait sneaks back in
+  after refining) → that beat's slot becomes ``{}`` → that beat only
+  falls back. Other beats keep their refined fields. When EVERY beat
+  in the batch falls back this way, the post-loop gate also raises
+  for the same reason.
 - LLM never sees attractor words from the narration: every input is run
   through :func:`sanitize_attractors` before being shown to the model.
 
@@ -699,8 +711,6 @@ construction. Examples:
   - "not smiling" → "neutral expression"
   - "no people" → "empty scene"
   - "no signs visible" → "plain walls"
-The ONE exception is the canonical "no readable text in image" anti-text
-prefix — keep it verbatim because the pipeline depends on the exact wording.
 
 Z-Image-Turbo behaves best at 80-250 words of densely-described visual
 detail. Below ~60 words it under-specifies and falls back to generic
@@ -718,7 +728,7 @@ uses for its ``{"beats": [...]}`` envelope.
     "refined_beats": [
       {
         "refined_visual":  "<dense subject description, 30-60 words, structured: shot type + subject + age band + appearance + clothing + signature props>",
-        "refined_scene":   "no readable text in image. <environment description, 40-80 words: setting + props + spatial composition + atmosphere + LIGHTING tokens>",
+        "refined_scene":   "<environment description, 40-80 words: setting + props + spatial composition + atmosphere + LIGHTING tokens>",
         "style_block":     "Style: <medium + technique + 2-4 visual qualities>. Mood: <2-4 mood adjectives + emotional register>."
       },
       ... (one per input beat, in beat order)
@@ -730,15 +740,11 @@ Each inner object MUST have exactly these three fields and no others.
 PER-BEAT RULES (a beat failing any rule has its slot replaced with {} by
 the caller, and that beat falls back to the legacy non-refined path):
 
-1. refined_scene MUST start with the literal string "no readable text in
-   image. " (lower-case, period, space). Do not paraphrase this prefix —
-   downstream idempotence depends on the exact wording.
-
-2. Inject EXACTLY ONE shot_type from the rotation the user message gives
+1. Inject EXACTLY ONE shot_type from the rotation the user message gives
    you, at the START of refined_visual. Do not invent shot types. Do
    not skip.
 
-3. Inject AT LEAST ONE high-impact LIGHTING token into refined_scene.
+2. Inject AT LEAST ONE high-impact LIGHTING token into refined_scene.
    Z-Image-Turbo lighting vocabulary that lands cleanly: "soft diffused
    daylight", "cinematic warm key light from the left", "noir
    high-contrast side lighting", "rim lighting against a dark
@@ -747,7 +753,7 @@ the caller, and that beat falls back to the legacy non-refined path):
    office overhead", "candlelit warm tungsten". Vary across beats —
    repeating the same lighting two beats in a row defeats the purpose.
 
-3a. SCENE ANCHOR — when the user message provides a channel-level
+2a. SCENE ANCHOR — when the user message provides a channel-level
    ``scene_anchor`` (an environment/setting hint such as "inside the
    cabin of a long-haul international flight, dim ambient lighting"),
    weave it into refined_scene WHEN the beat's authored scene has no
@@ -759,7 +765,7 @@ the caller, and that beat falls back to the legacy non-refined path):
    default product-photo backdrop. The anchor is OPTIONAL — when not
    supplied, refined_scene is composed from the authored scene alone.
 
-4. NEVER write any of: speech bubble, thought bubble, comic panel,
+3. NEVER write any of: speech bubble, thought bubble, comic panel,
    chalkboard, whiteboard, computer screen showing text, phone screen
    showing text, sign, billboard, poster, label, license plate, name tag,
    certificate, invitation, contract, receipt, scoreboard, clock face
@@ -767,22 +773,21 @@ the caller, and that beat falls back to the legacy non-refined path):
    button, bell icon, play button, video UI. Convey emotion via POSTURE,
    FACIAL EXPRESSION, and ENVIRONMENT only.
 
-5. NEVER render metaphors literally. "rocket of a shot" → "hard-struck
+4. NEVER render metaphors literally. "rocket of a shot" → "hard-struck
    ball". "thunderbolt" → "powerful strike". The same applies to all
    sports / action figurative language.
 
-6. ONE main subject per beat. The user message gives you a canonical
+5. ONE main subject per beat. The user message gives you a canonical
    character_description — the renderer prepends it verbatim at compose
    time, so DO NOT re-describe the character's age/build/hair/clothing
    in refined_visual. Use only the SHOT + ACTION + SUBJECT-relative
    posture. If the story introduces a SECONDARY character, describe
    that secondary character concretely once in refined_visual.
 
-7. Use POSITIVE constructions exclusively. Replace every "no X" or
-   "without Y" with the positive equivalent. The anti-text prefix
-   (rule 1) is the only exception.
+6. Use POSITIVE constructions exclusively. Replace every "no X" or
+   "without Y" with the positive equivalent.
 
-8. style_block: build "Style: ..." from the provided style (medium /
+7. style_block: build "Style: ..." from the provided style (medium /
    technique / 2-4 visual qualities) and "Mood: ..." from the provided
    mood (2-4 adjectives + emotional register). If either input is
    missing, expand to a neutral-but-rich placeholder ("Style: warm
@@ -790,7 +795,7 @@ the caller, and that beat falls back to the legacy non-refined path):
    watercolor brush texture. Mood: calm, observational, lightly
    melancholic.").
 
-9. Total word count across the three fields should land at ~120-180
+8. Total word count across the three fields should land at ~120-180
    words. Aim higher for cinematic beats, lower for static establishing
    shots — but never below ~80 words combined.
 
@@ -953,15 +958,18 @@ def _validate_one_item(
             beat_index, bool(rv), bool(rs), bool(sb),
         )
         return None, "missing_field"
-    # Anti-text prefix MUST lead refined_scene — required for downstream
-    # idempotence with images_cloudrun._append_anti_text_suffix.
-    if not rs.lower().startswith("no readable text in image"):
-        logger.warning(
-            "prompt_refiner: beat %d refined_scene missing anti-text "
-            "prefix; clearing",
-            beat_index,
-        )
-        return None, "missing_field"
+    # 2026-05-24: anti-text PREFIX requirement removed. The prior contract
+    # required refined_scene to start with "no readable text in image." as
+    # an idempotence marker for images_cloudrun._append_anti_text_suffix.
+    # That requirement caused job 39d1ec2d to fall back 16/16 because the
+    # immediately-following strip_text_bait pass flagged "text" inside the
+    # mandatory prefix as hard-bait. The prefix contributes zero diffusion-
+    # suppression power on its own — Z-Image-Turbo is CFG-distilled
+    # (negative_prompt is a no-op; see images_cloudrun.py:480) and the
+    # actual anti-text mechanism is the verb-led ANTI_TEXT_SUFFIX appended
+    # at generate-time. _append_anti_text_suffix's idempotence check now
+    # works off the suffix itself (and is harmless if double-appended,
+    # since the substring guard at images_cloudrun.py:547-552 still fires).
     return {"refined_visual": rv, "refined_scene": rs, "style_block": sb}, None
 
 
@@ -1009,12 +1017,18 @@ def refine_prompts_batch(
         - an empty dict ``{}`` on per-beat failure (caller falls back to
           legacy path for that beat only).
 
-        On whole-batch failure (network error, malformed JSON, wrong
-        array length) every slot is ``{}`` so the whole render falls
-        through to the legacy path. This is the kill-switch behaviour.
-
-    The function never raises — every failure mode is converted into an
-    empty slot so the caller's render path is unaffected.
+    Raises:
+        RuntimeError: On whole-batch failure — LLM transport exception,
+            malformed JSON, length mismatch, dict-instead-of-wrapper,
+            or every-per-item-fell-back. Pre-2026-05-24 these paths
+            returned ``[{} for _ in range(n)]`` silently, but the
+            downstream legacy ``build_full_prompt`` path prepends the
+            protagonist ``character_description`` onto every panel and
+            produces cast-collapse on any story with non-protagonist
+            focal subjects (job 39d1ec2d). Per
+            ``/ai/known-fragility.md`` F26 + memory
+            ``silent-fallback-unshippable-output``: unshippable failure
+            paths must surface as job failures, not silent degradation.
     """
     if not beats:
         return []
@@ -1112,8 +1126,8 @@ def refine_prompts_batch(
             except Exception as exc2:  # noqa: BLE001
                 logger.warning(
                     "prompt_refiner: LLM call failed on retry (%s); "
-                    "all %d beats fall back to legacy path",
-                    exc2, n,
+                    "raising to prevent cast-collapse downstream",
+                    exc2,
                 )
                 for i in range(n):
                     _track_refiner_fallback(i, "truncated")
@@ -1123,12 +1137,21 @@ def refine_prompts_batch(
                     parsed=None,
                     fallback_count=n,
                 )
-                return [{} for _ in range(n)]
+                raise RuntimeError(
+                    f"prompt_refiner: LLM call failed on retry "
+                    f"({type(exc2).__name__}: {exc2}); raising instead of "
+                    f"returning all-empty slots because the downstream "
+                    f"legacy build_full_prompt path prepends the "
+                    f"protagonist character_description to every panel "
+                    f"and produces cast-collapse. See "
+                    f"/ai/known-fragility.md F26 + memory "
+                    f"silent-fallback-unshippable-output."
+                ) from exc2
         else:
             logger.warning(
-                "prompt_refiner: LLM call failed (%s); all %d beats fall "
-                "back to legacy path",
-                exc, n,
+                "prompt_refiner: LLM call failed (%s); raising to "
+                "prevent cast-collapse downstream",
+                exc,
             )
             for i in range(n):
                 _track_refiner_fallback(i, "truncated")
@@ -1138,12 +1161,20 @@ def refine_prompts_batch(
                 parsed=None,
                 fallback_count=n,
             )
-            return [{} for _ in range(n)]
-    except Exception as exc:  # noqa: BLE001 — refiner must never raise
+            raise RuntimeError(
+                f"prompt_refiner: LLM call failed "
+                f"({type(exc).__name__}: {exc}); raising instead of "
+                f"returning all-empty slots because the downstream "
+                f"legacy build_full_prompt path prepends the "
+                f"protagonist character_description to every panel and "
+                f"produces cast-collapse. See /ai/known-fragility.md "
+                f"F26 + memory silent-fallback-unshippable-output."
+            ) from exc
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "prompt_refiner: LLM call failed (%s); all %d beats fall "
-            "back to legacy path",
-            exc, n,
+            "prompt_refiner: LLM call failed (%s); raising to prevent "
+            "cast-collapse downstream",
+            exc,
         )
         for i in range(n):
             _track_refiner_fallback(i, "truncated")
@@ -1153,7 +1184,15 @@ def refine_prompts_batch(
             parsed=None,
             fallback_count=n,
         )
-        return [{} for _ in range(n)]
+        raise RuntimeError(
+            f"prompt_refiner: LLM call failed "
+            f"({type(exc).__name__}: {exc}); raising instead of "
+            f"returning all-empty slots because the downstream legacy "
+            f"build_full_prompt path prepends the protagonist "
+            f"character_description to every panel and produces "
+            f"cast-collapse. See /ai/known-fragility.md F26 + memory "
+            f"silent-fallback-unshippable-output."
+        ) from exc
 
     # 2026-05-24 v4 fix — unwrap the wrapper object. Accept either
     # (a) the v4 wrapper shape ``{"refined_beats": [...]}`` (the canonical
@@ -1175,13 +1214,15 @@ def refine_prompts_batch(
             )
         else:
             reason = "length_mismatch"
+        shape_str = (
+            type(raw).__name__ if not isinstance(unwrapped, list)
+            else f"list[{len(unwrapped)}]"
+        )
         logger.warning(
             "prompt_refiner: LLM returned %s (expected wrapper "
-            "{\"refined_beats\":[...]} with %d items); whole batch "
-            "falls back",
-            type(raw).__name__ if not isinstance(unwrapped, list)
-            else f"list[{len(unwrapped)}]",
-            n,
+            "{\"refined_beats\":[...]} with %d items); raising to "
+            "prevent cast-collapse downstream",
+            shape_str, n,
         )
         for i in range(n):
             _track_refiner_fallback(i, reason)
@@ -1191,7 +1232,16 @@ def refine_prompts_batch(
             parsed=raw,
             fallback_count=n,
         )
-        return [{} for _ in range(n)]
+        raise RuntimeError(
+            f"prompt_refiner: LLM returned {shape_str} "
+            f"(reason={reason}; expected wrapper "
+            f"{{\"refined_beats\":[...]}} with {n} items); raising "
+            f"instead of returning all-empty slots because the "
+            f"downstream legacy build_full_prompt path prepends the "
+            f"protagonist character_description to every panel and "
+            f"produces cast-collapse. See /ai/known-fragility.md F26 "
+            f"+ memory silent-fallback-unshippable-output."
+        )
 
     # From here on, ``unwrapped`` is the validated list of N items —
     # rebind ``raw`` so the existing per-item loop is unchanged.
@@ -1314,6 +1364,28 @@ def refine_prompts_batch(
     # cost on retry and the empty slots fall back to legacy as before.)
     if fallback_count < n:
         _persist_cached_batch(batch_key, out)
+    # F26 / silent-fallback-unshippable-output: when EVERY beat fell back
+    # the render's wire prompts will all come from the legacy
+    # build_full_prompt(character_description, key_visual, scene) path,
+    # which prepends the protagonist's description to every panel and
+    # produces cast-collapse on any story with non-protagonist focal
+    # subjects (job 39d1ec2d). The mp4 still completes — looks
+    # technically successful — but ships unshippable output. Raise so
+    # the failure is Firestore-visible and the F32 author-gate fix is
+    # not silently bypassed. The whole-batch early-return paths above
+    # (LLM error, length mismatch, dict_returned) already log + emit
+    # the artifact; this exit covers the per-item all-failed case.
+    if fallback_count == n and n > 0:
+        raise RuntimeError(
+            f"prompt_refiner: every beat in the batch fell back "
+            f"({fallback_count}/{n}); refusing to return all-empty slots "
+            f"because the downstream legacy build_full_prompt path "
+            f"prepends the protagonist character_description to every "
+            f"panel and produces cast-collapse on any story with "
+            f"non-protagonist focal subjects. See "
+            f"/ai/known-fragility.md F26 + memory "
+            f"silent-fallback-unshippable-output."
+        )
     return out
 
 

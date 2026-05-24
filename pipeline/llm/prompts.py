@@ -1704,38 +1704,31 @@ def _maybe_refine_prompts(
     # too — see prompt_refiner.refine_prompts_batch).
     from pipeline.images import prompt_refiner as _refiner  # noqa: PLC0415
 
-    try:
-        refined = _refiner.refine_prompts_batch(
-            cleaned,
-            era_anchor_prefix=era_anchor_prefix,
-            character_description=character_description,
-            style=style,
-            mood=mood,
-            channel_key=channel_key,
-            scene_anchor=scene_anchor,
-            supporting=supporting,
-        )
-    except Exception as exc:  # noqa: BLE001 — refiner is best-effort
-        print(
-            f"[prompts] refiner pre-step FAILED ({exc}); "
-            "all beats fall back to legacy path"
-        )
-        _track_gate(
-            attempted=True, skipped_reason="exception",
-            refined_count=0, fallback_count=len(cleaned),
-        )
-        return cleaned
+    # 2026-05-24: refiner now RAISES RuntimeError on whole-batch failure
+    # (Path 1: LLM transport; Path 2: shape regression; Path 3: all-
+    # per-item-failed). Let the exception propagate instead of silently
+    # falling back to bare-scene prompts — the legacy build_full_prompt
+    # path collapses every panel onto the protagonist and produces
+    # cast-collapse (job 39d1ec2d). Per /ai/known-fragility.md F26 +
+    # memory silent-fallback-unshippable-output: every unshippable
+    # failure path surfaces as a job error, not silent degradation.
+    refined = _refiner.refine_prompts_batch(
+        cleaned,
+        era_anchor_prefix=era_anchor_prefix,
+        character_description=character_description,
+        style=style,
+        mood=mood,
+        channel_key=channel_key,
+        scene_anchor=scene_anchor,
+        supporting=supporting,
+    )
 
-    if len(refined) != len(cleaned):
-        print(
-            f"[prompts] refiner returned {len(refined)} slots for "
-            f"{len(cleaned)} beats; ignoring (whole batch falls back)"
-        )
-        _track_gate(
-            attempted=True, skipped_reason="count_mismatch",
-            refined_count=0, fallback_count=len(cleaned),
-        )
-        return cleaned
+    # Defensive assertion — the refiner contract guarantees parallel
+    # output; a length mismatch would have raised inside the refiner.
+    assert len(refined) == len(cleaned), (
+        f"refine_prompts_batch contract violation: "
+        f"len(refined)={len(refined)} != len(cleaned)={len(cleaned)}"
+    )
 
     refined_count = 0
     for beat, slot in zip(cleaned, refined):

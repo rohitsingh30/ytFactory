@@ -208,6 +208,10 @@ def _resolve_prompt_for_beat(
         )
         source = "refined" if (rv and rs and sb) else "legacy_build_full_prompt"
         scene_text = beat.get("scene", "") or fallback_text
+        # F32: pass the per-beat ``subject`` through so build_full_prompt
+        # can skip the protagonist character_description prepend when the
+        # beat's focal subject is partner / secondary_<X> / scene. None
+        # for pre-v5 caches → legacy prepend (backward compat).
         final_prompt = _images.build_full_prompt(
             style_prefix=style_prefix,
             character_description=character_description,
@@ -217,6 +221,7 @@ def _resolve_prompt_for_beat(
             refined_visual=rv,
             refined_scene=rs,
             style_block=sb,
+            subject=beat.get("subject"),
         )
         return final_prompt
     finally:

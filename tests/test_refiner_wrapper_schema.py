@@ -223,10 +223,18 @@ def test_refine_prompts_batch_unwraps_wrapper_object() -> None:
         assert item["style_block"].startswith(f"Style: s{i}.")
 
 
-def test_refine_prompts_batch_falls_back_when_llm_returns_bare_dict() -> None:
+def test_refine_prompts_batch_raises_when_llm_returns_bare_dict() -> None:
     """Defense-in-depth: if for any reason the LLM returns a bare dict
-    (the pre-v4 Shape-C failure mode), every beat must fall back to {}
-    instead of being interpreted as a single beat."""
+    (the pre-v4 Shape-C failure mode), the refiner must RAISE instead
+    of being interpreted as a single beat — and instead of silently
+    returning [{}] * n which the pre-2026-05-24 contract did.
+
+    The downstream legacy build_full_prompt path prepends the
+    protagonist character_description onto every panel and produces
+    cast-collapse (job 39d1ec2d). Raising surfaces the failure as a
+    job error instead of silently degrading. See
+    /ai/known-fragility.md F26 + memory silent-fallback-unshippable-output.
+    """
 
     def _fake(prompt, *, output_json, model, stage, json_schema=None,
               strict_schema=False):
@@ -234,25 +242,20 @@ def test_refine_prompts_batch_falls_back_when_llm_returns_bare_dict() -> None:
         # wrapper. Pre-fix this collapsed the whole batch silently.
         return {
             "refined_visual": "single object",
-            "refined_scene": "no readable text in image. just one.",
+            "refined_scene": "kitchen with afternoon light",
             "style_block": "Style: x. Mood: y.",
         }
 
     beats = [{"key_visual": f"kv_{i}", "scene": f"s{i}"} for i in range(3)]
-    out = refine_prompts_batch(
-        beats,
-        era_anchor_prefix=None,
-        character_description=None,
-        style=None,
-        mood=None,
-        llm_call=_fake,
-    )
-    assert len(out) == 3
-    assert all(item == {} for item in out), (
-        "Pre-fix the LLM-returned bare dict was sometimes treated as a "
-        "single beat (then all-but-one fell back). The wrapper parser "
-        "now treats this as a whole-batch failure."
-    )
+    with pytest.raises(RuntimeError, match="(dict_returned|reason=dict_returned)"):
+        refine_prompts_batch(
+            beats,
+            era_anchor_prefix=None,
+            character_description=None,
+            style=None,
+            mood=None,
+            llm_call=_fake,
+        )
 
 
 def test_refine_prompts_batch_still_accepts_bare_list_for_test_seams() -> None:
