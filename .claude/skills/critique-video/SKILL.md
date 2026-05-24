@@ -1,6 +1,6 @@
 ---
 name: critique-video
-description: Watch a finished ytFactory Short and give an honest viewer critique grounded in actual experience. Walk a 17-lens checklist so failure modes the eye registers but the brain skips (facial-emotion stagnation, narration-visual mismatch, missing CTA, deflated ending) get caught instead of papered over. Output a per-frame fix table + class-of-bug fixes — so the next render benefits, not just this one.
+description: Watch a finished ytFactory Short and give an honest viewer critique grounded in actual experience. Pass 1 builds a script-first inventory (characters, props, settings, plot beats, demographic-fit) and verifies what the script SAYS is on screen actually is. Pass 2 walks an 18-lens perceptual checklist tiered P1 (9 always-check high-impact), P2 (4 always-check medium), P3 (5 check-if-relevant). Catches cast collapse, prop mismatches, demographic mismatch, scene-logic failures, body-language flatline, facial-emotion stagnation, narration-visual mismatch, missing CTA, deflated ending, etc. Output a per-frame fix table + class-of-bug fixes — so the next render benefits, not just this one.
 ---
 
 # /critique-video
@@ -84,7 +84,7 @@ timing, rhythm, escalation, momentum, pacing pressure, emotional
 progression, visual progression. The experience over time matters
 more than individual frames — but a static frame held too long
 collapses the temporal experience, which is exactly the kind of
-failure the 17-lens checklist below catches.
+failure the 18-lens checklist below catches.
 
 ---
 
@@ -158,7 +158,67 @@ Never:
 
 ---
 
-## THE 17-LENS CHECKLIST
+## PASS 1: SCRIPT-FIRST PERCEPTION INVENTORY (DO THIS BEFORE THE LENS CHECKLIST)
+
+The 18-lens checklist below catches *perceptual* failures — what
+the viewer felt. But the most-missed class of failure is a
+different shape: the visualize stage rendered the wrong *thing*
+for the beat (wrong character, wrong prop, wrong setting, wrong
+age, wrong action). Those failures are invisible to a critic who
+walks the perceptual lenses without first knowing what the script
+*says* should be on screen.
+
+Pass 1 fixes that. Before any lens is scored, build this inventory
+from the audio narration + captions:
+
+1. **Characters named in the narration.** List every distinct
+   character the story references. Note their role (protagonist,
+   antagonist, supporting cast — mother, son, teacher, accuser,
+   neighbour, partner, etc.) and any demographic detail the script
+   gives (age, gender, relationship). Example for an AITA story:
+   `[(protagonist: 35-year-old mother of two), (son1: age 9),
+   (son2: age 11), (Mr. Daniels: adult male gym teacher),
+   (parents at school: adult, plural)]`.
+
+2. **Props/objects named.** List every concrete object the
+   narration mentions and the beat it appears in. Example:
+   `[(beat 5: white t-shirt), (beat 7: whistle), (beat 12: group
+   chat on phone), (beat 16: shrug, no prop)]`.
+
+3. **Settings/locations named.** List every distinct setting the
+   narration implies (home, kitchen, school office, gym, classroom,
+   schoolyard). Note which beat occurs where.
+
+4. **Plot beats.** Identify setup → escalation → twist → payoff.
+   Mark which beat carries the highest-stakes moment.
+
+5. **Character demographic story-fit check.** Does the
+   protagonist's apparent age/role in the rendered frames *fit*
+   the narrative role the script demands? A "24-year-old" rendering
+   playing the role of "mother of an 11-year-old" is a structural
+   incompatibility — the script and the locked character are
+   fighting each other and the viewer will feel the disconnect.
+
+6. **Per-item rendered check.** For each character / prop /
+   setting / plot beat in your inventory, find the panel(s) where
+   it should appear and mark its render status:
+   - **rendered** — the right thing is on screen at the right time
+   - **missing** — the script names it but no panel shows it
+   - **wrong-character** — a different person is rendered (often
+     the protagonist standing in for everyone — *cast collapse*)
+   - **wrong-prop** — the panel shows a different object than the
+     script implies, or shows a random prop with no script anchor
+   - **wrong-setting** — wrong location for the beat
+   - **wrong-action** — the body language / activity doesn't match
+     the verb the script uses
+
+Report Pass 1 in the critique as a table before the lens
+checklist (see Output Structure below). Every "wrong-*" or
+"missing" entry feeds the relevant lens score in Pass 2.
+
+---
+
+## PASS 2: THE LENS CHECKLIST (P1/P2/P3 TIERED, 18 LENSES)
 
 You MUST walk every lens below before writing the report. For each
 lens, decide: **OK / weak / missing**. Two of three Shorts that
@@ -166,28 +226,39 @@ lens, decide: **OK / weak / missing**. Two of three Shorts that
 the checklist is the structural fix for the failure mode of writing
 a critique that sounds smart but misses what the user actually felt.
 
-The checklist is not a film-school grid. Each lens names one specific
-viewer-experience question. Answer it with what the *viewer* sees.
+Lenses are tiered by impact:
 
-| # | Lens | The question |
-|---|---|---|
-| 1 | Hook frame (0.3-0.8s) | Does the first image visible to a scrolling viewer give a reason to stop scrolling? |
-| 2 | First-3s promise | Does the opening establish what kind of video this is? Genre, tone, stakes? |
-| 3 | Narration-visual sync | For each line, does the picture match what's being said RIGHT NOW? Not generally — line by line. |
-| 4 | Facial-emotion progression | Does the character's face change as the emotional content changes? Same face across "excited / defeated / asking-the-viewer" = lens-4 fail. |
-| 5 | Character continuity | Same person across every beat? Same hair / clothing / age / face? |
-| 6 | Environment lock | If the story is set in one place, does the location stay the same? Same walls, same furniture, same lighting? |
-| 7 | Visual-style lock | Consistent art style, palette, line weight, render quality across panels? |
-| 8 | Visual progression | Does the visual layer evolve as the narration evolves, or does it sit while audio escalates? |
-| 9 | Composition variety | Are framings varying meaningfully (close / medium / wide / over-shoulder / hands), or is the same shot repeating? |
-| 10 | Static-hold detection | Any composition held 1.5s+ with no change? Eye-finish-time on a Short is ~1.2s; longer = scroll trigger. |
-| 11 | Caption rhythm | Do captions match the spoken cadence without dominating the picture? Single-word vs sentence-block? Aspect-appropriate font size? |
-| 12 | Audio-pace match | Does narration WPM match the visual density? Fast narration over static images = mismatch. Slow narration over rapid cuts = mismatch. |
-| 13 | Reveal / payoff | Does the visual punchline land with framing the eye can read? Or is it visually small / off-center / under-lit? |
-| 14 | Buildup-to-payoff ratio | Does the setup earn the payoff? Three beats of buildup for a flat reveal = lens-14 fail. |
-| 15 | Ending cut-point | Does the video end at the emotional peak, or linger past it into a deflated quieter shot? |
-| 16 | CTA presence and quality | Is there a like / subscribe / next-button / closer CTA on screen at the end? If a graphical closer panel exists, does it feel adult or childish? |
-| 17 | Attention-drop scan | Mark concrete timestamps where a phone-scrolling viewer would keep scrolling. Tie each one back to which lens caused it. |
+- **P1 (always-check, high-impact)** — failing any one of these ships
+  a broken render. Walk all 9 on every critique.
+- **P2 (always-check, medium-impact)** — viewer notices but may
+  forgive if other lenses pass. Walk all 4 on every critique.
+- **P3 (check if relevant)** — applies only to certain channels or
+  formats. Skip when not relevant; explain why in the critique.
+
+The checklist is not a film-school grid. Each lens names one
+specific viewer-experience question. Answer it with what the
+*viewer* sees.
+
+| Tier | # | Lens | The question |
+|---|---|---|---|
+| P1 | 1 | Hook frame (0.3-0.8s) | Does the first image visible to a scrolling viewer give a reason to stop scrolling? |
+| P1 | 3 | Narration-visual sync | For each line, does the picture match what's being said RIGHT NOW? Not generally — line by line. |
+| P1 | 4 | Facial-emotion progression | Does the character's face change as the emotional content changes? Same face across "excited / defeated / asking-the-viewer" = lens-4 fail. |
+| P1 | 5 | Character continuity + cast distinctness | TWO checks: (a) Protagonist consistent across beats? Same hair / clothing / age / face? (b) Non-protagonist characters distinct from the protagonist? List every named character in the script (mother, son, antagonist, teacher); on the panels where they should appear, do they render as a different person — or has the protagonist's appearance bled across the whole cast (cast collapse)? Either direction failing = lens-5 fail. |
+| P1 | 16 | CTA presence and quality | Is there a like / subscribe / next-button / closer CTA on screen at the end? If a graphical closer panel exists, does it feel adult or childish? |
+| P1 | 18 | Prop/object semantic match | For each beat with a prop in the rendered frame, does the prop match what the narration says is happening? A chair-back during "I reported a teacher" is a prop mismatch; a whistle in the protagonist's mouth during "Mr. Daniels was their gym teacher" is the wrong character's prop; folded denim in a principal's office is incoherent. Random props with no script anchor = lens-18 fail. Use Pass 1's prop inventory. |
+| P1 | 19 | Character demographic story-fit | Does the rendered protagonist's apparent age, gender, and role fit the narrative role the script demands? A "24-year-old" rendering for a script that opens "I have two sons, ages nine and eleven" is structurally impossible — she'd have been 13. The viewer can't accept the protagonist in the story role and the disconnect colors every beat. This is upstream of the visualize stage — channel YAML / cast schema must allow demographic override when the story role conflicts. Pass 1's demographic-fit check feeds this lens. |
+| P1 | 20 | Scene logic plausibility | Does each scene make narrative sense given the beat it represents? Why is the protagonist on a basketball court with a whistle when the beat is about her sons mentioning their gym teacher? Why is she holding folded clothes in a principal's office? Why is the "parents turned on me" beat rendered as a child boy pointing at a child girl? Scene-logic failures — the model generated visuals from key_visual tokens without checking plausibility against the story. Use Pass 1's setting + action inventory. |
+| P1 | 22 | Body-language register | Independent of lens 4 (facial-emotion). Does the protagonist's *posture / stance / body language* shift across narrative beats with different emotional registers (reporting-mode, accused-mode, vindicated-mode, ostracized-mode, AITA-vulnerable-mode)? Same shoulder posture + same arm angle + same weight distribution across all of them = lens-22 fail. Even if the face is locked, the body could dramatise the story; if it doesn't, both layers are flat. |
+| P2 | 9 | Composition variety | Are framings varying meaningfully (close / medium / wide / over-shoulder / hands), or is the same shot repeating? |
+| P2 | 10 | Static-hold detection | Any composition held 1.5s+ with no change? Eye-finish-time on a Short is ~1.2s; longer = scroll trigger. |
+| P2 | 13 | Reveal / payoff | Does the visual punchline land with framing the eye can read? Or is it visually small / off-center / under-lit? |
+| P2 | 15 | Ending cut-point | Does the video end at the emotional peak, or linger past it into a deflated quieter shot? |
+| P3 | 6 | Environment lock | If the story is set in one place, does the location stay the same? Same walls, same furniture, same lighting? Skip when the story moves across many locations and Pass 1's wrong-setting status already covers per-beat mismatches. |
+| P3 | 7 | Visual-style lock | Consistent art style, palette, line weight, render quality across panels? Most relevant on AI-image channels (mystoriesanimated, hindutavaanimated). Less applicable on footage-only channels (cosmosdecoded, sportsrecapped). |
+| P3 | 11 | Caption rhythm | Do captions match the spoken cadence without dominating the picture? Single-word vs sentence-block? Aspect-appropriate font size? Skip when captions are off (some sportsrecapped variants). |
+| P3 | 12 | Audio-pace match | Does narration WPM match the visual density? Fast narration over static images = mismatch. Slow narration over rapid cuts = mismatch. |
+| P3 | 23 | Plot-beat visual telegraphing | The single highest-stakes plot moment in the story (twist, reveal, payoff, gut-punch) — does the visual mark it as the structural moment? A zoom, close-up, insert on the revealing object, graphic emphasis, expression change? Or does the visual treat it as just another medium-wide? Use Pass 1's plot-beat inventory. Skip on channels with no single payoff moment (countdown / educational / footage-news). |
 
 **Common silent failures the checklist catches:**
 
@@ -204,6 +275,23 @@ viewer-experience question. Answer it with what the *viewer* sees.
   punchline.
 - Lens 6: kitchen scenes use four different kitchens — character is
   locked, environment is not.
+- Lens 5 (cast-collapse direction): the protagonist looks locked
+  across panels — yellow shirt, brown hair, same face — so the
+  naive reading is "lens 5 OK." But the script names a mother, a
+  gym teacher, an 11-year-old son, and a boy in the schoolyard.
+  On the panels where those four should appear, **all four are
+  rendered as the protagonist** with her face, hair, and yellow
+  shirt. Lens 5 is missing, not OK. Procedure: before scoring
+  lens 5, list every distinct character the narration names; for
+  each, find the panel(s) where they should appear; verify they
+  render as a different person from the protagonist. Single
+  protagonist + cast-collapse = lens 5 fail. The 39d1ec2d
+  mystoriesanimated/tifu render was the calibration case
+  (2026-05-24); see memory `feedback_critique_video_cast_collapse.md`
+  for the user-flagged correction. This is the structural
+  consequence of `prompts.author_gate` discarding the refiner's
+  per-beat subjects (F32 candidate); cast-collapse is the
+  viewer-side mirror of that pipeline-side bug.
 
 ---
 
@@ -219,27 +307,39 @@ Write to `data/critiques/<slug>.md`:
 One short paragraph: what kind of experience this feels like, what
 emotional/pacing promise it makes, and whether it delivers.
 
-## Lens checklist (17 lenses)
+## Pass 1 — Script-first perception inventory
 
-| # | Lens | Status | One-line note |
-|---|---|---|---|
-| 1 | Hook frame | OK / weak / missing | <what the viewer sees at 0.3-0.8s> |
-| 2 | First-3s promise | OK / weak / missing | ... |
-| 3 | Narration-visual sync | OK / weak / missing | ... |
-| 4 | Facial-emotion progression | OK / weak / missing | ... |
-| 5 | Character continuity | OK / weak / missing | ... |
-| 6 | Environment lock | OK / weak / missing | ... |
-| 7 | Visual-style lock | OK / weak / missing | ... |
-| 8 | Visual progression | OK / weak / missing | ... |
-| 9 | Composition variety | OK / weak / missing | ... |
-| 10 | Static-hold | OK / weak / missing | ... |
-| 11 | Caption rhythm | OK / weak / missing | ... |
-| 12 | Audio-pace match | OK / weak / missing | ... |
-| 13 | Reveal / payoff | OK / weak / missing | ... |
-| 14 | Buildup-to-payoff ratio | OK / weak / missing | ... |
-| 15 | Ending cut-point | OK / weak / missing | ... |
-| 16 | CTA presence | OK / weak / missing | ... |
-| 17 | Attention-drop scan | OK / weak / missing | (filled in below) |
+| Item | Script reference | Beat(s) where it should appear | Render status | Note |
+|---|---|---|---|---|
+| <character: protagonist> | "I reported..." | every beat | rendered / wrong-character | ... |
+| <character: Mr. Daniels> | "their gym teacher" | beat N | rendered / wrong-character | ... |
+| <prop: phone with group chat> | "the chat said..." | beat M | rendered / missing / wrong-prop | ... |
+| <setting: principal's office> | "I reported it to..." | beat K | rendered / wrong-setting | ... |
+| <plot-beat: twist> | "but he was innocent" | beat T | telegraphed / missed | ... |
+| <demographic fit> | protagonist age vs role | n/a | fit / mismatch | ... |
+
+## Pass 2 — Lens checklist (18 lenses, P1/P2/P3 tiered)
+
+| Tier | # | Lens | Status | One-line note |
+|---|---|---|---|---|
+| P1 | 1 | Hook frame | OK / weak / missing | <what the viewer sees at 0.3-0.8s> |
+| P1 | 3 | Narration-visual sync | OK / weak / missing | ... |
+| P1 | 4 | Facial-emotion progression | OK / weak / missing | ... |
+| P1 | 5 | Character continuity + cast distinctness | OK / weak / missing | ... |
+| P1 | 16 | CTA presence | OK / weak / missing | ... |
+| P1 | 18 | Prop/object semantic match | OK / weak / missing | ... |
+| P1 | 19 | Character demographic story-fit | OK / weak / missing | ... |
+| P1 | 20 | Scene logic plausibility | OK / weak / missing | ... |
+| P1 | 22 | Body-language register | OK / weak / missing | ... |
+| P2 | 9 | Composition variety | OK / weak / missing | ... |
+| P2 | 10 | Static-hold | OK / weak / missing | ... |
+| P2 | 13 | Reveal / payoff | OK / weak / missing | ... |
+| P2 | 15 | Ending cut-point | OK / weak / missing | ... |
+| P3 | 6 | Environment lock | OK / weak / missing / N/A | ... |
+| P3 | 7 | Visual-style lock | OK / weak / missing / N/A | ... |
+| P3 | 11 | Caption rhythm | OK / weak / missing / N/A | ... |
+| P3 | 12 | Audio-pace match | OK / weak / missing / N/A | ... |
+| P3 | 23 | Plot-beat visual telegraphing | OK / weak / missing / N/A | ... |
 
 ## What worked
 
@@ -336,11 +436,32 @@ After the user reviews the critique and corrects a finding:
    "sound-design absence at reveal frames"), add it as lens 18+.
    The checklist grows by usage.
 
-The 17 above were calibrated against the 88d98126 critique
-(2026-05-24) where the absence of lenses 4 (facial-emotion), 16
-(CTA presence), 3 (narration-visual line-by-line sync) and 15
-(ending cut-point) all caused real viewer-flagged failures the
-critic missed.
+The original 17 lenses were calibrated against the 88d98126
+critique (2026-05-24) where the absence of lenses 4
+(facial-emotion), 16 (CTA presence), 3 (narration-visual
+line-by-line sync) and 15 (ending cut-point) all caused real
+viewer-flagged failures the critic missed.
+
+The checklist was restructured on 2026-05-24 against the 39d1ec2d
+mystoriesanimated/tifu critique:
+
+- **Lens 5 extended** to require "non-protagonist characters
+  distinct from the protagonist" (the cast-collapse direction).
+  See memory `feedback_critique_video_cast_collapse.md`.
+- **5 new lenses added** (18, 19, 20, 22, 23) to catch prop
+  mismatches, character demographic mismatch, scene-logic
+  failures, body-language flatline, and silent plot-beat
+  telegraphing.
+- **4 lenses removed** (original 2 First-3s promise, 8 Visual
+  progression, 14 Buildup-to-payoff, 17 Attention-drop scan) as
+  overlapping with stronger lenses or vague to score.
+- **P1/P2/P3 priority tiers added** so the critic walks the
+  highest-impact lenses first and treats P3 as channel-dependent.
+- **Lens 21 (motion/liveness)** was proposed but not added —
+  user decision.
+
+Final shape: 9 P1 + 4 P2 + 5 P3 = 18 lenses, plus Pass 1
+script-first inventory before lens scoring.
 
 ---
 
@@ -353,6 +474,7 @@ honestly:
 - why it stopped working,
 - and what actually caused the feeling.
 
-The 17-lens checklist + per-frame fix table makes that
-explanation structural so the same failure mode doesn't reappear
-on the next critique.
+Pass 1 (script-first inventory) + Pass 2 (18-lens checklist,
+P1/P2/P3 tiered) + per-frame fix table makes that explanation
+structural so the same failure mode doesn't reappear on the
+next critique.

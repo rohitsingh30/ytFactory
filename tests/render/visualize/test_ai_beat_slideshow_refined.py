@@ -52,6 +52,7 @@ def _marker_build_full_prompt(  # noqa: PLR0913 — mirrors real signature
     refined_visual: str | None = None,
     refined_scene: str | None = None,
     style_block: str | None = None,
+    subject: str | None = None,  # F32 — must mirror real signature
 ) -> str:
     """Test stub: emit a deterministic marker string so each test can
     distinguish the refined vs legacy assembly path. Returned in place

@@ -44,7 +44,18 @@ literally here.
 
 ---
 
-## F2. `spec.extra` is an untyped dict carrying load-bearing state across plugin slots
+## F2. `spec.extra` is an untyped dict carrying load-bearing state across plugin slots — GUARD TEST LANDED 2026-05-24
+
+**Status:** GUARD TEST LANDED 2026-05-24 — `RenderSpecExtras` TypedDict
+in `pipeline/render/spec.py` enumerates every key production code
+reads/writes on `spec.extra` (24 keys at audit time).
+`tests/test_spec_extra_typed_keys.py` greps every `spec.extra.get("…")`
+/ `spec.extra["…"]` site under `pipeline/` + `cloud/` + `control/`
+and asserts each key is declared in the TypedDict. A typo
+(`caracter_description`) now fails on the laptop pytest run with a
+file:line pointer at the offending site — before the render queues.
+Runtime behaviour is unchanged (the dict is still `dict[str, Any]`
+on the field; the TypedDict is structural typing + a grep target).
 
 **Where:** `pipeline/render/spec_enrich.py:145,214` (writes
 `era_anchor_prefix`, `character_description`), read sites at
@@ -960,6 +971,94 @@ caption-layout selection was actually honored end-to-end.
 dependency on `build_captions_ass`. Honors `max_lines` from
 `CaptionsLayout`, aspect-aware font size, uses `spec.caption_style`
 fields verbatim.
+
+---
+
+## F32. `build_full_prompt` unconditionally prepends protagonist `character_description` in refined mode → cast collapse on non-protagonist beats (2026-05-24)
+
+**Where:**
+- `pipeline/images/images.py::build_full_prompt` (lines 281-411) — the
+  refined-mode branch (`using_refined=True`, lines 368-371 pre-fix)
+  prepended `character_description` *unconditionally* before the
+  refiner's `refined_visual`.
+- `pipeline/render/visualize/ai_beat_slideshow.py::_resolve_prompt_for_beat`
+  (lines 167-237 pre-fix) called `build_full_prompt` without passing
+  `beat.get("subject")` even though the cached beat dict carries the
+  authored Rule-18 token.
+- `pipeline/render/shared/long_form_lib.py::_generate_panel_stills`
+  (lines 786-796 pre-fix) — same omission for long-form panels.
+
+**Why fragile:** The "critical invariant" pre-fix docstring at
+`pipeline/images/images.py:332-335` declared "`character_description`
+STILL prepends regardless of refined mode — the cast lock must
+survive even if the refiner forgets it." That was structurally
+correct as a *safety belt for the protagonist case*. It became a
+*poison pill* for the non-protagonist case once the v5
+prompt_refiner (`pipeline/images/prompt_refiner.py:307` —
+`REFINER_VERSION = "v5-subject-emotion"`) started using the
+per-beat `subject` token (Rule 18 in
+`pipeline/llm/prompts.py:439-470`) to inject a `_subject_lead`
+clause (`pipeline/images/prompt_refiner.py:478-498`) into
+`refined_visual` for `partner` / `secondary_<name>` / `scene`
+beats. Per memory `project_z_image_turbo_verb_led_prompts`,
+Z-Image-Turbo's encoder is left-weighted — it reads the first
+~50-100 chars as the dominant subject. With the protagonist's
+character_description (50-100 words) unconditionally prepended, the
+non-protagonist subject in `refined_visual` was demoted to
+background noise and the secondary character rendered as a copy of
+the protagonist. Visible viewer symptom: cast collapse (every human
+in the frame looked like the protagonist) — see memory
+`feedback_critique_video_cast_collapse.md` for the 39d1ec2d render
+that surfaced the failure.
+
+**What trips it:** Any cached beat whose authored `subject` is
+non-protagonist — i.e. multi-character stories on
+mystoriesanimated (AITA / TIFU partner / antagonist beats),
+hindutavaanimated (Krishna / Arjuna / Bhishma scene shifts),
+historyrecapped (gym teacher / mother / child supporting cast).
+Shorts and long-form both exposed because both call
+`build_full_prompt` with identical assembly invariants.
+
+**Counter-test:** `tests/test_build_full_prompt_subject_lock.py`
+(added 2026-05-24). 12 tests pinning:
+- subject="partner" / "secondary_X" / "scene" → character_description
+  ABSENT from final prompt; refined_visual leads directly after era_anchor.
+- subject="protagonist" / None / "" → character_description prepends
+  (back-compat for pre-v5 caches + explicit protagonist case unchanged).
+- legacy mode (refined_* not supplied) → character_description prepends
+  regardless of subject (safety belt retained — no subject-lead to
+  substitute it).
+- subject kwarg omitted == subject=None (backward-compat for old call
+  sites).
+- subject token case-insensitive ("PARTNER" / " partner " == "partner").
+
+**Status:** **fixed 2026-05-24.**
+
+- `pipeline/images/images.py::build_full_prompt` — new `subject:
+  str | None = None` kwarg. In refined mode, when the normalised
+  subject is set AND ≠ "protagonist", the `character_description`
+  prepend is skipped. Legacy mode and protagonist/unset cases
+  unchanged.
+- `pipeline/render/visualize/ai_beat_slideshow.py::_resolve_prompt_for_beat`
+  — passes `subject=beat.get("subject")` through.
+- `pipeline/render/shared/long_form_lib.py::_generate_panel_stills`
+  — passes `subject=p.get("subject")` through.
+- Existing `tests/test_build_full_prompt_refined.py` continues to
+  pass (the existing
+  `test_character_description_still_present_in_refined_mode` test
+  doesn't pass `subject` → defaults to None → protagonist case
+  preserved).
+
+**Why this is the root fix (not a scapegoat):** The refiner is doing
+its job (the per-beat refined_visual is correct in
+`refiner_io.json::parsed[]`). The Z-Image-Turbo model is doing its
+job (the encoder behaves as documented). The author-side schema is
+doing its job (Rule 18 emits the subject token). The bug is the
+ASSEMBLY contract in `build_full_prompt`: it treated
+`character_description` as a code-owned invariant rather than as
+content the refiner was responsible for substituting on
+non-protagonist beats. Threading the `subject` kwarg flips the
+ownership boundary correctly without breaking the protagonist case.
 
 ---
 

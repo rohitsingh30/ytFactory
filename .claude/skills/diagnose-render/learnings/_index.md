@@ -35,4 +35,4 @@ re-derive the pattern.
 
 ## Runs
 
-(none yet — first real invocation will append here)
+- 2026-05-24T15:55Z `39d1ec2ddb9141c199b2b2719c867864` (mystoriesanimated/tifu, tifu-by-reporting-a-pervert-...-39d1ec2d) — 8 findings, **NEW-FRAG F32 candidate** (shorts author_gate silently discards refined_count=0/16 with empty reason), **NEW-O O41 candidate** (author_gate hard-fail + reason emission). Confirms third instance of [[verify-refiner-with-fallback-count]] pattern (after 88d98126 + 845bdb0d). The fdc5f65 long-form fix doesn't reach shorts; the shorts path silently ships through legacy `build_full_prompt(character_description, …)`.
