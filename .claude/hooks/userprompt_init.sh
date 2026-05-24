@@ -112,11 +112,43 @@ if [ "$UNRESOLVED_COUNT" -gt 0 ] && [ "$PROMPT_LEN" -lt 200 ]; then
     exit 2
 fi
 
-# Block decision: ambiguous-reference + short prompt + no anchor entity
+# Block decision: ambiguous-reference + short prompt + no anchor entity.
+#
+# 2026-05-24 softening (option B in the hook-fix triple):
+# If the recent assistant message contains a multi-choice block (numbered
+# / lettered / markdown-table options) OR contains pick-prompt language,
+# treat this short prompt as a RESPONSE to that choice, not a fresh
+# ambiguous request. Don't block — let the agent handle it.
+#
+# 2026-05-24 surfacing (option C in the hook-fix triple):
+# When the hook DOES block, run the same helper to extract the recent
+# options and include them in the stderr message so the user (and agent)
+# see the actual candidates instead of just "Ask which specific thing."
+TRANSCRIPT_PATH="$(printf '%s' "$RAW" | jq -r '.transcript_path // empty' 2>/dev/null)"
+RECENT_OPTIONS_JSON="{}"
+HAS_RECENT_OPTIONS="false"
+if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
+    RECENT_OPTIONS_JSON="$("$PYTHON" "$LIB/recent_context_options.py" "$TRANSCRIPT_PATH" 2>/dev/null || echo '{}')"
+    HAS_RECENT_OPTIONS="$(printf '%s' "$RECENT_OPTIONS_JSON" | jq -r '.has_options // false' 2>/dev/null)"
+fi
+state_set "had_recent_options" "$([ "$HAS_RECENT_OPTIONS" = "true" ] && echo true || echo false)"
+
 if [ "$AMBIGUOUS" = 1 ] && [ "$PROMPT_LEN" -lt 80 ] && [ "$RESOLVED_COUNT" = 0 ]; then
+    # Softening: if the recent assistant message had options, this is a
+    # response to that choice — allow.
+    if [ "$HAS_RECENT_OPTIONS" = "true" ]; then
+        exit 0
+    fi
+
+    # Otherwise block, but surface the options helper's output (which
+    # will be "no options detected" — letting the user see why we
+    # think context wasn't enough).
+    OPTION_LINES="$("$PYTHON" "$LIB/recent_context_options.py" "$TRANSCRIPT_PATH" text 2>/dev/null || echo '')"
     {
-        printf 'P12-block: short ambiguous prompt (no resolved anchor entity).\n'
-        printf 'Ask which specific thing the user means before acting.\n'
+        printf 'P12-block: short ambiguous prompt (no resolved anchor entity, no recent option-list to anchor against).\n'
+        printf 'Recent assistant context for reference:\n'
+        printf '%s\n' "$OPTION_LINES"
+        printf '\nAsk which specific thing the user means before acting.\n'
     } >&2
     exit 2
 fi

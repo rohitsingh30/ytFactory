@@ -53,30 +53,52 @@ fi
 # Extract the last assistant text. Claude Code transcripts are JSONL
 # with one line per message event. We want the most-recent line whose
 # message.role == "assistant".
+#
+# 2026-05-24 stale-transcript fix (option A in the hook-fix triple):
+# The transcript is sometimes flushed AFTER the Stop hook fires. The
+# helper retries up to 3 times with a 250ms delay if the most-recent
+# assistant text it sees doesn't match the size we'd expect from a
+# just-completed turn (i.e. is empty or suspiciously short).
 LAST_ASST_TEXT="$("$PYTHON" - << 'PY' "$TRANSCRIPT"
-import json, sys
-last_text = ""
-try:
-    with open(sys.argv[1]) as f:
-        for line in f:
-            try: d = json.loads(line)
-            except: continue
-            m = d.get("message")
-            if not isinstance(m, dict): continue
-            if m.get("role") != "assistant": continue
-            content = m.get("content", "")
-            if isinstance(content, list):
-                text = " ".join(
-                    x.get("text", "") for x in content
-                    if isinstance(x, dict) and x.get("type") == "text"
-                )
-            else:
-                text = str(content)
-            if text.strip():
-                last_text = text
-except Exception:
-    pass
-print(last_text)
+import json, sys, time
+def extract_last(path):
+    last = ""
+    try:
+        with open(path) as f:
+            for line in f:
+                try: d = json.loads(line)
+                except: continue
+                m = d.get("message")
+                if not isinstance(m, dict): continue
+                if m.get("role") != "assistant": continue
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    text = " ".join(
+                        x.get("text", "") for x in content
+                        if isinstance(x, dict) and x.get("type") == "text"
+                    )
+                else:
+                    text = str(content)
+                if text.strip():
+                    last = text
+    except Exception:
+        pass
+    return last
+
+# Retry loop: read transcript up to 3 times with 250ms gap. If the
+# previous read returned a SHORTER text than the current one, the
+# transcript is still being written — wait and re-read. Stop when:
+#   (a) text stabilises (two consecutive reads yield same length)
+#   (b) max retries reached
+prev_len = -1
+text = ""
+for _ in range(3):
+    text = extract_last(sys.argv[1])
+    if len(text) == prev_len and prev_len > 0:
+        break
+    prev_len = len(text)
+    time.sleep(0.25)
+print(text)
 PY
 )"
 
@@ -96,29 +118,13 @@ fi
 
 if [ "$N_ASKS" -gt 0 ]; then
     # For each ask, check whether the assistant's response addresses it.
-    # Heuristic: if 3+ alphanumeric tokens (length>=4) from the ask appear
-    # in the response, consider it addressed. Cheap, conservative — false
-    # positives over false negatives so users aren't forever blocked.
-    DROPPED="$("$PYTHON" - "$ASKS_JSON" << 'PY'
-import json, re, sys
-asks = json.loads(sys.argv[1])
-text = sys.stdin.read().lower()
-def tokens(s):
-    return [t for t in re.findall(r"[a-z0-9_]{4,}", s.lower())
-            if t not in {"this","that","with","from","into","does","need","also","just","like","what","when","want"}]
-dropped = []
-for a in asks:
-    ask_text = a.get("ask", "")
-    toks = tokens(ask_text)
-    if not toks:
-        continue
-    matches = sum(1 for t in set(toks) if t in text)
-    coverage = matches / max(len(set(toks)), 1)
-    if coverage < 0.25 and matches < 3:
-        dropped.append(a)
-print(json.dumps(dropped))
-PY
-)" <<< "$LAST_ASST_TEXT" 2>/dev/null || DROPPED="[]"
+    # Heuristic delegated to lib/check_grievance_coverage.py — the prior
+    # inline `python - <<'PY'` + `<<<` here-string interaction left the
+    # script with empty stdin, so every ask was always false-positive
+    # flagged. The standalone helper takes ASKS_JSON as argv[1] and
+    # the assistant text on stdin — clean wiring, no bash quoting
+    # interactions.
+    DROPPED="$(printf '%s' "$LAST_ASST_TEXT" | "$PYTHON" "$LIB/check_grievance_coverage.py" "$ASKS_JSON" 2>/dev/null || echo '[]')"
     N_DROPPED="$(printf '%s' "$DROPPED" | jq 'length' 2>/dev/null || echo 0)"
     if [ "$N_DROPPED" -gt 0 ]; then
         violations+=("P02/P03/P26 grievance coverage: $N_DROPPED ask(s) silently dropped:")
@@ -251,6 +257,28 @@ if printf '%s' "$USER_PROMPT_LOWER" | grep -qE "tell me what|give me what|just (
             violations+=("P14 analysis-when-facts-wanted: user asked for raw facts but response is analysis. Haiku says: $REASON")
             recurrences_to_bump+=("analysis_when_facts")
         fi
+    fi
+fi
+
+# === 11b. Multichoice-required (P28 — added 2026-05-24 per user) ===
+# If the response contains 3+ option-shaped items (numbered or
+# markdown-table or letter-labeled), the agent MUST also invoke
+# AskUserQuestion so the user gets clickable selection rather than
+# typing back a letter / number. User's exact directive: "give me as
+# multichoice that I can select easily."
+N_NUM_OPTIONS="$(printf '%s' "$LAST_ASST_TEXT" | grep -cE '^\s*([0-9]+|[A-D])[.)]\s+' 2>/dev/null || echo 0)"
+N_NUM_OPTIONS="$(printf '%s' "$N_NUM_OPTIONS" | tr -dc '0-9' || echo 0)"
+N_NUM_OPTIONS="${N_NUM_OPTIONS:-0}"
+N_TABLE_OPTIONS="$(printf '%s' "$LAST_ASST_TEXT" | grep -cE '^\|\s*([0-9]+|[A-D])\s*\|' 2>/dev/null || echo 0)"
+N_TABLE_OPTIONS="$(printf '%s' "$N_TABLE_OPTIONS" | tr -dc '0-9' || echo 0)"
+N_TABLE_OPTIONS="${N_TABLE_OPTIONS:-0}"
+TOTAL_OPTIONS=$((N_NUM_OPTIONS + N_TABLE_OPTIONS))
+if [ "$TOTAL_OPTIONS" -ge 3 ]; then
+    # Did the agent also call AskUserQuestion in this turn? Look at the
+    # transcript for a recent AskUserQuestion tool invocation.
+    if ! tail -300 "$TRANSCRIPT" 2>/dev/null | grep -qE '"name":\s*"AskUserQuestion"'; then
+        violations+=("P28 multichoice-required: response contains $TOTAL_OPTIONS option-shaped items but no AskUserQuestion tool call. User asked for clickable multichoice not typed-back-letters — use the AskUserQuestion tool when presenting choices.")
+        recurrences_to_bump+=("multichoice_required")
     fi
 fi
 
