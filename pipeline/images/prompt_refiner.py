@@ -131,7 +131,23 @@ def _emit_refiner_io_artifact(
         pass
 
 
-REFINER_VERSION = "v3-scene-anchor"  # 2026-05-24 P4.2: bumped from v2-zturbo
+REFINER_VERSION = "v4-wrapper-schema"  # 2026-05-24 P4.3: bumped from v3-scene-anchor
+# so caches predating the Shape-C wrapper-schema fix (job c4aed485 long-form
+# render failure) auto-invalidate. v3 called call_llm(output_json=True) without
+# a json_schema, falling back to ``response_format={"type":"json_object"}``
+# which Azure's structured-output API forces to a single root object. The
+# system prompt instructed "return JSON array of N objects" but the LLM
+# physically could not comply — it collapsed to a single root object, every
+# beat fell back, long-form RAISED, shorts coincidentally shipped because the
+# legacy fallback path on shorts still has ``character_description`` in
+# ``build_full_prompt``. v4 wraps the array in ``{"refined_beats": [...]}``
+# and passes ``strict_schema=True`` to ``call_llm`` — same pattern as
+# ``_BEAT_RESPONSE_SCHEMA`` in ``pipeline/llm/prompts.py:468``. See memory
+# ``project_shape_c_azure_structured_output_array_bug.md`` for the original
+# 2026-05-16 floating-objects post-mortem on this exact failure mode.
+
+# Original pre-v4 version constant (kept):
+# REFINER_VERSION = "v3-scene-anchor"  # 2026-05-24 P4.2: bumped from v2-zturbo
 # so caches predating the ``scene_anchor`` channel-level setting (e.g. the
 # nosleep airplane-cabin anchor) auto-invalidate. The refiner now weaves
 # the channel's ``default_scene_anchor`` into refined_scene when the beat's
@@ -295,14 +311,24 @@ product-photo composition. Above ~300 words the later tokens lose
 weight. Aim for ~120-180 words of combined output across the three
 fields.
 
-OUTPUT — a JSON array of objects, one per input beat, in beat order. Each
-object MUST have exactly these three fields and no others:
+OUTPUT — a JSON WRAPPER OBJECT with a single key ``refined_beats`` whose
+value is an array of objects, one per input beat, in beat order. The
+wrapper exists because OpenAI/Azure structured outputs do not accept
+root-array types — this is the same pattern ``author_beat_prompts``
+uses for its ``{"beats": [...]}`` envelope.
 
   {
-    "refined_visual":  "<dense subject description, 30-60 words, structured: shot type + subject + age band + appearance + clothing + signature props>",
-    "refined_scene":   "no readable text in image. <environment description, 40-80 words: setting + props + spatial composition + atmosphere + LIGHTING tokens>",
-    "style_block":     "Style: <medium + technique + 2-4 visual qualities>. Mood: <2-4 mood adjectives + emotional register>."
+    "refined_beats": [
+      {
+        "refined_visual":  "<dense subject description, 30-60 words, structured: shot type + subject + age band + appearance + clothing + signature props>",
+        "refined_scene":   "no readable text in image. <environment description, 40-80 words: setting + props + spatial composition + atmosphere + LIGHTING tokens>",
+        "style_block":     "Style: <medium + technique + 2-4 visual qualities>. Mood: <2-4 mood adjectives + emotional register>."
+      },
+      ... (one per input beat, in beat order)
+    ]
   }
+
+Each inner object MUST have exactly these three fields and no others.
 
 PER-BEAT RULES (a beat failing any rule has its slot replaced with {} by
 the caller, and that beat falls back to the legacy non-refined path):
@@ -371,8 +397,48 @@ the caller, and that beat falls back to the legacy non-refined path):
    words. Aim higher for cinematic beats, lower for static establishing
    shots — but never below ~80 words combined.
 
-Return ONLY the JSON array. No prose, no markdown, no commentary.
+Return ONLY the JSON wrapper object ``{"refined_beats": [...]}``. No
+prose, no markdown, no commentary.
 """
+
+
+# Strict-compliant JSON schema for ``refine_prompts_batch`` output.
+#
+# Same Shape-C workaround as ``_BEAT_RESPONSE_SCHEMA`` in
+# ``pipeline/llm/prompts.py:468`` — root-array types aren't supported by
+# Azure structured outputs, so the array is nested inside a single-key
+# wrapper object. Strict-compliance contract per Azure docs:
+#   * every object: additionalProperties=false
+#   * every property listed in required
+#   * no unsupported keywords (minItems/maxItems, pattern, format, etc)
+#
+# v4-wrapper-schema (2026-05-24) — bug fix for the c4aed485 long-form
+# render failure. Pre-v4, ``refine_prompts_batch`` called ``call_llm(
+# output_json=True)`` without a schema → request defaulted to
+# ``response_format={"type":"json_object"}`` → Azure structurally forced
+# a single root object → LLM collapsed 70 beats into one, every beat
+# fell back to legacy. See memory
+# ``project_shape_c_azure_structured_output_array_bug.md``.
+_REFINER_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["refined_beats"],
+    "properties": {
+        "refined_beats": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["refined_visual", "refined_scene", "style_block"],
+                "properties": {
+                    "refined_visual": {"type": "string"},
+                    "refined_scene": {"type": "string"},
+                    "style_block": {"type": "string"},
+                },
+            },
+        },
+    },
+}
 
 
 def _build_user_prompt(
@@ -427,9 +493,10 @@ def _build_user_prompt(
         )
     lines.append("")
     lines.append(
-        f"Return a JSON array of EXACTLY {len(beats)} objects, in beat "
-        "order. Each object MUST have refined_visual, refined_scene, "
-        "style_block — and no other fields."
+        f"Return a JSON wrapper object {{\"refined_beats\": [...]}} whose "
+        f"``refined_beats`` array contains EXACTLY {len(beats)} objects, in "
+        "beat order. Each inner object MUST have refined_visual, "
+        "refined_scene, style_block — and no other fields."
     )
     return "\n".join(lines)
 
@@ -553,12 +620,67 @@ def refine_prompts_batch(
     }
 
     try:
+        # 2026-05-24 v4 fix — pass the wrapper-object json_schema so
+        # Azure's structured-output API actually accepts an array shape
+        # (root arrays are rejected; see _REFINER_RESPONSE_SCHEMA + the
+        # 2026-05-16 floating-objects post-mortem). ``strict_schema=True``
+        # enables Azure's CFG token-level enforcement so the LLM cannot
+        # physically emit a non-conforming response.
         raw = llm_call(
             full_prompt,
             output_json=True,
+            json_schema=_REFINER_RESPONSE_SCHEMA,
+            strict_schema=True,
             model="haiku",
             stage="prompt_refine",
         )
+    except TypeError as exc:
+        # Defensive: older call_llm injection seams (e.g. test stubs)
+        # may not accept json_schema / strict_schema. Retry once
+        # without — the legacy seam will still echo back its mock data.
+        if "json_schema" in str(exc) or "strict_schema" in str(exc):
+            logger.warning(
+                "prompt_refiner: llm_call seam %r doesn't accept "
+                "json_schema/strict_schema kwargs (%s); retrying without",
+                getattr(llm_call, "__qualname__", llm_call), exc,
+            )
+            try:
+                raw = llm_call(
+                    full_prompt,
+                    output_json=True,
+                    model="haiku",
+                    stage="prompt_refine",
+                )
+            except Exception as exc2:  # noqa: BLE001
+                logger.warning(
+                    "prompt_refiner: LLM call failed on retry (%s); "
+                    "all %d beats fall back to legacy path",
+                    exc2, n,
+                )
+                for i in range(n):
+                    _track_refiner_fallback(i, "truncated")
+                _emit_refiner_io_artifact(
+                    input_batch=input_batch,
+                    raw_response_str=f"<{type(exc2).__name__}: {exc2}>",
+                    parsed=None,
+                    fallback_count=n,
+                )
+                return [{} for _ in range(n)]
+        else:
+            logger.warning(
+                "prompt_refiner: LLM call failed (%s); all %d beats fall "
+                "back to legacy path",
+                exc, n,
+            )
+            for i in range(n):
+                _track_refiner_fallback(i, "truncated")
+            _emit_refiner_io_artifact(
+                input_batch=input_batch,
+                raw_response_str=f"<{type(exc).__name__}: {exc}>",
+                parsed=None,
+                fallback_count=n,
+            )
+            return [{} for _ in range(n)]
     except Exception as exc:  # noqa: BLE001 — refiner must never raise
         logger.warning(
             "prompt_refiner: LLM call failed (%s); all %d beats fall "
@@ -575,13 +697,32 @@ def refine_prompts_batch(
         )
         return [{} for _ in range(n)]
 
+    # 2026-05-24 v4 fix — unwrap the wrapper object. Accept either
+    # (a) the v4 wrapper shape ``{"refined_beats": [...]}`` (the canonical
+    # response under the strict json_schema), OR (b) a bare list (a
+    # back-compat seam: legacy injection seams in tests may still return
+    # a raw list directly).
     raw_response_str = _raw_response_string(raw)
-    if not isinstance(raw, list) or len(raw) != n:
-        reason = "dict_returned" if isinstance(raw, dict) else "truncated"
+    if isinstance(raw, dict) and "refined_beats" in raw:
+        unwrapped = raw["refined_beats"]
+    elif isinstance(raw, list):
+        unwrapped = raw
+    else:
+        unwrapped = None
+
+    if not isinstance(unwrapped, list) or len(unwrapped) != n:
+        if unwrapped is None:
+            reason = (
+                "dict_returned" if isinstance(raw, dict) else "truncated"
+            )
+        else:
+            reason = "length_mismatch"
         logger.warning(
-            "prompt_refiner: LLM returned %s (expected list of %d); "
-            "whole batch falls back",
-            type(raw).__name__ if not isinstance(raw, list) else f"list[{len(raw)}]",
+            "prompt_refiner: LLM returned %s (expected wrapper "
+            "{\"refined_beats\":[...]} with %d items); whole batch "
+            "falls back",
+            type(raw).__name__ if not isinstance(unwrapped, list)
+            else f"list[{len(unwrapped)}]",
             n,
         )
         for i in range(n):
@@ -593,6 +734,10 @@ def refine_prompts_batch(
             fallback_count=n,
         )
         return [{} for _ in range(n)]
+
+    # From here on, ``unwrapped`` is the validated list of N items —
+    # rebind ``raw`` so the existing per-item loop is unchanged.
+    raw = unwrapped
 
     out: list[dict[str, str]] = []
     # Local import — strip_text_bait lives next door and pulling it at
@@ -649,6 +794,7 @@ __all__ = [
     "compute_input_hash",
     "refine_prompts_batch",
     "refined_fields_for_render",
+    "_REFINER_RESPONSE_SCHEMA",
 ]
 
 
