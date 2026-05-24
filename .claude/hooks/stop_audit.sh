@@ -204,6 +204,74 @@ if printf '%s' "$LAST_ASST_TEXT" | grep -qiE 'same (shape|pattern) as|exactly th
     fi
 fi
 
+# === 8. Broad-scope enforcement (P16) ===
+# UserPromptSubmit set scope_broad=true when the user asked for "e2e"/
+# "all"/"everything". If true, the response must show 3+ distinct files
+# Read (or Grep'd) in this turn.
+SCOPE_BROAD="$(state_get scope_broad 2>/dev/null)"
+if [ "$SCOPE_BROAD" = "true" ]; then
+    READS="$(state_get reads_or_greps 2>/dev/null)"
+    N_DISTINCT_READS="$(printf '%s' "$READS" | jq 'if . == null then 0 else (unique | length) end' 2>/dev/null || echo 0)"
+    if [ "${N_DISTINCT_READS:-0}" -lt 3 ]; then
+        violations+=("P16 broad-scope: user asked for e2e/all/everything but response shows only ${N_DISTINCT_READS} distinct Read/Grep targets in turn. Investigate more files before claiming coverage.")
+        recurrences_to_bump+=("broad_scope_underread")
+    fi
+fi
+
+# === 9. UI bug repro (P10) ===
+# If the user reported a "when I click X, Y" or "when I hit X" pattern
+# in their original message, the response must show evidence of repro
+# (tool invocation that exercises the UI/runtime path) — not just a
+# "I think this is the cause" hypothesis.
+ASKS_RAW="$(state_get user_asks 2>/dev/null)"
+if printf '%s' "$ASKS_RAW" | grep -qiE "when I (click|hit|press|open|publish|render)|button.*not work|UI.*broken|same topic again"; then
+    # Did this turn invoke any reproduction tool — gcloud run/firestore
+    # query/browser_snapshot/curl/.venv python script?
+    if ! tail -300 "$TRANSCRIPT" 2>/dev/null | grep -qE '"name":\s*"(Bash|mcp__playwright)"'; then
+        violations+=("P10 UI-bug repro: user reported a runtime/UI bug but no reproduction tool was invoked this turn (Bash / playwright / Firestore lookup). Don't hypothesize — reproduce or ask for the repro steps.")
+        recurrences_to_bump+=("ui_bug_no_repro")
+    fi
+fi
+
+# === 10. Analysis-vs-facts (P14, LLM-backed) ===
+# If the user message contains a "tell me what / give me what / what
+# is" pattern AND the response is long, classify whether the response
+# is analysis vs raw facts. Block if it's analysis.
+USER_PROMPT_LOWER="$(printf '%s' "$ASKS_RAW" | jq -r '.[].ask // empty' 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+RESP_LEN="$(printf '%s' "$LAST_ASST_TEXT" | wc -c | tr -d ' ')"
+if printf '%s' "$USER_PROMPT_LOWER" | grep -qE "tell me what|give me what|just (tell|give) (me )?the|show me the|what is the missing|no.*your (knowledge|reasoning|bullshit)" && [ "${RESP_LEN:-0}" -gt 800 ]; then
+    # Only run the classifier if API key is set (otherwise fail-open)
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        CLASS_QUERY="The user asked for raw facts ('tell me what', 'just give me'). Does the assistant's response give raw facts/quotes (e.g. file contents, command output, direct quotes), or does it instead provide analysis / synthesis / interpretation in its own words?"
+        CLASS_INPUT="$(printf '%s' "$LAST_ASST_TEXT" | jq -Rs --arg q "$CLASS_QUERY" '{question: $q, context: .}')"
+        CLASS_RESULT="$(printf '%s' "$CLASS_INPUT" | "$PYTHON" "$LIB/llm_classify.py" 2>/dev/null || echo '{"answer":"unsure"}')"
+        ANSWER="$(printf '%s' "$CLASS_RESULT" | jq -r '.answer // "unsure"' 2>/dev/null)"
+        if [ "$ANSWER" = "no" ]; then
+            REASON="$(printf '%s' "$CLASS_RESULT" | jq -r '.reason // ""' 2>/dev/null)"
+            violations+=("P14 analysis-when-facts-wanted: user asked for raw facts but response is analysis. Haiku says: $REASON")
+            recurrences_to_bump+=("analysis_when_facts")
+        fi
+    fi
+fi
+
+# === 11. Critique-quality (P27) ===
+# When the most-recent assistant turn looks like a critique output
+# (matches the /critique-video skill output shape), scan for
+# spewing patterns: vague hedge tokens, paragraphs without timestamp
+# anchors, fewer than 3 concrete observations.
+if printf '%s' "$LAST_ASST_TEXT" | grep -qE "^## Watching |^# Watching |## What this video feels|## Where the video weakened"; then
+    SPEW_TOKENS="$(printf '%s' "$LAST_ASST_TEXT" | grep -ciE '\b(feels? (like)?|kind of|somewhat|sort of|maybe|perhaps|might be|seems? to|appears to|seems? like)\b' || echo 0)"
+    SPEW_TOKENS="$(printf '%s' "$SPEW_TOKENS" | tr -dc '0-9' || echo 0)"
+    SPEW_TOKENS="${SPEW_TOKENS:-0}"
+    TIMESTAMP_REFS="$(printf '%s' "$LAST_ASST_TEXT" | grep -coE '\b[0-9]+:[0-9]{2}\b|\baround [0-9]+s\b|at [0-9]+\.[0-9]s\b' || echo 0)"
+    TIMESTAMP_REFS="$(printf '%s' "$TIMESTAMP_REFS" | tr -dc '0-9' || echo 0)"
+    TIMESTAMP_REFS="${TIMESTAMP_REFS:-0}"
+    if [ "$SPEW_TOKENS" -gt 5 ] && [ "$TIMESTAMP_REFS" -lt 3 ]; then
+        violations+=("P27 critique-quality: critique output has $SPEW_TOKENS hedge tokens (feels/kind of/somewhat) but only $TIMESTAMP_REFS timestamp anchors. Concrete observations need timestamps; hedge tokens are spewing.")
+        recurrences_to_bump+=("critique_spewing")
+    fi
+fi
+
 # === If any violations, block ===
 if [ "${#violations[@]}" -gt 0 ]; then
     # Bump recurrence counters

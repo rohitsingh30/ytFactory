@@ -90,16 +90,102 @@ if [ "$TOOL_NAME" = "Edit" ]; then
     esac
 fi
 
-# === Dependency exists (P11) ===
-# When invoking gcloud run jobs execute / images.generate / music
-# selection paths, check that referenced asset paths actually exist
-# in the worker image (best-effort — we can only check local paths).
-# Keep this narrow: only fire on Bash with very specific patterns.
+# === Track WebSearch invocations in turn state ===
+# Used by P04 research-before-creative (below) to know if research
+# happened in this turn. Also used by Stop hook for fabrication audit.
+if [ "$TOOL_NAME" = "WebSearch" ] || [ "$TOOL_NAME" = "WebFetch" ]; then
+    Q="$(printf '%s' "$TOOL_INPUT" | jq -r '.query // .url // empty' 2>/dev/null)"
+    state_append "web_searches" "$(printf '%s' "$Q" | jq -Rs '.')"
+fi
+
+# === Track Read/Grep invocations in turn state ===
+# Used by Stop hook's P20 pattern-claim audit + P16 broad-scope check.
+if [ "$TOOL_NAME" = "Read" ] || [ "$TOOL_NAME" = "Grep" ] || [ "$TOOL_NAME" = "Glob" ]; then
+    TARGET="$(printf '%s' "$TOOL_INPUT" | jq -r '.file_path // .pattern // .path // empty' 2>/dev/null)"
+    state_append "reads_or_greps" "$(printf '%s' "$TARGET" | jq -Rs '.')"
+fi
+
+# === P04 research-before-creative ===
+# Block Write on data/critiques/, docs/, and PIL imaging tool calls
+# unless WebSearch was invoked earlier in this turn — catches the
+# "produced a CTA mockup from priors" failure mode.
+if [ "$TOOL_NAME" = "Write" ]; then
+    PATH_WRITE="$(printf '%s' "$TOOL_INPUT" | jq -r '.file_path // empty' 2>/dev/null)"
+    case "$PATH_WRITE" in
+        */data/critiques/*.png|*/data/critiques/*.jpg|*/data/critiques/*-mockup*|*/docs/*-mockup*)
+            # Creative image output — require prior research
+            N_SEARCHES="$(state_get "web_searches" | jq 'if . == null then 0 else length end' 2>/dev/null || echo 0)"
+            if [ "$N_SEARCHES" = "0" ] || [ "$N_SEARCHES" = "null" ]; then
+                violations+=("P04 fabricated-output: about to Write a creative artifact ($PATH_WRITE) but no WebSearch / WebFetch was invoked this turn. Modern conventions for this output type must be researched first, not produced from priors.")
+            fi
+            ;;
+    esac
+fi
+
+# Same gate on PIL imaging via Python — catch the .venv/bin/python ... PIL pattern
+# Tightened to require ACTUAL python execution context AND an
+# image-write call. Pure word-mentions (in commit messages, in shell
+# heredocs that aren't Python) must NOT trigger; that was the
+# false-positive that fired on this hook's own commit.
 if [ "$TOOL_NAME" = "Bash" ]; then
     CMD="$(printf '%s' "$TOOL_INPUT" | jq -r '.command // empty' 2>/dev/null)"
-    # gcloud run jobs execute with --update-env-vars=... — check job_id
-    # syntax. Skip; that's runtime.
-    :
+    # Skip if the command is clearly data-piping (echo/printf/cat
+    # heredoc to another tool). Those embed source code as data
+    # strings — the trigger words mentioned inside aren't actual
+    # python execution.
+    CMD_TRIMMED="$(printf '%s' "$CMD" | sed 's/^[[:space:]]*//')"
+    IS_DATA_PIPE=0
+    case "$CMD_TRIMMED" in
+        echo\ *|printf\ *|cat\ *|"git commit"*|"git add"*) IS_DATA_PIPE=1 ;;
+    esac
+    # Also skip if the command is invoking a hook directly (testing infra).
+    if printf '%s' "$CMD" | grep -qE '\.claude/hooks/' 2>/dev/null; then
+        IS_DATA_PIPE=1
+    fi
+
+    if [ "$IS_DATA_PIPE" = "0" ]; then
+        # Heuristic: require python-execution invocation AND PIL import
+        # AND an image .save() call within close proximity, AND output
+        # path matches mockup/preview/sample/cta.
+        if printf '%s' "$CMD" | grep -qE '(\.venv/bin/python|python3?\s)' 2>/dev/null \
+           && printf '%s' "$CMD" | grep -qE 'from PIL' 2>/dev/null \
+           && printf '%s' "$CMD" | grep -qE '\.save\(' 2>/dev/null \
+           && printf '%s' "$CMD" | grep -qiE '\.save\([^)]*(mockup|preview|sample|cta)' 2>/dev/null; then
+            N_SEARCHES="$(state_get "web_searches" | jq 'if . == null then 0 else length end' 2>/dev/null || echo 0)"
+            if [ "$N_SEARCHES" = "0" ] || [ "$N_SEARCHES" = "null" ]; then
+                violations+=("P04 fabricated-output: Python+PIL command writes a mockup/preview/sample image without prior WebSearch this turn. Research the visual conventions first.")
+            fi
+        fi
+    fi
+fi
+
+# === Dependency exists (P11) ===
+# Check that named asset paths referenced in Bash commands actually
+# resolve. Targets the music_bed / voice_ref / weights class of bug.
+if [ "$TOOL_NAME" = "Bash" ]; then
+    CMD="$(printf '%s' "$TOOL_INPUT" | jq -r '.command // empty' 2>/dev/null)"
+    # Pattern: --update-env-vars=KEY=path or YTFACTORY_X=path or
+    # similar. Extract every path-shaped argument and verify.
+    # Conservative: only check paths that look like channel music/
+    # or voice_refs/ — these are the documented F24 drift surface.
+    MISSING_PATHS="$(printf '%s' "$CMD" | "$PROJECT_ROOT/.venv/bin/python" - << 'PY' 2>/dev/null
+import re, sys, os
+cmd = sys.stdin.read()
+paths = re.findall(
+    r"((?:[a-z]+/){1,5}(?:music|voice_refs|weights)/[a-zA-Z0-9_.-]+\.(?:mp3|wav|safetensors|bin|pt))",
+    cmd,
+)
+repo = os.environ.get("PROJECT_ROOT", "/Users/rohit/ytFactory")
+for p in paths:
+    full = os.path.join(repo, p)
+    if not os.path.exists(full):
+        print(p)
+PY
+)"
+    if [ -n "$MISSING_PATHS" ]; then
+        violations+=("P11 dependency-asset-missing: Bash references asset paths that don't exist on disk:")
+        violations+=("$(printf '%s\n' "$MISSING_PATHS" | head -3 | sed 's/^/  - /')")
+    fi
 fi
 
 if [ "${#violations[@]}" -gt 0 ]; then
