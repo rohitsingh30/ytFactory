@@ -190,6 +190,23 @@ def main() -> int:
             parts.append(f"**Available skills:** {', '.join(skills)}")
             parts.append("")
 
+    # Job-telemetry pre-fetch (P31, 2026-05-24).
+    # When the user's prompt mentions a 32-char hex job_id, auto-fetch
+    # the highest-signal artifact (refiner_io.json fallback_count) +
+    # event-stream rollup and inject BEFORE the agent generates. Closes
+    # the "agent talks about <job_id> without ever opening the artifact"
+    # failure mode that bit 88d98126 (fallback_count: 14 was in the
+    # artifact the whole time, agent never opened it).
+    user_prompt = os.environ.get("USER_PROMPT", "")
+    if user_prompt:
+        try:
+            from job_telemetry import telemetry_block_for_prompt
+            tel = telemetry_block_for_prompt(user_prompt)
+            if tel:
+                parts.append(tel)
+        except Exception:
+            pass
+
     # Memory-content injection (2026-05-24 add).
     # Score every feedback_*/project_* memory file's frontmatter
     # (name + description) against the user's current prompt.
