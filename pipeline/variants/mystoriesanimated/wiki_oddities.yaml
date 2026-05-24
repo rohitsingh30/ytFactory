@@ -43,14 +43,17 @@ duration_target_s: [12, 22]
 output_resolution: [1080, 1920]
 
 # Closer CTA — Wiki-Oddities native. The channel-default AITA
-# YTA/NTA verdict frame is wrong here (these are strange-but-true
-# facts, not moral disputes). Two-clause split mirrors AITA's panel
-# layout — pipeline.captions._split_closer_format breaks on the
-# comma. Task #30 (2026-05-24): without this override every wiki-
-# oddities short shipped with the AITA closer because the variant
-# YAML's closer_format wasn't being read by the spec.extra
-# backfill (channel default leaked through).
-closer_format: "LIKE if surprising, COMMENT a weirder one."
+# YTA/NTA verdict frame is wrong (these are strange-but-true facts,
+# not moral disputes). User rule 2026-05-24: every script narration
+# already ends with a comment-prompting question, so the closer panel
+# must NOT duplicate that ask with COMMENT. Instead: LIKE (cheap
+# engagement, fits any non-verdict story) + SUBSCRIBE-for-more
+# (drives the channel growth ask). Two-clause comma split —
+# captions._split_closer_format renders one clause per row.
+# Task #30 (2026-05-24): without this override every wiki-oddities
+# short shipped with the AITA closer because variant YAML's
+# closer_format wasn't being read by the spec.extra backfill.
+closer_format: "LIKE if surprising, SUBSCRIBE for more oddities"
 closer_hold_s: 1.0
 
 # Source defaults — what the /make-script skill should pull by default.

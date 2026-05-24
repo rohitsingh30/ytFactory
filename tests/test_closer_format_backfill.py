@@ -215,47 +215,69 @@ def test_tifu_variant_closer_differs_from_channel_default() -> None:
     )
 
 
-def test_today_in_history_declares_non_aita_closer() -> None:
-    """Today-In-History is informational, not a moral dispute — the
-    AITA YTA/NTA closer doesn't fit. The variant must declare its
-    own closer_format that omits AITA tokens."""
+def _assert_non_aita_subscribe_closer(closer: str, variant: str) -> None:
+    """Shared assertions for non-AITA-verdict variant closers.
+
+    User rule 2026-05-24: every script narration already ends with a
+    comment-prompting question. So the closer panel must:
+      - keep LIKE (cheap engagement, fits any non-verdict story)
+      - keep / add SUBSCRIBE (channel growth ask)
+      - NOT contain COMMENT (would duplicate the narration's question)
+      - NOT contain AITA / YTA / NTA tokens (those are AITA-only)
+    """
+    assert closer, (
+        f"{variant} must declare a non-empty closer_format. Without it, "
+        f"the backfill inherits the channel-default AITA closer. "
+        f"Got: {closer!r}"
+    )
+    upper = closer.upper()
+    assert "YTA" not in upper and "NTA" not in upper and "AITA" not in upper, (
+        f"{variant} closer must not contain AITA tokens (those are "
+        f"AITA-variant-only). Got: {closer!r}"
+    )
+    assert "LIKE" in upper, (
+        f"{variant} closer must keep LIKE — cheap engagement that "
+        f"fits any non-verdict story. User correction 2026-05-24. "
+        f"Got: {closer!r}"
+    )
+    assert "SUBSCRIBE" in upper or "FOLLOW" in upper, (
+        f"{variant} closer must include SUBSCRIBE — narration already "
+        f"asks for comments, so the closer panel should drive the "
+        f"channel growth ask. Got: {closer!r}"
+    )
+    assert "COMMENT" not in upper, (
+        f"{variant} closer must NOT include COMMENT — every script "
+        f"already ends with a comment-prompting question, so adding "
+        f"COMMENT to the closer panel duplicates the script's ask. "
+        f"User rule 2026-05-24. Got: {closer!r}"
+    )
+
+
+def test_today_in_history_closer_shape() -> None:
+    """Today-In-History is informational, not a moral dispute. Must
+    use LIKE + SUBSCRIBE (no COMMENT, no AITA tokens) per the
+    user's 2026-05-24 closer-shape rule."""
     import yaml
     p = (
         _REPO_ROOT / "pipeline" / "variants" / "mystoriesanimated"
         / "today_in_history.yaml"
     )
     cfg = yaml.safe_load(p.read_text(encoding="utf-8"))
-    closer = cfg.get("closer_format")
-    assert closer, (
-        f"today_in_history.yaml must declare a non-empty closer_format. "
-        f"Without it, the backfill inherits the channel-default AITA "
-        f"closer ('LIKE if YTA, COMMENT if NTA') which is wrong for "
-        f"informational history content. Got: {closer!r}"
-    )
-    upper = closer.upper()
-    assert "YTA" not in upper and "NTA" not in upper and "AITA" not in upper, (
-        f"today_in_history closer must not contain AITA tokens. Got: {closer!r}"
+    _assert_non_aita_subscribe_closer(
+        cfg.get("closer_format") or "", "today_in_history.yaml"
     )
 
 
-def test_wiki_oddities_declares_non_aita_closer() -> None:
-    """Wiki-Oddities is strange-but-true facts, not a moral dispute —
-    the AITA YTA/NTA closer doesn't fit. The variant must declare its
-    own closer_format that omits AITA tokens."""
+def test_wiki_oddities_closer_shape() -> None:
+    """Wiki-Oddities is strange-but-true facts, not a moral dispute.
+    Must use LIKE + SUBSCRIBE (no COMMENT, no AITA tokens) per the
+    user's 2026-05-24 closer-shape rule."""
     import yaml
     p = (
         _REPO_ROOT / "pipeline" / "variants" / "mystoriesanimated"
         / "wiki_oddities.yaml"
     )
     cfg = yaml.safe_load(p.read_text(encoding="utf-8"))
-    closer = cfg.get("closer_format")
-    assert closer, (
-        f"wiki_oddities.yaml must declare a non-empty closer_format. "
-        f"Without it, the backfill inherits the channel-default AITA "
-        f"closer which is wrong for strange-but-true facts. "
-        f"Got: {closer!r}"
-    )
-    upper = closer.upper()
-    assert "YTA" not in upper and "NTA" not in upper and "AITA" not in upper, (
-        f"wiki_oddities closer must not contain AITA tokens. Got: {closer!r}"
+    _assert_non_aita_subscribe_closer(
+        cfg.get("closer_format") or "", "wiki_oddities.yaml"
     )
