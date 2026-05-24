@@ -102,7 +102,7 @@ closer_hold_s: 1.5
 # section, ported to physics. SUBSCRIBE first because a faceless
 # science channel monetizes on subs > likes (algorithm rewards
 # session retention, not engagement velocity).
-closer_format: "SUBSCRIBE for more decoders\nLIKE if this changed how you see physics"
+closer_format: "LIKE if this changed how you see physics, SUBSCRIBE for more cosmos decoders."
 
 # Cosmos Decoded narration is third-person documentary, not first-person
 # AITA. Same opt-out as HistoryRecapped + Sports.

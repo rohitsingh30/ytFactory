@@ -119,7 +119,7 @@ closer_hold_s: 1.2
 # likes and comments. Without this the closer reads as a passive caption.
 # Format: two lines, separated by \n; first line is the LIKE side, second
 # is the COMMENT side. Channel-customisable per niche.
-closer_format: "LIKE if you watched it live\nCOMMENT your favourite stoppage-time goal"
+closer_format: "LIKE if you watched it live, SUBSCRIBE for every weekend recap."
 
 # Sports stories are third-person narration ("Manchester City need to
 # beat QPR") rather than AITA-style ("AITA for refusing to host my

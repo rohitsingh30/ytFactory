@@ -159,7 +159,7 @@ closer_hold_s: 1.5
 # means we avoid verdict-bait ("WHO WAS RIGHT") and instead drive
 # audience-curating engagement (which battle next, which front).
 # Two lines separated by \n; first = LIKE side, second = COMMENT side.
-closer_format: "SUBSCRIBE for more deep dives\nLIKE if you learned something"
+closer_format: "LIKE if you learned something today, SUBSCRIBE for more historical deep dives."
 
 # War stories are third-person documentary narration ("On the morning
 # of June 6th, 1944…") rather than AITA-style first-person hooks.

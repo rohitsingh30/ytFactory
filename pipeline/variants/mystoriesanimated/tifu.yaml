@@ -69,7 +69,7 @@ output_resolution: [1080, 1920]
 # empathy, COMMENT for a one-up. The two-clause split mirrors AITA's
 # panel rendering (pipeline.captions._split_closer_format breaks on
 # the comma into the two visual rows).
-closer_format: "LIKE if you've been there, COMMENT your worst."
+closer_format: "LIKE if you've done worse than this, SUBSCRIBE for tomorrow's regret story."
 closer_hold_s: 1.0
 
 # ---- Upload (Stage 8) — shipped to MyStoriesAnimated YouTube channel.

@@ -246,7 +246,7 @@ output_resolution: [1080, 1920]   # vertical for shorts
 # prompt; no verdict acronym CTA (this isn't a debate channel). Kids'
 # algo rewards comments asking the next-rhyme question, so the closer
 # invites the viewer to comment which rhyme should be next.
-closer_format: "SUBSCRIBE for the next rhyme!\nCOMMENT your favorite rhyme below"
+closer_format: "LIKE if you sang along with us, SUBSCRIBE for the next nursery rhyme."
 closer_hold_s: 0.4                # tightened to 0.4s after v5 critique —
                                   # the embedded CTA reads instantly; with
                                   # word timestamps now capped to audio

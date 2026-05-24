@@ -44,7 +44,7 @@ duration_target_s: [12, 24]
 output_resolution: [1080, 1920]
 
 # Closer panel + hold — see aita_cliffhanger_animated.yaml.
-closer_format: "SUBSCRIBE, for Part 2"
+closer_format: "LIKE if you need to know how it ends, SUBSCRIBE so you don't miss Part 2."
 closer_hold_s: 1.4
 
 # Source defaults — top of the day from r/AmItheAsshole self-posts only.

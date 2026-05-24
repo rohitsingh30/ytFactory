@@ -122,7 +122,7 @@ closer_hold_s: 1.5
 # Closer CTA — judgment-bait, not poll. The 2026 engagement-bait
 # classifier down-weights "vote / poll" CTAs; "agree / swap" passes
 # because it asks for a personal judgment.
-closer_format: "LIKE if you agree, COMMENT who you'd swap in"
+closer_format: "LIKE if you agree with the ranking, SUBSCRIBE for next week's tier list."
 
 # Format flag — make_shorts.py reads this to wire 5 rank-chip overlays
 # at beat[1..5].start. Channels without this flag render unchanged.

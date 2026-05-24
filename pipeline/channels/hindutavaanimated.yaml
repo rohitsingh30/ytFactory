@@ -157,7 +157,7 @@ output_resolution: [1080, 1920]
 # No YTA/NTA verdict-bait. Spoken CTA is woven into the last beat
 # (per feedback_closer_caption_style — captions = narration only),
 # and the closer panel is a simple namaste + subscribe overlay.
-closer_format: "जय श्री कृष्णा 🙏  SUBSCRIBE"
+closer_format: "LIKE if you felt blessed by this katha, SUBSCRIBE for more divine stories."
 closer_hold_s: 1.5
 
 # ---- Long-form kathaa mode (NEW 2026-05-05) ---------------------------

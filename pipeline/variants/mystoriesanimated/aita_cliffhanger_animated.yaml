@@ -81,7 +81,7 @@ output_resolution: [1080, 1920]
 
 # Closer panel — comma split renders as two stacked rows
 # ["SUBSCRIBE", "for Part 2"] via captions._split_closer_format.
-closer_format: "SUBSCRIBE, for Part 2"
+closer_format: "LIKE if you need to know how it ends, SUBSCRIBE so you don't miss Part 2."
 # Slightly longer hold than standard AITA (1.0s). The cliffhanger-then-
 # subscribe ask is heavier than a vote prompt — viewers need a beat
 # to read SUBSCRIBE and act before the loop kicks them out.

@@ -30,7 +30,7 @@ part2_trigger:
 # The visual panel for this channel is rendered from the spec_template
 # overlay below, NOT from this string, but keeping it set means the
 # rewriter sees the same Part-2 framing as the other cliffhanger channels.
-closer_format: "SUBSCRIBE, for Part 2"
+closer_format: "LIKE if you need to know how it ends, SUBSCRIBE so you don't miss Part 2."
 
 # ------------------------------------------------------------------
 # spec_template: filled in per-Short by make_spec.py.
