@@ -436,6 +436,53 @@ Hard rules (violations make the rendered Short worse):
     render into mush. Stick to camera/lighting/composition vocabulary
     in your fields; let style_prefix carry the medium.
 
+18. PER-BEAT SUBJECT TOKEN. The `subject` field names WHO the camera
+    is on for THIS beat. If the narration line says "he poured ketchup,"
+    subject is `partner` and the rendered image shows him doing the
+    action — the protagonist may appear in the background but is not
+    the focal subject of that beat. Allowed tokens:
+      - "protagonist" — the narrator / OP. Default ONLY when no other
+        character is named or implied in the narration line.
+      - "partner" — the romantic/conflict partner (signals: "my
+        partner", "my husband", "my wife", "my boyfriend",
+        "my girlfriend", "he said", "she said" where "he/she" refers
+        to the partner from context).
+      - "secondary_<role>" — any OTHER named supporting character.
+        Use the role token from the supporting cast list (e.g.
+        "secondary_sister", "secondary_amelia", "secondary_mil",
+        "secondary_coworker", "secondary_friend").
+      - "scene" — environment-only beat: empty room, prop insert,
+        exterior establishing shot, hands-only without a body. Use
+        this when the beat is intentionally faceless (the reveal, a
+        prop close-up, a wide cold-open).
+    Critic 2026-05-24 (preflight 88d98126 grievance #1): when the
+    narration said "he takes two bites and said it's missing
+    something" the rendered panel showed the WOMAN eating — the
+    author defaulted to protagonist regardless of who the line was
+    about. The subject token forces the camera to follow the
+    narrative agent.
+
+19. PER-BEAT EMOTION TOKEN. The `emotion` field is the emotional
+    register of the SUBJECT for THIS beat. Pick exactly one token
+    from the closed list:
+      neutral, amused, proud, anxious, surprised, outraged,
+      defeated, tender, tense, exhausted, hopeful, fearful,
+      annoyed, resigned.
+    Pick the STRONGEST emotion present in the narration line, not
+    an average across the story. Map mood phrases directly:
+      "I was so proud" → proud
+      "he poured ketchup over my stew" (from subject=protagonist's
+        side) → outraged
+      "I sat alone with the bowl" → defeated
+      "we laughed about it later" → amused
+    Critic 2026-05-24 (preflight 88d98126 grievance #2): the
+    protagonist's face was the same concerned/sad expression in
+    every panel even as the narration escalated proud →
+    outraged → defeated. The emotion token drives a deterministic
+    posture/face cue at refine time (see prompt_refiner._EMOTION_CUES),
+    so picking the right token is load-bearing for the rendered
+    expression — not a stylistic preference.
+
 Return ONLY a JSON object with one field, ``"beats"``, whose value is
 an array of EXACTLY the requested number of beat objects in beat order.
 No prose, no markdown fences, no commentary before or after.
@@ -465,6 +512,41 @@ No prose, no markdown fences, no commentary before or after.
 # Reference: learn.microsoft.com/azure/foundry/openai/how-to/structured-outputs
 # (Supported types, "All fields must be required", "Always set
 # additionalProperties: false in objects").
+# Allowed per-beat emotion vocabulary. Restricted to 14 tokens so the
+# refiner's _EMOTION_CUES lookup is closed-form and the LLM cannot drift
+# into synonyms ("infuriated" / "livid" / "mad" → all collapse to
+# "outraged"). Surfaced 2026-05-24 (preflight 88d98126 critique row #2):
+# the protagonist's face was the same concerned/sad expression in every
+# beat even as the narration escalated proud → outraged → defeated. The
+# author wasn't emitting an emotion token and the refiner had nothing
+# to inject. This list IS the contract — adding a token requires a
+# matching entry in pipeline/images/prompt_refiner._EMOTION_CUES.
+ALLOWED_EMOTIONS: tuple[str, ...] = (
+    "neutral", "amused", "proud", "anxious", "surprised", "outraged",
+    "defeated", "tender", "tense", "exhausted", "hopeful", "fearful",
+    "annoyed", "resigned",
+)
+
+# Allowed per-beat subject vocabulary. Closed-form on purpose:
+#   - "protagonist"   — the narrator / OP / hero (the cast.narrator).
+#   - "partner"       — the conflict partner ("my partner", "my husband",
+#                        "my wife", "my boyfriend", "my girlfriend"). Maps
+#                        to the FIRST cast.supporting entry whose role/
+#                        name matches when available; otherwise falls back
+#                        to a generic age/gender description mined from
+#                        the narration.
+#   - "secondary_<n>" — any OTHER named supporting character (sister,
+#                        coworker, friend, MIL, etc.). The literal token
+#                        in the schema is "secondary_<role>" — see
+#                        pipeline/images/prompt_refiner._subject_lead.
+#   - "scene"         — environment-only beat (no human focal subject:
+#                        empty room, prop insert, exterior establishing).
+# A schema enum would over-constrain (secondary_<name> needs a wildcard);
+# we accept any string and the refiner's _subject_lead does the routing.
+ALLOWED_SUBJECT_PREFIXES: tuple[str, ...] = (
+    "protagonist", "partner", "scene",
+)
+
 _BEAT_RESPONSE_SCHEMA: dict = {
     "type": "object",
     "additionalProperties": False,
@@ -475,11 +557,29 @@ _BEAT_RESPONSE_SCHEMA: dict = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["key_visual", "scene", "narration_line"],
+                "required": [
+                    "key_visual", "scene", "narration_line",
+                    "subject", "emotion",
+                ],
                 "properties": {
                     "key_visual": {"type": "string"},
                     "scene": {"type": "string"},
                     "narration_line": {"type": "string"},
+                    # subject is free-form (must accept "secondary_<name>")
+                    # — the refiner's _subject_lead routes the token to
+                    # either the cast.supporting list, a generic age/
+                    # gender description from the narration, or the
+                    # protagonist fallback.
+                    "subject": {"type": "string"},
+                    # emotion is closed-form: 14 tokens. Mirror the
+                    # _EMOTION_CUES table in prompt_refiner. Azure strict
+                    # mode enforces this enum at token generation time so
+                    # the LLM cannot emit "livid" / "infuriated" — only
+                    # tokens with a deterministic posture/face cue.
+                    "emotion": {
+                        "type": "string",
+                        "enum": list(ALLOWED_EMOTIONS),
+                    },
                 },
             },
         },
@@ -657,6 +757,32 @@ def _build_user_prompt(
 
     fewshot_block = json.dumps(_FEWSHOT, indent=2)
 
+    # Supporting-cast role tokens — exposed to the LLM so it knows the
+    # exact "secondary_<role>" string to emit per beat. Without this the
+    # LLM either invents tokens that downstream can't route or collapses
+    # everything to "secondary_other". Mirrors the supporting list from
+    # cast_block; included separately so the schema-binding instruction
+    # below can quote concrete tokens.
+    supporting_role_tokens: list[str] = []
+    for s in supporting or []:
+        name = (s.get("name") or "").strip().lower()
+        if not name:
+            continue
+        # Normalise to a valid identifier — strip non-alpha, replace
+        # spaces with underscores. "my MIL" → "mil"; "Amelia" → "amelia";
+        # "her boyfriend Jake" → "her_boyfriend_jake".
+        token = re.sub(r"[^a-z0-9]+", "_", name).strip("_")
+        if token:
+            supporting_role_tokens.append(f"secondary_{token}")
+    supporting_token_clause = ""
+    if supporting_role_tokens:
+        supporting_token_clause = (
+            "\nALLOWED secondary subject tokens for THIS story (per "
+            "Rule 18; pick the matching token when the beat is about "
+            "that character):\n  " + ", ".join(supporting_role_tokens)
+            + "\n"
+        )
+
     return f"""\
 SOURCE STORY (raw — mine this for visual richness, not just the narration):
 \"\"\"
@@ -679,7 +805,7 @@ backdrop. The 2026-05 critic caught two consecutive closer beats
 rendering on a flat dark-grey background because the scene was purely
 "helpless shrug" with no setting or palette token to anchor the model):
 {style_prefix.strip()[:200]}{'...' if len(style_prefix) > 200 else ''}
-{opening_block}
+{opening_block}{supporting_token_clause}
 EXAMPLE OUTPUT FORMAT (4-beat sample from a different story — match this granularity):
 {fewshot_block}
 
@@ -695,6 +821,13 @@ object in the array has these fields:
   human-body subject, never a bare noun.
 - "scene": environment with TWO spatial anchors (Rule 14) + lighting
   (Rule 15), ≤40 words total.
+- "subject": Rule 18 — one of "protagonist", "partner",
+  "secondary_<role>" (use the allowed tokens above), or "scene".
+  Pick based on WHO/WHAT the camera is on for this beat.
+- "emotion": Rule 19 — one of: neutral, amused, proud, anxious,
+  surprised, outraged, defeated, tender, tense, exhausted, hopeful,
+  fearful, annoyed, resigned. The strongest emotion in the narration
+  line for THIS subject.
 """
 
 
@@ -1050,6 +1183,45 @@ def _validate_and_clean(
         # whatever order the LLM happened to emit.
         nl = (item.get("narration_line") or "").strip() or beats[i].text.strip()
 
+        # Subject + emotion (added 2026-05-24 for preflight 88d98126
+        # grievances #1 + #2). Per ``feedback_silent_fallback_unshippable_output``
+        # the fallback is PER-BEAT (not whole-batch): if the LLM omitted
+        # or emitted an invalid token, that beat defaults to protagonist/
+        # neutral and a warning is logged. The render still ships — but
+        # operators see the gap.
+        subject = (item.get("subject") or "").strip().lower()
+        if not subject:
+            print(
+                f"[prompts] beat {i} missing 'subject' field; defaulting "
+                f"to 'protagonist'. Narration line: {nl[:80]!r}"
+            )
+            subject = "protagonist"
+        elif not (
+            subject in ("protagonist", "partner", "scene")
+            or subject.startswith("secondary_")
+        ):
+            print(
+                f"[prompts] beat {i} invalid subject token {subject!r}; "
+                f"defaulting to 'protagonist'. Allowed: protagonist | "
+                f"partner | secondary_<role> | scene."
+            )
+            subject = "protagonist"
+
+        emotion = (item.get("emotion") or "").strip().lower()
+        if not emotion:
+            print(
+                f"[prompts] beat {i} missing 'emotion' field; defaulting "
+                f"to 'neutral'. Narration line: {nl[:80]!r}"
+            )
+            emotion = "neutral"
+        elif emotion not in ALLOWED_EMOTIONS:
+            print(
+                f"[prompts] beat {i} invalid emotion token {emotion!r}; "
+                f"defaulting to 'neutral'. Allowed: "
+                f"{', '.join(ALLOWED_EMOTIONS)}."
+            )
+            emotion = "neutral"
+
         # Hard verb-led validator (post-2026-05-17, job 3cd2b3b5 critique
         # row #3 / Rule 13). Bare-noun key_visuals ("a red ketchup
         # bottle", "an empty stew pot", "a yellow shirt") render as
@@ -1072,7 +1244,13 @@ def _validate_and_clean(
                 f"'over-shoulder of A doing B' — never just a noun."
             )
 
-        cleaned.append({"key_visual": kv, "scene": sc, "narration_line": nl})
+        cleaned.append({
+            "key_visual": kv,
+            "scene": sc,
+            "narration_line": nl,
+            "subject": subject,
+            "emotion": emotion,
+        })
 
     # Hard composition-variety validator (post-2026-05-17, job 3cd2b3b5
     # critique row #5 / Rule 10). The pre-fix render had 9–12s show two
@@ -1451,6 +1629,7 @@ def author_beat_prompts(
         mood=mood,
         channel_key=channel_key,
         scene_anchor=scene_anchor,
+        supporting=supporting,
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1469,6 +1648,7 @@ def _maybe_refine_prompts(
     mood: str | None,
     channel_key: str | None,
     scene_anchor: str | None = None,
+    supporting: list[dict] | None = None,
 ) -> list[dict]:
     """Optional second-pass refiner — gated by ``YTFACTORY_PROMPT_REFINER``.
 
@@ -1533,6 +1713,7 @@ def _maybe_refine_prompts(
             mood=mood,
             channel_key=channel_key,
             scene_anchor=scene_anchor,
+            supporting=supporting,
         )
     except Exception as exc:  # noqa: BLE001 — refiner is best-effort
         print(

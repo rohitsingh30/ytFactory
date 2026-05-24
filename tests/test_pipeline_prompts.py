@@ -558,10 +558,16 @@ class ValidateAndAuthorAdditionalTest(unittest.TestCase):
         # Post-2026-05-17 author_beat_prompts uses a verb-led validator
         # in _validate_and_clean (key_visual must NOT be a bare noun),
         # so the test's mock LLM output needs a shot-led key_visual.
+        # Post-2026-05-24 (v5-subject-emotion) the schema also requires
+        # ``subject`` + ``emotion`` per beat (Rules 18/19); without them
+        # the validator logs a per-beat fallback warning and defaults to
+        # protagonist/neutral.
         llm_out = [{
             "narration_line": "I found the phone.",
             "key_visual": "medium close-up of the character lifting a phone",
             "scene": "the character holding a phone, soft afternoon window light, blurred kitchen counter behind, warm palette",
+            "subject": "protagonist",
+            "emotion": "surprised",
         }]
         # Disable the channel-richness gate for this unit test — the
         # gate is integration-tested separately; here we're pinning the

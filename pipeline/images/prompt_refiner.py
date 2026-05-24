@@ -131,7 +131,30 @@ def _emit_refiner_io_artifact(
         pass
 
 
-REFINER_VERSION = "v4-wrapper-schema"  # 2026-05-24 P4.3: bumped from v3-scene-anchor
+REFINER_VERSION = "v5-subject-emotion"  # 2026-05-24: bumped from v4-wrapper-schema
+# so caches predating the per-beat subject + emotion injection auto-invalidate.
+# v4 honoured the author's verb-led key_visual verbatim, which meant when the
+# narration said "he poured ketchup" but the author defaulted to a protagonist-
+# centered shot, the rendered panel showed the wrong character (preflight
+# 88d98126, AITA ketchup, 2026-05-24 grievance #1). And the protagonist's face
+# was the same concerned/sad expression in every panel even as the narration
+# escalated proud → outraged → defeated (grievance #2). v5 takes the per-beat
+# ``subject`` + ``emotion`` tokens that the author now emits (Rules 18 + 19 in
+# pipeline/llm/prompts._SYSTEM) and deterministically injects:
+#   - a subject-lead clause prepended to refined_visual when subject != protagonist
+#     (e.g. "medium shot of a 32-year-old man pouring red ketchup over a steaming
+#      bowl of stew" instead of the author's default protagonist-centric shot)
+#   - an emotion cue clause appended to refined_visual driving the subject's
+#     posture/face (e.g. emotion=outraged → "her mouth pressed into a hard line,
+#     eyes wide with disbelief, leaning back from the bowl")
+# Both injections are post-LLM, deterministic, and table-driven (see
+# _EMOTION_CUES + _subject_lead below) so the refined_visual carries the
+# subject swap + emotion progression regardless of LLM drift. The hash now
+# includes subject + emotion so any per-beat token change auto-invalidates
+# the cached refined fields.
+
+# Previous version constant (kept inline as a historical breadcrumb):
+# REFINER_VERSION = "v4-wrapper-schema"  # 2026-05-24 P4.3: bumped from v3-scene-anchor
 # so caches predating the Shape-C wrapper-schema fix (job c4aed485 long-form
 # render failure) auto-invalidate. v3 called call_llm(output_json=True) without
 # a json_schema, falling back to ``response_format={"type":"json_object"}``
@@ -187,6 +210,200 @@ def shot_for_beat(beat_index: int) -> str:
     directive.
     """
     return SHOT_ROTATION[beat_index % len(SHOT_ROTATION)]
+
+
+# Emotion → deterministic posture/face cue lookup. Each cue is a
+# physically-observable clause (mouth + eyes + brow + posture) that
+# Z-Image-Turbo can render without ambiguity — emotion words alone
+# ("outraged", "defeated") collapse to a generic "concerned" face on the
+# 6B model. Mirrors the 14-token whitelist in
+# ``pipeline/llm/prompts.ALLOWED_EMOTIONS`` — adding a token here without
+# adding to the schema (or vice versa) breaks the contract; both lists
+# are pinned by tests/test_refiner_emotion_injection.py.
+#
+# Cues lean on the existing _SYSTEM Rule 8 vocabulary (posture/face
+# verbs) and are deliberately short (8-16 words) so they don't blow
+# past z-turbo's 250-word total budget when concatenated with the LLM's
+# refined_visual body.
+_EMOTION_CUES: dict[str, str] = {
+    "neutral": (
+        "lips relaxed, eyes calm, brow soft, shoulders level"
+    ),
+    "amused": (
+        "lips parted in a half-smile, eyes crinkled at the corners, "
+        "head tilted slightly, shoulders loose"
+    ),
+    "proud": (
+        "lips slightly parted in a small triumphant smile, gaze on the "
+        "subject of pride, chin lifted, chest open"
+    ),
+    "anxious": (
+        "lips pressed thin, eyes wide and darting, brow knit, shoulders "
+        "drawn forward in a tense hunch"
+    ),
+    "surprised": (
+        "mouth open in a small O, eyes wide, brows raised high, "
+        "shoulders pulled back as if recoiling"
+    ),
+    "outraged": (
+        "mouth pressed into a hard line, eyes wide with disbelief, brow "
+        "furrowed sharply, leaning back away from the focal point"
+    ),
+    "defeated": (
+        "lips parted in a slack exhale, eyes lowered to the floor, "
+        "shoulders rounded, head dropped forward"
+    ),
+    "tender": (
+        "lips curved in a soft closed-mouth smile, eyes warm and lidded, "
+        "head inclined toward the subject, shoulders open"
+    ),
+    "tense": (
+        "lips pressed tight, jaw clenched visible at the cheek, eyes "
+        "narrowed, shoulders raised toward the ears"
+    ),
+    "exhausted": (
+        "lips slightly parted, eyelids heavy and half-closed, brow "
+        "smooth from fatigue, shoulders slumped"
+    ),
+    "hopeful": (
+        "lips in a small closed-mouth smile, eyes lifted upward, brow "
+        "lightly raised, chest open and breathing in"
+    ),
+    "fearful": (
+        "lips parted, eyes wide and fixed on the threat, brow lifted in "
+        "the middle, shoulders pulled up and inward"
+    ),
+    "annoyed": (
+        "lips pursed off-centre, eyes narrowed to a flat stare, brow "
+        "furrowed shallowly, one shoulder cocked higher than the other"
+    ),
+    "resigned": (
+        "lips curved down in a small closed-mouth frown, eyes lidded "
+        "and looking off-frame, shoulders dropped in a slow exhale"
+    ),
+}
+
+
+def emotion_cue(emotion: str | None) -> str:
+    """Return the deterministic posture/face cue for an emotion token.
+
+    Unknown / missing emotion → returns the ``neutral`` cue so the
+    rendered subject still has an explicit expression (without this,
+    Z-Image-Turbo defaults to the same concerned-but-faintly-sad face it
+    falls into when given a bare character_description and no posture
+    cue — the exact 88d98126 grievance #2 failure mode).
+
+    The caller injects this cue into ``refined_visual`` so the subject's
+    expression is locked at refine time, independent of LLM drift.
+    """
+    if not emotion:
+        return _EMOTION_CUES["neutral"]
+    e = emotion.strip().lower()
+    return _EMOTION_CUES.get(e, _EMOTION_CUES["neutral"])
+
+
+def _subject_lead(
+    *,
+    subject: str | None,
+    supporting: list[dict] | None,
+    narration_line: str | None,
+) -> str | None:
+    """Return the shot-lead clause for a non-protagonist subject, or None.
+
+    When ``subject == "protagonist"`` or unset, returns None — the LLM's
+    refined_visual already centres on the protagonist via the
+    ``character_description`` that the renderer prepends at compose time.
+
+    When ``subject == "partner"`` or ``"secondary_<role>"``:
+      1. Look up the matching entry in ``supporting`` by aliases /
+         secondary_<token> suffix.
+      2. If found, build "medium shot of <description from supporting>"
+         from the matched cast row.
+      3. If not found, fall back to a generic age/gender description
+         mined from the narration line (regex-based: "32M" / "32-year-
+         old man" / "my partner") — better than dropping the beat per
+         feedback_silent_fallback_unshippable_output.md.
+      4. As a last resort, "medium shot of the partner" — a token that
+         z-turbo at least disambiguates as "a different person from the
+         protagonist", even without specifics.
+
+    Returns None for ``subject == "scene"`` so environment-only beats
+    aren't forced to include a human body.
+    """
+    if not subject or subject == "protagonist":
+        return None
+    if subject == "scene":
+        return None
+
+    role = subject.lower().strip()
+    # Find matching supporting entry. For "partner" match by relationship
+    # tokens in name/aliases. For "secondary_<role>" match by token suffix.
+    matched_desc: str | None = None
+    if supporting:
+        if role == "partner":
+            partner_tokens = {
+                "partner", "husband", "wife", "boyfriend", "girlfriend",
+                "fiance", "fiancé", "fiancée", "spouse",
+            }
+            for s in supporting:
+                name_l = (s.get("name") or "").strip().lower()
+                aliases_l = [
+                    (a or "").strip().lower() for a in (s.get("aliases") or [])
+                ]
+                if name_l in partner_tokens or any(
+                    a in partner_tokens for a in aliases_l
+                ):
+                    matched_desc = (s.get("description") or "").strip() or None
+                    break
+        elif role.startswith("secondary_"):
+            wanted = role[len("secondary_"):]
+            for s in supporting:
+                name_l = (s.get("name") or "").strip().lower()
+                aliases_l = [
+                    (a or "").strip().lower() for a in (s.get("aliases") or [])
+                ]
+                name_token = re.sub(r"[^a-z0-9]+", "_", name_l).strip("_")
+                alias_tokens = {
+                    re.sub(r"[^a-z0-9]+", "_", a).strip("_") for a in aliases_l
+                }
+                if name_token == wanted or wanted in alias_tokens:
+                    matched_desc = (s.get("description") or "").strip() or None
+                    break
+
+    if matched_desc:
+        # Cap the description so the prepended clause doesn't blow past
+        # z-turbo's per-prompt budget. The supporting description is
+        # already canonicalised by cast.py to ~30 words.
+        body = matched_desc.rstrip(".")
+        return f"medium shot of {body}"
+
+    # Fallback: mine age/gender from the narration line (regex). "32M",
+    # "32-year-old man", "my 32-year-old husband", "her boyfriend (28M)".
+    if narration_line:
+        m = re.search(
+            r"\b(\d{1,2})\s*(?:[-\s]?year[-\s]?old\s+)?([MmFf])\b",
+            narration_line,
+        )
+        if m:
+            age = m.group(1)
+            gender = "man" if m.group(2).lower() == "m" else "woman"
+            return f"medium shot of a {age}-year-old {gender}"
+        m = re.search(
+            r"\b(\d{1,2})[-\s]year[-\s]old\s+(man|woman|boy|girl|guy|lady)\b",
+            narration_line,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            age = m.group(1)
+            return f"medium shot of a {age}-year-old {m.group(2).lower()}"
+
+    # Last resort: a "different person from the protagonist" token. Better
+    # than nothing — z-turbo at least won't twin-clone the protagonist.
+    if role == "partner":
+        return "medium shot of the partner, a person visually distinct from the protagonist"
+    # "secondary_<role>" with no cast match — strip the prefix for a hint.
+    label = role.replace("secondary_", "").replace("_", " ")
+    return f"medium shot of the {label}, a person visually distinct from the protagonist"
 
 
 # Attractor-word rewrite map — script terms that pattern-match
@@ -273,6 +490,13 @@ def compute_input_hash(
         (style or "").strip(),
         (mood or "").strip(),
         (scene_anchor or "").strip(),
+        # Subject + emotion (v5-subject-emotion). Any per-beat token
+        # change auto-invalidates the cached refined fields — without
+        # this branch, a critic-patched subject/emotion on a cached
+        # beat would still honour the old refined_visual (the exact
+        # cache-staleness footgun the scene_anchor branch closed).
+        (beat.get("subject") or "").strip().lower(),
+        (beat.get("emotion") or "").strip().lower(),
     )
     # Unit-separator joins so accidental whitespace in one field can't
     # collide with another field's content.
@@ -449,6 +673,7 @@ def _build_user_prompt(
     style: str | None,
     mood: str | None,
     scene_anchor: str | None = None,
+    supporting: list[dict] | None = None,
 ) -> str:
     """Assemble the user-facing message for the refiner LLM call.
 
@@ -475,6 +700,27 @@ def _build_user_prompt(
             f"SCENE_ANCHOR (channel-level setting; weave into refined_scene "
             f"when the beat lacks its own setting): {scene_anchor.strip()}"
         )
+    if supporting:
+        # Surface the supporting cast so the LLM can resolve subject
+        # tokens (partner / secondary_<role>) into concrete descriptions.
+        # The downstream _subject_lead also reads this list, so the LLM
+        # mostly just needs to know WHO to swap in — it doesn't need to
+        # invent appearance from thin air.
+        sup_lines = []
+        for s in supporting or []:
+            name = (s.get("name") or "").strip()
+            desc = (s.get("description") or "").strip()
+            aliases = ", ".join(s.get("aliases") or [])
+            if not name or not desc:
+                continue
+            alias_clause = f" (aliases: {aliases})" if aliases else ""
+            sup_lines.append(f"  - {name}{alias_clause} — {desc}")
+        if sup_lines:
+            lines.append(
+                "SUPPORTING CAST (use when a beat's subject token "
+                "points here — partner / secondary_<role>):\n"
+                + "\n".join(sup_lines)
+            )
     lines.append("")
     lines.append("SHOT ROTATION (beat_index → shot_type):")
     for i, shot in enumerate(SHOT_ROTATION):
@@ -486,8 +732,16 @@ def _build_user_prompt(
         kv = sanitize_attractors((beat.get("key_visual") or "").strip())
         sc = sanitize_attractors((beat.get("scene") or "").strip())
         shot = shot_for_beat(i)
+        # Per-beat subject + emotion (v5-subject-emotion). Surfaced to
+        # the LLM so it can write refined_visual that already centres on
+        # the right subject — the post-LLM injection (_subject_lead +
+        # emotion_cue) is the deterministic safety net for when the LLM
+        # forgets the swap or smooths the emotion away.
+        subject = (beat.get("subject") or "").strip().lower() or "protagonist"
+        emotion = (beat.get("emotion") or "").strip().lower() or "neutral"
         lines.append(
-            f"\nBEAT {i} [shot: {shot}]\n"
+            f"\nBEAT {i} [shot: {shot}; subject: {subject}; "
+            f"emotion: {emotion}]\n"
             f"  key_visual: {kv}\n"
             f"  scene:      {sc}"
         )
@@ -548,6 +802,7 @@ def refine_prompts_batch(
     mood: str | None,
     channel_key: str | None = None,
     scene_anchor: str | None = None,
+    supporting: list[dict] | None = None,
     llm_call: Callable[..., Any] | None = None,
 ) -> list[dict[str, str]]:
     """Refine a batch of authored beats in ONE LLM call.
@@ -606,6 +861,7 @@ def refine_prompts_batch(
         style=style,
         mood=mood,
         scene_anchor=scene_anchor,
+        supporting=supporting,
     )
     full_prompt = _REFINER_SYSTEM + "\n\n---\n\n" + user_prompt
     input_batch = {
@@ -762,8 +1018,67 @@ def refine_prompts_batch(
             _track_refiner_fallback(i, "length_violation")
             out.append({})
             continue
+
+        # v5-subject-emotion: deterministic post-LLM injection. The LLM
+        # was instructed to centre refined_visual on the beat's subject
+        # token and convey the emotion via posture/face — but LLM drift
+        # is a known failure mode (the author defaulted to protagonist
+        # on the partner-pours-ketchup beat in preflight 88d98126). The
+        # post-pass injections are belt-and-suspenders:
+        #   - SUBJECT LEAD: when subject != protagonist, prepend a shot
+        #     clause that anchors the camera on the right person. This
+        #     wins over whatever the LLM put in refined_visual because
+        #     the diffusion model treats the FIRST clause as the primary
+        #     subject anchor (Z-Image-Turbo + FLUX both use this order
+        #     heuristic; see project_z_image_turbo_verb_led_prompts).
+        #   - EMOTION CUE: appended as a final posture/face clause so the
+        #     subject's expression is rendered explicitly. Without this
+        #     z-turbo defaults to a generic concerned-but-faintly-sad
+        #     face regardless of emotion token (preflight 88d98126
+        #     grievance #2 — same face proud → outraged → defeated).
+        # Raw tokens — preserve emptiness so we can distinguish "author
+        # didn't emit a token" (long-form panels: subject + emotion are
+        # not in the long-form panel schema yet) from "author emitted a
+        # token". Shorts always carry both (Rules 18/19); long-form
+        # currently doesn't. Without this distinction long-form would
+        # gain a forced "neutral" cue on every panel, which would damage
+        # heightened beats (volcanic eruption rendered with "lips
+        # relaxed, brow soft" — wrong).
+        subject_raw = (beat.get("subject") or "").strip().lower()
+        emotion_raw = (beat.get("emotion") or "").strip().lower()
+        subject_token = subject_raw or "protagonist"
+        narration_line = beat.get("narration_line") or beat.get("scene") or ""
+
+        lead = _subject_lead(
+            subject=subject_token,
+            supporting=supporting,
+            narration_line=narration_line,
+        )
+
+        # Compose: [optional lead] + LLM refined_visual + [optional cue].
+        # Lead is prepended ONLY when subject != protagonist (protagonist
+        # path is unchanged from v4 by design).
+        # Cue is appended ONLY when the author emitted a non-empty
+        # emotion token AND subject != "scene". This keeps v4 long-form
+        # callers (whose panels don't carry emotion) bit-identical to
+        # their previous renders, while the shorts path (Rule 19 mandates
+        # emotion) gets the deterministic expression lock. subject=scene
+        # beats also skip the cue: no human focal subject, so the face/
+        # posture clause would be noise on the environment shot.
+        cue_to_inject = ""
+        if emotion_raw and subject_token != "scene":
+            cue_to_inject = emotion_cue(emotion_raw)
+
+        final_rv_parts: list[str] = []
+        if lead:
+            final_rv_parts.append(lead.rstrip("."))
+        final_rv_parts.append(rv_clean.rstrip("."))
+        if cue_to_inject:
+            final_rv_parts.append(cue_to_inject)
+        final_rv = ", ".join(p for p in final_rv_parts if p)
+
         out.append({
-            "refined_visual": rv_clean,
+            "refined_visual": final_rv,
             "refined_scene": rs_clean,
             "style_block": refined["style_block"],
             "refined_version": REFINER_VERSION,
@@ -775,6 +1090,12 @@ def refine_prompts_batch(
                 mood=mood,
                 scene_anchor=scene_anchor,
             ),
+            # Surface the injected tokens so render-time inspectors +
+            # critic tooling can see what got woven in without diffing
+            # the wire prompt. Not consumed by build_full_prompt — purely
+            # diagnostic / archival.
+            "subject_lead": lead or "",
+            "emotion_cue": cue_to_inject,
         })
     fallback_count = sum(1 for slot in out if not slot)
     _emit_refiner_io_artifact(
@@ -794,6 +1115,9 @@ __all__ = [
     "compute_input_hash",
     "refine_prompts_batch",
     "refined_fields_for_render",
+    "emotion_cue",
+    "_EMOTION_CUES",
+    "_subject_lead",
     "_REFINER_RESPONSE_SCHEMA",
 ]
 
