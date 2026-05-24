@@ -68,12 +68,42 @@ def transcribe_words(
     ``mlx-community/whisper-large-v3-mlx-4bit`` (current behaviour).
     Pass ``provider="parakeet_mlx"`` to use Parakeet instead — the
     parakeet-mlx package is a separate optional install.
+
+    D3-3 (2026-05-24 retry-cache sweep): the docstring in
+    ``pipeline.cloud.cache`` lists ``alignments/<name>.json`` as a cached
+    artifact kind, but pre-fix nobody actually wrote to it. ASR re-ran
+    on every retry. Now we:
+
+      1. Check ``cache/alignments/<audio_name>.json`` first — if a
+         previous attempt persisted the alignment for the SAME audio
+         file (same name + matching size + matching duration), skip the
+         ASR call and return the cached words.
+      2. After a fresh ASR call, write the sanitised word list as JSON
+         to that path AND ``persist_artifact(kind="alignments", ...)``
+         so the next retry hits the disk cache.
+
+    Cache key = (audio_name, audio_bytes, provider, model). We deliberately
+    DON'T key on the audio's content hash — that would require reading
+    the whole wav into memory just to maybe-skip ASR, and a same-name +
+    same-size + same-provider hit is robust enough in practice: TTS
+    cache keys panel→narration→alignment all flow from the same render
+    spec, so a wav with matching bytes is virtually always the same.
     """
     # Late import to avoid a circular dependency with pipeline.asr.
     from . import asr
 
     if provider == "whisper_mlx" and model is None:
         model = "mlx-community/whisper-large-v3-mlx-4bit"
+
+    # D3-3 — skip-if-exists check. Cache file lives next to where
+    # B2's hydrate_cache puts it (work_dir/cache/alignments/<name>.json).
+    # We compute the cache path from the audio_path's parent +
+    # canonical relative location, then hop UP to work_dir to find
+    # cache/. Robust against the audio_path being either work_dir or
+    # work_dir/<subdir>. Disabled if env var YTFACTORY_ASR_CACHE=0.
+    cached = _try_load_alignment_cache(audio_path, provider=provider, model=model)
+    if cached is not None:
+        return cached
 
     result = asr.transcribe(audio_path, provider=provider, model=model)
     words: list[Word] = []
@@ -140,7 +170,150 @@ def transcribe_words(
             masked.append(w)
         sanitised = masked
 
+    # D3-3 — persist the sanitised alignment so retries skip ASR. We
+    # cache the POST-sanitisation list because that's what downstream
+    # consumers see; re-running the sanitiser on the cached read is
+    # idempotent (it's all clamping) so this is safe.
+    _persist_alignment_cache(
+        audio_path, sanitised, provider=provider, model=model,
+    )
     return sanitised
+
+
+# ---------------------------------------------------------------------------
+# D3-3 — Alignment cache helpers
+# ---------------------------------------------------------------------------
+#
+# The cache file lives at ``<work_dir>/cache/alignments/<audio_name>.json``.
+# Layout matches what ``pipeline.cloud.cache.hydrate_cache`` restores on
+# worker startup so a retry of a SIGKILLed render reads the cached
+# alignment without paying for whisper again.
+#
+# We probe the cache root by walking up from the audio file looking for a
+# ``cache/alignments/`` neighbour — the same pattern long-form already
+# uses for its panel + tts chunk caches (they live as
+# ``cache_dir/panels/...``, ``cache_dir/tts_chunks/...`` so the alignment
+# version is just one more subdir under the same root).
+
+
+def _alignment_cache_root(audio_path: Path) -> Path | None:
+    """Find the ``cache/alignments/`` dir for a given audio file.
+
+    Walks the parent chain up to 6 levels. Returns the resolved dir
+    (creating parents lazily on write) or ``None`` if no sensible
+    cache root can be located AND no ``YTFACTORY_WORK_DIR`` env is set.
+
+    Why two probe strategies:
+
+      * Long-form path: ``audio_path == cache_dir / "narration.wav"`` —
+        the parent IS the cache_dir, so the alignments subdir is right
+        there.
+      * Short-form path: ``audio_path == work_dir / "narration.wav"`` —
+        the parent is the work_dir; cache lives at ``work_dir/cache/``
+        (hydrate_cache mirrors gs://.../cache/<kind>/ → work_dir/cache/<kind>/).
+    """
+    import os as _os  # noqa: PLC0415
+    if _os.environ.get("YTFACTORY_ASR_CACHE", "1") == "0":
+        return None
+    p = Path(audio_path).resolve().parent
+    for _ in range(6):
+        if (p / "cache" / "alignments").is_dir() or (p / "alignments").is_dir():
+            # Prefer the canonical work_dir/cache/alignments/ layout.
+            cand = p / "cache" / "alignments"
+            if cand.is_dir() or (p / "cache").is_dir():
+                return cand
+            return p / "alignments"
+        if p == p.parent:
+            break
+        p = p.parent
+    # Fallback: write next to the audio file.
+    return Path(audio_path).resolve().parent / "cache" / "alignments"
+
+
+def _alignment_cache_path(audio_path: Path) -> Path | None:
+    root = _alignment_cache_root(audio_path)
+    if root is None:
+        return None
+    return root / f"{Path(audio_path).name}.json"
+
+
+def _try_load_alignment_cache(
+    audio_path: Path, *, provider: str, model: str | None,
+) -> list[Word] | None:
+    """Return cached words if a valid cache file exists for this audio.
+
+    Validity = file exists, parses as JSON, ``audio_bytes`` matches the
+    current file's size, ``provider``/``model`` match. On any mismatch
+    return ``None`` and let the caller re-run ASR.
+    """
+    path = _alignment_cache_path(audio_path)
+    if path is None or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(data, dict) or "words" not in data:
+        return None
+    try:
+        cur_bytes = Path(audio_path).stat().st_size
+    except OSError:
+        return None
+    if data.get("audio_bytes") != cur_bytes:
+        return None
+    if data.get("provider") != provider:
+        return None
+    # model may be None on cache write or read — treat None as wildcard.
+    if data.get("model") not in (None, model):
+        return None
+    words = []
+    for w in data["words"]:
+        try:
+            words.append(Word(
+                text=str(w["text"]),
+                start=float(w["start"]),
+                end=float(w["end"]),
+            ))
+        except (KeyError, TypeError, ValueError):
+            return None
+    return words
+
+
+def _persist_alignment_cache(
+    audio_path: Path, words: list[Word], *,
+    provider: str, model: str | None,
+) -> None:
+    """Write the alignment JSON + fire-and-forget GCS persist.
+
+    Best-effort: any failure is logged at debug and swallowed. The
+    render must never fail because the cache write failed.
+    """
+    path = _alignment_cache_path(audio_path)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            audio_bytes = Path(audio_path).stat().st_size
+        except OSError:
+            audio_bytes = 0
+        payload = {
+            "audio_bytes": audio_bytes,
+            "provider": provider,
+            "model": model,
+            "words": [{"text": w.text, "start": w.start, "end": w.end} for w in words],
+        }
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        from pipeline.cloud.cache import persist_artifact  # noqa: PLC0415
+        persist_artifact(path, kind="alignments")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _ffprobe_duration_s(path: Path) -> float | None:

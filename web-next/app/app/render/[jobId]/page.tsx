@@ -67,11 +67,28 @@ export default function RenderDetailPage() {
     try {
       const res = await jobsApi.retry(jobId);
       const copied = res.cache_objects_copied;
-      toast.success("Retry dispatched", {
-        description: copied > 0
-          ? `Reusing ${copied} cached artifact${copied === 1 ? "" : "s"} from the failed run`
-          : "Starting fresh — no cache available from the failed run",
-      });
+      // D3-4 (2026-05-24 retry-cache sweep) — surface GCS copy failure.
+      // cache_objects_copied=0 alone is ambiguous: the source prefix
+      // might have been empty (legit cold start, no warning needed) OR
+      // GCS list/copy raised (transient hiccup, retry will silently
+      // pay full GPU cost). The backend now stamps cache_copy_failed
+      // when the latter happened so we can show a louder warning.
+      if (res.cache_copy_failed) {
+        toast.warning("Retry dispatched — cache copy failed", {
+          description:
+            "GCS list/copy raised during the cache rehydrate step. " +
+            "Full GPU cost will apply on this retry (~₹20). Check " +
+            "the worker logs if this repeats.",
+          duration: 10000,
+        });
+      } else {
+        toast.success("Retry dispatched", {
+          description:
+            copied > 0
+              ? `Reusing ${copied} cached artifact${copied === 1 ? "" : "s"} from the failed run`
+              : "Starting fresh — no cache available from the failed run",
+        });
+      }
       router.push(`/app/render/${res.retry_job_id}`);
     } catch (e) {
       toast.error("Retry failed", {

@@ -320,8 +320,74 @@ class RetryJobRouteTest(unittest.TestCase):
             sys_p.stop()
 
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["cache_objects_copied"], 0)
+        body = resp.json()
+        self.assertEqual(body["cache_objects_copied"], 0)
+        # D3-4 — GCS exception during list/copy must flip the
+        # cache_copy_failed flag so the UI can show a louder warning
+        # than the "no cache available" message. Pre-fix this was
+        # silent: list_raises exception was swallowed and the response
+        # was identical to "source prefix was empty" → user couldn't
+        # tell the retry was about to pay full cost from a transient
+        # GCS hiccup.
+        self.assertTrue(body["cache_copy_failed"])
         self._fake_cloud_run.trigger_render_job.assert_called_once()
+
+    def test_retry_with_empty_cache_does_not_flag_failure(self) -> None:
+        """D3-4 — legitimate cold start (empty source prefix) MUST NOT
+        set cache_copy_failed. Only GCS exceptions should flip it."""
+        jobs = _FakeJobs()
+        jobs.create("j-empty-noflag", status="failed", proposal={
+            "channel": "historyrecapped", "topic": "x",
+        })
+
+        bucket = _FakeBucket([])  # empty + no exception
+        sys_p, attr_p = _install_fake_storage(bucket)
+        sys_p.start()
+        attr_p.start()
+        try:
+            client = self._build_app(jobs)
+            resp = client.post("/api/jobs/j-empty-noflag/retry")
+        finally:
+            attr_p.stop()
+            sys_p.stop()
+
+        body = resp.json()
+        self.assertEqual(body["cache_objects_copied"], 0)
+        self.assertFalse(
+            body["cache_copy_failed"],
+            "cache_copy_failed must stay False when the source prefix "
+            "was simply empty — only true exceptions flip the flag",
+        )
+
+    def test_retry_with_copy_blob_exception_flags_failure(self) -> None:
+        """D3-4 — exception during the copy_blob loop (not just list)
+        also flips cache_copy_failed. Covers the case where listing
+        succeeds but the per-blob copy raises (IAM blip on the copy
+        operation specifically, post-list)."""
+        jobs = _FakeJobs()
+        jobs.create("j-copy-fail", status="failed", proposal={
+            "channel": "historyrecapped", "topic": "x",
+        })
+
+        # list_raises=False but copy_raises=True — list succeeds and
+        # returns one blob, but copy_blob() raises mid-loop.
+        bucket = _FakeBucket(
+            [_FakeBlob("jobs/j-copy-fail/cache/panels/p0.png", b"P0")],
+            copy_raises=True,
+        )
+        sys_p, attr_p = _install_fake_storage(bucket)
+        sys_p.start()
+        attr_p.start()
+        try:
+            client = self._build_app(jobs)
+            resp = client.post("/api/jobs/j-copy-fail/retry")
+        finally:
+            attr_p.stop()
+            sys_p.stop()
+
+        body = resp.json()
+        self.assertEqual(body["cache_objects_copied"], 0)
+        self.assertTrue(body["cache_copy_failed"])
 
     def test_retry_dispatch_failure_surfaces_502_and_marks_failed(self) -> None:
         jobs = _FakeJobs()

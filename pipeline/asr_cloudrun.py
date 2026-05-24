@@ -39,6 +39,8 @@ Env vars
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import logging
 import os
 import re
@@ -118,6 +120,26 @@ def align_via_cloud(
 
     if not narration_wav.exists():
         raise FileNotFoundError(f"narration wav not found: {narration_wav}")
+
+    # D3-3 (2026-05-24 retry-cache sweep) — check the disk cache before
+    # paying GPU cost. cache.py:21 documents alignments/<name>.json as a
+    # cached artifact kind but pre-fix nothing wrote to it; B2's hydrate
+    # restores cache/alignments/<key>.json from gs://.../jobs/<id>/cache/
+    # alignments/ on worker startup so a retry skips the cloud call
+    # entirely. Disabled via YTFACTORY_ASR_CACHE=0.
+    cached = _try_load_segments_cache(
+        narration_wav,
+        mode=mode,
+        anchors=anchors,
+        language=language,
+        max_words_per_beat=max_words_per_beat,
+    )
+    if cached is not None:
+        _logger.info(
+            "asr_cloudrun: cache hit (%d segments) — skipping cloud call",
+            len(cached),
+        )
+        return cached
 
     payload: dict[str, Any] = {
         "mode": mode,
@@ -225,7 +247,7 @@ def align_via_cloud(
         success=True,
         status_code=resp.status_code,
     )
-    return [
+    segments = [
         Segment(
             start_s=float(s["start_s"]),
             end_s=float(s["end_s"]),
@@ -235,6 +257,183 @@ def align_via_cloud(
         )
         for i, s in enumerate(data.get("segments", []))
     ]
+    # D3-3 — persist the segments so a retry hits the cache. Best-effort.
+    _persist_segments_cache(
+        narration_wav,
+        segments,
+        mode=mode,
+        anchors=anchors,
+        language=language,
+        max_words_per_beat=max_words_per_beat,
+    )
+    return segments
+
+
+# ---------------------------------------------------------------------------
+# D3-3 — Alignment segments cache (cloud ASR path)
+# ---------------------------------------------------------------------------
+#
+# Cache file layout: ``<work_dir>/cache/alignments/<audio_name>.<key>.json``
+# where <key> is a sha256[:12] over the request parameters (mode, anchors,
+# language, max_words_per_beat) plus the audio byte size. The audio bytes
+# field is what makes the key tight against a same-name-different-content
+# collision (e.g. a re-rendered narration.wav with the same path but
+# different speech).
+#
+# Lives alongside the ``transcribe_words`` cache in pipeline.beats — same
+# directory, different schema (Segment list vs Word list).
+
+
+def _segments_cache_root(audio_path: Path) -> Path | None:
+    """Find the ``cache/alignments/`` dir for a given audio file.
+
+    Same probing strategy as :func:`pipeline.beats._alignment_cache_root`
+    — we walk up the parent chain looking for a ``cache/`` neighbour and
+    fall back to ``<audio_path.parent>/cache/alignments/`` if no neighbour
+    is found. Disabled via ``YTFACTORY_ASR_CACHE=0``.
+    """
+    if os.environ.get("YTFACTORY_ASR_CACHE", "1") == "0":
+        return None
+    p = Path(audio_path).resolve().parent
+    for _ in range(6):
+        if (p / "cache").is_dir():
+            return p / "cache" / "alignments"
+        if p == p.parent:
+            break
+        p = p.parent
+    return Path(audio_path).resolve().parent / "cache" / "alignments"
+
+
+def _segments_cache_key(
+    *,
+    audio_bytes: int,
+    mode: str,
+    anchors: list[str] | None,
+    language: str | None,
+    max_words_per_beat: int,
+) -> str:
+    blob = json.dumps(
+        {
+            "audio_bytes": audio_bytes,
+            "mode": mode,
+            "anchors": list(anchors or []),
+            "language": language or "",
+            "mwpb": int(max_words_per_beat),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
+def _segments_cache_path(
+    audio_path: Path, *,
+    mode: str,
+    anchors: list[str] | None,
+    language: str | None,
+    max_words_per_beat: int,
+) -> Path | None:
+    root = _segments_cache_root(audio_path)
+    if root is None:
+        return None
+    try:
+        ab = Path(audio_path).stat().st_size
+    except OSError:
+        return None
+    key = _segments_cache_key(
+        audio_bytes=ab,
+        mode=mode,
+        anchors=anchors,
+        language=language,
+        max_words_per_beat=max_words_per_beat,
+    )
+    return root / f"{Path(audio_path).stem}.{key}.json"
+
+
+def _try_load_segments_cache(
+    audio_path: Path, *,
+    mode: str,
+    anchors: list[str] | None,
+    language: str | None,
+    max_words_per_beat: int,
+) -> list[Segment] | None:
+    path = _segments_cache_path(
+        audio_path,
+        mode=mode,
+        anchors=anchors,
+        language=language,
+        max_words_per_beat=max_words_per_beat,
+    )
+    if path is None or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(data, dict) or "segments" not in data:
+        return None
+    try:
+        segs = [
+            Segment(
+                start_s=float(s["start_s"]),
+                end_s=float(s["end_s"]),
+                text=str(s.get("text", "")),
+                anchor_id=str(s["anchor_id"]),
+                kind=str(s.get("kind", "")),
+            )
+            for s in data["segments"]
+        ]
+    except (KeyError, TypeError, ValueError):
+        return None
+    return segs
+
+
+def _persist_segments_cache(
+    audio_path: Path,
+    segments: list[Segment],
+    *,
+    mode: str,
+    anchors: list[str] | None,
+    language: str | None,
+    max_words_per_beat: int,
+) -> None:
+    path = _segments_cache_path(
+        audio_path,
+        mode=mode,
+        anchors=anchors,
+        language=language,
+        max_words_per_beat=max_words_per_beat,
+    )
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "mode": mode,
+            "language": language,
+            "max_words_per_beat": max_words_per_beat,
+            "segments": [
+                {
+                    "start_s": s.start_s,
+                    "end_s": s.end_s,
+                    "text": s.text,
+                    "anchor_id": s.anchor_id,
+                    "kind": s.kind,
+                }
+                for s in segments
+            ],
+        }
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        from pipeline.cloud.cache import persist_artifact  # noqa: PLC0415
+        persist_artifact(path, kind="alignments")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _inject_trace_headers(headers: dict[str, str]) -> None:

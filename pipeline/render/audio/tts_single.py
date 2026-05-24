@@ -82,19 +82,47 @@ class TtsSingle:
         provider = spec.voice_provider or "cloudrun_chatterbox"
         voice_id = spec.voice_id or ""
         speed = self._effective_speed(spec)
+        atempo = self._effective_atempo(spec)
 
-        # synthesize is the channel-agnostic TTS dispatcher in
-        # pipeline.audio.__init__. It accepts (text, voice, out_path,
-        # speed, provider, …) and writes the wav to out_path. Cloud→
-        # laptop fallback is wired inside pipeline.tts.cloudrun
-        # (CloudRunUnavailable → local F5/kokoro). Returns the wav path.
-        synthesize(
-            text=narration_text,
-            voice=voice_id,
-            out_path=out_path,
-            speed=speed,
-            provider=provider,
-        )
+        # D3-2 (2026-05-24 retry-cache sweep) — skip-if-exists check.
+        # Pre-fix short-form TTS re-ran on every retry because the cache
+        # layer only knew about long-form chunks (tts_chunked → persists
+        # per-chunk WAVs via long_form_lib.py:495+). Short-form writes a
+        # single narration.wav to work_dir, and the work_dir was being
+        # hydrated from gs://<bucket>/jobs/<id>/cache/tts_chunks/ but the
+        # short engine never wrote anything there. Now we mirror the
+        # long-form contract: check the canonical location AND a hydrate
+        # restore location, then persist after synth so the next retry
+        # short-circuits. Match the long-form pattern at
+        # pipeline/render/shared/long_form_lib.py:464.
+        if not self._restore_or_skip_synth(out_path, work_dir):
+            # synthesize is the channel-agnostic TTS dispatcher in
+            # pipeline.audio.__init__. It accepts (text, voice, out_path,
+            # speed, provider, …) and writes the wav to out_path. Cloud→
+            # laptop fallback is wired inside pipeline.tts.cloudrun
+            # (CloudRunUnavailable → local F5/kokoro). Returns the wav path.
+            synthesize(
+                text=narration_text,
+                voice=voice_id,
+                out_path=out_path,
+                speed=speed,
+                provider=provider,
+            )
+            # D3-2 — persist the synthesised narration.wav so a retry
+            # after a SIGKILL hydrates it and short-circuits this stage.
+            # kind="tts_short" because hydrate_cache mirrors gs path to
+            # work_dir/cache/<kind>/<name> 1-to-1 (cache.py:222) — using
+            # the same "tts_chunks" kind would overload the chunk path
+            # with a different shape (chunks live at cache/tts_chunks/chunk_NNNN.wav
+            # for long-form). Best-effort: never block synthesis.
+            try:
+                from pipeline.cloud.cache import persist_artifact  # noqa: PLC0415
+                persist_artifact(out_path, kind="tts_short", name="narration.wav")
+            except Exception as exc:  # noqa: BLE001
+                import logging as _logging  # noqa: PLC0415
+                _logging.getLogger(__name__).warning(
+                    "tts_single: cache.persist failed (non-fatal): %s", exc,
+                )
 
         # Bind the wav to the cfg that produced it via the voice
         # fingerprint sidecar, so cache-invalidation downstream works
@@ -103,7 +131,6 @@ class TtsSingle:
         # synthesize() doesn't apply it directly — the engine layer
         # may apply atempo as a post-pass; the fingerprint must
         # match the cfg the user picked.
-        atempo = self._effective_atempo(spec)
         fp = compute_fingerprint({
             "tts_provider": provider,
             "tts_voice": voice_id,
@@ -127,6 +154,47 @@ class TtsSingle:
             voice_fingerprint=fp,
             chunk_timings=None,
         )
+
+    def _restore_or_skip_synth(self, out_path: Path, work_dir: Path) -> bool:
+        """Return True iff ``out_path`` is already populated (skip synth).
+
+        Two-stage check, mirroring long_form_lib.py:464:
+
+        1. Direct hit at ``work_dir/narration.wav`` — a same-process
+           re-run (rare) or a worker that survived past TTS and is
+           re-driving the engine for some reason.
+        2. Hydrate hit at ``work_dir/cache/tts_short/narration.wav`` —
+           the canonical location B2's ``hydrate_cache`` mirrors from
+           ``gs://<bucket>/jobs/<id>/cache/tts_short/narration.wav``
+           after a retry. We copy it to ``out_path`` so the rest of
+           ``synth()`` (fingerprint, telemetry) operates on the real
+           file in the conventional place.
+
+        Threshold of 1024 bytes mirrors the long-form pattern at
+        long_form_lib.py:464 — anything smaller is almost certainly
+        a stub / failed write, not a real wav.
+        """
+        if out_path.exists() and out_path.stat().st_size > 1024:
+            return True
+        hydrated = work_dir / "cache" / "tts_short" / "narration.wav"
+        if hydrated.exists() and hydrated.stat().st_size > 1024:
+            try:
+                import shutil  # noqa: PLC0415
+                shutil.copy2(hydrated, out_path)
+                import logging as _logging  # noqa: PLC0415
+                _logging.getLogger(__name__).info(
+                    "tts_single: restored narration.wav from hydrated cache "
+                    "(%d bytes) — skipping synth",
+                    hydrated.stat().st_size,
+                )
+                return True
+            except Exception as exc:  # noqa: BLE001
+                import logging as _logging  # noqa: PLC0415
+                _logging.getLogger(__name__).warning(
+                    "tts_single: cache restore failed (%s); re-synthesising",
+                    exc,
+                )
+        return False
 
     def _narration_text(self, script: dict[str, Any]) -> str:
         # The short engine accepts either a flat narration text or a

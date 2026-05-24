@@ -74,6 +74,7 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Any, Callable
 
 from pipeline import observability as _obs
@@ -92,6 +93,178 @@ def _track_refiner_fallback(beat_index: int, reason: str) -> None:
         )
     except Exception:  # noqa: BLE001
         pass
+
+
+def _track_refiner_cache_hit(batch_key: str, n_beats: int) -> None:
+    """Emit ``prompt_refine.cache.hit`` when the batch is served from disk.
+
+    D3-1 (2026-05-24 retry-cache sweep): the refiner is deterministic but
+    expensive — a 60-beat long-form render costs one whole LLM call. Pre-
+    fix a retry re-ran refine_prompts_batch from scratch because the
+    cache layer only covered panel PNGs + TTS chunk WAVs + ASR alignments,
+    not the refiner's structured JSON output. Hitting this disk cache on
+    a retry saves the LLM call AND avoids re-rolling the fallback risk
+    (a transient Azure 5xx on the second attempt would drop every beat
+    to the legacy path).
+    """
+    try:
+        _obs.track(
+            "prompt_refine.cache.hit",
+            category="llm",
+            success=True,
+            metadata={"batch_key": batch_key, "n_beats": n_beats},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _compute_batch_key(
+    *,
+    beats: list[dict[str, Any]],
+    era_anchor_prefix: str | None,
+    character_description: str | None,
+    style: str | None,
+    mood: str | None,
+    channel_key: str | None,
+    scene_anchor: str | None,
+    supporting: list[dict] | None,
+) -> str:
+    """Stable sha256[:16] of the whole refiner input batch.
+
+    Used as the disk-cache filename so a retry hits the cached refined
+    slots without paying for the LLM call again. Includes
+    :data:`REFINER_VERSION` so a version bump invalidates every prior
+    cached batch.
+
+    The hash MUST cover every input the LLM sees plus the version, so
+    we trivially get cache-staleness invalidation when any of the inputs
+    move (an authored beat patched by the critic, the channel's style
+    block rewritten, era anchor retuned, etc.).
+    """
+    payload = {
+        "v": REFINER_VERSION,
+        "channel_key": channel_key or "",
+        "era_anchor_prefix": era_anchor_prefix or "",
+        "character_description": character_description or "",
+        "style": style or "",
+        "mood": mood or "",
+        "scene_anchor": scene_anchor or "",
+        "supporting": supporting or [],
+        # Only fields that actually feed the LLM. compute_input_hash
+        # already covers (key_visual, scene, subject, emotion) for the
+        # per-beat hash; we mirror that selection here so the batch key
+        # has the same staleness behaviour but at the whole-batch level.
+        "beats": [
+            {
+                "key_visual": (b.get("key_visual") or "").strip(),
+                "scene": (b.get("scene") or "").strip(),
+                "subject": (b.get("subject") or "").strip().lower(),
+                "emotion": (b.get("emotion") or "").strip().lower(),
+                "narration_line": (b.get("narration_line") or "").strip(),
+            }
+            for b in beats
+        ],
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _refiner_cache_path(batch_key: str) -> Path | None:
+    """Where on disk we persist refined slots for a given batch.
+
+    Lives under ``$YTFACTORY_REFINER_CACHE_DIR`` when set (cloud worker
+    points it at ``work_dir/cache/prompts_refined/``), else under
+    ``$YTFACTORY_WORK_DIR/cache/prompts_refined/`` when that's set, else
+    returns ``None`` (purely-local renders with no cache root configured
+    just skip the disk cache and re-run the LLM — no regression vs
+    pre-fix behaviour).
+
+    Why two env vars: the worker entrypoint always exports
+    ``YTFACTORY_WORK_DIR`` so we have a fallback, but callers that need
+    a different layout (e.g. tests) can override with the dedicated var
+    without disturbing every other path that reads ``YTFACTORY_WORK_DIR``.
+    """
+    base = os.environ.get("YTFACTORY_REFINER_CACHE_DIR")
+    if not base:
+        wd = os.environ.get("YTFACTORY_WORK_DIR")
+        if not wd:
+            return None
+        base = os.path.join(wd, "cache", "prompts_refined")
+    return Path(base) / f"{batch_key}.json"
+
+
+def _load_cached_batch(batch_key: str, n: int) -> list[dict[str, str]] | None:
+    """Return the cached refined slots for ``batch_key`` if present + valid.
+
+    Validity = file exists, parses as JSON, contains a list of length ``n``,
+    every element is a dict. On any mismatch we return ``None`` (cache
+    miss; caller re-runs LLM) — corrupted cache must never poison a render.
+    """
+    path = _refiner_cache_path(batch_key)
+    if path is None or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "prompt_refiner: cache read failed for %s (%s); re-running LLM",
+            path, exc,
+        )
+        return None
+    if not isinstance(data, list) or len(data) != n:
+        logger.warning(
+            "prompt_refiner: cache shape mismatch at %s (expected list[%d], got %s); "
+            "re-running LLM",
+            path, n, type(data).__name__,
+        )
+        return None
+    for item in data:
+        if not isinstance(item, dict):
+            logger.warning(
+                "prompt_refiner: cache element shape mismatch at %s; re-running LLM",
+                path,
+            )
+            return None
+    return data
+
+
+def _persist_cached_batch(batch_key: str, slots: list[dict[str, str]]) -> None:
+    """Write ``slots`` to the refiner disk cache + GCS persist.
+
+    Best-effort: any failure here is logged and swallowed. The render
+    must NEVER fail because the cache write failed — same contract as
+    every other ``persist_artifact`` call site.
+    """
+    path = _refiner_cache_path(batch_key)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(slots, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "prompt_refiner: cache write failed for %s (%s); next retry will "
+            "re-run LLM",
+            path, exc,
+        )
+        return
+    # Mirror the disk write to GCS so a retry-on-a-fresh-worker hydrates
+    # the cache before the LLM call (B2 hydrate runs at worker startup
+    # under jobs/<job_id>/cache/<kind>/<name>). kind="prompts_refined"
+    # is a new bucket layout entry — generic-kind support has always been
+    # there in persist_artifact (cache.py:144) so no cache module change
+    # is needed.
+    try:
+        from pipeline.cloud.cache import persist_artifact  # noqa: PLC0415
+        persist_artifact(path, kind="prompts_refined")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "prompt_refiner: GCS persist failed for %s (%s); retry will re-run LLM",
+            path, exc,
+        )
 
 
 def _raw_response_string(value: Any) -> str | None:
@@ -847,6 +1020,35 @@ def refine_prompts_batch(
         return []
     n = len(beats)
 
+    # D3-1 (2026-05-24 retry-cache sweep) — skip the LLM call entirely
+    # when a prior attempt's refined slots are sitting on disk for this
+    # exact (REFINER_VERSION, inputs) batch key. The cache is hydrated
+    # on worker startup from gs://<bucket>/jobs/<job_id>/cache/prompts_refined/
+    # (see pipeline.cloud.cache.hydrate_cache) so a retry of a SIGKILLed
+    # render skips both the LLM cost AND the fallback-risk of a second
+    # attempt landing on a transient Azure 5xx and dropping every beat
+    # to the legacy path. Tests gate this on YTFACTORY_REFINER_CACHE_DIR
+    # being set; production renders inherit YTFACTORY_WORK_DIR from the
+    # worker entrypoint.
+    batch_key = _compute_batch_key(
+        beats=beats,
+        era_anchor_prefix=era_anchor_prefix,
+        character_description=character_description,
+        style=style,
+        mood=mood,
+        channel_key=channel_key,
+        scene_anchor=scene_anchor,
+        supporting=supporting,
+    )
+    cached_slots = _load_cached_batch(batch_key, n)
+    if cached_slots is not None:
+        logger.info(
+            "prompt_refiner: cache hit for batch_key=%s (n=%d) — skipping LLM call",
+            batch_key, n,
+        )
+        _track_refiner_cache_hit(batch_key, n)
+        return cached_slots
+
     if llm_call is None:
         # Imported lazily so importing this module doesn't drag the LLM
         # dispatcher into test collection (and so the test seam is the
@@ -1104,6 +1306,14 @@ def refine_prompts_batch(
         parsed=raw,
         fallback_count=fallback_count,
     )
+    # D3-1 — persist whole-batch refined slots so a retry skips the LLM
+    # call. Only persist when at least one slot is non-empty: a 100%-
+    # fallback batch is the LLM having failed for every beat, and
+    # persisting that would just freeze the failure across retries.
+    # (Partial fallback is still worth caching — the working beats save
+    # cost on retry and the empty slots fall back to legacy as before.)
+    if fallback_count < n:
+        _persist_cached_batch(batch_key, out)
     return out
 
 

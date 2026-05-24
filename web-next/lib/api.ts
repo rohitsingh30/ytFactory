@@ -244,6 +244,11 @@ export const jobsApi = {
       retry_job_id: string;
       retry_of: string;
       cache_objects_copied: number;
+      // D3-4 — True iff the server-side cache copy raised a GCS
+      // exception (transient bucket hiccup, IAM blip). Distinct from
+      // a legitimate cold-start where the source prefix was simply
+      // empty. UI surfaces the difference as a warning toast.
+      cache_copy_failed?: boolean;
       cloud_execution: string | null;
     }>(`/api/jobs/${jobId}/retry`),
   publish: (jobId: string, body: PublishRequest) =>

@@ -1564,6 +1564,16 @@ class RetryResponse(BaseModel):
     retry_job_id: str
     retry_of: str
     cache_objects_copied: int
+    # D3-4 (2026-05-24) — surface the difference between "no source cache
+    # existed" (cache_copy_failed=False, cache_objects_copied=0; first-
+    # attempt fail before any panel/chunk was persisted — legitimately
+    # cold) and "GCS list/copy raised an exception" (cache_copy_failed=
+    # True, cache_objects_copied=0; the worker DID persist artifacts but
+    # we couldn't read them, so the retry will silently re-pay full
+    # cost). Pre-fix both surfaced as 0 with no distinction → UI showed
+    # "Starting fresh — no cache available" for both cases, hiding the
+    # transient GCS hiccup that cost the user ~₹20.
+    cache_copy_failed: bool = False
     cloud_execution: str | None = None
 
 
@@ -1624,7 +1634,13 @@ async def retry_job(
     # Server-side GCS copy of the cache prefix. Cheap (same bucket,
     # same region) and atomic per-blob. We do this BEFORE the new doc
     # exists so a failure here doesn't leave a stranded retry doc.
-    copied = await asyncio.to_thread(_copy_cache_prefix, job_id, new_job_id)
+    # D3-4 — _copy_cache_prefix now returns (count, failed) so the
+    # endpoint can distinguish "no source cache existed" from "GCS
+    # raised during list/copy" and surface the latter to the UI as a
+    # warning instead of silently degrading to full-cost retry.
+    copied, cache_copy_failed = await asyncio.to_thread(
+        _copy_cache_prefix, job_id, new_job_id,
+    )
 
     # Build the new doc. Preserve proposal verbatim so the retry uses
     # the same channel/topic/length/notes. Tag both directions of the
@@ -1687,16 +1703,30 @@ async def retry_job(
         retry_job_id=new_job_id,
         retry_of=job_id,
         cache_objects_copied=copied,
+        cache_copy_failed=cache_copy_failed,
         cloud_execution=cloud_execution,
     )
 
 
-def _copy_cache_prefix(old_job_id: str, new_job_id: str) -> int:
+def _copy_cache_prefix(old_job_id: str, new_job_id: str) -> tuple[int, bool]:
     """Server-side copy gs://<bucket>/jobs/<old>/cache/** to <new>/cache/**.
 
-    Returns the count of objects copied. Never raises — a missing or
-    empty source prefix just returns 0 (a first-attempt cache or a
-    job that died before any panel was generated).
+    Returns ``(count, failed)``:
+      * ``count`` — number of objects copied (≥ 0).
+      * ``failed`` — True iff a GCS exception was raised during list or
+        copy (transient bucket hiccup / IAM blip). When True the retry
+        still proceeds, but the caller surfaces the failure to the UI
+        so the user knows the retry will pay full cost rather than the
+        "no cache available" message implying a legitimate cold start.
+
+    Never raises — a missing or empty source prefix returns ``(0, False)``
+    (a first-attempt cache or a job that died before any panel was
+    generated; legitimately cold).
+
+    D3-4 (2026-05-24 retry-cache sweep): pre-fix this returned a bare
+    int and the GCS-failure branch returned ``0`` indistinguishable
+    from "no source cache". UI showed "Starting fresh" for both — the
+    user couldn't tell the retry was about to silently re-spend ~₹20.
 
     Uses ``bucket.copy_blob(source_blob, destination_bucket=bucket, new_name=...)``
     which is a metadata operation at GCS — no data egress, no rewrites.
@@ -1721,11 +1751,11 @@ def _copy_cache_prefix(old_job_id: str, new_job_id: str) -> int:
                 "retry cache copy: %d objects %s → %s",
                 count, src_prefix, dst_prefix,
             )
-        return count
+        return count, False
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "retry cache copy failed for old=%s new=%s: %s — proceeding "
             "with empty cache (retry will pay full cost)",
             old_job_id, new_job_id, exc,
         )
-        return 0
+        return 0, True
