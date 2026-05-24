@@ -576,6 +576,19 @@ class AiBeatSlideshow:
                 "(no fallback path)."
             )
 
+        # 2026-05-24 — substitute the LAST beat image with the per-channel
+        # closer panel asset at data/<channel>/closer_panels/shorts.png
+        # if present. This wires the static CTA scene (character +
+        # companion + LIKE+SUBSCRIBE buttons embedded as scene props) as
+        # the final frame of every short. Narration's closer line (per
+        # _closer_block in pipeline/llm/rewrite.py) is spoken over this
+        # frame. Best-effort: missing asset → no substitution, render
+        # proceeds with the AI-generated last beat image unchanged.
+        from pipeline.captions import substitute_last_panel_with_closer  # noqa: PLC0415
+        substitute_last_panel_with_closer(
+            images, spec.channel, "shorts", tuple(spec.output_resolution),
+        )
+
         # Stitch one image per beat into a continuous video. Each image
         # is held statically for the beat's duration.
         out_path = work_dir / "slideshow.mp4"

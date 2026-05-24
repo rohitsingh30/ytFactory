@@ -556,3 +556,64 @@ def render_closer_panel(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path)
     return out_path
+
+
+def substitute_last_panel_with_closer(
+    panel_paths: list[Path],
+    channel: str | None,
+    aspect: str,
+    output_resolution: tuple[int, int],
+) -> bool:
+    """Overwrite ``panel_paths[-1]`` with the per-channel closer panel asset.
+
+    Resolves ``data/<channel>/closer_panels/<aspect>.png`` (``aspect`` is
+    one of ``"shorts"`` or ``"longform"``), resizes the asset to
+    ``output_resolution`` (LANCZOS), and overwrites the last entry of
+    ``panel_paths`` in place. Returns True if the substitution happened.
+
+    Integration point for the 2026-05-24 per-channel closer panel work —
+    instead of having Z-Image-Turbo generate a final beat image, every
+    render's last panel is the channel-specific CTA scene (character +
+    companion + LIKE+SUBSCRIBE buttons embedded as scene props). The
+    narration's closer line (per ``pipeline/llm/rewrite.py::_closer_block``)
+    is spoken over this static panel.
+
+    Best-effort: missing asset, channel, or aspect arg → returns False
+    without raising. Asset present but resize / write failure → logs
+    warning, returns False. Caller can ignore the return value and
+    continue safely.
+
+    Architecture note: this replaces the AI-rendered last frame with a
+    static asset *in the panel image list before video stitching*. The
+    closer_panel_path overlay path in ``pipeline/compose.py:720``
+    (deprecated 2026-05-02) is NOT used — that overlay would composite
+    the panel ON TOP of the existing last frame; substitution replaces
+    it entirely. Simpler model, no compose-side change required.
+    """
+    import logging  # noqa: PLC0415
+    logger = logging.getLogger(__name__)
+
+    if not panel_paths or not channel or aspect not in ("shorts", "longform"):
+        return False
+
+    repo_root = Path(__file__).resolve().parent.parent
+    asset = repo_root / "data" / channel / "closer_panels" / f"{aspect}.png"
+    if not asset.exists():
+        return False
+
+    target = Path(panel_paths[-1])
+    try:
+        with Image.open(asset) as im:
+            resized = im.resize(output_resolution, Image.LANCZOS)
+            resized.save(target, format="PNG")
+        logger.info(
+            "closer panel: substituted last panel image %s ← %s (aspect=%s, res=%dx%d)",
+            target.name, asset, aspect, output_resolution[0], output_resolution[1],
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — best-effort, never break render
+        logger.warning(
+            "closer panel: could not substitute last panel image (asset=%s, target=%s): %s",
+            asset, target, exc,
+        )
+        return False

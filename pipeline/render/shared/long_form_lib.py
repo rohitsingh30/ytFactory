@@ -1093,6 +1093,15 @@ def build_image_panels_video(
         scene_anchor=scene_anchor,
         channel_key=channel_key,
     )
+    # 2026-05-24 — substitute the LAST panel image with the per-channel
+    # closer panel asset at data/<channel>/closer_panels/longform.png if
+    # present. Same wiring as ai_beat_slideshow (shorts path); see
+    # pipeline.captions.substitute_last_panel_with_closer for the
+    # contract. Best-effort: missing asset → no substitution.
+    from pipeline.captions import substitute_last_panel_with_closer  # noqa: PLC0415
+    substitute_last_panel_with_closer(
+        panel_pngs, channel_key, "longform", (image_width, image_height),
+    )
     return _assemble_panel_static(
         panel_pngs=panel_pngs,
         panels=panels,
