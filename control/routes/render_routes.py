@@ -766,40 +766,148 @@ async def publish(
     from pathlib import Path as _P  # noqa: PLC0415
     from pipeline.upload.upload import youtube_upload, UploadError  # noqa: PLC0415
 
+    # C1 2026-05-24 — lift the 501 gate. For cloud-rendered jobs the mp4
+    # lives at gs://<bucket>/jobs/<id>/short.mp4 (long.mp4 for long-form)
+    # and ``short_uri`` on the doc points at the canonical URI. Resolve
+    # to a local mp4 the existing upload module can read by either:
+    #   1. using ``preview_local_path`` when present + readable (the
+    #      laptop dev flow, unchanged), or
+    #   2. downloading the GCS object referenced by ``short_uri`` to a
+    #      temp file. The temp file is cleaned up after upload.
     short_uri = doc.get("short_uri") or ""
-    local_mp4 = doc.get("preview_local_path")
-    if not local_mp4 or not _P(local_mp4).exists():
-        # Real-cloud worker dispatch is wired in a later milestone — for
-        # now persist the generated metadata so the worker can pick it
-        # up + return a clean 501 instead of pretending to publish.
-        jobs_mod.get_jobs().update(
-            job_id,
-            publish_metadata=persisted_publish_meta,
-            publish_meta=persisted_publish_meta,
-        )
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "real publish path needs a local mp4; cloud-worker "
-                "dispatch is queued for the next milestone. Metadata "
-                "has been persisted to the job doc."
-            ),
-        )
+    local_mp4_str = doc.get("preview_local_path")
+    local_mp4: _P | None = _P(local_mp4_str) if local_mp4_str else None
+    local_mp4_is_temp = False
+    if local_mp4 is None or not local_mp4.exists():
+        # No local path → fall through to GCS resolve. If neither
+        # ``short_uri`` nor a local path is set, we cannot upload —
+        # surface 422 (the inputs are missing).
+        if not short_uri.startswith("gs://"):
+            # Persist metadata anyway so the worker / a retry sees it.
+            jobs_mod.get_jobs().update(
+                job_id,
+                publish_metadata=persisted_publish_meta,
+                publish_meta=persisted_publish_meta,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"job {job_id} has no preview_local_path and no "
+                    f"gs:// short_uri to download. Cannot publish."
+                ),
+            )
+        from control.core import storage as _storage  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+        try:
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".mp4", prefix=f"publish-{job_id}-", delete=False,
+            )
+            tmp.close()
+            local_mp4 = _storage.download(short_uri, tmp.name)
+            local_mp4_is_temp = True
+        except Exception as exc:  # noqa: BLE001
+            jobs_mod.get_jobs().update(
+                job_id,
+                publish_metadata=persisted_publish_meta,
+                publish_meta=persisted_publish_meta,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"failed to download cloud mp4 from {short_uri}: {exc}"
+                ),
+            ) from exc
 
-    account = (doc.get("proposal") or {}).get("upload_account") or "default"
+    # Resolve upload account — proposal override wins, else fall back
+    # to the channel slug (matches pipeline.upload.upload's account-name
+    # convention; each channel has its own youtube_token_<slug>.json or
+    # /secrets/youtube-token-<slug>/value mount on Cloud Run).
+    proposal = doc.get("proposal") or {}
+    account = (
+        proposal.get("upload_account")
+        or doc.get("channel")
+        or proposal.get("channel")
+        or "default"
+    )
+
+    upload_method_requested = (body.upload_method or "auto").lower()
+    used_method = "api"
     try:
-        result = youtube_upload(
-            _P(local_mp4),
-            title=meta_view.title,
-            description=meta_view.description,
-            tags=meta_view.tags,
-            category_id=meta_view.category_id,
-            privacy=body.visibility,
-            publish_at=publish_at,
-            made_for_kids=meta_view.made_for_kids,
-            account=account,
-            thumbnail_path=_P(meta_view.thumbnail_path) if meta_view.thumbnail_path else None,
-        )
+        if upload_method_requested == "playwright":
+            # Operator explicitly chose playwright — skip the API path.
+            result = _publish_via_playwright(
+                local_mp4,
+                meta_view=meta_view,
+                privacy=body.visibility,
+                publish_at=publish_at,
+                account=str(account),
+                job_id=job_id,
+            )
+            used_method = "playwright"
+        else:
+            try:
+                result = youtube_upload(
+                    local_mp4,
+                    title=meta_view.title,
+                    description=meta_view.description,
+                    tags=meta_view.tags,
+                    category_id=meta_view.category_id,
+                    privacy=body.visibility,
+                    publish_at=publish_at,
+                    made_for_kids=meta_view.made_for_kids,
+                    account=str(account),
+                    thumbnail_path=_P(meta_view.thumbnail_path) if meta_view.thumbnail_path else None,
+                )
+            except UploadError as exc:
+                # C3 2026-05-24 — playwright fallback on quotaExceeded.
+                # ``pipeline.upload.upload.QuotaExceededError`` is the
+                # specific subclass for documented quota reasons; other
+                # UploadError subclasses (RefreshTokenLost, generic
+                # 403/5xx) are NOT quota-class and should not trigger
+                # the fallback.
+                from pipeline.upload.upload import (  # noqa: PLC0415
+                    QuotaExceededError,
+                )
+
+                if not isinstance(exc, QuotaExceededError):
+                    raise
+
+                logger.warning(
+                    "youtube_upload quotaExceeded (reason=%s); attempting "
+                    "playwright fallback for job=%s account=%s",
+                    exc.reason, job_id, account,
+                )
+                try:
+                    result = _publish_via_playwright(
+                        local_mp4,
+                        meta_view=meta_view,
+                        privacy=body.visibility,
+                        publish_at=publish_at,
+                        account=str(account),
+                        job_id=job_id,
+                    )
+                    used_method = "playwright"
+                except _PlaywrightUnavailable as pw_exc:
+                    # Both paths exhausted — queue for manual upload.
+                    persisted_publish_meta["upload_method"] = "queued_for_manual"
+                    persisted_publish_meta["queued_reason"] = (
+                        f"api quota exhausted ({exc.reason}); playwright "
+                        f"fallback failed: {pw_exc}"
+                    )
+                    jobs_mod.get_jobs().update(
+                        job_id,
+                        publish_metadata=persisted_publish_meta,
+                        publish_meta=persisted_publish_meta,
+                    )
+                    return PublishResponse(
+                        job_id=job_id,
+                        status="queued_for_manual",
+                        error=(
+                            "quota exhausted, playwright fallback "
+                            f"failed: {pw_exc}"
+                        ),
+                        publish_metadata=meta_view,
+                    )
     except UploadError as exc:
         return PublishResponse(
             job_id=job_id,
@@ -807,8 +915,21 @@ async def publish(
             error=str(exc),
             publish_metadata=meta_view,
         )
+    finally:
+        # Clean up the temp file we downloaded for cloud-rendered jobs.
+        # Done in ``finally`` so the cleanup happens even on the failure
+        # paths above (UploadError, playwright fallback failure, etc.).
+        if local_mp4_is_temp and local_mp4 is not None:
+            try:
+                local_mp4.unlink(missing_ok=True)
+            except OSError:
+                # Defensive — on Windows or some bind mounts unlink can
+                # race with antivirus scanners; the temp dir gets GC'd
+                # by the OS regardless.
+                pass
 
     youtube_url = result.get("url")
+    persisted_publish_meta["upload_method"] = used_method
     jobs_mod.get_jobs().update(
         job_id,
         youtube_url=youtube_url,
@@ -821,6 +942,75 @@ async def publish(
         youtube_url=youtube_url,
         publish_metadata=meta_view,
     )
+
+
+# ---- C3 playwright fallback (2026-05-24) ----------------------------
+#
+# When ``pipeline.upload.upload.youtube_upload`` raises
+# ``QuotaExceededError`` (per-account daily 10K-unit pool exhausted),
+# the publish route attempts to upload via the playwright path instead.
+# The ``upload-via-playwright`` skill is the interactive driver the
+# operator runs locally; a programmatic module is available when the
+# ``pipeline.upload.playwright_upload`` import succeeds AND the
+# environment is non-headless (laptop). On Cloud Run the import is
+# expected to fail (no Chrome user-data-dir) → fall through to the
+# ``_PlaywrightUnavailable`` branch which queues the job for manual
+# upload via the skill.
+
+
+class _PlaywrightUnavailable(Exception):
+    """Programmatic playwright path can't run in this env.
+
+    Distinct from generic Exception so the caller can return a clean
+    ``queued_for_manual`` status (operator triggers the skill manually)
+    rather than a 500.
+    """
+
+
+def _publish_via_playwright(
+    mp4_path: Path,
+    *,
+    meta_view: "PublishMetadataView",
+    privacy: str,
+    publish_at: str | None,
+    account: str,
+    job_id: str,
+) -> dict:
+    """Drive an upload via ``pipeline.upload.playwright_upload`` when
+    available; raise :class:`_PlaywrightUnavailable` otherwise.
+
+    The module is optional — when it isn't present in the image (the
+    expected state on Cloud Run, since playwright + signed-in Chrome
+    only run on the operator's laptop), the import fails and we surface
+    the gap so the caller can return ``queued_for_manual``.
+    """
+    try:
+        from pipeline.upload import playwright_upload as _pw  # noqa: PLC0415
+    except ImportError as exc:
+        raise _PlaywrightUnavailable(
+            "pipeline.upload.playwright_upload not importable "
+            f"({exc}); run the /pw-upload skill from a laptop with a "
+            "signed-in Chrome profile to complete the upload."
+        ) from exc
+    try:
+        return _pw.playwright_upload(
+            mp4_path,
+            title=meta_view.title,
+            description=meta_view.description,
+            tags=list(meta_view.tags),
+            privacy=privacy,
+            publish_at=publish_at,
+            made_for_kids=meta_view.made_for_kids,
+            account=account,
+            thumbnail_path=Path(meta_view.thumbnail_path) if meta_view.thumbnail_path else None,
+            job_id=job_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — relay any playwright failure
+        # Re-raise as _PlaywrightUnavailable so the caller's manual-queue
+        # branch handles it uniformly with the ImportError case.
+        raise _PlaywrightUnavailable(
+            f"playwright_upload failed: {exc}"
+        ) from exc
 
 
 class CancelResponse(BaseModel):

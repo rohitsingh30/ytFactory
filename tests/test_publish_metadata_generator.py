@@ -170,5 +170,140 @@ class DescriptionContainsHashtagsTest(unittest.TestCase):
         )
 
 
+class ChannelPlaybookTest(unittest.TestCase):
+    """C4 2026-05-24 — channel-aware metadata. Pin that each registered
+    channel produces the playbook's per-channel category_id, language,
+    and made-for-kids flag, with hashtags drawn from the playbook
+    cluster rather than the generic tokeniser fallback."""
+
+    def test_mystoriesanimated_aita_uses_people_and_blogs_category(self) -> None:
+        script = {
+            "title_options": ["AITA for telling my MIL she's not invited?"],
+            "summary": "A wife's first wedding turns into an ultimatum.",
+        }
+        meta = generate_publish_metadata(
+            "job-mystories",
+            script,
+            channel="mystoriesanimated",
+            variant="reddit_aita",
+        )
+        self.assertEqual(meta.category_id, "22", "People & Blogs for AITA")
+        self.assertEqual(meta.default_language, "en")
+        self.assertFalse(meta.made_for_kids)
+        # Playbook hashtag cluster appears.
+        self.assertIn("#AITA", meta.hashtags)
+        self.assertIn("#redditstories", meta.hashtags)
+
+    def test_mystoriesanimated_tifu_variant_swaps_hashtag_cluster(self) -> None:
+        script = {
+            "title_options": ["TIFU by replying-all to a wedding RSVP"],
+            "summary": "Misfired email, dramatic consequences.",
+        }
+        meta = generate_publish_metadata(
+            "job-tifu", script, channel="mystoriesanimated", variant="tifu",
+        )
+        self.assertIn("#TIFU", meta.hashtags)
+        self.assertNotIn("#AITA", meta.hashtags)
+
+    def test_mystoriesanimated_wiki_variant_uses_education_category(self) -> None:
+        script = {"title_options": ["The forgotten dancing plague of 1518"]}
+        meta = generate_publish_metadata(
+            "job-wiki", script, channel="mystoriesanimated", variant="wiki_oddities",
+        )
+        self.assertEqual(meta.category_id, "27", "Education for wiki/TIH")
+        self.assertIn("#history", meta.hashtags)
+
+    def test_hindutavaanimated_sets_hindi_language_and_film_category(self) -> None:
+        script = {"title_options": ["कृष्ण ने गोवर्धन उठाया"]}
+        meta = generate_publish_metadata(
+            "job-hindi", script, channel="hindutavaanimated", variant=None,
+        )
+        self.assertEqual(meta.category_id, "1", "Film & Animation")
+        self.assertEqual(meta.default_language, "hi", "Hindi language critical for recommendations")
+        self.assertIn("#mahabharat", meta.hashtags)
+
+    def test_cosmosdecoded_uses_science_and_technology_category(self) -> None:
+        script = {"title_options": ["How we knew the universe was expanding"]}
+        meta = generate_publish_metadata(
+            "job-cosmos", script, channel="cosmosdecoded", variant=None,
+        )
+        self.assertEqual(meta.category_id, "28", "Science & Technology")
+        self.assertIn("#space", meta.hashtags)
+        self.assertIn("#physics", meta.hashtags)
+
+    def test_sportsrecapped_uses_sports_category(self) -> None:
+        script = {"title_options": ["Ronaldo vs Messi — the 2008 turning point"]}
+        meta = generate_publish_metadata(
+            "job-sports", script, channel="sportsrecapped", variant=None,
+        )
+        self.assertEqual(meta.category_id, "17", "Sports")
+        self.assertIn("#football", meta.hashtags)
+
+    def test_historyrecapped_uses_education_category(self) -> None:
+        script = {"title_options": ["In 79 seconds, Vesuvius killed 2000 people"]}
+        meta = generate_publish_metadata(
+            "job-history", script, channel="historyrecapped", variant=None,
+        )
+        self.assertEqual(meta.category_id, "27", "Education")
+        self.assertIn("#history", meta.hashtags)
+
+    def test_rhymetimejunction_is_made_for_kids(self) -> None:
+        """Out-of-rotation channel; FTC/COPPA requires made_for_kids=true
+        for nursery-rhyme content per playbook line 364."""
+        script = {"title_options": ["Twinkle Twinkle little star"]}
+        meta = generate_publish_metadata(
+            "job-rhyme", script, channel="rhymetimejunction", variant=None,
+        )
+        self.assertEqual(meta.category_id, "10", "Music")
+        self.assertTrue(meta.made_for_kids)
+
+    def test_unknown_channel_falls_back_to_generic_defaults(self) -> None:
+        script = {"title_options": ["A Title For An Unknown Channel"]}
+        meta = generate_publish_metadata(
+            "job-unknown", script, channel="totally_made_up_channel", variant=None,
+        )
+        # Falls back to Entertainment / en / not-for-kids.
+        self.assertEqual(meta.category_id, "24")
+        self.assertEqual(meta.default_language, "en")
+        self.assertFalse(meta.made_for_kids)
+
+    def test_script_language_override_wins_over_playbook(self) -> None:
+        # If a render explicitly sets default_language on the script
+        # (e.g. an English Hindi-mythology variant), the script's value
+        # MUST win over the channel default — channel rules are defaults,
+        # not lock-ins.
+        script = {
+            "title_options": ["English mythology explainer"],
+            "default_language": "en",
+        }
+        meta = generate_publish_metadata(
+            "job-override", script, channel="hindutavaanimated", variant=None,
+        )
+        self.assertEqual(meta.default_language, "en")
+
+    def test_playbook_hashtags_all_start_with_hash(self) -> None:
+        # Defensive — playbook entries are hand-edited; the generator
+        # filters malformed entries. Sanity check that nothing in the
+        # current table is malformed.
+        from pipeline.publish.metadata_generator import _CHANNEL_PLAYBOOK
+        for channel, entry in _CHANNEL_PLAYBOOK.items():
+            for tag in entry.get("hashtags", []):
+                self.assertTrue(
+                    isinstance(tag, str) and tag.startswith("#"),
+                    f"channel {channel!r} has malformed hashtag {tag!r}",
+                )
+
+    def test_playbook_tags_respect_youtube_budget(self) -> None:
+        # The playbook hand-curated tag lists must still fit in
+        # YouTube's 500-char total + 30-char individual limit.
+        from pipeline.publish.metadata_generator import _CHANNEL_PLAYBOOK
+        for channel, entry in _CHANNEL_PLAYBOOK.items():
+            tags = entry.get("tags", [])
+            total = sum(len(t) + 1 for t in tags)
+            self.assertLessEqual(total, 500, f"{channel!r} tag budget overrun")
+            for t in tags:
+                self.assertLessEqual(len(t), 30, f"{channel!r}: tag too long: {t!r}")
+
+
 if __name__ == "__main__":
     unittest.main()

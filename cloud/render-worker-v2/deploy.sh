@@ -127,7 +127,25 @@ gcloud run jobs deploy "${JOB}" \
   --max-retries=0 \
   --task-timeout=3600 \
   --update-secrets="AZURE_OPENAI_API_KEY=azure-openai-key:latest" \
+  --update-secrets="/secrets/youtube-token-mystoriesanimated/value=youtube-token-mystoriesanimated:latest,/secrets/youtube-token-sportsrecapped/value=youtube-token-sportsrecapped:latest,/secrets/youtube-token-hindutavaanimated/value=youtube-token-hindutavaanimated:latest,/secrets/youtube-token-historyrecapped/value=youtube-token-historyrecapped:latest,/secrets/youtube-token-cosmosdecoded/value=youtube-token-cosmosdecoded:latest,/secrets/youtube-token-scrollpulse/value=youtube-token-scrollpulse:latest,/secrets/youtube-token-rhymetimejunction/value=youtube-token-rhymetimejunction:latest" \
   --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT}|YTFACTORY_BUCKET=ytfactory-prod-v3-artifacts|CLOUDRUN_TTS_CHATTERBOX_URL=${TTS_CHATTERBOX_URL}|CLOUDRUN_TTS_INDICF5_URL=${TTS_INDICF5_URL}|CLOUDRUN_IMAGE_Z_IMAGE_TURBO_URL=${IMAGE_Z_IMAGE_TURBO_URL}|CLOUDRUN_ASR_URL=${ASR_URL}|CLOUDRUN_TTS_DISABLE_FALLBACK=1|CLOUDRUN_IMAGE_DISABLE_FALLBACK=1|YTFACTORY_RENDER_MODE=real|YTFACTORY_LLM_BACKEND=azure_openai|AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}|AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}|AZURE_OPENAI_MODEL=${AZURE_OPENAI_MODEL}|AZURE_OPENAI_TOKEN_PARAM=${AZURE_OPENAI_TOKEN_PARAM}|YTFACTORY_ASR_PROVIDER=faster_whisper|YTFACTORY_PROMPT_REFINER=1|LOG_LEVEL=INFO"
+
+# C1+C3 2026-05-24 — mount each channel's YouTube OAuth refresh token at
+# /secrets/youtube-token-<account>/value. ``pipeline.upload.upload``
+# (see _secret_mount_path) reads from these paths transparently on
+# Cloud Run; on the laptop it falls back to
+# ~/.config/ytfactory/youtube_token_<account>.json so the same code
+# works in both envs.
+#
+# Each secret must already exist in Secret Manager — create them via
+# ``gcloud secrets create youtube-token-<account>`` then add a version
+# from the laptop's local token JSON. Missing secrets cause the JOB
+# deploy itself to fail loudly (better than a silent token-missing
+# error at publish time).
+#
+# --update-secrets is additive (replaces only the listed secret mounts,
+# leaves AZURE_OPENAI_API_KEY alone — audit T1.11). If you add a new
+# channel, append it here so the worker can publish for it.
 
 # Audit T1.11 — was --set-secrets="AZURE_OPENAI_API_KEY=...".
 # --set-secrets is REPLACE-not-merge, so any subsequent

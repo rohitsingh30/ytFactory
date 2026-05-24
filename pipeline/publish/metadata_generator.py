@@ -5,11 +5,13 @@ ONLY a visibility selector + optional scheduled-publish time. Title,
 description, hashtags, tags, thumbnail, category, default-language and
 made-for-kids are produced here from the script + channel config.
 
-**This is a stub.** The actual editorial rules — what makes a hit Short
-title, the correct hashtag count, the description boilerplate that
-maximises CTR — are being researched in a parallel work-stream and will
-land at ``docs/youtube_shorts_metadata_playbook.md``. Once the playbook
-ships, this module's heuristics are replaced site-for-site; the public
+**Channel-aware (since C4 2026-05-24).** The per-channel rules from
+``docs/youtube_shorts_metadata_playbook.md`` §"Per-channel apply table"
+are encoded in ``_CHANNEL_PLAYBOOK`` below. When ``channel`` (and
+optionally ``variant``) matches an entry, the per-channel hashtag set,
+default category, default language, made-for-kids flag, and
+description-suffix template apply. Channels with no entry fall back to
+the generic heuristics (Entertainment, en, false). The public
 ``generate_publish_metadata(...)`` signature + ``PublishMetadata`` shape
 are the stable contract the UI + control-plane endpoint depend on.
 
@@ -65,6 +67,180 @@ _STOP_WORDS = frozenset({
     "being", "would", "could", "should", "shall", "will", "just", "very",
     "story", "shorts", "short",
 })
+
+
+# ---- per-channel playbook (C4 2026-05-24) -----------------------------
+#
+# Encoded from docs/youtube_shorts_metadata_playbook.md §"Per-channel
+# apply table for ytFactory" (lines 459-586). Each entry maps a channel
+# slug to its per-channel defaults (category_id, language, made-for-kids)
+# plus a ``hashtags`` list (already in playbook order — first 3 pin
+# above the title) and optional variant overrides keyed by variant slug
+# under ``variants``.
+#
+# Adding a new channel: append an entry here AND extend the per-channel
+# section of the playbook with the new rules (so the doc stays the
+# source of truth and this dict is the machine encoding). The fallback
+# branch below (when no entry matches) yields the generic Entertainment
+# defaults so any unknown channel still ships shippable metadata.
+
+_PlaybookEntry = dict  # type alias for clarity below
+
+
+_CHANNEL_PLAYBOOK: dict[str, _PlaybookEntry] = {
+    "mystoriesanimated": {
+        # AITA / TIFU / wiki / TIH variants — see playbook lines 464-492.
+        # Default cluster matches AITA (the dominant variant); per-variant
+        # overrides switch the cluster + category for the others.
+        "hashtags": ["#AITA", "#redditstories", "#Shorts", "#storytime", "#reddit"],
+        "tags": [
+            "aita", "reddit stories", "am i the asshole", "reddit storytime",
+            "aita reddit", "mystoriesanimated", "youtube shorts", "reddit aita",
+        ],
+        "category_id": "22",  # People & Blogs (AITA/TIFU default)
+        "default_language": "en",
+        "made_for_kids": False,
+        "variants": {
+            "tifu": {
+                "hashtags": ["#TIFU", "#redditstories", "#Shorts", "#storytime", "#funnystories"],
+                "tags": [
+                    "tifu", "reddit stories", "today i fucked up", "reddit storytime",
+                    "tifu reddit", "mystoriesanimated", "youtube shorts", "funny reddit",
+                ],
+            },
+            "reddit_tifu": {
+                "hashtags": ["#TIFU", "#redditstories", "#Shorts", "#storytime", "#funnystories"],
+                "tags": [
+                    "tifu", "reddit stories", "today i fucked up", "reddit storytime",
+                    "tifu reddit", "mystoriesanimated", "youtube shorts", "funny reddit",
+                ],
+            },
+            "wiki_oddities": {
+                "hashtags": ["#history", "#didyouknow", "#Shorts", "#facts", "#todayinhistory"],
+                "tags": [
+                    "wiki oddities", "history facts", "did you know", "weird history",
+                    "history shorts", "mystoriesanimated", "youtube shorts", "fun facts",
+                ],
+                "category_id": "27",  # Education for wiki/TIH (playbook 487)
+            },
+            "today_in_history": {
+                "hashtags": ["#history", "#didyouknow", "#Shorts", "#facts", "#todayinhistory"],
+                "tags": [
+                    "today in history", "on this day", "history facts", "history shorts",
+                    "did you know", "mystoriesanimated", "youtube shorts", "history",
+                ],
+                "category_id": "27",
+            },
+        },
+    },
+    "hindutavaanimated": {
+        # Hindi mythology — playbook lines 494-516. Devanagari + Hindi
+        # language is critical (uses Hindi audio tag).
+        "hashtags": ["#mahabharat", "#krishna", "#Shorts", "#hindumythology", "#arjuna"],
+        "tags": [
+            "mahabharat", "ramayan", "hindu mythology", "krishna",
+            "hindi mythology shorts", "hindutavaanimated", "pauraanik kathayein",
+            "mythology shorts hindi",
+        ],
+        "category_id": "1",  # Film & Animation
+        "default_language": "hi",
+        "made_for_kids": False,
+        "variants": {
+            "ramayan": {
+                "hashtags": ["#ramayan", "#ram", "#Shorts", "#hindumythology", "#hanuman"],
+            },
+            "puraan": {
+                "hashtags": ["#hindumythology", "#puran", "#Shorts", "#sanatandharma", "#mythology"],
+            },
+        },
+    },
+    "sportsrecapped": {
+        # Sports — playbook lines 518-540. Entity-led cluster (the
+        # variant overrides typically reshape these per video).
+        "hashtags": ["#football", "#Shorts", "#footballshorts", "#soccer", "#sports"],
+        "tags": [
+            "football", "soccer", "football shorts", "soccer shorts",
+            "sportsrecapped", "youtube shorts", "sports", "match recap",
+        ],
+        "category_id": "17",  # Sports
+        "default_language": "en",
+        "made_for_kids": False,
+    },
+    "cosmosdecoded": {
+        # Physics + space — playbook lines 542-562. Use Science & Tech
+        # (28) rather than Education for tighter recommendation pool.
+        "hashtags": ["#space", "#physics", "#Shorts", "#astronomy", "#nasa"],
+        "tags": [
+            "physics", "astronomy", "space shorts", "cosmosdecoded",
+            "how we knew", "science shorts", "space", "science",
+        ],
+        "category_id": "28",  # Science & Technology
+        "default_language": "en",
+        "made_for_kids": False,
+    },
+    "historyrecapped": {
+        # History — playbook lines 564-586. Education default;
+        # animated long-form variants can override to Film & Animation.
+        "hashtags": ["#history", "#ancienthistory", "#Shorts", "#historyfacts", "#worldhistory"],
+        "tags": [
+            "history shorts", "ancient history", "world history", "historyrecapped",
+            "history facts", "history", "youtube shorts", "education",
+        ],
+        "category_id": "27",  # Education
+        "default_language": "en",
+        "made_for_kids": False,
+    },
+    "rhymetimejunction": {
+        # Out-of-rotation but registered. Nursery rhymes — made-for-kids
+        # MUST be true (playbook line 364, FTC/COPPA).
+        "hashtags": ["#nurseryrhyme", "#kidssongs", "#Shorts", "#preschool", "#kids"],
+        "tags": [
+            "nursery rhymes", "kids songs", "bilingual rhymes", "hindi rhymes",
+            "rhymetimejunction", "preschool", "youtube shorts kids", "kids",
+        ],
+        "category_id": "10",  # Music
+        "default_language": "en",
+        "made_for_kids": True,
+    },
+    "scrollpulse": {
+        # Reddit-thread reaction Shorts — out of rotation. People & Blogs
+        # is the catch-all storytime fallback per playbook line 322.
+        "hashtags": ["#reddit", "#redditstories", "#Shorts", "#aita", "#storytime"],
+        "tags": [
+            "reddit", "reddit stories", "scrollpulse", "reddit reaction",
+            "ai voice reddit", "youtube shorts", "reddit shorts", "storytime",
+        ],
+        "category_id": "22",  # People & Blogs
+        "default_language": "en",
+        "made_for_kids": False,
+    },
+}
+
+
+def _resolve_playbook(
+    channel: str | None, variant: str | None,
+) -> _PlaybookEntry | None:
+    """Return the merged playbook entry for ``channel``/``variant`` or
+    ``None`` when no per-channel entry matches.
+
+    Variant overrides merge SHALLOW into the channel base entry — the
+    variant can replace e.g. ``hashtags`` + ``category_id`` while
+    inheriting ``tags`` + ``default_language``. ``variants`` sub-key on
+    the merged result is stripped (it's a lookup table, not a returned
+    field).
+    """
+    if not channel:
+        return None
+    base = _CHANNEL_PLAYBOOK.get(channel.lower())
+    if base is None:
+        return None
+    merged: _PlaybookEntry = {k: v for k, v in base.items() if k != "variants"}
+    if variant:
+        variants_table = base.get("variants") or {}
+        override = variants_table.get(variant.lower())
+        if override:
+            merged.update(override)
+    return merged
 
 
 class MissingMetadataInputError(ValueError):
@@ -266,8 +442,14 @@ def generate_publish_metadata(
         # topic are blank — title is still the best signal we have.
         description_seed = title
 
+    # C4 2026-05-24: try per-channel playbook first; fall back to the
+    # heuristic tokeniser when no entry matches OR the playbook entry
+    # leaves a field unset.
+    playbook = _resolve_playbook(channel, variant)
+
     # Hashtag/tag pool: title + topic + hook + summary all contribute,
-    # deduped + stop-worded by ``_tokenise``.
+    # deduped + stop-worded by ``_tokenise``. Used both as the heuristic
+    # fallback AND to pad/supplement the playbook lists when needed.
     pool = " ".join(
         s for s in (
             title,
@@ -278,16 +460,28 @@ def generate_publish_metadata(
         if s
     )
     tokens = _tokenise(pool)
-    # Per memory ``feedback_silent_fallback_unshippable_output``: an
-    # empty hashtag list is shippable (YouTube accepts videos with no
-    # hashtags) — but for the stub we guarantee at least one anchor
-    # hashtag from the title so the playbook's "no empty hashtag arrays"
-    # invariant is satisfied. If even tokenisation yields nothing
-    # (title was punctuation-only, which the upstream rewrite gates
-    # should catch), fall back to a single ``#shorts`` anchor so
-    # downstream code can rely on a non-empty list.
-    hashtags = _hashtagify(tokens, _DEFAULT_HASHTAG_COUNT) or ["#shorts"]
-    tags = _budget_tags(tokens, _DEFAULT_TAG_COUNT)
+    if playbook and playbook.get("hashtags"):
+        # Playbook hashtags are the curated set (capped at 5 per
+        # playbook §"Hashtags" line 212-214). Validate every entry
+        # starts with `#` — if a future edit corrupts that, we still
+        # ship valid metadata.
+        hashtags = [h for h in playbook["hashtags"] if isinstance(h, str) and h.startswith("#")]
+        if not hashtags:
+            # Playbook entry was malformed → fall back to heuristic.
+            hashtags = _hashtagify(tokens, _DEFAULT_HASHTAG_COUNT) or ["#shorts"]
+    else:
+        # Per memory ``feedback_silent_fallback_unshippable_output``: an
+        # empty hashtag list is shippable (YouTube accepts videos with
+        # no hashtags) — but we guarantee at least one anchor so
+        # downstream code can rely on a non-empty list.
+        hashtags = _hashtagify(tokens, _DEFAULT_HASHTAG_COUNT) or ["#shorts"]
+
+    if playbook and playbook.get("tags"):
+        # Tags from playbook are already curated; still budget-check
+        # them against YouTube's 500-char total + 30-char-each rules.
+        tags = _budget_tags(list(playbook["tags"]), _DEFAULT_TAG_COUNT)
+    else:
+        tags = _budget_tags(tokens, _DEFAULT_TAG_COUNT)
 
     thumbnail_path = _resolve_thumbnail(job_id, script)
 
@@ -298,15 +492,35 @@ def generate_publish_metadata(
     if hashtags:
         description_body = f"{description_seed}\n\n{' '.join(hashtags)}"
 
+    category_id = (
+        str(playbook["category_id"]) if playbook and playbook.get("category_id")
+        else _DEFAULT_CATEGORY_ID
+    )
+    # Script-level overrides (rare — e.g. a Hindi-language flag set
+    # explicitly on the rewrite) win over the playbook default; otherwise
+    # the playbook default wins; otherwise "en".
+    default_language = (
+        str(script.get("default_language"))
+        if script.get("default_language")
+        else (str(playbook["default_language"]) if playbook and playbook.get("default_language") else "en")
+    )
+    # made_for_kids: script override > playbook default > False.
+    if "made_for_kids" in script:
+        made_for_kids = bool(script.get("made_for_kids"))
+    elif playbook and "made_for_kids" in playbook:
+        made_for_kids = bool(playbook["made_for_kids"])
+    else:
+        made_for_kids = False
+
     return PublishMetadata(
         title=title[:_YT_TITLE_MAX],
         description=description_body[:_YT_DESCRIPTION_MAX],
         hashtags=hashtags,
         tags=tags,
         thumbnail_path=thumbnail_path,
-        category_id=_DEFAULT_CATEGORY_ID,
-        default_language=str(script.get("default_language") or "en"),
-        made_for_kids=bool(script.get("made_for_kids", False)),
+        category_id=category_id,
+        default_language=default_language,
+        made_for_kids=made_for_kids,
     )
 
 

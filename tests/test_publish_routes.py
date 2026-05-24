@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 # Configure the env BEFORE importing the route module — same shape as
@@ -250,6 +251,265 @@ class PublishPostTest(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             os.unlink(local_mp4)
+
+
+class PublishCloudMp4Test(unittest.IsolatedAsyncioTestCase):
+    """C1 2026-05-24 — cloud-rendered jobs have no preview_local_path;
+    their mp4 lives at gs://<bucket>/jobs/<id>/short.mp4. The publish
+    route must download the mp4 to a temp file and feed THAT to
+    youtube_upload, not raise 501."""
+
+    def setUp(self) -> None:
+        reset_queue()
+        jobs_mod.reset_jobs()
+        rate_limit.reset_backend()
+
+    async def test_cloud_rendered_job_downloads_short_uri_then_uploads(self) -> None:
+        import tempfile
+
+        _done_job("j-cloud")
+        # NO preview_local_path — just a gs:// short_uri (the cloud
+        # worker shape).
+        jobs_mod.get_jobs().update(
+            "j-cloud",
+            short_uri="gs://ytfactory-prod-v3-artifacts/jobs/j-cloud/short.mp4",
+        )
+
+        # Fake storage.download writes a real temp mp4 so the upload
+        # mock can see it.
+        downloaded_paths: list[str] = []
+
+        def fake_download(uri: str, local_path: str) -> Path:
+            downloaded_paths.append(uri)
+            p = Path(local_path)
+            p.write_bytes(b"\x00" * 16)
+            return p
+
+        fake_result = {
+            "video_id": "cloud123",
+            "url": "https://youtu.be/cloud123",
+            "uploaded_at": "2026-05-24T00:00:00Z",
+        }
+        with patch.dict(os.environ, {"YTFACTORY_SIM_WORKER": "0"}):
+            with patch("control.core.storage.download", side_effect=fake_download):
+                with patch(
+                    "pipeline.upload.upload.youtube_upload",
+                    return_value=fake_result,
+                ) as mock_upload:
+                    app = _make_app()
+                    transport = httpx.ASGITransport(app=app)
+                    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+                        r = await c.post(
+                            "/api/jobs/j-cloud/publish",
+                            json={"visibility": "unlisted"},
+                        )
+
+        self.assertEqual(r.status_code, 200, r.text)
+        # storage.download was called with the canonical gs:// URI.
+        self.assertEqual(len(downloaded_paths), 1)
+        self.assertTrue(downloaded_paths[0].startswith("gs://"))
+        self.assertIn("j-cloud/short.mp4", downloaded_paths[0])
+        # youtube_upload was called with the downloaded temp path
+        # (Path object, .suffix == ".mp4").
+        self.assertTrue(mock_upload.called)
+        args, _kwargs = mock_upload.call_args
+        self.assertTrue(str(args[0]).endswith(".mp4"))
+
+    async def test_cloud_rendered_job_returns_422_when_no_short_uri_and_no_local(self) -> None:
+        _done_job("j-no-mp4")
+        # Wipe short_uri so neither path resolves.
+        jobs_mod.get_jobs().update("j-no-mp4", short_uri="sim://nope.mp4")
+        with patch.dict(os.environ, {"YTFACTORY_SIM_WORKER": "0"}):
+            app = _make_app()
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+                r = await c.post(
+                    "/api/jobs/j-no-mp4/publish",
+                    json={"visibility": "unlisted"},
+                )
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("short_uri", r.text)
+
+    async def test_cloud_rendered_job_returns_502_when_download_fails(self) -> None:
+        _done_job("j-dl-fail")
+        jobs_mod.get_jobs().update(
+            "j-dl-fail",
+            short_uri="gs://ytfactory-prod-v3-artifacts/jobs/j-dl-fail/short.mp4",
+        )
+        with patch.dict(os.environ, {"YTFACTORY_SIM_WORKER": "0"}):
+            with patch(
+                "control.core.storage.download",
+                side_effect=RuntimeError("network borked"),
+            ):
+                app = _make_app()
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+                    r = await c.post(
+                        "/api/jobs/j-dl-fail/publish",
+                        json={"visibility": "unlisted"},
+                    )
+        self.assertEqual(r.status_code, 502, r.text)
+
+
+class PublishQuotaPlaywrightFallbackTest(unittest.IsolatedAsyncioTestCase):
+    """C3 2026-05-24 — when youtube_upload raises QuotaExceededError,
+    the route attempts the playwright fallback. When playwright isn't
+    available either, the route returns ``status="queued_for_manual"``
+    (NOT 500) so the UI can surface the skill-run instruction."""
+
+    def setUp(self) -> None:
+        reset_queue()
+        jobs_mod.reset_jobs()
+        rate_limit.reset_backend()
+
+    async def test_quota_exceeded_then_playwright_unavailable_returns_queued(self) -> None:
+        import tempfile
+
+        from pipeline.upload.upload import QuotaExceededError
+
+        _done_job("j-quota")
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(b"\x00" * 16)
+            local_mp4 = f.name
+        try:
+            jobs_mod.get_jobs().update("j-quota", preview_local_path=local_mp4)
+
+            quota_exc = QuotaExceededError("quotaExceeded", "daily limit hit")
+            with patch.dict(os.environ, {"YTFACTORY_SIM_WORKER": "0"}):
+                with patch(
+                    "pipeline.upload.upload.youtube_upload",
+                    side_effect=quota_exc,
+                ):
+                    # Force playwright path unavailable by removing the
+                    # env precondition.
+                    with patch.dict(os.environ, {"YTFACTORY_CHROME_USER_DATA_DIR": ""}):
+                        app = _make_app()
+                        transport = httpx.ASGITransport(app=app)
+                        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+                            r = await c.post(
+                                "/api/jobs/j-quota/publish",
+                                json={"visibility": "public"},
+                            )
+            self.assertEqual(r.status_code, 200, r.text)
+            body = r.json()
+            self.assertEqual(body["status"], "queued_for_manual")
+            self.assertIn("quota", body.get("error", "").lower())
+            # Persisted state reflects the queued status.
+            doc = jobs_mod.get_job("j-quota")
+            assert doc is not None
+            self.assertEqual(
+                doc["publish_metadata"]["upload_method"], "queued_for_manual",
+            )
+            self.assertIn("queued_reason", doc["publish_metadata"])
+        finally:
+            os.unlink(local_mp4)
+
+    async def test_quota_exceeded_then_playwright_success_returns_done(self) -> None:
+        import tempfile
+
+        from pipeline.upload.upload import QuotaExceededError
+
+        _done_job("j-quota-pw")
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(b"\x00" * 16)
+            local_mp4 = f.name
+        try:
+            jobs_mod.get_jobs().update("j-quota-pw", preview_local_path=local_mp4)
+
+            quota_exc = QuotaExceededError("quotaExceeded", "limit")
+            fake_pw_result = {
+                "video_id": "pw_abc",
+                "url": "https://youtu.be/pw_abc",
+                "uploaded_at": "2026-05-24T00:00:00Z",
+            }
+            with patch.dict(os.environ, {"YTFACTORY_SIM_WORKER": "0"}):
+                with patch(
+                    "pipeline.upload.upload.youtube_upload",
+                    side_effect=quota_exc,
+                ):
+                    with patch(
+                        "pipeline.upload.playwright_upload.playwright_upload",
+                        return_value=fake_pw_result,
+                    ) as mock_pw:
+                        app = _make_app()
+                        transport = httpx.ASGITransport(app=app)
+                        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+                            r = await c.post(
+                                "/api/jobs/j-quota-pw/publish",
+                                json={"visibility": "unlisted"},
+                            )
+            self.assertEqual(r.status_code, 200, r.text)
+            body = r.json()
+            self.assertEqual(body["status"], "done")
+            self.assertEqual(body["youtube_url"], "https://youtu.be/pw_abc")
+            self.assertTrue(mock_pw.called)
+            doc = jobs_mod.get_job("j-quota-pw")
+            assert doc is not None
+            self.assertEqual(doc["publish_metadata"]["upload_method"], "playwright")
+        finally:
+            os.unlink(local_mp4)
+
+    async def test_non_quota_upload_error_does_not_trigger_playwright(self) -> None:
+        """Generic UploadError (e.g. refresh-token-lost, 5xx) must NOT
+        fall through to playwright — only quota-class 403s do."""
+        import tempfile
+
+        from pipeline.upload.upload import UploadError
+
+        _done_job("j-non-quota")
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(b"\x00" * 16)
+            local_mp4 = f.name
+        try:
+            jobs_mod.get_jobs().update("j-non-quota", preview_local_path=local_mp4)
+            with patch.dict(os.environ, {"YTFACTORY_SIM_WORKER": "0"}):
+                with patch(
+                    "pipeline.upload.upload.youtube_upload",
+                    side_effect=UploadError("oauth token revoked"),
+                ):
+                    with patch(
+                        "pipeline.upload.playwright_upload.playwright_upload",
+                    ) as mock_pw:
+                        app = _make_app()
+                        transport = httpx.ASGITransport(app=app)
+                        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+                            r = await c.post(
+                                "/api/jobs/j-non-quota/publish",
+                                json={"visibility": "unlisted"},
+                            )
+            self.assertEqual(r.status_code, 200, r.text)
+            body = r.json()
+            self.assertEqual(body["status"], "failed")
+            self.assertIn("oauth", body.get("error", "").lower())
+            # Playwright must NOT have been invoked.
+            self.assertFalse(mock_pw.called)
+        finally:
+            os.unlink(local_mp4)
+
+
+class PublishPlaywrightModuleEnvCheckTest(unittest.TestCase):
+    """Pin :func:`pipeline.upload.playwright_upload._check_environment`'s
+    failure modes — every missing precondition must raise RuntimeError
+    with a specific message, never silently no-op."""
+
+    def test_check_raises_when_user_data_dir_unset(self) -> None:
+        from pipeline.upload.playwright_upload import _check_environment
+
+        with patch.dict(os.environ, {"YTFACTORY_CHROME_USER_DATA_DIR": ""}, clear=False):
+            with self.assertRaises(RuntimeError) as ctx:
+                _check_environment()
+            self.assertIn("YTFACTORY_CHROME_USER_DATA_DIR", str(ctx.exception))
+
+    def test_check_raises_when_user_data_dir_does_not_exist(self) -> None:
+        from pipeline.upload.playwright_upload import _check_environment
+
+        with patch.dict(
+            os.environ,
+            {"YTFACTORY_CHROME_USER_DATA_DIR": "/definitely/not/a/real/path/xyz"},
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _check_environment()
+            self.assertIn("does not", str(ctx.exception))
 
 
 class PublishAuthTest(unittest.IsolatedAsyncioTestCase):
