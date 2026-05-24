@@ -153,15 +153,22 @@ class SingleBed:
         return result
 
     def _resolve_bed_path(self, spec: Any, bed_name: str) -> Path | None:
-        """Find the bed mp3/wav under <channel>/music/ or
-        spec.extra['music_dir']."""
+        """Find the bed mp3/wav. Three locations in priority order:
+
+        1. ``spec.extra['music_dir']`` — caller-supplied override.
+        2. ``<repo_root>/<channel>/music/<bed>.{wav,mp3}`` — per-channel.
+        3. ``<repo_root>/data/music/<bed>.{wav,mp3}`` — central asset
+           dir (added 2026-05-24; mirrors the same fix in
+           ducked_loop.py). See that file's docstring for the
+           UI-promised-but-backend-missing context.
+        """
         music_dir = (spec.extra or {}).get("music_dir")
         if music_dir:
             for ext in (".wav", ".mp3"):
                 p = Path(music_dir) / f"{bed_name}{ext}"
                 if p.exists():
                     return p
-        from pipeline.paths import RenderPaths  # noqa: PLC0415
+        from pipeline.paths import RenderPaths, PROJECT_ROOT  # noqa: PLC0415
         try:
             rp = RenderPaths.from_channel_dir(spec.channel)
             for ext in (".wav", ".mp3"):
@@ -170,6 +177,10 @@ class SingleBed:
                     return p
         except Exception:  # noqa: BLE001
             pass
+        for ext in (".wav", ".mp3"):
+            p = PROJECT_ROOT / "data" / "music" / f"{bed_name}{ext}"
+            if p.exists():
+                return p
         return None
 
 

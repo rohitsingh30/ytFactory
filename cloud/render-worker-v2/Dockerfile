@@ -71,6 +71,15 @@ COPY pipeline/      /workspace/pipeline/
 COPY control/       /workspace/control/
 COPY scripts/       /workspace/scripts/
 
+# Central music bed assets (~2 MB). Channel YAMLs reference these by
+# bare name (``music_bed_default: ambient_low.mp3``); the resolver in
+# pipeline/render/music/{ducked_loop,single_bed}.py falls back to
+# /workspace/data/music/ when no per-channel music dir exists.
+# Without this COPY, every render that uses a default ambient bed
+# died at the music stage with "music_bed_default=... not found on
+# disk" — 3 jobs killed by this on 2026-05-24 alone before the fix.
+COPY data/music/    /workspace/data/music/
+
 COPY cloud/render-worker-v2/entrypoint.py /workspace/cloud/render-worker-v2/entrypoint.py
 COPY cloud/render-worker-v2/writeback.py /workspace/cloud/render-worker-v2/writeback.py
 COPY cloud/render-worker-v2/_stage_envelope.py /workspace/cloud/render-worker-v2/_stage_envelope.py

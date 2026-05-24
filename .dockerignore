@@ -38,6 +38,16 @@ data/research/*
 !data/research/channel_assets/
 !data/research/channel_assets/**
 
+# Central music bed assets (~2 MB). render-worker-v2's Dockerfile
+# COPYs data/music/ into the image so every channel's
+# music_bed_default (ambient_low, cinematic, dreamy, …) resolves at
+# render time. Without this re-include, the build fails with
+# "COPY failed: stat data/music/: file does not exist" — which is
+# exactly the F24 Dockerfile-COPY-drift class manifesting through
+# .dockerignore instead of the Dockerfile itself.
+!data/music/
+!data/music/**
+
 # Per-channel folders: cloud control plane needs config.yaml + variants/
 # + uploads/ + raw/ + narrations/ (the last two so the round-robin
 # scheduler can see the backlog). Everything heavy stays out.

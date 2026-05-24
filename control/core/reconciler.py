@@ -155,6 +155,13 @@ def reconcile_stuck_jobs(
         "actions": [],
         "dry_run": dry_run,
         "error": None,
+        # Per-status query failures (e.g. composite-index 400). Empty
+        # when all status scans succeeded. If non-empty, ``error`` is
+        # also set so callers + the dashboard can distinguish "0
+        # candidates because nothing's stuck" from "0 candidates
+        # because every scan 400'd silently". Previous behaviour
+        # swallowed both into the same success-shaped summary.
+        "per_status_errors": {},
     }
 
     try:
@@ -194,17 +201,32 @@ def reconcile_stuck_jobs(
                     break
         except Exception as exc:  # noqa: BLE001
             # Most likely a composite-index 400 the first time. Log + skip
-            # this status; other statuses can still be reconciled.
+            # this status; other statuses can still be reconciled, but
+            # surface the failure in ``summary`` so a fully-broken
+            # reconciler doesn't look like a healthy 0-candidates tick.
             logger.warning(
                 "reconciler: firestore query failed for status=%s: %s "
                 "(needs composite index updated_at + status)",
                 status, exc,
             )
+            summary["per_status_errors"][status] = f"{type(exc).__name__}: {exc}"
             continue
         if len(candidates) >= batch_size:
             break
 
     summary["candidates"] = len(candidates)
+    # Roll any per-status query failures up into ``error`` so the
+    # caller has one field to gate on. "All five scans failed" is a
+    # different beast from "scans succeeded but nothing was stuck"
+    # and the dashboard needs to tell them apart.
+    if summary["per_status_errors"]:
+        n_failed = len(summary["per_status_errors"])
+        n_total = len(_RECONCILABLE_STATUSES)
+        summary["error"] = (
+            f"reconciler: {n_failed}/{n_total} status scans failed "
+            f"(see per_status_errors). Most likely a missing composite "
+            f"index — deploy firestore.indexes.json."
+        )
     if not candidates:
         logger.debug("reconciler: no candidates older than %s min", max_age_minutes)
         return summary
@@ -318,13 +340,23 @@ def _reconcile_one(
     cancelled_count = int(getattr(execution, "cancelled_count", 0) or 0)
     running_count = int(getattr(execution, "running_count", 0) or 0)
 
-    # Proto fields default to "Timestamp(seconds=0)" when unset — must
-    # check the seconds value too, not just truthiness.
-    completion_seconds = (
-        getattr(completion_time, "seconds", 0) if completion_time else 0
+    # proto-plus (the modern google-cloud-run client) auto-converts
+    # proto3 Timestamps to ``DatetimeWithNanoseconds`` — a ``datetime``
+    # subclass with NO ``.seconds`` attribute. The legacy raw-proto
+    # ``Timestamp(seconds=N, nanos=N)`` IS still possible if a future
+    # codepath bypasses proto-plus. So treat the field as "set" if
+    # either the datetime year is > 1970 (proto-plus path) OR the
+    # raw-proto .seconds > 0 (legacy path). Truthy alone is wrong:
+    # a ``DatetimeWithNanoseconds(1970, 1, 1)`` is truthy but means
+    # "Timestamp unset". This bug previously labelled every completed
+    # execution ``still_running`` and the reconciler never marked
+    # anything failed — see tests/test_control_reconciler.py.
+    completion_is_set = bool(completion_time) and (
+        getattr(completion_time, "year", 1970) > 1970
+        or int(getattr(completion_time, "seconds", 0) or 0) > 0
     )
 
-    if completion_seconds == 0:
+    if not completion_is_set:
         # Execution still running OR queued. running_count==1 means a
         # task is actively executing (worker is just not writing
         # Firestore progress). Don't touch.

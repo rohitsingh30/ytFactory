@@ -1009,8 +1009,17 @@ def build_spec(
     music_bed = overrides.get("music_bed") \
         or (cfg.get("long_form") or {}).get("music_bed_default") \
         or cfg.get("music_bed_default")
-    if music_bed and music_bed.endswith(".mp3"):
-        music_bed = music_bed[:-4]
+    # Strip the file extension so the resolver can probe both .wav and
+    # .mp3 from a bare bed name. Pre-2026-05-24 only ``.mp3`` was
+    # stripped; ``music_bed_default: aether-loop.wav`` (historyrecapped)
+    # left the literal "aether-loop.wav" in bed_name and the resolver
+    # then looked for "aether-loop.wav.wav" / "aether-loop.wav.mp3" —
+    # both 404'd. Strip whichever extension is present.
+    if music_bed:
+        for ext in (".mp3", ".wav"):
+            if music_bed.endswith(ext):
+                music_bed = music_bed[: -len(ext)]
+                break
 
     # ----- captions -------------------------------------------------------
     captions_density = _coerce_captions_density(overrides.get("captions_density"))

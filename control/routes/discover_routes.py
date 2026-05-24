@@ -57,7 +57,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -105,7 +107,14 @@ CHANNEL_DEFAULT_SUBREDDIT: dict[str, str] = {
 # env (so unit tests / CI don't hit Azure unintentionally). Set
 # ``YTFACTORY_DISCOVER_LLM_DISABLE=1`` to disable LLM augmentation
 # globally (callers fall back to native-only).
-LLM_BRAINSTORM_COUNT = 4
+# 2026-05-24: bumped from 4 → 8 after users reported "render keeps
+# choosing the same 2-3 topics". Combined with picking uniformly
+# across the FULL feed (was: top-5) in pick_one and the server-side
+# Firestore-recent avoid seed in _build_feed, this gives the picker
+# enough headroom that successive clicks traverse the candidate space
+# instead of cycling. Cost: ~2x LLM tokens per discover call (still
+# well under the $2 budget cap — see _llm_topic_items).
+LLM_BRAINSTORM_COUNT = 8
 
 
 class DiscoverContextValues(BaseModel):
@@ -696,6 +705,83 @@ def _native_items_for(channel: str, req: DiscoverRequest, *, limit: int) -> tupl
     return ("", [])
 
 
+def _recently_rendered_topics_and_refs(
+    channel: str, *, days: int = 14, max_docs: int = 200,
+) -> set[str]:
+    """Return the set of topics + source_refs that this channel has
+    already rendered (or attempted) in the last ``days``.
+
+    Why this exists: the client-side ``shownTopics`` state in
+    ``web-next/app/app/create/page.tsx`` is React ``useState`` —
+    session-only, resets on every page mount / tab / device. Users
+    reported "I keep getting the same story" because every fresh
+    /app/create session sent ``avoid: []`` and the discover feed's
+    top item came back unchanged. The fix is to seed the avoid set
+    server-side from Firestore so dedup survives reloads + cross-
+    device usage without forcing the UI to persist anything.
+
+    Set semantics — every entry is lowercased + stripped so the
+    downstream ``_filter_avoid`` (which already lowercases its inputs)
+    matches uniformly.
+
+    Bounds — ``limit(200)`` caps the scan. At our render volume
+    (≤50/day per channel) a 14-day window comfortably fits. If we
+    ever ship 200 renders/day per channel, this needs to grow.
+
+    Best-effort — Firestore unavailable / blip → empty set. Discover
+    keeps working; you might see a recent dupe but the endpoint never
+    500s on the dedup path.
+    """
+    if not channel:
+        return set()
+    try:
+        from google.cloud import firestore  # noqa: PLC0415
+        db = firestore.Client(
+            project=os.environ.get("GOOGLE_CLOUD_PROJECT", "ytfactory-prod-v3"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("discover dedup: firestore unavailable: %s", exc)
+        return set()
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    seen: set[str] = set()
+    try:
+        # Single-field where on `channel` (auto-indexed). Filter
+        # `created_at > cutoff` in Python so we don't need a
+        # composite index. Cap the scan to keep this O(1) on a
+        # busy channel.
+        stream = (
+            db.collection("jobs")
+            .where("channel", "==", channel)
+            .limit(max_docs)
+            .stream()
+        )
+        for snap in stream:
+            d = snap.to_dict() or {}
+            created = d.get("created_at")
+            # Treat unset / non-datetime created_at as recent (worst
+            # case we over-dedup; better than under-dedup).
+            if created is not None:
+                try:
+                    if created < cutoff:
+                        continue
+                except TypeError:
+                    pass  # mismatched types — keep
+            topic = (d.get("topic") or "").strip().lower()
+            if topic:
+                seen.add(topic)
+            ref = ((d.get("proposal") or {}).get("source_ref") or "").strip()
+            if ref:
+                seen.add(ref.lower())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "discover dedup: firestore query failed for channel=%s: %s",
+            channel, exc,
+        )
+        return set()
+    return seen
+
+
 def _filter_avoid(items: list[DiscoverItem], avoid: list[str]) -> list[DiscoverItem]:
     if not avoid:
         return items
@@ -742,13 +828,22 @@ def _build_feed(channel: str, *, limit: int = 8, req: DiscoverRequest | None = N
     non-fatal — only "literally zero items" surfaces as 502.
     """
     req = req or DiscoverRequest()
+    # Seed the avoid list with topics + source_refs already rendered
+    # for this channel in the last 14 days. The client's
+    # ``shownTopics`` React state resets per session — without this
+    # server-side seed, every fresh /app/create tab gets the same
+    # top story back. Merged as a copy so we don't mutate the
+    # caller's DiscoverRequest.
+    server_avoid = _recently_rendered_topics_and_refs(channel, days=14)
+    effective_avoid = list(req.avoid or []) + list(server_avoid)
+
     native_label, native_items = _safe_native_items_for(channel, req, limit=limit)
-    native_items = _filter_avoid(native_items, req.avoid)
+    native_items = _filter_avoid(native_items, effective_avoid)
 
     # LLM augmentation — always attempted unless globally disabled. We
     # ask for a small batch so total feed length stays bounded.
     llm_items = _llm_topic_items(channel, req, count=min(LLM_BRAINSTORM_COUNT, limit))
-    llm_items = _filter_avoid(llm_items, req.avoid)
+    llm_items = _filter_avoid(llm_items, effective_avoid)
 
     parts: list[str] = []
     if native_label:
@@ -835,7 +930,18 @@ async def pick_one(channel: str, req: DiscoverRequest | None = None) -> Discover
         raise HTTPException(status_code=502, detail=f"upstream source failed: {e}")
     if not feed_obj.items:
         raise HTTPException(status_code=502, detail="upstream returned no candidates")
-    # Pick from the first 5 (the "best" of the blended pool) so the
-    # signal-to-noise stays high but successive clicks don't always
-    # return the same item.
-    return random.choice(feed_obj.items[: min(5, len(feed_obj.items))])
+    # Pick uniformly across the FULL feed (was: top-5 only). 2026-05-24:
+    # users reported "render keeps choosing the same 2-3 topics" — with
+    # a top-5 cap and ~4-5 items returned per call, the collision
+    # probability per click was ~20%, so 5 clicks had ~96% chance of
+    # repeating. The native source (Reddit top-of-day) is stable for
+    # 24h, so its top item is the same on every successive call; the
+    # only variety came from the LLM brainstorm. Picking from the full
+    # blended feed (up to 10 items) drops collision probability to ~10%
+    # per click. Combined with the server-side dedup in _build_feed
+    # (which adds Firestore-recent topics to the avoid set), successive
+    # clicks now meaningfully traverse the candidate space instead of
+    # cycling. The "quality stays high" argument for capping at 5 is
+    # mooted by _build_feed already ranking + filtering — anything
+    # surviving into ``feed_obj.items`` is fair game.
+    return random.choice(feed_obj.items)

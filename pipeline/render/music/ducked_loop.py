@@ -215,16 +215,26 @@ class DuckedLoop:
         return out_path
 
     def _resolve_bed_path(self, spec: Any, bed_name: str) -> Path | None:
-        """Find the bed mp3/wav. Looks under spec.extra['music_dir']
-        first, else the channel's standard <channel>/music/ dir."""
+        """Find the bed mp3/wav across three locations, in priority order:
+
+        1. ``spec.extra['music_dir']`` — caller-supplied override.
+        2. ``<repo_root>/<channel>/music/<bed>.{wav,mp3}`` — per-channel
+           assets (only sportsrecapped currently uses this).
+        3. ``<repo_root>/data/music/<bed>.{wav,mp3}`` — central asset
+           dir. Every channel YAML's ``music_bed_default`` (ambient_low,
+           cinematic, upbeat, etc.) lives here. Added 2026-05-24 after
+           the UI-promised-but-backend-missing audit found 3 renders
+           killed by ``music_bed_default='ambient_low' not found on
+           disk`` — the file existed at ``data/music/ambient_low.mp3``
+           but the resolver never looked there.
+        """
         music_dir = (spec.extra or {}).get("music_dir")
         if music_dir:
             for ext in (".wav", ".mp3"):
                 p = Path(music_dir) / f"{bed_name}{ext}"
                 if p.exists():
                     return p
-        # Channel default: <repo_root>/<channel>/music/<bed>.{wav,mp3}
-        from pipeline.paths import RenderPaths  # noqa: PLC0415
+        from pipeline.paths import RenderPaths, PROJECT_ROOT  # noqa: PLC0415
         try:
             rp = RenderPaths.from_channel_dir(spec.channel)
             for ext in (".wav", ".mp3"):
@@ -233,6 +243,11 @@ class DuckedLoop:
                     return p
         except Exception:  # noqa: BLE001
             pass
+        # Central asset dir — the canonical home of every default bed.
+        for ext in (".wav", ".mp3"):
+            p = PROJECT_ROOT / "data" / "music" / f"{bed_name}{ext}"
+            if p.exists():
+                return p
         return None
 
     def _resolve_narration_path(self, spec: Any) -> Path | None:

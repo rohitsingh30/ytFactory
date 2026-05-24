@@ -57,7 +57,13 @@ class DuckedLoopMissingBedRaises(unittest.TestCase):
         # Point music to a non-existent bed asset. The resolver looks
         # in spec.extra["music_dir"] first; we set it to an empty
         # temp dir so resolution definitively fails.
-        spec.music.default_bed = "ambient_low"
+        # Use a deliberately non-existent bed name so all three resolver
+        # locations (spec.extra music_dir, <channel>/music/, AND the
+        # data/music/ central fallback added 2026-05-24) miss. Picking
+        # a real bed like "ambient_low" would now resolve via the
+        # central fallback — which is the GOOD path, but defeats this
+        # test's purpose (verifying the RAISE on a true miss).
+        spec.music.default_bed = "definitely-not-a-real-bed-name-xyz"
         if spec.extra is None:
             spec.extra = {}
         spec.extra["music_dir"] = str(self.tmp)
@@ -71,7 +77,7 @@ class DuckedLoopMissingBedRaises(unittest.TestCase):
         # The error message must name the configured bed AND point at
         # the silent_fallback memory note so the operator knows the
         # fix path without trawling source.
-        self.assertIn("ambient_low", msg)
+        self.assertIn("definitely-not-a-real-bed-name-xyz", msg)
         self.assertIn("silent_fallback_unshippable_output", msg)
 
     def test_off_bed_still_returns_silent_path(self) -> None:
@@ -111,7 +117,7 @@ class SingleBedMissingBedRaises(unittest.TestCase):
             {"channel": "test_channel", "channel_overrides": {}},
             channel_yaml_path=None, variant_yaml_path=None,
         )
-        spec.music.default_bed = "aether-loop"
+        spec.music.default_bed = "definitely-not-a-real-bed-xyz"
         if spec.extra is None:
             spec.extra = {}
         spec.extra["music_dir"] = str(self.tmp)
@@ -122,7 +128,7 @@ class SingleBedMissingBedRaises(unittest.TestCase):
         with self.assertRaises(FileNotFoundError) as cm:
             SingleBed().compose(spec, narration_duration_s=2.0)
         msg = str(cm.exception)
-        self.assertIn("aether-loop", msg)
+        self.assertIn("definitely-not-a-real-bed-xyz", msg)
         self.assertIn("silent_fallback_unshippable_output", msg)
 
     def test_off_bed_returns_synth_ambient(self) -> None:
@@ -165,7 +171,13 @@ class MusicPickEventSignalsFailure(unittest.TestCase):
             {"channel": "test_channel", "channel_overrides": {}},
             channel_yaml_path=None, variant_yaml_path=None,
         )
-        spec.music.default_bed = "ambient_low"
+        # Use a deliberately non-existent bed name so all three resolver
+        # locations (spec.extra music_dir, <channel>/music/, AND the
+        # data/music/ central fallback added 2026-05-24) miss. Picking
+        # a real bed like "ambient_low" would now resolve via the
+        # central fallback — which is the GOOD path, but defeats this
+        # test's purpose (verifying the RAISE on a true miss).
+        spec.music.default_bed = "definitely-not-a-real-bed-name-xyz"
         if spec.extra is None:
             spec.extra = {}
         spec.extra["music_dir"] = str(self.tmp)
@@ -183,7 +195,87 @@ class MusicPickEventSignalsFailure(unittest.TestCase):
             "fallback path.",
         )
         self.assertEqual(picks[0]["metadata"]["source"], "missing_bed")
-        self.assertEqual(picks[0]["metadata"]["configured_bed"], "ambient_low")
+        self.assertEqual(picks[0]["metadata"]["configured_bed"],
+                         "definitely-not-a-real-bed-name-xyz")
+
+
+class CentralMusicDirFallbackWorks(unittest.TestCase):
+    """When ``data/music/<bed>.{wav,mp3}`` exists at repo root, the
+    resolver must find it even though the channel has no
+    ``<channel>/music/`` dir of its own. Pre-2026-05-24 the resolver
+    only checked spec.extra['music_dir'] then ``<channel>/music/`` —
+    every channel YAML's default bed (``ambient_low.mp3``, etc.)
+    sits in ``data/music/`` and the resolver returned None, raising
+    the unshippable FileNotFoundError. Pin the central-dir fallback
+    so it can't silently regress."""
+
+    def test_data_music_fallback_resolves_ambient_low(self) -> None:
+        from pipeline.paths import PROJECT_ROOT
+        bed = PROJECT_ROOT / "data" / "music" / "ambient_low.mp3"
+        # Sanity: the asset is actually in the repo.
+        self.assertTrue(
+            bed.exists(),
+            f"data/music/ambient_low.mp3 must exist in the repo "
+            f"({bed} missing) — the central asset dir is the canonical "
+            f"home of every default bed. If you're moving the dir, "
+            f"update pipeline/render/music/{{ducked_loop,single_bed}}.py "
+            f"AND cloud/render-worker-v2/Dockerfile's COPY line.",
+        )
+
+        spec = build_spec(
+            {"channel": "test_channel", "channel_overrides": {}},
+            channel_yaml_path=None, variant_yaml_path=None,
+        )
+        spec.music.default_bed = "ambient_low"
+        # Use an empty music_dir so spec.extra path fails AND
+        # <channel>/music/ doesn't exist either — only the
+        # data/music/ fallback should resolve.
+        with tempfile.TemporaryDirectory(prefix=".empty-") as empty:
+            spec.extra = {"music_dir": empty}
+            resolved = DuckedLoop()._resolve_bed_path(spec, "ambient_low")
+            self.assertEqual(
+                resolved, bed,
+                f"resolver must find ambient_low at the central "
+                f"data/music/ location; got {resolved}",
+            )
+
+    def test_data_music_fallback_resolves_for_single_bed_too(self) -> None:
+        from pipeline.paths import PROJECT_ROOT
+        bed = PROJECT_ROOT / "data" / "music" / "cinematic.mp3"
+        self.assertTrue(bed.exists(), f"data/music/cinematic.mp3 missing ({bed})")
+
+        spec = build_spec(
+            {"channel": "test_channel", "channel_overrides": {}},
+            channel_yaml_path=None, variant_yaml_path=None,
+        )
+        with tempfile.TemporaryDirectory(prefix=".empty-") as empty:
+            spec.extra = {"music_dir": empty}
+            resolved = SingleBed()._resolve_bed_path(spec, "cinematic")
+            self.assertEqual(resolved, bed)
+
+
+class DockerfileBakesCentralMusicDir(unittest.TestCase):
+    """Pin the Dockerfile-COPY drift (F24) for the music asset dir.
+    Without this COPY, the resolver fix above is useless in production:
+    the file system on the deployed worker has no data/music/, so the
+    fallback returns None and the render raises the unshippable error.
+    """
+
+    def test_dockerfile_copies_data_music(self) -> None:
+        from pipeline.paths import PROJECT_ROOT
+        dockerfile = PROJECT_ROOT / "cloud" / "render-worker-v2" / "Dockerfile"
+        text = dockerfile.read_text(encoding="utf-8")
+        self.assertIn(
+            "COPY data/music/",
+            text,
+            "render-worker-v2/Dockerfile must COPY data/music/ — the "
+            "central music bed assets. The resolver in "
+            "ducked_loop.py + single_bed.py falls back to "
+            "/workspace/data/music/; if the COPY line is removed the "
+            "fallback resolves to a path that doesn't exist on the "
+            "deployed worker and every render using a default ambient "
+            "bed dies at the music stage.",
+        )
 
 
 if __name__ == "__main__":

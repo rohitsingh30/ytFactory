@@ -322,6 +322,120 @@ class ReconcilerTest(unittest.TestCase):
         self.assertEqual(summary["marked_failed"], 0)
         self.assertEqual(writes, {})
 
+    def test_completion_time_as_datetime_marks_job_failed(self):
+        # Regression: ``google-cloud-run`` (proto-plus) returns
+        # ``Execution.completion_time`` as a ``datetime`` subclass
+        # (DatetimeWithNanoseconds), NOT a raw proto Timestamp with a
+        # ``.seconds`` attribute. Before 2026-05-24 the reconciler did
+        # ``getattr(completion_time, "seconds", 0)`` which returned 0
+        # for every real datetime, so every completed execution was
+        # mislabelled ``still_running`` and never reconciled. Job
+        # 82682e8e (mystoriesanimated tifu) sat queued for 24h
+        # because of this. Pin the datetime-shape so the bug can't
+        # come back the next time the SDK is upgraded.
+        old = datetime.now(timezone.utc) - timedelta(hours=3)
+        docs = {
+            "pending": [_fake_doc(
+                "job-datetime",
+                status="pending",
+                stage="dispatching",
+                updated_at=old,
+                cloud_execution="exec-dt",
+            )],
+        }
+        execs = {
+            "exec-dt": SimpleNamespace(
+                completion_time=datetime(2026, 5, 23, 20, 51, 23,
+                                         tzinfo=timezone.utc),
+                failed_count=1,
+                succeeded_count=0,
+                cancelled_count=0,
+                running_count=0,
+            ),
+        }
+        summary, writes = self._run_reconciler(
+            docs_by_status=docs, execution_responses=execs,
+        )
+        self.assertEqual(summary["marked_failed"], 1,
+                         "datetime-shaped completion_time must be "
+                         "treated as 'set', else reconciler no-ops")
+        self.assertEqual(writes["job-datetime"][0]["status"], "failed")
+
+    def test_unset_completion_time_as_epoch_datetime_is_still_running(self):
+        # When the proto Timestamp is unset, proto-plus surfaces it as
+        # ``DatetimeWithNanoseconds(1970, 1, 1)`` — truthy but
+        # semantically "not set". Must not mark failed: worker may be
+        # mid-stage.
+        old = datetime.now(timezone.utc) - timedelta(hours=3)
+        docs = {
+            "rendering": [_fake_doc(
+                "job-epoch",
+                status="rendering",
+                stage="compose",
+                updated_at=old,
+                cloud_execution="exec-epoch",
+            )],
+        }
+        execs = {
+            "exec-epoch": SimpleNamespace(
+                completion_time=datetime(1970, 1, 1, tzinfo=timezone.utc),
+                failed_count=0,
+                succeeded_count=0,
+                cancelled_count=0,
+                running_count=1,
+            ),
+        }
+        summary, writes = self._run_reconciler(
+            docs_by_status=docs, execution_responses=execs,
+        )
+        self.assertEqual(summary["still_running"], 1)
+        self.assertEqual(summary["marked_failed"], 0)
+        self.assertNotIn("job-epoch", writes)
+
+    def test_all_status_query_failures_surface_error(self):
+        # Regression: previously, a missing composite index made every
+        # status query 400 and the reconciler silently returned a
+        # success-shaped ``{scanned:0, candidates:0, error:None}``
+        # summary. Violates feedback_silent_fallback_unshippable_output.
+        # Now ``summary['error']`` is set and ``per_status_errors``
+        # lists each failure.
+        from control.core import reconciler
+
+        class _ExplodingCollection:
+            def where(self, *_a, **_k):
+                raise RuntimeError(
+                    "FailedPrecondition: 400 The query requires an index",
+                )
+
+        class _ExplodingClient:
+            def collection(self, *_a, **_k):
+                return _ExplodingCollection()
+
+        fake_firestore = SimpleNamespace(
+            Client=MagicMock(return_value=_ExplodingClient()),
+        )
+        fake_run_v2 = SimpleNamespace(
+            ExecutionsClient=MagicMock(return_value=MagicMock()),
+        )
+
+        import google.cloud as _gcloud  # noqa: PLC0415
+        with patch.dict("sys.modules", {
+            "google.cloud.firestore": fake_firestore,
+            "google.cloud.run_v2": fake_run_v2,
+        }), patch.object(_gcloud, "firestore", fake_firestore, create=True), \
+                patch.object(_gcloud, "run_v2", fake_run_v2, create=True):
+            summary = reconciler.reconcile_stuck_jobs(dry_run=True)
+
+        self.assertEqual(summary["scanned"], 0)
+        self.assertEqual(summary["candidates"], 0)
+        self.assertIsNotNone(summary["error"],
+                             "error must be set when status queries fail")
+        self.assertIn("scans failed", summary["error"])
+        self.assertIn("firestore.indexes.json", summary["error"])
+        self.assertEqual(set(summary["per_status_errors"].keys()),
+                         {"queued", "pending", "dispatching",
+                          "rendering", "running"})
+
 
 class ReconcilerStubResistanceTest(unittest.TestCase):
     """Pin the test-stubbing pattern itself.

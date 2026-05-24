@@ -9,11 +9,18 @@
     <!-- execution has finished failing (SIGKILL / OOM / task-timeout)    -->
     <!-- and marks them status=failed so the dashboard surfaces them.    -->
     <!-- See control/core/reconciler.py for the full docstring.           -->
+    <!-- 2026-05-24: switched from `curl POST http://127.0.0.1:8090/...`  -->
+    <!-- to direct Python invocation. The HTTP path was a silent no-op    -->
+    <!-- whenever the laptop FastAPI server wasn't running — which is     -->
+    <!-- exactly the state we want the reconciler to survive (the laptop  -->
+    <!-- server crashing leaves jobs stuck; reconciler being down too     -->
+    <!-- makes the stuck-state permanent). Direct Python eliminates the   -->
+    <!-- server-up dependency. No PIN auth needed for an in-process call. -->
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>curl -sS -X POST http://127.0.0.1:8090/api/admin/reconcile_jobs -H "Content-Type: application/json" -d '{"max_age_minutes": 120, "batch_size": 50, "dry_run": false}' &gt;&gt; /tmp/ytfactory-job-reconciler.log 2&gt;&amp;1 &amp;&amp; echo "" &gt;&gt; /tmp/ytfactory-job-reconciler.log</string>
+        <string>cd /Users/rohit/ytFactory &amp;&amp; PYTHONPATH=/Users/rohit/ytFactory /Users/rohit/ytFactory/.venv/bin/python -c 'import json; from control.core.reconciler import reconcile_stuck_jobs; r = reconcile_stuck_jobs(max_age_minutes=120, batch_size=50, dry_run=False); print(json.dumps({k:v for k,v in r.items() if k != "actions"}, default=str)); [print("ACTION:", a.get("action"), a.get("job_id","")[:8], (a.get("reason","")[:120])) for a in r.get("actions",[])]' &gt;&gt; /tmp/ytfactory-job-reconciler.log 2&gt;&amp;1; echo "---tick $(date -u +%FT%TZ)---" &gt;&gt; /tmp/ytfactory-job-reconciler.log</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -25,22 +32,24 @@
     <!-- stops, not that it stops within seconds.                         -->
     <key>StartInterval</key>
     <integer>300</integer>
+    <key>WorkingDirectory</key>
+    <string>/Users/rohit/ytFactory</string>
     <key>StandardOutPath</key>
     <string>/tmp/ytfactory-job-reconciler.out</string>
     <key>StandardErrorPath</key>
     <string>/tmp/ytfactory-job-reconciler.err</string>
-    <!-- AUTH NOTE: the /api/admin/reconcile_jobs route requires the pin -->
-    <!-- header (Depends(require_pin)). If the laptop server is running  -->
-    <!-- with YTFACTORY_PIN set, install this plist with the pin baked   -->
-    <!-- into the curl call:                                              -->
-    <!--   -H "X-Pin: $(cat ~/.config/ytfactory/pin)"                    -->
-    <!-- Localhost-only deployment without a pin works as-is.            -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
         <string>/Users/rohit</string>
         <key>PATH</key>
         <string>/Users/rohit/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- ADC lookup path; without GOOGLE_CLOUD_PROJECT the Firestore -->
+        <!-- client falls back to ADC project metadata which works on    -->
+        <!-- gcloud-authed laptops. Hardcoding it removes the fallback   -->
+        <!-- path and any ambiguity in CI / new machines.                 -->
+        <key>GOOGLE_CLOUD_PROJECT</key>
+        <string>ytfactory-prod-v3</string>
     </dict>
 </dict>
 </plist>
