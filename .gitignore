@@ -146,3 +146,6 @@ data/critiques/
 # we keep the SHIP/FIX verdict on the job doc in Firestore as the
 # durable record.
 **/critiques/
+
+# Runtime turn state (hook system) — not tracked
+.claude/state/
