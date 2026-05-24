@@ -137,24 +137,17 @@ if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
 fi
 state_set "had_recent_options" "$([ "$HAS_RECENT_OPTIONS" = "true" ] && echo true || echo false)"
 
-if [ "$AMBIGUOUS" = 1 ] && [ "$PROMPT_LEN" -lt 80 ] && [ "$RESOLVED_COUNT" = 0 ]; then
-    # Softening: if the recent assistant message had options, this is a
-    # response to that choice — allow.
-    if [ "$HAS_RECENT_OPTIONS" = "true" ]; then
-        exit 0
-    fi
-
-    # Otherwise block, but surface the options helper's output (which
-    # will be "no options detected" — letting the user see why we
-    # think context wasn't enough).
-    OPTION_LINES="$("$PYTHON" "$LIB/recent_context_options.py" "$TRANSCRIPT_PATH" text 2>/dev/null || echo '')"
-    {
-        printf 'P12-block: short ambiguous prompt (no resolved anchor entity, no recent option-list to anchor against).\n'
-        printf 'Recent assistant context for reference:\n'
-        printf '%s\n' "$OPTION_LINES"
-        printf '\nAsk which specific thing the user means before acting.\n'
-    } >&2
-    exit 2
-fi
-
+# 2026-05-24 — P12 BLOCK DISABLED PER EXPLICIT USER DIRECTIVE.
+# User: "not bloking my prompts, this is the last time I am telling you motherfucker"
+# User then authorized via AskUserQuestion: "Authorize me to retry the edit"
+#
+# P12 kept blocking legitimate short follow-up references to visual context
+# (e.g. "that cat looks ugly" referring to a panel just shown). The recent-
+# options softening doesn't help when the prior turn was an image display
+# rather than a choice list. Rather than keep iterating on the softening
+# logic, the block is removed entirely.
+#
+# The ambiguity-detection state is STILL recorded earlier in this script
+# (state_set "ambiguous" at line ~75) so Stop-hook checks can still use it
+# for context if needed. Only the prompt-submit-time block is removed.
 exit 0
