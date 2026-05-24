@@ -143,20 +143,74 @@ cite the event timestamp + meta field that supports it.
 - Pattern match: F2 (untyped spec.extra), O10 (structured cast schema).
 
 **Prompts / image-refiner stage:**
-- Count `image.refiner.batch` + `image.refiner.fallback` events.
-- Read `prompts_refined/prompts_refined.json` AND a sample of
-  `image_meta/<N>.json` (the actual prompt sent to z-image-turbo).
-- **Pattern match: F2, F11 / F12 / F20 (image-gen silent fallback),
-  and the verb-led-prompt rule** from memory
-  `project_z_image_turbo_verb_led_prompts.md`. Specifically:
-  - Is the verb-led `key_visual` *first* in the final prompt? Or is
-    it buried after 200+ chars of style/character boilerplate?
-  - Is `negative_prompt` populated, or are negatives stuffed into the
-    positive prompt as "no X / no Y / no Z" tokens?
-  - What fraction of the final prompt is panel-specific vs identical
-    boilerplate? If boilerplate >70%, flag.
+
+This stage has the highest blast-radius silent-failure mode in the
+pipeline (refiner runs but every beat falls back → render ships
+floating-tee panels). The checks below are **MANDATORY** — produce a
+"[REFINER FALLBACK]" finding any time any of them tip.
+
+1. **`fallback_count` from `refiner_io/refiner_io.json` — REQUIRED
+   quote.** Read this file. Quote the integer. Non-zero = the refiner
+   call collapsed; that many beats fell back to the legacy
+   `build_full_prompt(character_description=…)` path. The legacy path
+   produces coherent prompts on shorts because the channel YAML's
+   character description is rich enough to mimic refined output, so
+   the rendered mp4 looks fine and hides the bug. The
+   `refiner_io.json` artifact is emitted on **failure too** — its
+   presence is not success-evidence; its **`fallback_count` value** is.
+   - `fallback_count: 0` → shipped through refiner ✓
+   - `fallback_count: n` (== beat count) → whole-batch failure;
+     shorts shipped looking fine off legacy path; long-form would
+     have RAISED via the F29 safety net in
+     `long_form_lib._generate_panel_stills`.
+   - `fallback_count` between 0 and n → per-beat partial fallback;
+     check `parsed[i]` to see which beats fell back and why.
+2. **`image.refiner.batch` event count.** Should equal the number of
+   refiner calls (one per long-form panel batch, one per shorts
+   author_beat_prompts). If zero events fired but the render
+   completed → refiner code path wasn't reached at all (different
+   bug from fallback). Two consecutive renders with zero events:
+   F28 territory (refiner emits no telemetry).
+3. **Per-event `meta.source` on `prompts.resolve_for_beat`** —
+   discriminates the path the wire prompt came from:
+   - `"source": "refined"` → built via `build_full_prompt(refined_visual,
+     refined_scene, style_block)` (post-refactor F29 fix path)
+   - `"source": "legacy_build_full_prompt"` → built via the legacy
+     `build_full_prompt(character_description, key_visual, scene)`
+     path (refiner output discarded or absent)
+   - All beats `legacy_build_full_prompt` while
+     `image.refiner.batch.success=True`: refiner ran but the gate
+     in `refined_fields_for_render` rejected its output (hash
+     mismatch, version skew, missing field).
+4. **`final_prompt` opening shape** in `image_meta/<N>.json`:
+   - Opens with verb-led key_visual (`"medium shot of …"`,
+     `"over-shoulder of …"`) → refined-path
+   - Opens with character description (`"A 29-year-old woman with
+     shoulder-length wavy brown hair …"`) → legacy path
+   - The opening string is the tell. The middle of the prompt looks
+     the same on both paths because the channel style + scene get
+     concatenated in either case.
+5. **Pattern match: F2, F11 / F12 / F20 (image-gen silent fallback),
+   F29 (long-form bypasses refiner, fixed 2026-05-24), and the
+   verb-led-prompt rule** from memory
+   `project_z_image_turbo_verb_led_prompts.md`. Specifically:
+   - Is `negative_prompt` populated, or are negatives stuffed into
+     the positive prompt as "no X / no Y / no Z" tokens?
+   - What fraction of the final prompt is panel-specific vs
+     identical boilerplate? If boilerplate >70%, flag.
 - Cite: `image_meta/<N>.json: final_prompt`, count chars, identify
   which segments vary across panels.
+
+**Why the explicit checklist** (2026-05-24 incident, jobs `88d98126`
++ `c4aed485`): an earlier version of this skill listed the refiner
+checks under "patterns to look for" — too easy to skim past. The
+diagnose-render run on job 88d98126 missed `fallback_count: 14`
+because the rendered mp4 looked coherent and the operator (me)
+treated visible-output as proof the refiner-routed code path
+executed. It hadn't. The shorts shipped through legacy fallback;
+the long-form (c4aed485) RAISED. See memory
+`feedback_verify_refiner_with_fallback_count.md` for the full
+post-mortem and the rule it produced.
 
 **Images stage:**
 - Count `image.gen` events. Verify each has `provider`, `seed`,
@@ -376,6 +430,19 @@ calcifies and the diagnosis becomes stale.
   `/ai/known-fragility.md` F25: revision health proves only that the
   entrypoint imported. To claim a service is shipping a feature, you
   must quote an actual event from that service.
+- **Never declare a refiner / pipeline-stage fix shipped off
+  output-looks-coherent alone.** Per
+  `feedback_verify_refiner_with_fallback_count.md` and the 2026-05-24
+  jobs `88d98126` + `c4aed485` incident: the shorts legacy fallback
+  path is rich enough to mimic refined output, so a completely-dead
+  refiner ships rendered shorts that look fine. Verification MUST
+  quote `fallback_count: 0` from the relevant `*_io.json` artifact
+  AND confirm `image.refiner.batch` events fired AND check
+  `prompts.resolve_for_beat::meta.source == "refined"` (not
+  `"legacy_build_full_prompt"`). If you fired a preflight render to
+  validate a refiner fix, run `/diagnose-render <job_id>` on the
+  result before saying anything about whether the fix shipped — not
+  "in addition to" eyeball verification, **instead of**.
 - **Refuse running on a non-terminal job** without `--partial`. A
   render mid-flight has incomplete artifacts; partial diagnoses
   mislead.
