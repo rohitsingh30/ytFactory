@@ -14,6 +14,7 @@ import type {
   JobListResponse,
   NicheDoc,
   NicheDraftResponse,
+  PublishMetadataView,
   PublishRequest,
   PublishResponse,
   QueueState,
@@ -247,6 +248,8 @@ export const jobsApi = {
     }>(`/api/jobs/${jobId}/retry`),
   publish: (jobId: string, body: PublishRequest) =>
     api.post<PublishResponse>(`/api/jobs/${jobId}/publish`, body),
+  publishPreview: (jobId: string) =>
+    api.get<PublishMetadataView>(`/api/jobs/${jobId}/publish/preview`),
   previewUrl: (jobId: string) => `/api/jobs/${jobId}/preview.mp4`,
   // Slice 4 — single endpoint for every per-job artifact kind.
   // Backend signs the GCS URI and 302-redirects.

@@ -23,15 +23,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -514,25 +506,63 @@ function TimelineRow({ entry }: { entry: TimelineEntry }) {
   );
 }
 
+/**
+ * One-click publish modal.
+ *
+ * Per the 2026-05-24 product cut: the modal collects ONLY visibility +
+ * optional scheduled-publish-at. Title / description / hashtags / tags
+ * are auto-generated server-side by
+ * ``pipeline.publish.generate_publish_metadata`` and rendered into the
+ * read-only preview block at the top of the modal — "this is what we
+ * will publish with". The user can adjust their channel defaults if
+ * they want different copy; the modal does not let them edit
+ * per-render. The next-time-it-should-be-smooth bar is enforced here:
+ * one selector + one date picker + one submit.
+ */
 function PublishDialog({ job, onPublished }: { job: Job; onPublished: (j: Job) => void }) {
   const [open, setOpen] = useState(false);
   const [visibility, setVisibility] = useState<"public" | "unlisted" | "private">("unlisted");
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [tags, setTags] = useState("");
+  const [scheduledAt, setScheduledAt] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
+  const [preview, setPreview] = useState<import("@/lib/types").PublishMetadataView | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  // Load the auto-generated preview the moment the modal opens so the
+  // user sees what's about to be published before they decide.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    jobsApi
+      .publishPreview(job.job_id)
+      .then((data) => {
+        if (!cancelled) setPreview(data);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setPreviewError(e instanceof Error ? e.message : String(e));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setPreviewLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, job.job_id]);
 
   async function submit() {
     setSubmitting(true);
     try {
+      // Convert the datetime-local value (no tz) to RFC 3339 UTC.
+      const publishAt = scheduledAt
+        ? new Date(scheduledAt).toISOString()
+        : null;
       const res = await jobsApi.publish(job.job_id, {
         visibility,
-        title: title.trim() || undefined,
-        description: description.trim() || undefined,
-        tags: tags
-          .split(",")
-          .map((t) => t.trim())
-          .filter(Boolean),
+        scheduled_publish_at: publishAt,
       });
       if (res.youtube_url) {
         toast.success("Published", { description: res.youtube_url });
@@ -556,69 +586,117 @@ function PublishDialog({ job, onPublished }: { job: Job; onPublished: (j: Job) =
           Publish
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-md" data-testid="publish-modal">
         <DialogHeader>
           <DialogTitle>Publish to YouTube</DialogTitle>
           <DialogDescription>
-            Override metadata or accept the channel&apos;s defaults.
+            Pick visibility — we&apos;ll handle the rest.
           </DialogDescription>
         </DialogHeader>
+
+        {/* Auto-generated preview block — read-only. */}
+        <div
+          className="rounded-md border border-border bg-surface-2 p-3 text-[12px]"
+          data-testid="publish-preview"
+        >
+          <div className="mb-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+            We&apos;ll publish with
+          </div>
+          {previewLoading && (
+            <div className="text-muted-foreground">Loading preview…</div>
+          )}
+          {previewError && (
+            <div className="text-red-500" data-testid="publish-preview-error">
+              {previewError}
+            </div>
+          )}
+          {preview && (
+            <div className="space-y-2">
+              <div>
+                <div className="text-[11px] text-muted-foreground">Title</div>
+                <div
+                  className="font-medium text-foreground"
+                  data-testid="publish-preview-title"
+                >
+                  {preview.title}
+                </div>
+              </div>
+              <div>
+                <div className="text-[11px] text-muted-foreground">Description</div>
+                <div
+                  className="max-h-24 overflow-y-auto whitespace-pre-wrap text-foreground"
+                  data-testid="publish-preview-description"
+                >
+                  {preview.description}
+                </div>
+              </div>
+              {preview.hashtags.length > 0 && (
+                <div>
+                  <div className="text-[11px] text-muted-foreground">Hashtags</div>
+                  <div className="text-foreground" data-testid="publish-preview-hashtags">
+                    {preview.hashtags.join(" ")}
+                  </div>
+                </div>
+              )}
+              {preview.tags.length > 0 && (
+                <div>
+                  <div className="text-[11px] text-muted-foreground">Tags</div>
+                  <div className="text-foreground" data-testid="publish-preview-tags">
+                    {preview.tags.join(", ")}
+                  </div>
+                </div>
+              )}
+              <div className="pt-1 text-[10px] text-muted-foreground">
+                Change defaults in channel settings if needed.
+              </div>
+            </div>
+          )}
+        </div>
 
         <div className="space-y-4">
           <div className="space-y-1.5">
             <Label htmlFor="vis" className="text-[12px]">
               Visibility
             </Label>
-            <Select value={visibility} onValueChange={(v: string) => setVisibility(v as typeof visibility)}>
-              <SelectTrigger id="vis">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="public">Public</SelectItem>
-                <SelectItem value="unlisted">Unlisted (default)</SelectItem>
-                <SelectItem value="private">Private</SelectItem>
-              </SelectContent>
-            </Select>
+            {/* Radio group — explicit Public / Unlisted / Private buttons
+                per the 2026-05-24 modal scope. */}
+            <div className="flex gap-2" role="radiogroup" aria-label="Visibility">
+              {(["public", "unlisted", "private"] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  role="radio"
+                  aria-checked={visibility === v}
+                  data-testid={`publish-visibility-${v}`}
+                  onClick={() => setVisibility(v)}
+                  className={cn(
+                    "flex-1 rounded-md border px-3 py-1.5 text-[12px] capitalize",
+                    visibility === v
+                      ? "border-primary bg-primary/10 text-foreground"
+                      : "border-border bg-surface-2 text-muted-foreground",
+                  )}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="title" className="text-[12px]">
-              Title override
+            <Label htmlFor="schedule" className="text-[12px]">
+              Schedule publish (optional)
             </Label>
             <Input
-              id="title"
-              placeholder={job.topic ?? ""}
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              maxLength={100}
+              id="schedule"
+              type="datetime-local"
+              value={scheduledAt}
+              onChange={(e) => setScheduledAt(e.target.value)}
               className="bg-surface-2"
+              data-testid="publish-schedule"
             />
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="desc" className="text-[12px]">
-              Description
-            </Label>
-            <Textarea
-              id="desc"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Channel default if blank"
-              className="min-h-[88px] bg-surface-2"
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="tags" className="text-[12px]">
-              Tags (comma-separated)
-            </Label>
-            <Input
-              id="tags"
-              value={tags}
-              onChange={(e) => setTags(e.target.value)}
-              placeholder="shorts, tutorial, ai"
-              className="bg-surface-2"
-            />
+            <div className="text-[10px] text-muted-foreground">
+              Leave blank to publish immediately at the chosen visibility.
+            </div>
           </div>
         </div>
 
@@ -626,7 +704,12 @@ function PublishDialog({ job, onPublished }: { job: Job; onPublished: (j: Job) =
           <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
             Cancel
           </Button>
-          <Button size="sm" onClick={submit} disabled={submitting}>
+          <Button
+            size="sm"
+            onClick={submit}
+            disabled={submitting || !preview}
+            data-testid="publish-submit"
+          >
             {submitting ? (
               <>
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />

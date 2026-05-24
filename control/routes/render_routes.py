@@ -546,12 +546,47 @@ async def list_jobs(
 
 
 class PublishRequest(BaseModel):
+    """One-click-publish request body.
+
+    Per the 2026-05-24 modal refactor, the UI only collects ``visibility``
+    + optional ``scheduled_publish_at``; every other field (title,
+    description, hashtags, tags, thumbnail) is auto-generated server-side
+    by :func:`pipeline.publish.generate_publish_metadata` from the
+    rendered script.
+
+    The legacy fields (``schedule_at``, ``title``, ``description``,
+    ``tags``, ``upload_method``) are kept optional for back-compat with
+    callers that still POST them — they're persisted to the job doc
+    alongside the generated metadata but DO NOT override the generator's
+    output. Once every caller has migrated they can be removed.
+    """
+
     visibility: str = "unlisted"  # public | unlisted | private
-    schedule_at: str | None = None
+    scheduled_publish_at: str | None = None  # RFC 3339, or null for immediate
+    # ---- legacy / deprecated fields ---------------------------------
+    schedule_at: str | None = None  # legacy alias of scheduled_publish_at
     title: str | None = None
     description: str | None = None
     tags: list[str] = []
     upload_method: str = "auto"  # auto | api | playwright
+
+
+class PublishMetadataView(BaseModel):
+    """The shape returned by ``GET /api/jobs/{id}/publish/preview``.
+
+    Mirrors :class:`pipeline.publish.PublishMetadata` but with
+    ``thumbnail_path`` serialised to a string so the JSON response is
+    transport-safe.
+    """
+
+    title: str
+    description: str
+    hashtags: list[str]
+    tags: list[str]
+    thumbnail_path: str | None
+    category_id: str
+    default_language: str
+    made_for_kids: bool
 
 
 class PublishResponse(BaseModel):
@@ -559,6 +594,88 @@ class PublishResponse(BaseModel):
     status: str  # submitted | scheduled | uploading | done | failed
     youtube_url: str | None = None
     error: str | None = None
+    publish_metadata: PublishMetadataView | None = None
+
+
+def _build_publish_metadata(job_id: str, doc: dict) -> PublishMetadataView:
+    """Resolve the job's script payload + channel/variant, then delegate
+    to :func:`pipeline.publish.generate_publish_metadata`.
+
+    The job doc carries ``proposal`` (the ShortProposal that birthed the
+    render) and may carry an already-rewritten ``script`` payload — we
+    prefer the latter when present so titles/hooks reflect the writer's
+    final pick. If neither carries usable inputs the generator raises
+    :class:`MissingMetadataInputError`, which we surface as a 422.
+    """
+    from pipeline.publish import (  # noqa: PLC0415
+        generate_publish_metadata,
+    )
+    from pipeline.publish.metadata_generator import (  # noqa: PLC0415
+        MissingMetadataInputError,
+    )
+
+    proposal = doc.get("proposal") or {}
+    script = doc.get("script") or {}
+    # Backfill script with proposal-side fields so single-source-of-truth
+    # lookups (topic, hook) work whether or not the rewrite stage has
+    # populated ``doc["script"]``.
+    merged_script: dict[str, Any] = {
+        "topic": proposal.get("topic"),
+        "hook": script.get("hook") or proposal.get("hook"),
+        "summary": script.get("summary") or proposal.get("summary"),
+        "title_options": script.get("title_options")
+        or proposal.get("title_options")
+        or [],
+        "title": script.get("title") or proposal.get("title"),
+        "thumbnail_path": script.get("thumbnail_path")
+        or doc.get("thumb_uri"),
+        "default_language": script.get("default_language")
+        or proposal.get("default_language"),
+        "made_for_kids": script.get("made_for_kids", False),
+    }
+    channel = doc.get("channel") or proposal.get("channel") or "auto"
+    variant_raw = proposal.get("format") or doc.get("variant")
+    variant = str(variant_raw) if variant_raw else None
+    try:
+        meta = generate_publish_metadata(
+            job_id, merged_script, channel=channel, variant=variant,
+        )
+    except MissingMetadataInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return PublishMetadataView(
+        title=meta.title,
+        description=meta.description,
+        hashtags=meta.hashtags,
+        tags=meta.tags,
+        thumbnail_path=str(meta.thumbnail_path) if meta.thumbnail_path else None,
+        category_id=meta.category_id,
+        default_language=meta.default_language,
+        made_for_kids=meta.made_for_kids,
+    )
+
+
+@router.get(
+    "/api/jobs/{job_id}/publish/preview",
+    response_model=PublishMetadataView,
+)
+async def publish_preview(
+    job_id: str,
+    request: Request,
+    _pin: None = Depends(require_pin),
+) -> PublishMetadataView:
+    """Return the auto-generated metadata the modal previews before publish.
+
+    The modal calls this on open to show "this is what we'll publish
+    with"; the same code path that runs in :func:`publish` runs here, so
+    there is zero drift between what the user sees and what gets sent
+    to YouTube.
+    """
+    doc = jobs_mod.get_job(job_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    _job_owner_check(request, doc)  # audit S1.7
+    return _build_publish_metadata(job_id, doc)
 
 
 @router.post("/api/jobs/{job_id}/publish", response_model=PublishResponse)
@@ -568,12 +685,26 @@ async def publish(
     request: Request,
     _pin: None = Depends(require_pin),
 ) -> PublishResponse:
-    """Publish a finished render to YouTube.
+    """Publish a finished render to YouTube — one-click flow.
+
+    The user picks visibility (+ optional scheduled publish time); every
+    other knob is generated by
+    :func:`pipeline.publish.generate_publish_metadata`. Generated
+    metadata is persisted to the job doc as ``publish_metadata`` so the
+    same payload that the modal previewed is what the worker uploads.
 
     Sim mode: returns a fake youtube_url + marks the job published.
-    Real mode (later): kicks the YOUTUBE_UPLOAD light task with metadata.
+    Real mode: kicks
+    :func:`pipeline.upload.upload.youtube_upload` (existing auth flow,
+    resumable upload, quota handling).
     """
     from control.core.sim_worker import is_enabled as sim_enabled  # noqa: PLC0415
+
+    if body.visibility not in ("public", "unlisted", "private"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"visibility must be public|unlisted|private; got {body.visibility!r}",
+        )
 
     doc = jobs_mod.get_job(job_id)
     if doc is None:
@@ -585,34 +716,110 @@ async def publish(
             detail=f"job not ready (status={doc.get('status')!r}); render must complete first",
         )
 
+    # Auto-generate metadata BEFORE doing any real work — surface
+    # missing-input errors (422) before we trigger an upload that would
+    # then have to be undone.
+    meta_view = _build_publish_metadata(job_id, doc)
+
+    # Resolved publish-at: prefer the new field, fall back to the legacy
+    # alias, else None (immediate publish).
+    publish_at = body.scheduled_publish_at or body.schedule_at
+
+    # Persist the generated metadata + visibility / schedule choices to
+    # the job doc. The worker reads this on the upload side; the UI's
+    # PublishedCard reads ``youtube_url`` once it lands.
+    persisted_publish_meta = {
+        "visibility": body.visibility,
+        "scheduled_publish_at": publish_at,
+        "title": meta_view.title,
+        "description": meta_view.description,
+        "hashtags": meta_view.hashtags,
+        "tags": meta_view.tags,
+        "thumbnail_path": meta_view.thumbnail_path,
+        "category_id": meta_view.category_id,
+        "default_language": meta_view.default_language,
+        "made_for_kids": meta_view.made_for_kids,
+        "upload_method": body.upload_method,
+    }
+
     # Sim path — instant fake upload so the UI flow works end-to-end.
     if sim_enabled():
         fake = f"https://youtu.be/sim-{job_id[:11]}"
+        persisted_publish_meta["upload_method"] = "sim"
         jobs_mod.get_jobs().update(
             job_id,
             youtube_url=fake,
-            publish_meta={
-                "visibility": body.visibility,
-                "schedule_at": body.schedule_at,
-                "title": body.title,
-                "description": body.description,
-                "tags": body.tags,
-                "upload_method": "sim",
-            },
+            publish_metadata=persisted_publish_meta,
+            publish_meta=persisted_publish_meta,  # legacy alias
         )
         return PublishResponse(
             job_id=job_id,
             status="done",
             youtube_url=fake,
+            publish_metadata=meta_view,
         )
 
     # Real path — defer to the existing pipeline.upload.upload module.
-    # The real-cloud milestone wires this into a Cloud Run Job. For now,
-    # surface a clean "not implemented in cloud yet" so the UI can render
-    # the right message.
-    raise HTTPException(
-        status_code=501,
-        detail="real publish path is wired to the Cloud Run worker (next milestone)",
+    # Same auth path (OAuth refresh-token from
+    # ~/.config/ytfactory/youtube_token_<account>.json or the Cloud Run
+    # secret mount at /secrets/youtube-token-<account>/value).
+    from pathlib import Path as _P  # noqa: PLC0415
+    from pipeline.upload.upload import youtube_upload, UploadError  # noqa: PLC0415
+
+    short_uri = doc.get("short_uri") or ""
+    local_mp4 = doc.get("preview_local_path")
+    if not local_mp4 or not _P(local_mp4).exists():
+        # Real-cloud worker dispatch is wired in a later milestone — for
+        # now persist the generated metadata so the worker can pick it
+        # up + return a clean 501 instead of pretending to publish.
+        jobs_mod.get_jobs().update(
+            job_id,
+            publish_metadata=persisted_publish_meta,
+            publish_meta=persisted_publish_meta,
+        )
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "real publish path needs a local mp4; cloud-worker "
+                "dispatch is queued for the next milestone. Metadata "
+                "has been persisted to the job doc."
+            ),
+        )
+
+    account = (doc.get("proposal") or {}).get("upload_account") or "default"
+    try:
+        result = youtube_upload(
+            _P(local_mp4),
+            title=meta_view.title,
+            description=meta_view.description,
+            tags=meta_view.tags,
+            category_id=meta_view.category_id,
+            privacy=body.visibility,
+            publish_at=publish_at,
+            made_for_kids=meta_view.made_for_kids,
+            account=account,
+            thumbnail_path=_P(meta_view.thumbnail_path) if meta_view.thumbnail_path else None,
+        )
+    except UploadError as exc:
+        return PublishResponse(
+            job_id=job_id,
+            status="failed",
+            error=str(exc),
+            publish_metadata=meta_view,
+        )
+
+    youtube_url = result.get("url")
+    jobs_mod.get_jobs().update(
+        job_id,
+        youtube_url=youtube_url,
+        publish_metadata=persisted_publish_meta,
+        publish_meta=persisted_publish_meta,
+    )
+    return PublishResponse(
+        job_id=job_id,
+        status="done",
+        youtube_url=youtube_url,
+        publish_metadata=meta_view,
     )
 
 
@@ -848,7 +1055,26 @@ async def get_queue_state() -> QueueResponse:
     # we sort here instead — cheap on ≤200 rows.)
     docs.sort(key=lambda jd: str(jd[1].get("updated_at") or ""), reverse=True)
 
+    # ``internal_only=True`` docs are smoke-tests / dev fixtures
+    # fired by scripts/trigger_one_render.py and the test-fixture
+    # auto-flagger (see control/core/scheduler.py::is_test_fixture_topic).
+    # They should NEVER appear on the operator dashboard — pre-2026-05-24
+    # the queue route ignored the flag entirely and 31 internal_only
+    # "ketchup on slow-cooked beef stew" smoke renders cluttered the
+    # Completed column. Filter them out here. The internal_only flag
+    # lives at ``doc.proposal.internal_only`` (set by
+    # control/core/jobs.py:411) but for back-compat we also accept
+    # a flat ``doc.internal_only`` field in case any pre-flag-flag
+    # rows wrote it at the root.
+    def _is_internal_only(doc: dict) -> bool:
+        if doc.get("internal_only") is True:
+            return True
+        p = doc.get("proposal") or {}
+        return p.get("internal_only") is True
+
     for jid, d in docs:
+        if _is_internal_only(d):
+            continue
         s = d.get("status")
         view = _doc_to_view(jid, d).model_dump()
         if s == "pending":
@@ -857,6 +1083,8 @@ async def get_queue_state() -> QueueResponse:
             running.append(view)
 
     for jid, d in terminal_docs:
+        if _is_internal_only(d):
+            continue
         completed.append(_doc_to_view(jid, d).model_dump())
 
     # Holds: walk every channel/_holds.json on disk (cheap; ≤ 8 files).

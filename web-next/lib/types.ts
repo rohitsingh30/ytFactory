@@ -227,6 +227,14 @@ export interface RenderResponse {
 
 export interface PublishRequest {
   visibility: "public" | "unlisted" | "private";
+  // RFC 3339 timestamp for a scheduled (private→public) publish, or null
+  // for immediate publication. The old ``schedule_at`` field is kept as
+  // an alias on the server for back-compat but new callers send
+  // ``scheduled_publish_at``.
+  scheduled_publish_at?: string | null;
+  // The one-click publish flow no longer sends these — the backend
+  // auto-generates them via pipeline.publish.generate_publish_metadata.
+  // They remain on the request type so legacy callers still typecheck.
   schedule_at?: string | null;
   title?: string;
   description?: string;
@@ -234,11 +242,24 @@ export interface PublishRequest {
   upload_method?: "auto" | "api" | "playwright";
 }
 
+/** Mirrors :class:`PublishMetadata` (pipeline/publish/metadata_generator.py). */
+export interface PublishMetadataView {
+  title: string;
+  description: string;
+  hashtags: string[];
+  tags: string[];
+  thumbnail_path: string | null;
+  category_id: string;
+  default_language: string;
+  made_for_kids: boolean;
+}
+
 export interface PublishResponse {
   job_id: string;
   status: "submitted" | "scheduled" | "uploading" | "done" | "failed";
   youtube_url?: string;
   error?: string | null;
+  publish_metadata?: PublishMetadataView | null;
 }
 
 export interface DashboardData {
