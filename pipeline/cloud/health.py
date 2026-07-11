@@ -189,7 +189,7 @@ def _classify(svc: Service, row: HealthRow) -> str:
     # contains "timeout") AND svc.kind == IMAGE, return "yellow" +
     # flag "probe_timeout_likely_cold" instead of falling through to
     # "red" via the network-error rule above. Image cold-load is
-    # 5-7 min (FLUX) / 15-25 min (Z-Image), well over the 15 s probe
+    # 15-25 min (Z-Image-Turbo), well over the 15 s probe
     # ceiling — calling those red is misleading. See
     # `.claude/skills/update-docs/learnings/_index.md` 2026-05-10
     # entry; escalate to CLASS-OF-BUG on second observation.

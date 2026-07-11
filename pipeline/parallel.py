@@ -1,6 +1,6 @@
 """Bounded fan-out for embarrassingly-parallel CPU-bound jobs.
 
-Used by render_long_form.py and render_footage_only.py to parallelise
+Used by long_form_lib.py and footage_only_lib.py to parallelise
 ffmpeg trim+letterbox+grade calls across multiple cores. ThreadPoolExecutor
 is intentional — the heavy work happens inside ffmpeg subprocesses and PIL
 C extensions, both of which release the GIL while running. A ProcessPool

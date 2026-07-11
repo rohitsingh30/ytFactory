@@ -10,11 +10,10 @@ near-instantly.
 
 This module is the canonical entry point used by:
 
-* :mod:`pipeline.render.shorts` / :mod:`pipeline.render.long_form` /
-  :mod:`pipeline.render.footage_only` / :mod:`pipeline.render.sports_doc`
-  (called inline before stage 1, fire-and-forget on a thread)
-* The daily snapshot cron (so nightly burn isn't all cold-load tax)
+* ``control/core/jobs.py`` at queue time (``warm_async_http``,
+  fire-and-forget so the GPU containers warm while the job waits)
 * The Cloud admin tab "Warm now" button
+  (``control/routes/cloud_routes.py`` → ``/api/cloud/warm``)
 """
 from __future__ import annotations
 

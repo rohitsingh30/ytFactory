@@ -5,23 +5,17 @@ Single function: :func:`pick_engine` returns the engine's
 callable for the given spec. Used by :mod:`pipeline.render.video` (the
 public entry) to route every render through the right engine.
 
-Today's mapping:
+Mapping:
 
 * ``RenderKind.SHORT``        → :func:`pipeline.render.short_engine.render_short`
 * ``RenderKind.LONG_FORM``    → :func:`pipeline.render.long_engine.render_long`
 * ``RenderKind.SPORTS_DOC``   → :func:`pipeline.render.long_engine.render_long`
-                                 (sports_doc kind is collapsing into long
-                                 with ``visual_mode=overlay_timeline`` per
-                                 the consolidation plan; bigbang PR removes
-                                 the SPORTS_DOC enum value)
+                                 (``visual_mode=sports_overlay_timeline``)
 * ``RenderKind.FOOTAGE_ONLY`` → :func:`pipeline.render.long_engine.render_long`
-                                 (same — collapses into long with
-                                 ``visual_mode=footage_windows``)
+                                 (``visual_mode=footage_windows``)
 
-Note: the ``SPORTS_DOC`` and ``FOOTAGE_ONLY`` mapping rows are
-TRANSITIONAL. They keep the old enum values working through the
-plugin layer until the bigbang PR collapses ``RenderKind`` to
-``{SHORT, LONG}``.
+All long-shaped kinds go through the long engine; the ``visual_mode``
+and other spec flags differentiate WHAT it renders.
 """
 from __future__ import annotations
 
@@ -59,9 +53,8 @@ def pick_engine(spec: RenderSpec) -> EngineFn:
         return render_short
 
     # All long-shaped kinds (LONG_FORM / SPORTS_DOC / FOOTAGE_ONLY) go
-    # through the long engine. The visual_mode + overlay_timeline +
-    # other spec flags differentiate WHAT the long engine renders.
-    # Bigbang PR collapses these three to a single LONG enum value.
+    # through the long engine. The visual_mode + other spec flags
+    # differentiate WHAT the long engine renders.
     if spec.kind in {RenderKind.LONG_FORM, RenderKind.SPORTS_DOC, RenderKind.FOOTAGE_ONLY}:
         from pipeline.render.long_engine import render_long  # noqa: PLC0415
         _emit_engine_pick(spec, render_long)

@@ -23,11 +23,11 @@ from fastapi.staticfiles import StaticFiles
 # Production server (web/server.py) uses the same set; dev + prod now
 # share the same route surface.
 #
-# chat_routes is the only one that still lives at control/chat_routes.py
-# because it owns shared helpers (_enqueue_render_job, ConfirmResponse)
-# that control/scheduler.py + control/render_routes.py depend on.
-# A future cleanup pass moves chat_routes to control/routes/ once those
-# cross-imports are migrated.
+# chat_routes still lives at control/chat_routes.py (not control/routes/)
+# and owns the /api/chat surface (ChatService). Prod (web/server.py)
+# retired the chat router in Phase 1; this dev server still mounts it.
+# (The canonical render helpers — _enqueue_render_job, ConfirmResponse —
+# live in control/core/jobs.py; chat_routes carries its own separate copy.)
 from control.chat_routes import router as chat_router
 
 from control.routes.agent_routes import router as agent_router

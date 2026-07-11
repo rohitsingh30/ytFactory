@@ -33,16 +33,16 @@ Public surface
 - :class:`StageContext` — input passed to a stage (channel cfg, raw
   input, optional learned corrections).
 - :class:`Constraint` — one named rule a stage's output must satisfy.
-- :class:`ValidationFailure` — what came back when validation didn't
+- :class:`pipeline.llm.fix.Fix` — what came back when validation didn't
   pass; severity ``"error"`` triggers regen, ``"warning"`` is logged.
 - :class:`StageContract` (Protocol) — what each stage must implement
   (gather_constraints, build_prompt, regen_prompt, validate).
 - :func:`run_stage` — drive one stage end-to-end.
 - :class:`OrchestratorError` — raised when retries are exhausted.
 
-Each stage's contract lives under ``pipeline/llm/contracts/``. The
-first one is :mod:`pipeline.llm.contracts.rewrite_contract`; cast and
-prompts contracts will follow as the same pattern.
+Each stage's contract lives under ``pipeline/llm/contracts/``:
+``rewrite_contract``, ``cast_contract``, ``prompts_contract``,
+``images_contract`` and ``critic_contract`` all follow the same pattern.
 """
 
 from __future__ import annotations

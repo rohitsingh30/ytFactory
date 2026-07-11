@@ -10,8 +10,7 @@ Approach: haiku vision via the `claude` CLI's `Read` tool. The
 model is given a focused yes/no rubric — it just has to detect
 hand/finger glitches, not produce a full critique. Returns
 ``(ok, reason)`` with the same shape as ``quality_gate.check_image``
-so the existing QC retry loop in ``pipeline/render/shorts.py``
-absorbs it without restructuring.
+so a QC caller can absorb it without restructuring.
 
 Cost: ~$0.002 per image at haiku 4.5 + 1024px input. For a 26-beat
 Short that's ~$0.05 added per render. Latency: ~2-4s per check.

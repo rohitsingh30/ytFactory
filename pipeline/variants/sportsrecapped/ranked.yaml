@@ -1,6 +1,6 @@
 # SportsStoriesAnimated — Ranked / Tier-list variant (Top-5 countdown)
 #
-# Manifest-only channel (Path 2 — make_shorts.py autonomous renderer).
+# Manifest-only channel (Path 2 — the autonomous renderer).
 # Same per-beat illustration + footage cut-in pipeline as the parent
 # SportsStoriesAnimated channel. The tier-list FORMAT is enforced by
 # the /make-ranking skill (script structure: 1 hook + 5 ranked beats +
@@ -17,7 +17,7 @@
 #   1. /make-ranking writes script.json with ranks[] + footage[] arrays
 #   2. (sports only) wiki_research per ranked moment if needed for
 #      pronunciation; cast.cast_from_dossier composes a minimal cast
-#   3. make_shorts.py — TTS, beats, per-beat AI images, footage cut-ins,
+#   3. the renderer — TTS, beats, per-beat AI images, footage cut-ins,
 #      karaoke captions, rank chips (NEW), closer panel
 #
 # Comments-bait closer is the LIKE-if-agree / COMMENT-swap split —
@@ -124,7 +124,7 @@ closer_hold_s: 1.5
 # because it asks for a personal judgment.
 closer_format: "LIKE if you agree with the ranking, SUBSCRIBE for next week's tier list."
 
-# Format flag — make_shorts.py reads this to wire 5 rank-chip overlays
+# Format flag — the renderer reads this to wire 5 rank-chip overlays
 # at beat[1..5].start. Channels without this flag render unchanged.
 # Implementation lives in pipeline/captions.render_rank_chip +
 # pipeline/compose rank-chip overlay slot (FOLLOW-UP — see

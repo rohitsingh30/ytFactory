@@ -1,11 +1,8 @@
 """Long-form panel slideshow VisualProducer (long-engine canonical).
 
-Wraps :func:`pipeline.render.long_form.build_image_panels_video` so
-the new long_engine can call a Protocol method instead of importing
+Wraps :func:`pipeline.render.shared.long_form_lib.build_image_panels_video`
+so the long_engine can call a Protocol method instead of importing
 the renderer-internal helper directly.
-
-Today's impl is a thin delegating wrapper. The bigbang PR moves the
-body fully into this module so long_form.py can be deleted.
 
 Plugin selection: ``spec.visual_mode = LONGFORM_PANELS``. Default for
 mystoriesanimated / hindutavaanimated / rhymetimejunction long-form

@@ -181,8 +181,9 @@ def submit_render(
     """POST a render request to the website. Returns the job_id.
 
     Two modes:
-      1. SHORTS convenience: pass `channel_yaml=` + `script_path=`. Internally
-         rewritten to ``cmd=[scripts/make_shorts.py, --channel, ..., --script, ...]``.
+      1. SHORTS convenience: pass `channel_yaml=` + `script_path=`. Posted
+         as-is to ``/api/jobs/from_script``; the website resolves them to a
+         cloud render-worker JOB invocation in its own env.
       2. GENERIC: pass `cmd=[...]` directly. The first element is the
          renderer entry script (must be in the website's whitelist —
          see `_ALLOWED_RENDER_CMDS` in web/server.py). The skill knows

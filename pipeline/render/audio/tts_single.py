@@ -198,8 +198,8 @@ class TtsSingle:
 
     def _narration_text(self, script: dict[str, Any]) -> str:
         # The short engine accepts either a flat narration text or a
-        # beats-style script. For now we just concatenate beats[].text;
-        # the bigbang PR will define a stable script schema for this.
+        # beats-style script; concatenate beats[].text when no flat
+        # narration is present.
         if isinstance(script.get("narration"), str):
             return script["narration"]
         beats = script.get("beats") or []

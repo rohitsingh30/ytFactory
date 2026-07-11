@@ -30,8 +30,8 @@ True — both providers must be cloud-bound):
   from ``asr_beats`` arrive later — compose re-times visuals to the
   real boundaries at mux time.
 
-  Same pattern as legacy ``pipeline.render.shorts``'s TTS ⫽ image-
-  gen overlap (see ``docs/parallel_stage_overlap.md``).
+  This TTS ⫽ image-gen overlap is described in
+  ``docs/parallel_stage_overlap.md``.
 
 Plugin selection (driven entirely by spec fields, no engine knowledge)
 ----------------------------------------------------------------------

@@ -6,11 +6,11 @@ letterboxes, concats into one continuous video. NO AI image gen —
 the channel's USP is the real footage.
 
 Plugin selection: ``spec.visual_mode = FOOTAGE_WINDOWS``. Picked
-automatically when the legacy ``kathaa:`` or ``footage_only:`` block
+automatically when the ``kathaa:`` or ``footage_only:`` block
 migrates into ``defaults.long`` per the migration script.
 
-Today's impl wraps :mod:`pipeline.render.footage_only` orchestration
-(yt-dlp + ffmpeg trim ladder); bigbang PR moves it inline.
+The trim/concat ladder runs via
+``pipeline.render.shared.footage_only_lib``.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ class FootageWindows:
     unset, from the channel's standard
     ``<channel>/shotlist/<slug>.json`` location). Each entry is a
     ``{source_url, in_s, out_s}`` triple. Clips are downloaded +
-    trimmed + letterboxed via the legacy ``footage_only`` helpers,
+    trimmed + letterboxed via the ``footage_only_lib`` helpers,
     then concatenated.
 
     Falls back to a solid-color stand-in if the shotlist is missing
@@ -70,7 +70,7 @@ class FootageWindows:
             slug = (spec.extra or {}).get("slug", "footage_windows_render")
             out_path = _build_silent_video(channel, slug, shotlist, work_dir)
         except Exception as exc:  # noqa: BLE001
-            _logger.warning("footage_windows: legacy footage_only failed (%s) — "
+            _logger.warning("footage_windows: footage_only_lib failed (%s) — "
                             "falling back to solid color", exc)
             return self._fallback_solid_color(spec, timeline, work_dir)
 

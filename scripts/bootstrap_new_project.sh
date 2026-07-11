@@ -21,14 +21,14 @@
 #   5. Create GCS buckets (artifacts, weights, state)
 #   6. Create Secret Manager secrets (HF_TOKEN, AZURE_OPENAI_API_KEY)
 #   7. Grant SA permissions (storage.objectViewer, secretmanager.secretAccessor)
-#   8. Stage z-turbo weights via Cloud Build (per the cost-optimized
-#      minimal stack — see docs/cost_optimized_deploy.md)
+#   8. Weights staging skipped — z-image-turbo bakes its own weights
+#      (the standalone Cloud Build job was deleted per R9; see step 8 body)
 #   9. Build + deploy z-image-turbo service (right-sized 4 vCPU + 16 GiB)
 #  10. Build + deploy TTS services (chatterbox, indicf5 — 4 vCPU + 16 GiB, concurrency=2)
 #  11. Deploy ASR service (asr-whisper — 4 vCPU + 16 GiB, concurrency=2)
 #  12. Build + deploy render-worker-v2 with ALL env URLs
 #  13. Set up billing alert at $30 + budget cutoff at $200
-#  14. Smoke test: render one short, verify mp4
+#  14. Smoke test skipped — run a real render via the /app/create wizard
 #
 # IMPORTANT lessons baked in (see comments per step):
 #   - Quotas requested BEFORE any deploy (avoids mid-deploy quota errors)
@@ -232,7 +232,7 @@ for svc_dir in image-z-image-turbo; do
   GCP_PROJECT="${PROJECT}" GCP_REGION="${REGION}" bash deploy.sh
   cd "${ROOT}"
 done
-ok "3 image services deployed (max-instances=1, GCS Fuse mount)"
+ok "1 image service deployed (z-image-turbo, max-instances=1, GCS Fuse mount)"
 
 # ─── 10. TTS services (chatterbox + indicf5) ─────────────────────────
 

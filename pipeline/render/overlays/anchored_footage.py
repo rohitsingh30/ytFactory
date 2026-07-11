@@ -8,11 +8,6 @@ anchors.
 
 Plugin activation: ``spec.overlay_timeline = True`` in the wizard.
 Pairs with ``spec.visual_mode = footage_filler``.
-
-The download + trim helpers were inlined from the legacy
-``pipeline.render.sports_doc._download_source`` /
-``_prep_footage_clip`` on 2026-05-14 as part of the bigbang
-follow-up.
 """
 from __future__ import annotations
 
@@ -42,11 +37,7 @@ def _slug_from_url(url: str) -> str:
 
 
 def _download_source(url: str, sources_dir: Path) -> Path:
-    """yt-dlp the source video into sources_dir/<hash>.mp4. Cached.
-
-    Inlined from legacy ``pipeline.render.sports_doc._download_source``
-    2026-05-14.
-    """
+    """yt-dlp the source video into sources_dir/<hash>.mp4. Cached."""
     sources_dir.mkdir(parents=True, exist_ok=True)
     target = sources_dir / f"{_slug_from_url(url)}.mp4"
     if target.exists() and target.stat().st_size > 1024 * 100:
@@ -76,9 +67,6 @@ def _prep_footage_clip(
     Reuses :func:`pipeline.render.shared.trim_letterbox.trim_clip_letterbox`
     for the blurred-letterbox path on aspect mismatches + the stream-
     copy short-circuit when src already matches.
-
-    Inlined from legacy ``pipeline.render.sports_doc._prep_footage_clip``
-    2026-05-14.
     """
     cid = entry["id"]
     out = cache_dir / "clips" / f"{cid}.mp4"
@@ -137,7 +125,7 @@ class AnchoredFootage:
                         spec.output_resolution[0],
                         spec.output_resolution[1],
                         spec.output_fps,
-                        None,  # no grade filter — bigbang plumbs from spec
+                        None,  # no grade filter
                     )
                     duration_ms = int((time.perf_counter() - t0) * 1000)
                 except Exception as exc:  # noqa: BLE001

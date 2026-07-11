@@ -49,7 +49,7 @@ source_adapter: manual  # curator hand-authors scripts/<slug>.json
 # REST access (https://api.sunoapi.org), pay-per-generation
 # (~$0.05-0.10/song, top up at https://sunoapi.org/topup).
 #
-# Pipeline contract (audio_provider: sunoapi mode in make_shorts.py +
+# Pipeline contract (audio_provider: sunoapi mode in the renderer +
 # pipeline/audio.synth_via_sunoapi):
 #   - Reads suno_prompt.{lyrics, style} from data/intermediate/
 #     rhymetimejunction/scripts/<slug>.json (authored by /make-rhyme).

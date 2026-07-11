@@ -56,7 +56,7 @@ export function deriveAspect(
   if (raw && VALID_ASPECTS.has(raw)) return raw as Aspect;
 
   // Audit Q2.52 — sports_doc spec without aspect_ratio defaults
-  // to 16:9 (matches pipeline/render/sports_doc.py output).
+  // to 16:9 (matches the sports_doc RenderKind's 16:9 output).
   const k = (spec?.kind as string | undefined)?.trim();
   if (k === "sports_doc" || k === "long_form") return "16:9";
 

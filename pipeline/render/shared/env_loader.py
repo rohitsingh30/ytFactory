@@ -1,19 +1,14 @@
 """Shared `.env` loader for the render pipeline entry points.
 
-**Audit D3.48** — pre-fix three render modules had near-identical
-``_load_env`` implementations:
+**Audit D3.48** — the render pipeline needs a single ``.env`` loader
+that strips outer quotes from values. A drifted earlier copy did NOT
+strip quotes, so a value like ``HF_TOKEN="hf_..."`` was written to
+os.environ as the literal ``"hf_..."`` string (with quotes) — every
+HF API call then 401'd because the bearer-token header included the
+literal quote chars.
 
-  * ``pipeline/render/long_form.py``  — strips outer quotes
-  * ``pipeline/render/sports_doc.py`` — strips outer quotes
-  * ``pipeline/render/footage_only.py`` — does NOT strip quotes (bug)
-
-The footage_only version drifted, so a value like
-``HF_TOKEN="hf_..."`` was written to os.environ as the literal
-``"hf_..."`` string (with quotes) — every HF API call then 401'd
-because the bearer-token header included the literal quote chars.
-
-This module is the single source of truth. All three callers now
-import :func:`load_dotenv_into_environ` from here.
+This module is the single source of truth; callers import
+:func:`load_dotenv_into_environ` from here.
 
 Behaviour:
 

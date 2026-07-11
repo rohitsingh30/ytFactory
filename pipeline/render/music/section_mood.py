@@ -69,8 +69,7 @@ class SectionMood:
             "music",
             {"track": track, "mood": track["mood"], "duck_curve": None},
         )
-        _logger.info("section_mood: placeholder silent track for %d sections — "
-                     "bigbang PR plumbs real mood crossfade", len(sections))
+        _logger.info("section_mood: silent track for %d sections", len(sections))
         return out_path
 
 

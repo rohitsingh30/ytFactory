@@ -38,9 +38,10 @@ _JOBS = "jobs"
 class ConfirmResponse(BaseModel):
     """Response shape for any path that turns a ShortProposal into a Job.
 
-    Used by /api/render and the round-robin scheduler. (Was originally
-    defined in control/chat_routes.py — moved here when chat was retired
-    so render_routes + scheduler don't depend on a deleted module.)
+    Used by /api/render and the round-robin scheduler. This is the
+    canonical copy for control.routes.render_routes + control.core.scheduler;
+    control/chat_routes.py keeps its own separate copy for the (dev-only)
+    /api/chat surface.
     """
     job_id: str
     task_id: str
@@ -360,7 +361,7 @@ def _enqueue_render_job(
     Dispatches based on ``YTFACTORY_RENDER_BACKEND``:
 
     - ``sim``      → drop a RENDER_SHORT task on the queue; the in-process
-                     sim worker (control/sim_worker.py) picks it up.
+                     sim worker (control/core/sim_worker.py) picks it up.
     - ``cloudrun`` → fire one execution of ytfactory-render-worker-v2
                      directly. No queue entry, no agent. The Cloud Run
                      Job reads the job from Firestore and writes

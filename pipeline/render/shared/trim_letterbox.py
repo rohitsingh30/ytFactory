@@ -1,13 +1,7 @@
 """Shared trim+letterbox helper for every renderer + plugin.
 
-Pre-2026-05-14 lived as ``_trim_clip_letterbox`` inside
-``pipeline/render/long_form.py``; sports_doc.py imported it from
-there. Promoted here as part of the 4-renderer-to-2-engine
-consolidation (plan.md).
-
-Function body is byte-equivalent to the long_form.py original — same
-three-tier short-circuit (exact-match stream-copy → aspect-match plain
-scale → full split+gblur+overlay chain), same warm-firelight
+Three-tier short-circuit (exact-match stream-copy → aspect-match plain
+scale → full split+gblur+overlay chain), with warm-firelight
 ``grade_filter`` semantics.
 """
 from __future__ import annotations

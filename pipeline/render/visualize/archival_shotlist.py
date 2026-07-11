@@ -2,14 +2,10 @@
 
 Reads a curated shotlist of archive.org / Wikimedia clips, downloads +
 trims each, concats into one continuous video for use as long-form
-sleep narrator background. Same workflow as historyrecapped's
-existing long_form pipeline.
+sleep narrator background.
 
 Plugin selection: ``spec.visual_mode = ARCHIVAL_SHOTLIST``. Default
 for historyrecapped + cosmosdecoded long-form renders.
-
-Today's impl is a delegating wrapper. Bigbang PR moves the body
-inline.
 """
 from __future__ import annotations
 
@@ -33,9 +29,9 @@ class ArchivalShotlist:
     """Archive footage cycled as long-form background.
 
     Reads shotlist from ``spec.extra['shotlist_path']`` and delegates
-    to ``pipeline.render.long_form._trim_shotlist_clips`` +
-    ``_concat_and_pad`` (the existing helpers). Falls back to solid
-    color when the shotlist or helpers are unavailable.
+    to ``pipeline.render.shared.long_form_lib._trim_shotlist_clips`` +
+    ``_concat_and_pad``. Falls back to longform_panels when the
+    shotlist or helpers are unavailable.
     """
 
     def produce(

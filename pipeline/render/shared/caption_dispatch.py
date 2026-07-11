@@ -1,21 +1,9 @@
-"""Caption-layout dispatch — pure helpers lifted out of legacy shorts.py.
+"""Caption-layout dispatch — pure helpers for the compose stage.
 
 These map the wizard's ``captions_layout`` knob to the
 ``(caption_mode, caption_max_lines, label)`` tuple the compose stage
 consumes. The compose plugin in
-``pipeline/render/compose/beat_slideshow_mux.py`` uses this; the
-older legacy renderer used to live in
-``pipeline/render/_legacy/shorts.py`` but those orchestrator modules
-were deleted in the 2026-05-14 bigbang cleanup (see
-``docs/post-audit-2026-05-14.md`` and the session plan).
-
-History
--------
-
-Pre-2026-05-14 cleanup, this lived inline in shorts.py. The
-extraction is mechanical — the constants + functions are unchanged
-from their previous form, just relocated so the legacy orchestrator
-modules could be deleted cleanly.
+``pipeline/render/compose/beat_slideshow_mux.py`` uses this.
 """
 from __future__ import annotations
 

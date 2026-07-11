@@ -52,8 +52,8 @@ def _download_tweet_video(url: str, out_path: pathlib.Path) -> bool:
     """Run yt-dlp to fetch the tweet's video. Returns True on success.
 
     Cloud-first: uses the Cloud Run yt-dlp worker so the laptop never
-    has to handle bot challenges. Falls back to local yt-dlp on cloud
-    unavailability.
+    has to handle bot challenges. Returns False when the cloud worker
+    fails or is unavailable.
     """
     from pipeline.footage import yt_dlp_cloudrun  # noqa: PLC0415 — lazy
 

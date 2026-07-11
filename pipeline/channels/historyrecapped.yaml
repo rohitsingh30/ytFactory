@@ -12,7 +12,7 @@
 # for the rule. The image-gen config below is kept for future hybrid
 # experiments, but the production scripts skip image-gen entirely.
 #
-# Production workflow — bypasses make_shorts.py for ~25s renders
+# Production workflow — bypasses the full render for ~25s renders
 # instead of 30+ min image-gen waste. Reproducible scripts at
 # historyrecapped/scripts/ — see historyrecapped/scripts/README.md for the full
 # recipe. Summary:

@@ -186,9 +186,8 @@ class CustomizationField(BaseModel):
 
     cfg_targets: list[CfgTarget] | None = None
     """One or more cfg locations the value writes to. Replaces the
-    pre-2026-05-12 hardcoded if/elif chain in
-    ``pipeline/render/shorts.py:_apply_form_overrides``. The descriptor-
-    driven loop in :func:`pipeline.render.input_registry.apply_overrides`
+    pre-2026-05-12 hardcoded if/elif chain in the shorts renderer.
+    The descriptor-driven loop in :func:`pipeline.render.input_registry.apply_overrides`
     walks this list."""
 
     apply_handler: str | None = None
@@ -804,7 +803,7 @@ def _visual_source_default_for(default_format: str) -> str:
 def _visual_source_field(default_format: str) -> CustomizationField:
     """3-way segmented: AI generations / Real footage / Both.
 
-    Honored by pipeline/render/shorts.py via cfg["visual_source"]:
+    Honored by the short render engine via cfg["visual_source"]:
       - ai      → channel's existing image_provider runs (current default)
       - footage → routes to the dedicated footage_only render path; warns
                   + falls back to AI if the channel has no footage data

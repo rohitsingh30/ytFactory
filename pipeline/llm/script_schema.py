@@ -86,8 +86,8 @@ class LongFormSection:
 class LongFormPanel:
     """One image-panel cue — used when ``visual_mode == longform_panels``.
 
-    Mirrors the ``panels[]`` shape ``pipeline.render.long_form`` already
-    expects on disk (see render_long_form's ``script.get("panels")``).
+    Mirrors the ``panels[]`` shape ``pipeline.render.long_engine`` already
+    expects on disk (see the engine's ``script.get("panels")`` load).
     ``hold_s`` may be auto-padded by the renderer if the total panel
     duration is shorter than the synthesised narration.
     """
@@ -111,11 +111,11 @@ class LongFormScript:
     """Long-form sectioned narration with optional panel/shotlist hints.
 
     Authored by ``pipeline.llm.rewrite_long_form.rewrite_long_form()``
-    or hand-written. Consumed by ``pipeline.render.long_form`` (the
-    unified ``pipeline.render.video.render(spec)`` orchestrator
-    dispatches to long_form when ``spec.kind == long_form``).
+    or hand-written. Consumed by ``pipeline.render.long_engine`` (the
+    unified ``pipeline.render.video.render_via_engines(spec)`` entry
+    dispatches to the long engine when ``spec.kind == long_form``).
 
-    Shape lines up with what long_form.py loads on disk today
+    Shape lines up with what long_engine loads on disk today
     (``narration`` OR ``sections[].text``, plus optional ``panels[]``)
     so a render that previously hand-built a ``narrations/<slug>.json``
     by hand still works after dropping it through ``to_legacy_dict()``.
@@ -256,11 +256,11 @@ class ScriptEnvelope:
         }
 
     def to_legacy_long_form_dict(self) -> dict[str, Any]:
-        """Flatten to the shape ``pipeline.render.long_form`` reads from
+        """Flatten to the shape ``pipeline.render.long_engine`` reads from
         ``narrations/<slug>.json`` today: ``{narration?, sections?,
         panels?, sources?}``. Used by the orchestrator to write the
         narration file the long-form renderer expects without changing
-        long_form.py's loader."""
+        the long engine's loader."""
         if not self.long_form:
             raise ValueError("envelope has no long_form payload to flatten")
         lf = self.long_form

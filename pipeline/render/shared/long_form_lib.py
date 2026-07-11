@@ -33,13 +33,11 @@ NOT done by this script (yet — track in TODOs):
     - support-ask animated screen build (PIL+ffmpeg one-time per channel)
     - music-bed sourcing (manual: drop a wav into historyrecapped/music/)
 
-Usage:
-    .venv/bin/python historyrecapped/scripts/render_long_form.py \
-        --channel historyrecapped --slug pacific-war-1941-1942-sleep
+This is a library of long-form render helpers imported by the render
+plugins under ``pipeline/render/{audio,visualize,overlays}/``.
 """
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import math
@@ -47,27 +45,21 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-# Repo root = parent.parent of pipeline/render/long_form.py (was parent.parent.parent
-# when this file lived under historyrecapped/scripts/).
+# Repo root ancestor of pipeline/render/shared/long_form_lib.py.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 import yaml
 
 from pipeline import observability as obs
 
-# Phase 1 (2026-05-14) — promotion of helpers into pipeline.render.shared.
-# The local underscore names below are kept as re-exports so existing
-# in-process callers (sports_doc.py, every test that does
-# ``from pipeline.render.long_form import _ffmpeg``) keep working
-# unchanged. The bigbang PR will delete these once long_form.py itself
-# is gone.
+# Local underscore aliases for the shared ffmpeg helpers, so this
+# module's body can keep using the short ``_ffmpeg`` / ``_atempo`` names.
 from pipeline.render.shared.ffmpeg_helpers import (
     apply_atempo as _atempo,
     probe_duration as _probe_duration,
@@ -1313,8 +1305,7 @@ def build_captions_srt(
     **Audit Q2.21** — pre-fix this called ``transcribe_words(narration_wav)``
     without ``provider=``, so the channel YAML's ``asr_provider`` and
     ``YTFACTORY_ASR_PROVIDER`` env were silently ignored on the long-form
-    caption path. Now the caller (long_form.main + render_footage_only.py)
-    threads ``cfg["asr_provider"]`` through.
+    caption path. Now the caller threads ``cfg["asr_provider"]`` through.
     """
     import re as _re
     from pipeline import beats as _beats

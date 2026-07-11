@@ -1,18 +1,12 @@
 """Provider-switchable ASR (transcribe + word timestamps).
 
-Two backends ship today:
+The single live backend is ``faster_whisper`` (the ``faster-whisper``
+CTranslate2 build). The legacy provider keys (``whisper_mlx`` /
+``whisper_mlx_base`` / ``parakeet_mlx``) are still accepted as names and
+coerced to ``faster_whisper`` via :data:`_LEGACY_PROVIDER_MAP`, so call
+sites and channel configs that pass them keep working unchanged.
 
-    * ``whisper_mlx`` — current default. ``mlx-whisper`` with whatever
-      model id the channel config / call site passes. Reuses what is
-      already cached.
-
-    * ``parakeet_mlx`` — opt-in. ``parakeet-mlx`` package + the MLX
-      community Parakeet-TDT 0.6B v2 model. ~10× faster than whisper-
-      large-v3-turbo on M-series for English. Single model replaces
-      both stage-1 (long-form transcribe) and stage-5 (word timestamps
-      on TTS output) calls.
-
-All backends return the **Whisper-shaped result dict** so existing
+The backend returns the **Whisper-shaped result dict** so existing
 callers (``pipeline.transcribe``, ``pipeline.beats``) don't have to
 care which engine produced the data:
 
@@ -25,9 +19,8 @@ care which engine produced the data:
       ]
     }
 
-Heavy imports (``mlx_whisper`` / ``parakeet_mlx``) live inside the
-backend functions, so importing this module never triggers a model
-download.
+The ``faster-whisper`` import lives inside the backend function, so
+importing this module never triggers a model download.
 """
 
 from __future__ import annotations
@@ -213,16 +206,6 @@ def transcribe(
             audio_path,
             model or "base",
         )
-    elif canonical in ("whisper_mlx", "whisper_mlx_base"):
-        result = _transcribe_whisper(
-            audio_path,
-            model or PROVIDER_DEFAULTS[canonical],
-        )
-    elif canonical == "parakeet_mlx":
-        result = _transcribe_parakeet(
-            audio_path,
-            model or PROVIDER_DEFAULTS["parakeet_mlx"],
-        )
     else:
         raise ValueError(
             f"unknown ASR provider {provider!r}. "
@@ -335,87 +318,3 @@ def _strip_trailing_repetition(result: dict[str, Any], min_run: int = 4) -> dict
     if cleaned_anything:
         print(f"[asr] stripped trailing-repetition hallucination: {'; '.join(cleanup_log)}")
     return result
-
-
-# ---------- whisper_mlx ----------------------------------------------------
-
-
-def _transcribe_whisper(audio_path: Path, model: str) -> dict[str, Any]:
-    import mlx_whisper  # heavy: pulls torch/mlx — kept lazy
-
-    return mlx_whisper.transcribe(
-        str(audio_path),
-        path_or_hf_repo=model,
-        word_timestamps=True,
-    )
-
-
-# ---------- parakeet_mlx ---------------------------------------------------
-
-
-def _transcribe_parakeet(audio_path: Path, model: str) -> dict[str, Any]:
-    """Transcribe with parakeet-mlx and adapt the result to Whisper shape.
-
-    Requires the optional ``parakeet-mlx`` package:
-
-        .venv/bin/pip install parakeet-mlx
-
-    On first call, downloads ``mlx-community/parakeet-tdt-0.6b-v2``
-    (~600 MB) into the HuggingFace cache.
-    """
-    try:
-        from parakeet_mlx import from_pretrained  # type: ignore
-    except ImportError as e:
-        raise RuntimeError(
-            "ASR provider 'parakeet_mlx' requires the parakeet-mlx package.\n"
-            "  install: .venv/bin/pip install parakeet-mlx\n"
-            f"  underlying error: {e}"
-        ) from e
-
-    pk = from_pretrained(model)
-    result = pk.transcribe(str(audio_path))
-
-    # parakeet-mlx 0.5.x returns AlignedResult{text, sentences:[AlignedSentence{
-    # text, tokens:[AlignedToken{text, start, end, ...}], start, end}]}.
-    # Tokens are SentencePiece subwords whose text uses **leading space** to
-    # mark a word-start (e.g. " cleaned", "le", "an", " the"). We merge each
-    # word's subword run into a single Whisper-shaped "word" record so
-    # downstream beat-splitting and source alignment see real words.
-    segments: list[dict] = []
-    sentences = getattr(result, "sentences", None) or []
-    for sent in sentences:
-        token_list = getattr(sent, "tokens", None) or getattr(sent, "words", []) or []
-        words: list[dict] = []
-        cur: dict | None = None
-        for tok in token_list:
-            text = getattr(tok, "text", "") or ""
-            start = float(getattr(tok, "start", 0.0))
-            end = float(getattr(tok, "end", start))
-            is_word_start = text.startswith(" ") or text.startswith("▁") or cur is None
-            stripped = text.lstrip(" ▁")
-            if is_word_start:
-                if cur is not None:
-                    words.append(cur)
-                cur = {"word": stripped, "start": start, "end": end}
-            else:
-                # Continuation subword — append to the in-progress word and
-                # extend its end timestamp.
-                cur["word"] = (cur.get("word") or "") + stripped
-                cur["end"] = end
-        if cur is not None:
-            words.append(cur)
-
-        seg_text = (getattr(sent, "text", "") or "").strip() or " ".join(
-            w["word"] for w in words
-        )
-        seg_start = float(getattr(sent, "start", words[0]["start"] if words else 0.0))
-        seg_end = float(getattr(sent, "end", words[-1]["end"] if words else 0.0))
-        segments.append(
-            {"text": seg_text, "start": seg_start, "end": seg_end, "words": words}
-        )
-
-    return {
-        "text": (getattr(result, "text", "") or "").strip()
-        or " ".join(s["text"] for s in segments),
-        "segments": segments,
-    }

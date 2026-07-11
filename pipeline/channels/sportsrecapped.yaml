@@ -12,9 +12,9 @@
 #      For the **footage cut** (the channel USP — see
 #      feedback_sports_footage_is_usp.md), the script JSON declares an
 #      optional ``footage[]`` array of {match_text, url, in_s, out_s}.
-#      make_shorts.py + compose.compose_hybrid splice the real clip in
+#      the renderer + compose.compose_hybrid splice the real clip in
 #      at the matching beat.
-#   5. make_shorts.py — TTS uses pronunciation_dict from the dossier so
+#   5. the renderer — TTS uses pronunciation_dict from the dossier so
 #      "Aguero" → "ah-GWAIR-oh" before Kokoro sees it; the original
 #      spelling stays in captions / ASR alignment.
 
@@ -348,8 +348,8 @@ long_form_doc:
 # horizontal documentary on a player/match/tactical idea, archival
 # footage matched to the chaptered narration. Distinct from
 # `sports_doc:` which is the chapter-card-driven format with
-# talking-head + b-roll lanes (that's still owned by
-# pipeline.render.sports_doc). This is the simpler "long-form recap"
+# talking-head + b-roll lanes (that's still owned by the sports-doc
+# render path). This is the simpler "long-form recap"
 # entry, sharing the long-form chunked-TTS + archival_shotlist path
 # with historyrecapped.
 long_form:

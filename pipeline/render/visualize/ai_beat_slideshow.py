@@ -3,11 +3,9 @@
 One Flux/SD image per Segment, cross-faded with a per-image punch-in
 + slow-drift zoom. Default visualize for short renders on every
 animated channel (mystoriesanimated / hindutavaanimated /
-rhymetimejunction).
-
-Today's impl is a delegating wrapper around ``pipeline.compose``'s
-existing per-beat image-gen + zoom chain. The bigbang PR moves the
-body fully into this module so shorts.py can be deleted.
+rhymetimejunction). Images are generated via
+:mod:`pipeline.images` (cached through
+:func:`pipeline.images.image_cache.generate_with_cache`).
 
 Plugin selection: ``spec.visual_mode = AI_BEAT_SLIDESHOW``.
 
@@ -245,9 +243,8 @@ def _resolve_prompt_for_beat(
 class AiBeatSlideshow:
     """One image per beat, per-image punch-in + slow-drift zoom, cross-faded.
 
-    Today's impl falls back to a solid-color stand-in when the
-    pipeline.images dispatcher isn't available — bigbang PR plumbs
-    the real Flux cloud call here.
+    Falls back to a solid-color stand-in when the pipeline.images
+    dispatcher isn't available.
     """
 
     def produce(

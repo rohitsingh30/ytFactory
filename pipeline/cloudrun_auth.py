@@ -2,7 +2,7 @@
 
 Used by:
 - `pipeline.tts.cloudrun` (chatterbox + indicf5)
-- `pipeline.images_cloudrun` (cloudrun_z_image_turbo)
+- `pipeline.images.images_cloudrun` (cloudrun_z_image_turbo)
 
 Why per-audience cache:
 

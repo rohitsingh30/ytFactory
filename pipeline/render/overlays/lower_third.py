@@ -3,16 +3,9 @@
 Generates one PNG per talking-head segment (or per anchored
 foreground footage clip) showing the speaker's name + social handle.
 Default style: deep-teal slab + orange accent + bold white text
-(matches sports_doc historical aesthetic; channels override via
-``spec.lower_third`` config).
+(channels override via ``spec.lower_third`` config).
 
 Plugin activation: ``spec.lower_thirds = True`` in the wizard.
-
-The PNG-rendering body was inlined from the legacy
-``pipeline.render.sports_doc._render_lower_third`` on 2026-05-14
-as part of the bigbang follow-up. Bigbang itself stripped the
-legacy module's orchestration entry points; this commit removes
-the helper-import dependency so ``sports_doc.py`` can be deleted.
 """
 from __future__ import annotations
 
@@ -46,9 +39,6 @@ def _render_lower_third_png(
 ) -> Path:
     """Slab lower-third: deep teal block, bold white speaker, orange
     underline, small handle below.
-
-    Inlined from legacy ``pipeline.render.sports_doc._render_lower_third``
-    2026-05-14. Behavior unchanged.
     """
     from PIL import Image, ImageDraw, ImageFont  # noqa: PLC0415
 
@@ -110,8 +100,6 @@ class LowerThird:
 
     Pulls speaker info from ``Segment.text`` (when it parses as
     ``"Speaker Name | @handle"``) or skips the Segment otherwise.
-    The bigbang PR adds a richer schema where Segments carry
-    explicit speaker/handle fields.
 
     Style defaults read from ``spec.lower_third`` config — channels
     can override per-render.

@@ -31,10 +31,8 @@ from pipeline.render.contracts import (
 
 
 class SectionVideoMux:
-    """Long engine final mux. Today inherits the beat_slideshow_mux
-    impl wholesale — the bigbang PR will diverge as section-mood
-    music + chapter-card overlay sequencing get richer per-section
-    handling."""
+    """Long engine final mux. Inherits the beat_slideshow_mux impl
+    wholesale."""
 
     def __init__(self) -> None:
         self._inner = BeatSlideshowMux()

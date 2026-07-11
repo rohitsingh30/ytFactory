@@ -14,9 +14,8 @@ Origin: 2026-05-05 postmortem of top10-alien-abductions-202605.
 
 CLI usage:
     .venv/bin/python scripts/_shared/safety_scan_source.py \\
-        --source-url <url> \\
-        --cache-dir <channel>/footage/sources \\
-        [--strict]
+        --source <path/to/source.mp4> \\
+        [--n 5] [--strict]
 
 Programmatic:
     from scripts._shared.safety_scan_source import scan
@@ -119,7 +118,7 @@ def scan(source_path: Path, n_frames: int = 5) -> dict[str, Any]:
         "watermark_hits": watermark_hits,
         "minor_face_hits": minor_face_hits,
         "_deps_status": {
-            "pytesseract": "ok" if "_ocr_watermark" and not any(
+            "pytesseract": "ok" if not any(
                 "__deps_missing__" in str(h) for h in watermark_hits
             ) else "missing",
             "mediapipe_age": "stub_only — install mediapipe + an age model to enforce",

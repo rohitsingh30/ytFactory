@@ -15,7 +15,7 @@ cosmos-decoded). This module defines:
     permissive — older slugs that predate 2026-05-08 still work).
 
 Design choice: TypedDict, not @dataclass. Reasons:
-  1. Renderers (pipeline/render/long_form.py, footage_only.py) read
+  1. Renderers (pipeline/render/long_engine.py) read
      narration JSON via `json.loads()` → raw dict; converting to a
      dataclass would force a rewrite of every renderer entry-point.
      TypedDict is type-hint-only — runtime is still a plain dict.

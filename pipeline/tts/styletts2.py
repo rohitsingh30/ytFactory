@@ -16,9 +16,9 @@ sleep video where micro-pauses and rhythm carry the listener through).
 Channel `tts_voice` is the path to a 5-15s reference WAV.
 
 Why not the default for short channels: StyleTTS2's PyTorch path is
-slower than F5-TTS-MLX or Kokoro on M2 Max, and the prosody lift is
-most audible past ~30s of continuous narration. For Shorts the cost
-isn't worth it; F5-TTS-MLX is the pick.
+slower than Kokoro on M2 Max, and the prosody lift is most audible past
+~30s of continuous narration. For Shorts the cost isn't worth it;
+Kokoro is the pick.
 """
 from __future__ import annotations
 

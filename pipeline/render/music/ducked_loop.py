@@ -2,10 +2,6 @@
 
 Loops a music bed under the narration, ducked when narration is
 loud. Selected by ``spec.music_policy = MusicPolicy.DUCKED_LOOP``.
-
-The ffmpeg amix chain was inlined from the legacy
-``pipeline.render.shorts._mix_music_bed_under_narration`` on
-2026-05-14 as part of the bigbang follow-up.
 """
 from __future__ import annotations
 
@@ -41,9 +37,6 @@ def _mix_bed_under_narration(
 
     Narration is intentionally NOT attenuated — bed alone is moved
     down. Preserves the same dialog level the ASR/beats stage saw.
-
-    Inlined from ``pipeline.render.shorts._mix_music_bed_under_narration``
-    2026-05-14.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -89,9 +82,8 @@ class DuckedLoop:
             )
             return result
 
-        # Resolve the bed path. Pre-bigbang shorts.py looked it up via
-        # cfg["music_bed_default"] under the channel YAML's music_dir;
-        # we read from spec.extra (channel YAML loader populates it).
+        # Resolve the bed path from spec.extra (the channel YAML loader
+        # populates it from cfg["music_bed_default"] under music_dir).
         bed_path = self._resolve_bed_path(spec, bed_name)
         if bed_path is None or not bed_path.exists():
             # Silent-fallback audit (Fix #6, 2026-05-24): when the

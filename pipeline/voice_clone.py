@@ -1,4 +1,4 @@
-"""Clone a protagonist's voice from a YouTube video for F5-TTS narration.
+"""Clone a protagonist's voice from a YouTube video for voice-cloned TTS.
 
 Pipeline (per slug):
 
@@ -8,8 +8,8 @@ Pipeline (per slug):
        light denoise → ``<channel>/voices/<slug>.wav`` (or caller's
        ``out_wav``).
     3. ASR: transcribe that clip via ``pipeline.audio.asr`` to produce
-       the ``ref_text`` F5-TTS-MLX (and IndicF5 cloud) requires
-       alongside the ref WAV.
+       the ``ref_text`` the voice-clone TTS providers (IndicF5 cloud,
+       Chatterbox) require alongside the ref WAV.
     4. Persist ``<channel>/voices/<slug>.json`` with
        ``{ref_wav, ref_text, source_url, start, duration}``.
 
@@ -222,7 +222,7 @@ def _trim_and_clean(
     """ffmpeg: trim, mono, 24kHz, loudnorm, mild denoise → dst (WAV)."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     # afftdn = light spectral denoise; loudnorm = EBU R128 to -16 LUFS
-    # which is what F5-TTS-MLX seems happiest with.
+    # which is what the voice-clone TTS providers expect for a ref clip.
     af = "afftdn=nf=-25,loudnorm=I=-16:TP=-1.5:LRA=11"
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
@@ -299,7 +299,7 @@ def clone_from_youtube(
     """
     if not (5.0 <= duration <= 15.0):
         raise ValueError(
-            f"duration={duration} outside F5-TTS's 5–15s sweet spot"
+            f"duration={duration} outside the 5–15s voice-clone ref window"
         )
 
     if out_wav is not None and out_json is not None:

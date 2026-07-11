@@ -18,7 +18,7 @@ cliffhanger: true
 # Part-2 production — auto-fired by pipeline/part2_watcher.py once the
 # uploaded Part-1 video crosses `subs_delta` new subscribers since
 # upload, within `window_days` of the upload (after that the pending
-# record expires). Watcher → rewrite_part2() → make_shorts → upload.
+# record expires). Watcher → rewrite_part2() → render → upload.
 part2_channel: mystoriesanimated/variants/aita_cliffhanger_part2_animated.yaml
 part2_trigger:
   subs_delta: 100

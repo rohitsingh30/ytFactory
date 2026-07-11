@@ -164,7 +164,7 @@ def _set_critique_status(
 #
 #     ● Read(pipeline/compose.py)
 #     ● Read(pipeline/compose.py:870)        ← optional :line
-#     ● Edit(pipeline/render/long_form.py)
+#     ● Edit(pipeline/render/long_engine.py)
 #     ● Write(tests/test_foo.py)
 #     ● Bash(pytest -x -q)
 #     ● Glob(**/*.py)

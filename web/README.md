@@ -15,7 +15,7 @@ web/
 
 ## What it does (in one paragraph)
 
-A user opens `http://<host>:8765/`, picks a niche, picks a voice (38 voices across 9 languages), hits Generate. The browser POSTs to `/api/jobs`, gets a `job_id`, and opens an SSE stream. The backend spawns `pull_stories.py` and then `make_shorts.py` as subprocesses, tails their stdout, and parses the structured progress prefixes (`[1/4]`, `[prompts]`, `[3/4] mflux: generating N images`, `[critic] score=`) into typed JSON events fanned out over SSE. The browser updates a stage-by-stage progress UI, fills in scene cards as `prompts.json` is authored, populates thumbnails as each `img_NN.png` lands, and **evolves a single right-side preview panel** through three states: idle spinner → `<audio>` of the narration (the moment TTS finishes, ~5s in) → `<video>` of the final mp4 (when ffmpeg finishes, ~7 min in). Auth is a single bearer token; tunnel via cloudflared for public URL.
+A user opens `http://<host>:8765/`, picks a niche, picks a voice (38 voices across 9 languages), hits Generate. The browser POSTs to `/api/jobs`, gets a `job_id`, and opens an SSE stream. The backend spawns `pull_stories.py` and then `python -m pipeline.render` as subprocesses, tails their stdout, and parses the structured progress prefixes (`[1/4]`, `[prompts]`, `[3/4] <provider>: generating N images`, `[critic] score=`) into typed JSON events fanned out over SSE. The browser updates a stage-by-stage progress UI, fills in scene cards as `prompts.json` is authored, populates thumbnails as each `img_NN.png` lands, and **evolves a single right-side preview panel** through three states: idle spinner → `<audio>` of the narration (the moment TTS finishes, ~5s in) → `<video>` of the final mp4 (when ffmpeg finishes, ~7 min in). Auth is a single bearer token; tunnel via cloudflared for public URL.
 
 ---
 
@@ -69,7 +69,7 @@ A user opens `http://<host>:8765/`, picks a niche, picks a voice (38 voices acro
             │  reddit / wiki / tih    │
             └────────┬────────────────┘
                      ▼ stdout (line by line)
-            ┌──── make_shorts.py ─────┐
+            ┌── python -m pipeline.render ─┐
             │  TTS → beats → prompts  │
             │  → images → compose     │
             │  → critic               │
@@ -98,7 +98,7 @@ A user opens `http://<host>:8765/`, picks a niche, picks a voice (38 voices acro
 | GET | `/api/niches` | `{niches: [{key, label, description, color_from, color_to, …}]}` |
 | GET | `/api/voices` | `{languages: [{code, label, flag}], voices: [{id, label, lang, accent, tone, sample_url}], default}` |
 | GET | `/api/voices/{voice_id}/sample.wav` | Lazy-synth + cache. First call ~3s; subsequent calls hit the cache file. Sample text is per-language (an AITA hook in the voice's native language). |
-| POST | `/api/jobs` | Body: `{niche: str, options: {voice: str}}` → `{job_id: str}`. Spawns `pull_stories.py` + `make_shorts.py --tts-voice <id>` and starts emitting SSE events. |
+| POST | `/api/jobs` | Body: `{niche: str, options: {voice: str}}` → `{job_id: str}`. Spawns `pull_stories.py` + `python -m pipeline.render --tts-voice <id>` and starts emitting SSE events. |
 | GET | `/api/jobs/{job_id}` | Snapshot — `{job_id, niche, state, slug, error, stage_started, stage_done, events, beat_prompts, mp4_url}`. Useful for catch-up after a reconnect. **Falls through to `SCRIPT_JOBS` on JOBS-miss** (since 2026-05-10) so the same endpoint serves both niche-driven and skill-submitted renders — see `docs/jobs_snapshot_unification.md`. |
 | GET | `/api/jobs/{job_id}/events` | SSE stream of stage events. See "SSE event schema" below. |
 | GET | `/api/jobs/{job_id}/audio` | `narration.wav` (404 until `tts.done`). |
@@ -111,7 +111,7 @@ A user opens `http://<host>:8765/`, picks a niche, picks a voice (38 voices acro
 | GET | `/api/telemetry/llm?hours=N` | Per-model rows for claude CLI calls: calls, errors, input/output tokens, cost USD, avg + p95 latency. |
 | GET | `/api/telemetry/errors?hours=N&limit=M` | Most recent failures (stage_error and any event with `success=false`). |
 | GET | `/api/telemetry/timeline?hours=N` | Hourly buckets: jobs / errors / llm calls — for sparkline-style charts. |
-| POST | `/api/_internal/render` | (opt-in) Single-image render through the long-lived in-process diffusion pipe. Activated by starting uvicorn with `YTFACTORY_PERSIST_IMAGE_PIPE=1`. `make_shorts.py` POSTs here when `YTFACTORY_IMAGE_WORKER_URL` is set. Single-tenant `asyncio.Lock` serializes the GPU. Body: `{kwargs: {prompt, seed, out_path, width, height, steps, provider, ip_adapter_image?, ip_adapter_scale?, extra_negative?}}`. |
+| POST | `/api/_internal/render` | (opt-in) Single-image render through the long-lived in-process diffusion pipe. Activated by starting uvicorn with `YTFACTORY_PERSIST_IMAGE_PIPE=1`. The render subprocess POSTs here when `YTFACTORY_IMAGE_WORKER_URL` is set. Single-tenant `asyncio.Lock` serializes the GPU. Body: `{kwargs: {prompt, seed, out_path, width, height, steps, provider, ip_adapter_image?, ip_adapter_scale?, extra_negative?}}`. |
 
 ### Auth model
 
@@ -178,7 +178,7 @@ _run_job_with_telemetry(job)            ← wraps run_job
    └── job_started                      (niche, voice, options at submission)
    └── job_finished  (in finally)       (state, total ms, error, slug)
 
-make_shorts.py (per QC retry)           ← one row per image generate() call
+python -m pipeline.render (per QC retry)  ← one row per image generate() call
    └── image_attempt                    (beat, attempt, qc=pass|fail, qc_reason,
                                          provider, seed; feeds the retry %
                                          rollup, makes silent retry doubling
@@ -189,7 +189,7 @@ pipeline/llm.call_claude_cli(...)       ← one row per claude CLI call
                                          cost_usd from envelope, latency)
 ```
 
-`run_subprocess()` propagates `YTFACTORY_JOB_ID` to spawned `pull_stories.py` / `make_shorts.py` so the LLM calls *inside* those subprocesses get attributed to the right job. The `llm.py` wrapper reads the env var and stamps it onto the row.
+`run_subprocess()` propagates `YTFACTORY_JOB_ID` to spawned `pull_stories.py` / `python -m pipeline.render` so the LLM calls *inside* those subprocesses get attributed to the right job. The `llm.py` wrapper reads the env var and stamps it onto the row.
 
 ### Stage_error message handling
 
@@ -223,13 +223,13 @@ Time-window dropdown (`#tlm-window`) is `?hours=` for all five endpoints; `loadT
 
 ## Persistent image worker (opt-in)
 
-Default: every job's `make_shorts.py` subprocess cold-loads its own diffusion pipe (~3–7 GB, 15–30 s on Apple Silicon). The IP-adapter reference cache (`pipeline/images.py:_IP_REF_CACHE`) also resets per process. Both costs amortize once you cross a handful of jobs/week.
+Default: every job's `python -m pipeline.render` subprocess cold-loads its own diffusion pipe (~3–7 GB, 15–30 s on Apple Silicon). The IP-adapter reference cache (`pipeline/images.py:_IP_REF_CACHE`) also resets per process. Both costs amortize once you cross a handful of jobs/week.
 
 Activate the in-process worker by starting uvicorn with `YTFACTORY_PERSIST_IMAGE_PIPE=1`:
 
 - `lifespan` warms the diffusion pipe on a background task at startup (`_warm_image_pipe()`); server returns 200 immediately, renders that arrive before warmup finishes block on the GPU lock then go straight through.
 - `/api/_internal/render` accepts a single render and dispatches it through `pipeline/images.generate()` inside the server. An `asyncio.Lock` (`_IMAGE_GPU_LOCK`) serializes concurrent jobs — the GPU is single-tenant.
-- `run_subprocess()` injects `YTFACTORY_IMAGE_WORKER_URL` into the spawned `make_shorts.py` env when the worker is active. `pipeline/images.generate()` reads that env var and calls `_generate_via_worker()` (POSTs JSON over `urllib`), falling back to local generation on any worker error so a server crash doesn't take the pipeline down.
+- `run_subprocess()` injects `YTFACTORY_IMAGE_WORKER_URL` into the spawned `python -m pipeline.render` env when the worker is active. `pipeline/images.generate()` reads that env var and calls `_generate_via_worker()` (POSTs JSON over `urllib`), falling back to local generation on any worker error so a server crash doesn't take the pipeline down.
 
 Tunables:
 

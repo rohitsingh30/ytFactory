@@ -12,8 +12,8 @@ Most heavy ML deps (torch, diffusers, mflux, mlx-whisper, kokoro)
 were removed from the laptop venv 2026-05-09. The local web server
 can still load + serve the UI but actual rendering must go through
 the cloud render-worker JOB (``YTFACTORY_RENDER_BACKEND=cloudrun``).
-Local mode (subprocess of make_shorts.py) will fail at the first GPU
-import.
+Local mode (subprocess of ``python -m pipeline.render``) will fail at
+the first GPU import.
 
 Endpoints (mirrored cloud-side):
     GET  /                          → niche picker HTML
@@ -25,10 +25,10 @@ Endpoints (mirrored cloud-side):
     GET  /api/jobs/{id}/thumb/{i}   → image thumbnail (img_NN.png)
 
 Pipeline integration: every job spawns ``pull_stories.py`` and then
-``make_shorts.py`` as subprocesses (re-using the existing CLI rather
-than refactoring). We tail stdout, parse the structured prefixes
-already emitted (``[1/4]``, ``[prompts]``,
-``[3/4] mflux: generating N images``, ``[critic] score=...``), and
+``python -m pipeline.render`` as subprocesses (re-using the existing
+CLI rather than refactoring). We tail stdout, parse the structured
+prefixes emitted by the render subprocess (``[1/4]``, ``[prompts]``,
+``[3/4] <provider>: generating N images``, ``[critic] score=...``), and
 fan them out as SSE events to the browser.
 """
 
@@ -381,7 +381,7 @@ SUBSCRIBERS: dict[str, list[asyncio.Queue]] = {}
 # ---- Website-native render-from-script jobs (2026-05-09) -----------------
 #
 # The original /api/jobs flow is niche-driven: pick a niche, the website
-# runs pull_stories.py + make_shorts.py end-to-end. Skills (the AI
+# runs pull_stories.py + `python -m pipeline.render` end-to-end. Skills (the AI
 # authoring layer) need a different entry point: they hand-author the
 # script JSON themselves and just want the website to drive the
 # renderer in its already-correct env (PYTHONPATH, gcloud account, cwd).
@@ -759,13 +759,13 @@ _RE_PROMPTS_START = re.compile(r"^\[prompts\] authoring (\d+) beat prompts")
 _RE_PROMPTS_DONE = re.compile(r"^\[prompts\] wrote ")
 _RE_IMG_START = re.compile(r"^\[3/4\] \S+: generating (\d+) images")
 _RE_IMG_BEAT = re.compile(r"^\s+\[(\d+)/(\d+)\]")
-# Per-image completion marker — printed by make_shorts.py AFTER the
+# Per-image completion marker — printed by the render subprocess AFTER the
 # img_NN.png is written (and QC-checked) to disk. This is the safe
 # moment for the frontend to fetch /api/jobs/{id}/thumb/{i}; the
 # earlier _RE_IMG_BEAT line fires BEFORE generate() runs.
 _RE_IMG_DONE = re.compile(r"^\[image-done\] beat (\d+) of (\d+)")
 # Per-attempt diagnostic. Printed once per images.generate() call inside
-# the QC retry loop (make_shorts.py). Surfaces silent retry doubling:
+# the QC retry loop (the render subprocess). Surfaces silent retry doubling:
 # a beat that retries N times costs N× wall time but used to look
 # identical in telemetry to a clean beat — only the aggregate beat
 # duration moved. Capturing per-attempt {dt_s, qc_pass, reason} lets
@@ -822,7 +822,7 @@ def parse_stdout_line(line: str) -> tuple[str, str, str, dict] | None:
         return "tts", "done", "TTS cached", {}
     m = _RE_TTS_START.match(line_r)
     if m:
-        # Reflect the actual provider make_shorts.py prints; falls back
+        # Reflect the actual provider the render subprocess prints; falls back
         # to "TTS" if the provider tag is missing (older log format).
         provider = (m.group(1) or "").strip().lower()
         if provider == "kokoro":
@@ -865,7 +865,7 @@ def parse_stdout_line(line: str) -> tuple[str, str, str, dict] | None:
         }
     m = _RE_IMG_DONE.match(line_r)
     if m:
-        # make_shorts.py prints the 0-indexed beat (matches img_NN.png
+        # the render subprocess prints the 0-indexed beat (matches img_NN.png
         # filename); we expose both forms so the frontend can use `i`
         # for display (1-indexed, consistent with image/progress events
         # and the [1/N] convention) and `beat_index` for the thumb URL
@@ -938,7 +938,7 @@ async def run_subprocess(
     last ~120 raw stdout lines, surfaced into error events when the
     subprocess exits non-zero so the UI shows the actual cause (Python
     traceback, ``RuntimeError`` text) instead of a bare
-    "make_shorts.py exited 1".
+    "the render subprocess exited 1".
 
     ``start_new_session=True`` puts the child in its own process group so
     a uvicorn restart (or pkill on the parent) does NOT cascade into the
@@ -960,7 +960,7 @@ async def run_subprocess(
     # line-buffered output so emit() sees stages as they actually happen.
     env["PYTHONUNBUFFERED"] = "1"
     # If the server is hosting a warm in-process diffusion pipe (opt-in
-    # via YTFACTORY_PERSIST_IMAGE_PIPE=1 at startup), tell make_shorts.py
+    # via YTFACTORY_PERSIST_IMAGE_PIPE=1 at startup), tell the render subprocess
     # to render images by HTTP-POSTing to the server instead of cold-
     # loading its own pipe. Saves the 15-30s cold load per job and any
     # IP-adapter image cache — see _IMAGE_WORKER below.
@@ -1171,7 +1171,7 @@ async def run_job(job: Job) -> None:
 
     # If the user picked a YouTube-cloned voice, bind it to this slug now
     # by copying the cached ref into the channel's voices/<slug>.{wav,json}.
-    # make_shorts._find_voice_path will discover and use it.
+    # the renderer's voice discovery will find and use it.
     # If the user picked a Kokoro voice instead (no clone), unlink any
     # stale binding from a prior render so the picker isn't silently
     # overridden by leftover state.
@@ -1198,7 +1198,7 @@ async def run_job(job: Job) -> None:
         import shutil
         shutil.copyfile(src_dir / "ref.wav", dst_wav)
         meta = json.loads((src_dir / "ref.json").read_text())
-        # Rewrite ref_wav in the json to the new absolute path so make_shorts
+        # Rewrite ref_wav in the json to the new absolute path so the renderer
         # finds the file regardless of which CWD it runs from.
         meta["ref_wav"] = str(dst_wav)
         meta["bound_clone_id"] = clone_id
@@ -1238,7 +1238,7 @@ async def run_job(job: Job) -> None:
         return
     if rc != 0:
         job.state = "error"
-        job.error = _format_subprocess_failure("make_shorts.py", rc, tail)
+        job.error = _format_subprocess_failure("pipeline.render", rc, tail)
         emit(job, StageEvent(
             job_id=job.job_id, ts=time.time(),
             stage="error", status="error",
@@ -1291,7 +1291,7 @@ async def _riff_render_one_seed(
     seed_idx: int,
     profile: dict,
 ) -> Path | None:
-    """Run pull-equivalent (raw write + rewrite + cast) + make_shorts.py
+    """Run pull-equivalent (raw write + rewrite + cast) + `python -m pipeline.render`
     for one ideated seed. Returns the produced mp4 path, or None on
     failure (already emitted as an error event with seed_idx)."""
     channel_dir = profile.get("channel_dir") or "reddit_amitheasshole"
@@ -1377,7 +1377,7 @@ async def _riff_render_one_seed(
         return None
     if rc != 0:
         _emit_simple(job, "error", "error",
-                     _format_subprocess_failure("make_shorts.py", rc, tail),
+                     _format_subprocess_failure("pipeline.render", rc, tail),
                      seed_idx=seed_idx)
         return None
 
@@ -1512,13 +1512,13 @@ async def run_riff_job(job: Job) -> None:
 
 # ---- in-process image worker (opt-in) ----------------------------------
 #
-# Default behavior: every job's make_shorts.py subprocess cold-loads its
+# Default behavior: every job's render subprocess cold-loads its
 # own diffusion pipe (~3-7 GB, 15-30 s on Apple Silicon). Once you go
 # beyond a handful of jobs/week that adds up — and the IP-adapter
 # reference cache I added in pipeline/images.py also resets per process.
 #
 # Opt-in via YTFACTORY_PERSIST_IMAGE_PIPE=1: the server warms a single
-# pipe at startup and exposes /api/_internal/render. make_shorts.py then
+# pipe at startup and exposes /api/_internal/render. The render subprocess then
 # POSTs each image request instead of generating in-process. The GPU is
 # single-tenant, so a threading.Lock-equivalent (asyncio.Lock here)
 # serializes concurrent renders. Across-process this gives you exactly
@@ -3271,7 +3271,7 @@ async def _warm_voice_sample(voice: dict, sample_path: Path) -> None:
 # Each clone lives at data/cache/voice_clones/web/<id>/{ref.wav, ref.json}
 # and surfaces in the UI as another voice card. When a job is submitted
 # with options.voice_clone_id, run_job copies the ref into
-# data/intermediate/<channel>/voices/<slug>.{wav,json} so make_shorts
+# data/intermediate/<channel>/voices/<slug>.{wav,json} so the renderer
 # auto-picks the voice-clone override (same path the per-story cast uses).
 
 WEB_CLONES_DIR = PROJECT_ROOT / "data" / "cache" / "voice_clones" / "web"
@@ -3692,7 +3692,8 @@ async def create_script_job(payload: dict) -> dict:
 
     Payload (preferred — generic):
         cmd:    list[str], e.g.
-                ["scripts/make_shorts.py",
+                ["-m", "pipeline.render",
+                 "--kind", "short",
                  "--channel", "mystoriesanimated/variants/aita_animated.yaml",
                  "--script", "mystoriesanimated/.../scripts/<slug>.json"]
                 The first element MUST be in the allowed-entry-point
@@ -4420,7 +4421,7 @@ def _resolve_critique_inputs_from_job(job_id: str) -> dict:
     if not script_path:
         raise HTTPException(400, f"job {job_id} has no --script in cmd")
     slug = Path(script_path).stem
-    # cache_dir: <niche_root>/cache/<slug>/ — matches make_shorts.py layout
+    # cache_dir: <niche_root>/cache/<slug>/ — matches the renderer's cache layout
     sp = Path(script_path)
     cache_dir = (
         sp.parent.parent / "cache" / slug
@@ -5269,7 +5270,7 @@ def _do_upload_blocking(
 def _scene_thumbs_for(slug: str) -> list[dict]:
     """List the cached scene PNGs (img_NN.png) for a slug, in order.
 
-    These are the per-beat images make_shorts.py wrote to data/cache/<slug>/.
+    These are the per-beat images the render subprocess wrote to data/cache/<slug>/.
     The user can pick one in the upload form to use as the YouTube thumbnail.
     """
     cache = CACHE_DIR / slug

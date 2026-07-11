@@ -6,17 +6,15 @@ validates, and exposes derived views — adding a channel is a YAML
 edit, no Python change needed.
 
 The YAML is the canonical reference for production channels (slug,
-youtube_title, youtube_channel_id, niches, rotation flag, aliases).
+youtube_title, youtube_channel_id, niches, rotation flag).
 The cloud ``youtube-channel-ids`` Secret Manager secret can drift
 (stale 2026-05-04 entries persisted alongside fresh 2026-05-09
 ones); treat it as a cache, not authoritative.
 
-Renames are first-class via ``aliases``: when a channel's local
-dir or slug changes but its YouTube channel_id stays the same,
-record the old slug under ``aliases`` and ``resolve_channel`` will
-map either form to the canonical Channel. Separate channels with
-distinct channel_ids each get their own entry — never an alias
-across channel_ids.
+There is no alias layer: ``slug`` is the single canonical name and
+every caller uses exactly that string. If a channel is renamed,
+every reference migrates in lockstep. Separate channels with
+distinct channel_ids each get their own entry.
 """
 from __future__ import annotations
 
@@ -95,8 +93,8 @@ class Channel(BaseModel):
 
     # ---- Where this channel's per-channel files live on the laptop ----
     # Single source of truth for channel artifact locations. Other
-    # modules (pipeline/paths.py, pipeline/customization.py, render
-    # code) read these instead of hardcoding ``pipeline/channels/<slug>``.
+    # modules (pipeline/paths.py, pipeline/schemas/customization.py,
+    # render code) read these instead of hardcoding ``pipeline/channels/<slug>``.
     # If we ever rename the central dirs, this is the only place to
     # edit; every caller automatically picks up the new path.
 
@@ -201,8 +199,8 @@ def all_channels() -> tuple[Channel, ...]:
 
 
 def channel_rotation() -> list[str]:
-    """Slugs the round-robin scheduler picks from. Replaces the
-    hardcoded list at control/scheduler.py:CHANNEL_ROTATION."""
+    """Slugs the round-robin scheduler picks from. Source of truth for
+    control/core/scheduler.py:CHANNEL_ROTATION, which is derived from this."""
     return [c.slug for c in CHANNELS if c.in_rotation]
 
 
@@ -219,7 +217,9 @@ def is_known_channel(slug: str) -> bool:
 def niche_channel_map() -> dict[str, tuple[str, str]]:
     """niche_key -> (state_dir, variant_yaml_path).
 
-    Drop-in replacement for pipeline/niches.py:NICHE_CHANNEL.
+    Derived view over channels.yaml, mirroring the shape of
+    pipeline/niches.py:NICHE_CHANNEL (which remains the production
+    routing source of truth).
     """
     out: dict[str, tuple[str, str]] = {}
     for c in CHANNELS:

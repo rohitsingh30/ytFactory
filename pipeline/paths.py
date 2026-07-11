@@ -50,7 +50,7 @@ and joins ``"uploads"`` underneath).
 
 A channel uses niches **everywhere or nowhere** — no mixing.
 
-* Niche channels (mystoriesanimated, sportstoriesanimated): per-slug
+* Niche channels (mystoriesanimated, sportsrecapped): per-slug
   subdirs (raw / narrations / cast / shotlist / uploads / shorts /
   long_form / cache / scratch / critiques) ALL nest under ``<niche>/``.
 * Channel-wide subdirs (config.yaml, variants/, learnings/, scripts/,
@@ -238,7 +238,7 @@ class RenderPaths:
         for chan_dir, chan_yaml_str in niches.NICHE_CHANNEL.values():
             if yaml_str.endswith(chan_yaml_str):
                 # chan_dir is e.g. "mystoriesanimated/reddit_amitheasshole"
-                # or "sportstoriesanimated/ranked".
+                # or "sportsrecapped/ranked".
                 if "/" in chan_dir:
                     channel, niche = chan_dir.split("/", 1)
                     return cls.for_channel(channel, niche, project_root=project_root)

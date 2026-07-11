@@ -1309,7 +1309,7 @@ def _youtube_upload_impl(
 # Every Short going public passes through a vision critique first. The
 # critic samples the rendered mp4 at 1 fps and Claude returns a 1..10
 # score plus per-beat / class-of-bug findings. We cache the critique on
-# disk (the same place make_shorts.py writes it) so we don't pay the
+# disk (the same place the renderer writes it) so we don't pay the
 # critic twice for the same render.
 #
 # A score below ``upload.min_score`` blocks the upload outright — the

@@ -5,32 +5,13 @@ Single source of truth for the seven plugin slot Protocols that the
 Engines have ZERO ``if visual_mode == ...`` branches — they consult
 the registry, get back a Protocol-conforming impl, call it.
 
-History
--------
-
-This module landed 2026-05-14 as part of the 4-renderer-to-2-engine
-consolidation (see plan.md in the session workspace). Before this
-landing:
-
-- ``shorts.py`` (3344 LoC) hardwired the per-beat AI-image-slideshow
-  pipeline; sports_doc.py (1306 LoC) hardwired the overlay-timeline
-  pipeline; long_form.py (2734 LoC) hardwired the panel/archival
-  pipeline; footage_only.py (946 LoC) hardwired the shotlist pipeline.
-  Combined ~8.3k LoC of orchestration with high duplication.
-- The 4 modules each shipped their own subset of: TTS, ASR alignment,
-  visualize, captions, music bed, watermark, mux. The same loudnorm
-  bug had to be fixed in two places (commit ``ac4b396``, 2026-05-12).
-
-Post-landing:
-
-- Two engines (``short`` / ``long``) call the seven Protocols below.
-- Each Protocol has multiple impls under ``pipeline/render/<slot>/``
-  (e.g. ``visualize/ai_beat_slideshow.py``,
-  ``overlays/word_caption_pngs.py``).
-- Engines never know which impl is selected — they pass the spec to
-  ``get_<slot>(spec)`` and call the result.
-- Adding a new visual_mode = add a module + register it. No engine,
-  no contracts, no spec change required.
+Two engines (``short`` / ``long``) call the seven Protocols below. Each
+Protocol has multiple impls under ``pipeline/render/<slot>/`` (e.g.
+``visualize/ai_beat_slideshow.py``, ``overlays/word_caption_pngs.py``).
+Engines never know which impl is selected — they pass the spec to
+``get_<slot>(spec)`` and call the result. Adding a new visual_mode =
+add a module + register it. No engine, no contracts, no spec change
+required.
 
 Plugin slot summary
 -------------------

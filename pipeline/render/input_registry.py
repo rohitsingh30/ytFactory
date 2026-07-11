@@ -7,27 +7,19 @@ with its ``cfg_targets`` / ``spec_field`` / ``apply_handler`` /
 ``prompt_patch_fn`` metadata, and every consumer below picks it up
 automatically.
 
-Pre-2026-05-12 this layer was a hand-coded if/elif chain in
-``pipeline/render/shorts.py:_apply_form_overrides`` (962-1122) that:
-1. Was **never called** from ``_make_short_impl`` — silently dead code.
-2. Was completely missing on the long-form path — every form pick except
-   ``length_s`` was dropped on long-form renders.
-3. Couldn't be extended without editing 4-5 unrelated files.
-
-The descriptor pattern fixes all three: one decl per input, exactly
-one call into this module per consumer.
+The descriptor pattern means one decl per input, and exactly one call
+into this module per consumer — no per-input if/elif chains scattered
+across the renderers.
 
 ## Public API
 
-- :func:`apply_overrides` — replaces the body of
-  ``pipeline/render/shorts.py:_apply_form_overrides``. Walks the
-  registered descriptors and writes form-supplied values into the
-  channel cfg dict at every declared target path.
+- :func:`apply_overrides` — walks the registered descriptors and
+  writes form-supplied values into the channel cfg dict at every
+  declared target path.
 
-- :func:`long_form_overlay_from_spec` — used by
-  ``pipeline/render/video.py::render_long_form`` to build a per-render
-  YAML overlay deep-merged on top of the channel YAML by
-  ``pipeline/render/long_form.py``'s new ``--config <path>`` flag.
+- :func:`long_form_overlay_from_spec` — projects spec fields into a
+  per-render YAML overlay dict (deep-merged on top of the channel
+  YAML). See note in the function docstring on its current caller.
 
 - :func:`prompt_patches_for` — used by long-form / short rewriters to
   collect mode-changing prompt fragments contributed by descriptors
@@ -206,8 +198,7 @@ def _apply_voice(cfg: dict, value: Any, channel_meta: dict) -> None:
     - bare voice id on a laptop channel → write voice id, flip provider
       to ``"kokoro"``, drop ``tts_ref_text``.
 
-    Mirrors the carve-out previously hand-coded at
-    ``pipeline/render/shorts.py:1044-1062``. Centralised here so a
+    Mirrors the TTS-provider carve-out. Centralised here so a
     future TTS-provider change is one edit, not five.
 
     2026-05-13 — added bare-id → path resolution so wizard picks like
@@ -391,10 +382,8 @@ def apply_overrides(
     """Walk the descriptor registry and write each form override into
     the matching cfg locations.
 
-    Replaces the dead ``pipeline/render/shorts.py:_apply_form_overrides``
-    body with a descriptor-driven loop. Adding a new form input is a
-    single ``CustomizationField(...)`` declaration — this function picks
-    it up without any code change here.
+    Adding a new form input is a single ``CustomizationField(...)``
+    declaration — this function picks it up without any code change here.
 
     Args:
         cfg: channel config dict to mutate in-place.
@@ -499,14 +488,14 @@ def long_form_overlay_from_spec(spec: Any) -> dict:
     """Build a per-render YAML overlay dict from a typed RenderSpec.
 
     Walks the descriptors and projects each ``spec_field`` value into
-    the cfg target path the descriptor declares. Used by
-    ``pipeline/render/video.py::render_long_form`` to write
-    ``work_dir/long_form_overlay.yaml`` which long_form.py picks up via
-    its new ``--config <path>`` flag.
+    the cfg target path the descriptor declares.
 
-    Returns an empty dict when no descriptors mirror to spec fields,
-    which is harmless (long_form.py treats empty overlay as "use
-    channel YAML alone").
+    NOTE: the long-form render path (``video.render_long_form``) now
+    renders in-process via the engines and reads spec fields directly,
+    so it no longer consumes this overlay. The projection is retained
+    (and unit-tested) for any caller that needs the spec→cfg overlay
+    shape; returns an empty dict when no descriptors mirror to spec
+    fields.
 
     2026-05-13 — also dispatches ``apply_handler`` if a descriptor
     declares one. Pre-fix, descriptors with NO ``cfg_targets`` (the

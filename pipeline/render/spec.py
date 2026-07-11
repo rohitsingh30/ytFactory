@@ -95,17 +95,19 @@ class RenderKind(str, Enum):
     """Top-level orchestration choice. Determines which stage chain runs.
 
     - ``short``       — 9:16, ≤120 s, single-pass TTS, ASR-driven beats,
-                        ai/motion/hybrid visualize. Today's
-                        ``pipeline.render.shorts`` codepath.
+                        ai/motion/hybrid visualize. Routed to
+                        ``short_engine.render_short``.
     - ``long_form``   — 16:9, 5-120 min, chunked TTS, sectioned narration,
-                        panels OR archival_shotlist visualize. Today's
-                        ``pipeline.render.long_form`` codepath.
+                        panels OR archival_shotlist visualize. Routed to
+                        ``long_engine.render_long``.
     - ``sports_doc``  — 16:9, 5-30 min, chaptered narration + separate
-                        footage_plan, overlay-timeline visualize. Today's
-                        ``pipeline.render.sports_doc`` codepath.
+                        footage_plan, overlay-timeline visualize. Routed
+                        to ``long_engine.render_long``
+                        (``visual_mode=sports_overlay_timeline``).
     - ``footage_only``— any aspect, any length, shotlist windows over
-                        external clips, no AI image gen. Today's
-                        ``pipeline.render.footage_only`` codepath.
+                        external clips, no AI image gen. Routed to
+                        ``long_engine.render_long``
+                        (``visual_mode=footage_windows``).
     """
     SHORT = "short"
     LONG_FORM = "long_form"
@@ -220,8 +222,8 @@ class CaptionsLayout(str, Enum):
     - ``center_word_by_word`` — TikTok-style. ONE word at a time, large,
       vertically centred (slight bottom-bias for chin-tap clearance).
       The default for shorts. Drives ``caption_mode="word"`` in
-      ``pipeline/compose.py`` and selects the word-PNG path in
-      ``pipeline/render/long_form.py``.
+      ``pipeline/compose.py`` and selects the word-caption PNG overlay
+      (``pipeline/render/overlays/word_caption_pngs.py``).
 
     - ``bottom_one_line`` — one short line at the bottom, MarginV=80.
       Sentence-level cues, hard-truncated to a single line if too long.

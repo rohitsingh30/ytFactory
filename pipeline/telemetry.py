@@ -4,8 +4,8 @@ This module used to be a self-contained JSONL writer. As of the OTel
 migration (see :mod:`pipeline.observability` + ``docs/telemetry.md``)
 all telemetry flows through OTel → Cloud Trace + Cloud Monitoring +
 Cloud Logging. The shim keeps every existing call site
-(``pipeline.render.shorts``, ``pipeline.compose``, ``pipeline.llm.cli``,
-``web.server`` etc.) working without churn:
+(``pipeline.render.short_engine``, ``pipeline.compose``,
+``pipeline.llm.cli``, ``web.server`` etc.) working without churn:
 
     from pipeline import telemetry as tlm
     tlm.track("evt", category="...", duration_ms=...)

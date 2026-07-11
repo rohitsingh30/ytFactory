@@ -2,10 +2,6 @@
 
 Loops one music bed under the full narration duration with no
 ducking — the long-form sleep history pattern.
-
-The bed-synthesis chain was inlined from the legacy
-``pipeline.render.long_form.build_music_bed`` on 2026-05-14 as
-part of the bigbang follow-up.
 """
 from __future__ import annotations
 
@@ -30,9 +26,6 @@ def _synthesize_ambient_bed(out_path: Path, duration_s: float) -> Path:
     Three slow-detuned sine waves at low frequencies (~82/123/164 Hz)
     with low-pass filter + reverb. Not as polished as a real ambient
     track but lets the pipeline render end-to-end without a curated bed.
-
-    Inlined from ``pipeline.render.long_form.build_music_bed``
-    2026-05-14. Behavior unchanged.
     """
     flt = (
         "sine=frequency=82:duration={d}[s1];"

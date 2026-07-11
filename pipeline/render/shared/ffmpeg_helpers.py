@@ -1,25 +1,17 @@
 """Shared ffmpeg/ffprobe helpers used by every render engine + plugin.
 
-Pre-2026-05-14 these lived as private helpers (``_ffmpeg``, ``_atempo``,
-``_probe_duration``) inside ``pipeline/render/long_form.py``;
-``sports_doc.py`` already imported them from there. The
-4-renderer-to-2-engine consolidation (see plan.md) promotes them here
-so both the new ``short_engine`` and ``long_engine`` plus every plugin
-under ``visualize/``, ``overlays/``, ``music/``, ``compose/`` import
-from ONE place.
+Both ``short_engine`` and ``long_engine`` plus every plugin under
+``visualize/``, ``overlays/``, ``music/``, ``compose/`` import the
+canonical helpers (``run_ffmpeg``, ``apply_atempo``, ``probe_duration``)
+from ONE place here.
 
 Design notes
 ------------
 
-Public names (no leading underscore) — these are the canonical helpers
-new code should use. The underscore-prefixed legacy names continue to
-work via re-exports in ``pipeline/render/long_form.py`` until the
-bigbang PR deletes the old renderers.
-
-Behaviour preservation: the function bodies are byte-equivalent to the
-``long_form.py`` originals (Tier-0 batch-E hardening for stderr capture
-+ optional timeout, Audit T1.15 for ``probe_wav_params``, Audit Q2.25
-for concat-safe path escaping).
+Public names (no leading underscore) are the canonical helpers new
+code should use. Behaviour: stderr capture + optional timeout (Tier-0
+batch-E hardening), ``probe_wav_params`` (Audit T1.15), concat-safe
+path escaping (Audit Q2.25).
 """
 from __future__ import annotations
 

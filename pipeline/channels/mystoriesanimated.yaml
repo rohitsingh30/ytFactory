@@ -143,7 +143,7 @@ upload:
   privacy: private
   made_for_kids: false
   category_id: "24"          # Entertainment
-  auto_upload: false         # set true to upload at the end of make_shorts.py
+  auto_upload: false         # set true to upload at the end of the render
   tags:
     - aita
     - reddit

@@ -15,9 +15,10 @@ Every tick:
      5-ronaldinho duplicate-render bug from the 2026-05-13 audit).
      Looks at both top-level (`<channel>/narrations/<slug>.json`) AND
      niche-nested (`<channel>/<niche>/narrations/<slug>.json`) layouts.
-  4. On match, enqueue a RENDER_SHORT task via control.core.jobs._enqueue_render_job.
-     The agent on the laptop leases it, runs make_shorts.py, and ships
-     to YouTube.
+  4. On match, enqueue a RENDER_SHORT via control.core.jobs._enqueue_render_job,
+     which (per YTFACTORY_RENDER_BACKEND) fires the Cloud Run render worker
+     (ytfactory-render-worker-v2) directly or drops a task for the in-process
+     sim worker. The worker renders and ships to YouTube.
 
 State (last_channel, last_slug, last_enqueued_at) persists in Firestore
 collection ``scheduler_state`` (or in-process memory for the dev backend).

@@ -8,8 +8,8 @@ Each module implements VisualProducer. Engine picks based on
 * ``footage_filler``       → :mod:`.footage_filler` (b-roll cycle, paired
                               with overlays.anchored_footage)
 
-Other visual_modes (motion_clips, hybrid_beat_footage, footage_windows,
-archival_shotlist) get added as the bigbang PR migrates more callers.
+Other visual_modes (motion_clips, hybrid_beat_footage) get added as
+new modules register themselves.
 
 For tests, :mod:`.visuals_from_fixture` loads a pre-rendered mp4 from
 disk so engine goldens don't depend on Flux cloud.

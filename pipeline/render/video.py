@@ -1,45 +1,27 @@
 """Unified renderer orchestrator — dispatches by ``RenderSpec.kind``.
 
-Single entry point for any render in ytFactory. Replaces the ad-hoc
-"shell out to shorts.py / long_form.py / sports_doc.py" branching the
-cloud worker did pre-2026-05-12 (see plan.md, Slice 2).
+Single entry point for any render in ytFactory. Both entry functions
+run the render IN-PROCESS via the pluggable engines (no subprocess):
 
-Today's responsibilities (Slice 2 minimum-viable):
+- :func:`render_via_engines` — the deterministic engine dispatch.
+  Routes through :func:`pipeline.render.engine.pick_engine` to
+  ``short_engine.render_short`` or ``long_engine.render_long``, which
+  resolve the six plugin slots (audio / timeline / visualize /
+  overlays / music / compose) by spec field. The cloud worker's
+  short path and ``pipeline.render.__main__`` call this directly with
+  a typed ``RenderSpec``.
 
-- ``spec.kind == short``     → no-op; the worker continues to use its
-                              existing rewrite/cast/compose stages
-                              (which already know how to drive
-                              ``pipeline.render.shorts``). This module
-                              exists to give the worker a single
-                              dispatcher symbol; the short path will
-                              migrate into here in Slice 5 along with
-                              the shim cleanup.
+- :func:`render_long_form` — the long-form wrapper. Authors the
+  sectioned narration envelope via
+  :func:`pipeline.llm.rewrite_long_form.rewrite_long_form`, writes it
+  to ``<channel_dir>/narrations/<slug>.json``, then calls
+  :func:`render_via_engines` in-process to produce the mp4. The cloud
+  worker's long-form path calls this.
 
-- ``spec.kind == long_form`` → run :func:`render_long_form` which:
-    1. Calls :func:`pipeline.llm.rewrite_long_form.rewrite_long_form`
-       to author a sectioned ``ScriptEnvelope``.
-    2. Writes the envelope's legacy long-form dict shape to
-       ``<channel_dir>/narrations/<slug>.json`` (where
-       ``pipeline.render.long_form`` reads it).
-    3. Writes the merged channel YAML (base + variant overlay) to a
-       temporary path so the existing long_form.py loads spec-derived
-       overrides (aspect, voice, music_bed, etc) without us having to
-       refactor its config-loading.
-    4. Shells out to ``python -m pipeline.render.long_form``.
-    5. Returns the produced mp4 path.
-
-- ``spec.kind == sports_doc`` / ``footage_only`` → not yet wired
-  (the worker doesn't generate these via the form today; they go
-  through their own laptop CLIs). Slice 5 lands the wiring.
-
-Why short stays in the worker
------------------------------
-
-The worker's per-stage timeline emission (rewrite → cast → tts → asr
-→ images → compose → upload) is tightly coupled to its Firestore
-update loop. Migrating short into ``video.render`` in Slice 2 would
-require changing both at once. Slice 5 absorbs short into here once
-the envelope + spec foundation has bedded in.
+The subprocess-teeing helpers (``_stream_subprocess`` +
+``_extract_last_traceback`` / ``_format_subprocess_failure`` /
+``_is_telemetry_traceback`` / ``_maybe_emit_long_form_progress``)
+remain for callers that still shell out to a renderer CLI.
 """
 from __future__ import annotations
 
@@ -88,35 +70,24 @@ def render_via_engines(
 ) -> Path:
     """Render the spec to an mp4 via the new pluggable engines.
 
-    Added 2026-05-14 as part of the 4-renderer-to-2-engine
-    consolidation. This is the NEW dispatch path — it routes through
+    This routes through
     :func:`pipeline.render.engine.pick_engine` to pick
     ``short_engine.render_short`` or ``long_engine.render_long``,
     which in turn dispatch to plugin slots (audio / timeline /
     visualize / overlays / music / compose) by spec field.
 
-    Coexists with :func:`render` (the legacy dispatch that shells out
-    to the old per-kind renderers) until the bigbang PR removes the
-    legacy path. New callers should use this; the cloud worker will
-    flip during bigbang.
-
-    Differs from :func:`render` in three ways:
-
-    * Takes ``script`` directly instead of a ``proposal``. The
-      legacy path also rewrites the script as part of the dispatch;
-      the new path expects the rewriter to have run upstream so the
-      engine only does the deterministic stages.
+    * Takes ``script`` directly. The rewriter is expected to have run
+      upstream so the engine only does the deterministic stages.
     * Takes ``out_path`` directly instead of inferring it from
       channel layout. Caller is responsible for ``RenderPaths``
       lookup. Keeps the engine fully channel-agnostic.
-    * Drops ``job_id``. Telemetry is emitted via the OTel render
-      envelope from inside each engine; artifact emission via
+    * Telemetry is emitted via the OTel render envelope from inside
+      each engine; artifact emission via
       :mod:`pipeline.render.artifacts` is done at the same call
-      sites as before. ``progress_cb`` is forwarded into the engine
-      so the cloud worker's dashboard timeline keeps receiving live
+      sites. ``progress_cb`` is forwarded into the engine so the
+      cloud worker's dashboard timeline keeps receiving live
       stage-boundary events (without it the substage pills freeze
-      while the in-process render runs — fixed 2026-05-14 after the
-      bigbang regressed live logs).
+      while the in-process render runs).
 
     Returns the path to the produced mp4.
     """
@@ -148,11 +119,11 @@ def render_long_form(
     job_id: str,
     progress_cb: ProgressCallback | None = None,
 ) -> Path:
-    """Author the long-form narration + invoke ``pipeline.render.long_form``.
+    """Author the long-form narration + render it in-process via engines.
 
-    Writes the narration to the canonical location the existing
-    long_form.py loader reads (``<channel_dir>/narrations/<slug>.json``)
-    so we don't have to refactor its config + load path.
+    Writes the narration to the canonical location
+    (``<channel_dir>/narrations/<slug>.json``), then calls
+    :func:`render_via_engines` to render it.
 
     Returns the produced mp4 path
     (``<channel_dir>/long_form/<slug>.mp4``).
@@ -182,7 +153,7 @@ def render_long_form(
     )
 
     # Stage B: write the legacy narration JSON shape into the channel dir
-    # where pipeline.render.long_form will find it.
+    # where the long engine's plugins read it.
     paths = _resolve_paths(spec)
     narration_path = paths.narration_for(env.slug)
     narration_path.parent.mkdir(parents=True, exist_ok=True)
@@ -199,7 +170,7 @@ def render_long_form(
     # JSONs to GCS the moment they're authored so the dashboard can
     # show "Script: ready" within ~2 min of starting a long-form render
     # instead of waiting for the entire 30-min render to finish. The
-    # narration .wav itself is uploaded by pipeline.render.long_form
+    # narration .wav itself is produced by the in-process engine render
     # later; what we emit here is the JSON shape that lists the
     # sections + panels so the user can preview the structure.
     try:
@@ -240,25 +211,15 @@ def render_long_form(
 
     # Stage C: invoke the engine in-process via render_via_engines.
     #
-    # Pre-2026-05-15 this shelled out to ``python -m pipeline.render.long_form``
-    # which hasn't existed since the bigbang renderer-consolidation
-    # (2026-05-14) deleted the four legacy per-kind modules. Cloud
-    # render-worker hits surfaced this on 2026-05-15 — every long-form
-    # render in production failed with::
-    #
-    #     /usr/local/bin/python: No module named pipeline.render.long_form
-    #     RuntimeError: pipeline.render.long_form exited with code 1.
-    #
-    # The new entrypoint at ``pipeline.render.__main__`` is the
-    # canonical CLI replacement, but the cloud-worker dispatch already
-    # has the typed RenderSpec built (after build_spec applied every
-    # form override / channel YAML key) — so re-spawning a Python
-    # subprocess just to re-derive the same spec is wasteful AND would
-    # need every override projected back to ``--override KEY=VALUE``
-    # flags which the new entrypoint can't accept for nested paths.
+    # This used to shell out to ``python -m pipeline.render.long_form``,
+    # but that module was deleted in the renderer consolidation (the
+    # four legacy per-kind modules are gone). The cloud-worker dispatch
+    # already has the typed RenderSpec built (after build_spec applied
+    # every form override / channel YAML key), so re-spawning a Python
+    # subprocess just to re-derive the same spec is wasteful.
     #
     # Calling ``render_via_engines`` directly in-process is the cleanest
-    # fix: same engine dispatch, same plugin chain, same progress_cb
+    # path: same engine dispatch, same plugin chain, same progress_cb
     # shape (which the engine already fires via its ``_emit`` helper —
     # no stdout-classifier needed on the in-process path).
     if progress_cb:
@@ -487,26 +448,6 @@ def _resolve_paths(spec: RenderSpec) -> RenderPaths:
             pass
 
     return RenderPaths.from_channel_dir(channel_dir_arg, project_root=REPO_ROOT)
-
-
-def _channel_arg_for_long_form(spec: RenderSpec, paths: RenderPaths) -> str:
-    """The ``--channel`` arg long_form.py expects.
-
-    Today long_form.py's ``RenderPaths.from_channel_dir`` accepts either
-    a flat channel slug or a compound ``<channel>/<niche>`` form. We
-    pass the same string we used to build ``paths`` so layout stays
-    consistent.
-    """
-    channel_dir_arg = spec.channel
-    if spec.niche:
-        try:
-            from pipeline.niches import NICHE_CHANNEL  # noqa: PLC0415
-            entry = NICHE_CHANNEL.get(spec.niche)
-            if entry:
-                channel_dir_arg = entry[0]
-        except Exception:  # noqa: BLE001
-            pass
-    return channel_dir_arg
 
 
 def _stream_subprocess(

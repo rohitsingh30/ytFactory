@@ -53,7 +53,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-# Repo root = parent.parent of pipeline/render/footage_only.py.
+# Repo root ancestor of pipeline/render/shared/footage_only_lib.py.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 import yaml

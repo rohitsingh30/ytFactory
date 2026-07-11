@@ -1,9 +1,7 @@
 """``python -m pipeline.render`` — engine-driven CLI entry point.
 
-NEW (2026-05-14): the bigbang PR's hard-cutover CLI per user direction.
-Replaces the legacy `python -m pipeline.render.shorts --script foo.json`
-chain with a single engine-driven entry that takes a typed RenderSpec
-shape and routes via :func:`pipeline.render.video.render_via_engines`.
+Single engine-driven entry that takes a typed RenderSpec shape and
+routes via :func:`pipeline.render.video.render_via_engines`.
 
 Usage
 -----
@@ -30,12 +28,6 @@ captions_layout, etc.) are picked up from the channel YAML's
 ``defaults: { short / long }`` block via the standard build_spec()
 chain. Repeated ``--override KEY=VALUE`` flags inject form-style
 overrides (same shape as the cloud worker's --override flags).
-
-Coexistence with the legacy ``python -m pipeline.render.shorts``:
-
-The legacy CLI shims continue to work in this branch. The bigbang
-merge that deletes the legacy renderers will also drop their
-``cli_main()`` modules; this entry point becomes the only path then.
 """
 from __future__ import annotations
 
@@ -158,11 +150,11 @@ def main(argv: list[str] | None = None) -> int:
         out_path=out_path,
     )
 
-    # OUTPUT_MANIFEST — same convention as the legacy CLI shims so the
-    # cloud worker's log tailer + any external consumer keep working.
+    # OUTPUT_MANIFEST — so the cloud worker's log tailer + any external
+    # consumer can locate the produced mp4.
     manifest = {
         "mp4": str(mp4),
-        "thumb": None,  # engine doesn't yet emit a thumb — bigbang TODO
+        "thumb": None,  # engine doesn't emit a thumb
         "slug": args.slug,
         "channel_dir": rp.channel_dir,
     }

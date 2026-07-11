@@ -5,10 +5,6 @@ Each card shows the chapter number + title; held for
 ``spec.chapter_card.duration_s`` seconds at the start of each chapter.
 
 Plugin activation: ``spec.chapter_cards = True`` in the wizard.
-
-The PNG-rendering body was inlined from the legacy
-``pipeline.render.sports_doc._render_chapter_card`` on 2026-05-14
-as part of the bigbang follow-up.
 """
 from __future__ import annotations
 
@@ -43,9 +39,6 @@ def _render_chapter_card_png(
 ) -> Path:
     """Full-frame chapter card: deep teal slab + orange chapter
     number + bold white title.
-
-    Inlined from legacy ``pipeline.render.sports_doc._render_chapter_card``
-    2026-05-14. Behavior unchanged.
     """
     from PIL import Image, ImageDraw, ImageFont  # noqa: PLC0415
 

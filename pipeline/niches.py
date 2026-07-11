@@ -2,7 +2,7 @@
 
 Single source of truth for which channel YAML each niche renders with
 and where its raw/intermediate files live on disk. Both
-``pipeline.imitate`` (riff-mode profile resolution) and
+``pipeline.llm.imitate`` (riff-mode profile resolution) and
 ``web.server`` (UI niche cards + manual job dispatch) import from
 here so adding a niche YAML or moving an existing niche to its own
 YAML is a one-line change.
@@ -56,8 +56,8 @@ NICHE_CHANNEL: dict[str, tuple[str, str]] = {
     # by the /make-ranking skill; pull_stories has no auto adapter for
     # this niche (the curator picks 5 from the existing sports raw pool
     # or hand-authors new raws). The website's "Generate" button still
-    # routes through make_shorts.py — same renderer path as the parent
-    # sports channel.
+    # routes through the same renderer path (pipeline.render) as the
+    # parent sports channel.
     #
     # NOTE: channel slug is "sportsrecapped" — pre-fix this entry pointed
     # at "sportstoriesanimated" which has never existed (audit YAML-14).

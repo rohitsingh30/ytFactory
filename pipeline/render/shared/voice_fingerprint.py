@@ -1,11 +1,10 @@
 """Voice-fingerprint sidecar for cached ``narration.wav`` files.
 
-**Audit Q2.22** — only ``pipeline/render/shorts.py`` was busting its
-TTS cache when the channel YAML's ``tts_provider`` / ``tts_voice`` /
-``tts_speed`` changed. ``long_form.py``, ``sports_doc.py``, and
-``footage_only.py`` all checked ``narr_path.exists()`` and skipped
-synthesis if true — switching F5 → Chatterbox in the YAML didn't
-cause a re-render, the next operator just heard the OLD voice.
+**Audit Q2.22** — cached TTS must be busted when the channel YAML's
+``tts_provider`` / ``tts_voice`` / ``tts_speed`` changes. A stale
+render path that only checked ``narr_path.exists()`` skipped synthesis
+when true, so switching F5 → Chatterbox in the YAML didn't cause a
+re-render — the next operator just heard the OLD voice.
 
 This module provides a lightweight sidecar contract:
 

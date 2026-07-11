@@ -4,13 +4,9 @@ Generates one PNG per beat (TikTok-style: one large word centred at
 ``H * 0.78``). Each PNG becomes a layer-40 OverlayElement covering
 its beat's [start_s, end_s] window.
 
-Today's impl delegates to
-:func:`pipeline.compose.render_word_caption_pngs` — the existing
-helper that ``shorts.py`` already calls. The bigbang PR moves the
-body inline.
-
 Style defaults from ``spec.caption_style.font_size_minimal/standard/dense``
-(driven by ``spec.captions_density``).
+(driven by ``spec.captions_density``). The PNGs are rendered via
+:func:`pipeline.captions.render_word_caption`.
 
 2026-05-15 fail-loud audit
 --------------------------
@@ -72,8 +68,7 @@ class WordCaptionPngs:
 
         try:
             # Word-caption rendering is in pipeline.captions, NOT
-            # pipeline.compose. The bigbang PR collapses these helpers
-            # under pipeline.render.overlays.* and removes this delegation.
+            # pipeline.compose.
             from pipeline.captions import render_word_caption  # noqa: PLC0415
         except ImportError as exc:
             # Gate removed per user direction: import failure no longer

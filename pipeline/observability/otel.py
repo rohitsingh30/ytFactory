@@ -293,7 +293,7 @@ def _cloud_run_identity_attrs(service_name: str) -> dict:
     OTel→Cloud Monitoring mapping projects every ytfactory process
     onto ``generic_node`` with all-empty labels (the GCP resource
     detector has no Cloud Run JOB support), so every JOB execution +
-    every ``pipeline.render.long_form`` subprocess writes to the SAME
+    every ``pipeline.render`` subprocess writes to the SAME
     bucket. A new run's start_time is older than the previous run's
     most recent point → 400 InvalidArgument every export interval.
 

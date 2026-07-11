@@ -21,10 +21,12 @@ Two render modes — flip via ``YTFACTORY_RENDER_MODE`` env on the JOB:
               upload stage drops a placeholder mp4. Useful for
               end-to-end wiring tests without an LLM key.
 * ``real``   (default) — calls ``pipeline.llm.rewrite.rewrite()`` to
-              synthesize a script.json, then shells out to
-              ``python -m pipeline.render.shorts`` with the channel
-              YAML + the new script. The renderer handles stages
-              images→tts→asr→compose→upload itself using the cloud
+              synthesize a script.json, then calls
+              ``pipeline.render.video.render_via_engines(spec)``
+              IN-PROCESS (no subprocess) with the channel YAML + the
+              new script. ``render_via_engines`` dispatches to the
+              short / long engine by ``spec.kind`` and runs the plugin
+              slots for stages images→tts→asr→compose using the cloud
               providers declared in the channel YAML
               (``image_provider: cloudrun_z_image_turbo``,
               ``tts_provider: cloudrun_chatterbox``, etc.). ASR uses
@@ -596,7 +598,7 @@ def _variant_yaml_for(channel_key: str, variant: str | None) -> Path | None:
     (legacy). Pre-2026-05-11 the cloud worker ignored ``format`` and
     always used the bare channel YAML — so picking "AITA Animated" vs
     "AITA Text" produced identical renders. Now we resolve the overlay
-    and pass IT as ``--channel`` to ``pipeline.render.shorts``, which
+    and pass IT as the channel YAML to the renderer, which
     uses ``RenderPaths.from_channel_yaml`` to merge channel + variant.
     """
     if not variant or variant in ("auto", ""):
@@ -1358,7 +1360,7 @@ def _stage_rewrite_real(job: dict, work_dir: Path) -> None:
     script = rewrite(raw_story, channel_cfg=channel_cfg)
 
     # Persist script.json under <channel_root>/scripts/<slug>.json so
-    # pipeline.render.shorts --script picks it up.
+    # the renderer (via job['_script_path']) picks it up.
     chan_root = REPO_ROOT / channel_key
     scripts_dir = chan_root / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
@@ -1459,13 +1461,13 @@ def _fetch_source(kind: str, ref: str) -> dict | None:
 
 @stage_envelope("cast", artifact_kind="cast", artifact_extractor=_extract_cast_artifact)
 def _stage_cast_real(job: dict, work_dir: Path) -> None:
-    """No-op for the v2 worker: the renderer subprocess invokes
-    pipeline.llm.cast.author_cast as part of its first stage; we
-    just emit a timeline marker.
+    """No-op for the v2 worker: the in-process renderer
+    (``render_via_engines``) invokes pipeline.llm.cast.author_cast as
+    part of its first stage; we just emit a timeline marker.
 
     (Authoring cast here would require loading the script.json we
     just wrote, generating a cast.json, and persisting it — work
-    that pipeline.render.shorts already does in its bootstrap. Keep
+    that the render engines already do in their bootstrap. Keep
     the worker thin and let the renderer own it.)"""
     time.sleep(0.05)
 
@@ -1473,11 +1475,12 @@ def _stage_cast_real(job: dict, work_dir: Path) -> None:
 # Renderer-log → user-visible substep
 # ---------------------------------------------------------------------------
 #
-# The renderer subprocess (``pipeline.render.shorts``) prints a
-# well-known set of phase markers to stdout: ``[1/4] TTS``, ``[2/4]
-# … timestamps``, ``[3/4] z_image_turbo: generating 22 images``,
-# ``[3/4] [12/22]``, ``[image-done] beat 12 of 22``, ``[4/4] ffmpeg
-# compose``, ``[compose] wrote slug.mp4`` and friends.
+# The in-process renderer (``render_via_engines`` and the shared
+# libs it delegates to) prints a well-known set of phase markers to
+# stdout: ``[1/4] TTS``, ``[2/4] … timestamps``, ``[3/4]
+# z_image_turbo: generating 22 images``, ``[3/4] [12/22]``,
+# ``[image-done] beat 12 of 22``, ``[4/4] ffmpeg compose``,
+# ``[compose] wrote slug.mp4`` and friends.
 #
 # Pre-2026-05-11 the cloud worker piped all of that to a log file and
 # only emitted a coarse ``"real-mode"`` pill on the compose stage —
@@ -1492,16 +1495,15 @@ def _stage_cast_real(job: dict, work_dir: Path) -> None:
 # instead. Deliberately a small subset — keep this in sync with
 # ``web/server.py`` regex bank when adding new markers.
 
-# Sub-stages of the renderer subprocess in the order
-# pipeline.render.shorts emits them. Used by ``_compose_progress`` to
-# walk the timeline forward — when the renderer reaches images, tts /
-# asr are marked done, etc.
+# Sub-stages of the renderer in the order the render engines emit
+# them. Used by ``_compose_progress`` to walk the timeline forward —
+# when the renderer reaches images, tts / asr are marked done, etc.
 _RENDERER_SUBSTAGES: tuple[str, ...] = ("tts", "asr", "images", "compose")
 
 # Long-form substage taxonomy. The long-form renderer (invoked via
-# ``pipeline.render.video.render_long_form`` → subprocess
-# ``pipeline.render.long_form``) is genuinely different from the Shorts
-# pipeline:
+# ``pipeline.render.video.render_long_form``, which in turn calls
+# ``render_via_engines`` IN-PROCESS — no subprocess) is genuinely
+# different from the Shorts pipeline:
 #
 #   - ``rewrite`` IS a real, observable substage (LLM authoring of the
 #     sectioned envelope). The Shorts pipeline does rewrite as a
@@ -1726,7 +1728,7 @@ def _classify_renderer_line(line: str) -> tuple[str, str] | None:
     """
     s = line.rstrip("\r\n")
 
-    # ---- SHORT renderer (pipeline.render.shorts) -----------------------
+    # ---- SHORT renderer (short_engine substep markers) -----------------
 
     if _REGEX_TTS_CACHED.match(s):
         return ("tts", "Reusing cached narration")
@@ -1760,7 +1762,7 @@ def _classify_renderer_line(line: str) -> tuple[str, str] | None:
     if (m := _REGEX_COMPOSE_DONE.match(s)):
         return ("compose", f"Wrote {Path(m.group(1)).name}")
 
-    # ---- LONG-FORM renderer (pipeline.render.long_form) ----------------
+    # ---- LONG-FORM renderer (long_engine substep markers) --------------
 
     # TTS substage progress
     if (m := _REGEX_LF_TTS_PLAN.match(s)):
@@ -1888,12 +1890,12 @@ def _tail_renderer_log(
 #
 # Post-2026-05-14 the cloud worker calls `pipeline.render.video.render_via_engines`
 # IN-PROCESS — no subprocess, no log file, no tailer. The engine plugins
-# still delegate to `pipeline/render/_legacy/{shorts,long_form,sports_doc,
-# footage_only}.py` for the heavy lifting (tts_chunked → synth_long_narration,
-# longform_panels → render_panel_video, …) and those legacy modules still
-# emit the same `print(…)` statements `_classify_renderer_line` is designed
-# to consume. The fix is just to bridge the engine call's stdout into the
-# same classifier.
+# still delegate to the shared render libs (`pipeline/render/shared/
+# long_form_lib.py` + `footage_only_lib.py`) for the heavy lifting
+# (tts_chunked → synth_long_narration, longform_panels → render_panel_video,
+# …) and those libs still emit the same `print(…)` statements
+# `_classify_renderer_line` is designed to consume. The fix is just to
+# bridge the engine call's stdout into the same classifier.
 #
 # `_StdoutProgressProxy` wraps `sys.stdout` for the duration of the call.
 # It uses PER-THREAD line buffers so the visualize worker thread (StageOverlap)
@@ -2491,11 +2493,11 @@ def _run_renderer_via_engines(
        of whether the underlying plugin is a thin wrapper or a fat
        legacy delegation.
     2. ``_capture_renderer_stdout`` wraps ``sys.stdout`` for the
-       duration of the call so the LEGACY ``print()`` statements in
-       ``pipeline/render/_legacy/{shorts,long_form,sports_doc,footage_only}.py``
-       (still reached via the delegating plugin shims like
-       ``audio.tts_chunked`` → ``synth_long_narration``) are
-       classified through ``_classify_renderer_line`` and forwarded
+       duration of the call so the ``print()`` statements in the
+       shared render libs (``pipeline/render/shared/long_form_lib.py``
+       + ``footage_only_lib.py``, still reached via the delegating
+       plugin shims like ``audio.tts_chunked`` → ``synth_long_narration``)
+       are classified through ``_classify_renderer_line`` and forwarded
        to ``progress_cb`` for per-substep granularity (``TTS cloud
        chunk N/M``, ``Image N of M``, ``Panel N/M``).
 
@@ -2629,7 +2631,8 @@ def _stage_render_real(
     progress_cb: Callable[[str, str], None] | None = None,
 ) -> None:
     """Composite stage that covers images + tts + asr + compose by
-    delegating to ``pipeline.render.shorts``. Returns the mp4 path
+    calling ``render_via_engines`` in-process (via
+    :func:`_run_renderer_via_engines`). Returns the mp4 path
     via job['_real_mp4'].
 
     Naming note (F33 fix, 2026-05-24): pre-fix this carried
@@ -2642,11 +2645,12 @@ def _stage_render_real(
     substage transition. See ``tests/test_stage_envelope_coverage.py``
     (ShortFormEnvelopeContract) for the regression guard.
 
-    When ``progress_cb`` is supplied, the renderer's stdout is tailed
-    in a background thread and each notable substep is forwarded as
-    ``(stage_key, msg)`` so the caller can surface live progress on
-    the **correct** timeline pill (tts / asr / images / compose)
-    instead of pinning every substep to the umbrella compose stage.
+    When ``progress_cb`` is supplied, the in-process renderer's stdout
+    is captured (via ``_StdoutProgressProxy``) and each notable substep
+    is forwarded as ``(stage_key, msg)`` so the caller can surface live
+    progress on the **correct** timeline pill (tts / asr / images /
+    compose) instead of pinning every substep to the umbrella compose
+    stage.
     """
     mp4 = _run_renderer_via_engines(job, work_dir, progress_cb=progress_cb)
     # Generate a thumb. Prefer the CTR-optimized composition from
@@ -3165,11 +3169,11 @@ def _main_from_firestore(job_id: str) -> int:
     # visual_mode, …) BEFORE any compute starts.
     #
     # Then the spec acts as a gate: if the user asked for a kind/aspect
-    # the legacy ``pipeline.render.shorts`` codepath cannot honour
-    # (long_form, 16:9, panels, …), we mark the job failed at
-    # bootstrap with a friendly error pointing at the slice landing
-    # for that combo. Pre-2026-05-12 the worker silently routed every
-    # render through shorts.py regardless, so a user picking
+    # the unified renderer cannot honour yet
+    # (unsupported short combos, exotic aspects, …), we mark the job
+    # failed at bootstrap with a friendly error pointing at the slice
+    # landing for that combo. Pre-2026-05-12 the worker silently routed
+    # every render through the short path regardless, so a user picking
     # length_s=1800 got a 30-min 9:16 Short with no error.
     spec_failed = False
     spec_dict: dict = {}
@@ -3202,9 +3206,9 @@ def _main_from_firestore(job_id: str) -> int:
         _update_job(job_id, render_spec=spec_dict)
 
         # Slice-2 (2026-05-12): the gate now ONLY fires for combos that
-        # NEITHER the legacy shorts.py codepath NOR the unified
-        # video.render orchestrator can produce yet. Long-form on every
-        # channel now routes through pipeline.render.video.render —
+        # the unified ``render_via_engines`` orchestrator can't produce
+        # yet. Long-form on every channel now routes through
+        # ``pipeline.render.video.render_long_form`` (in-process) —
         # see the kind=LONG_FORM branch in the stage loop below.
         legacy_shorts_ok = (
             spec_obj.kind == RenderKind.SHORT
@@ -4099,7 +4103,12 @@ def _main_from_gcs_spec(spec_uri: str) -> int:
         work_dir.mkdir(parents=True, exist_ok=True)
         log_path = work_dir / "renderer.log"
 
-        # Mirror the production renderer call. ASR forced to
+        # NOTE (de-slop 2026): this from-script GCS-spec path still
+        # shells out to ``python -m pipeline.render.shorts`` — a module
+        # deleted in the 2026-05-14 renderer consolidation. It no longer
+        # mirrors production (the Firestore path calls render_via_engines
+        # in-process). This subprocess will fail with "No module named
+        # pipeline.render.shorts"; see de-slop/HANDOFF.md. ASR forced to
         # faster_whisper because mlx_whisper is Apple-only.
         cmd = [
             sys.executable, "-m", "pipeline.render.shorts",

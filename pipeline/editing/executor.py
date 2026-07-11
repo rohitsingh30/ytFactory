@@ -12,18 +12,18 @@ Modes:
                        letterbox + grade + audio loudnorm. Implemented
                        as one ffmpeg invocation with -filter_complex.
 * ``assemble-clips`` — multiple mp4s, assembled per the EDL shot list.
-                       Each shot is trim+filter, then concat+xfade.
+                       Each shot is trim+filter, then concatenated.
 * ``assemble-stills``— image sequence with slow zoom + crossfade. Each
                        shot is image2pipe → loop → zoompan → scale,
-                       then concat+xfade. Audio is silent unless
+                       then concatenated. Audio is silent unless
                        ``audio.music`` is set.
-* ``assemble-mixed`` — same xfade pipeline as -clips, with image shots
+* ``assemble-mixed`` — same concat pipeline as -clips, with image shots
                        internally upgraded to mp4-frames-per-shot before
                        the concat.
 
 The compiler favors a SINGLE ffmpeg invocation (filter_complex chain)
-over multi-pass pipelines. Loudnorm is the one exception — it needs a
-2-pass measure-then-apply, implemented in :func:`_loudnorm_2pass`.
+over multi-pass pipelines. Audio loudnorm is applied single-pass inside
+that same filter_complex chain.
 
 Inputs are resolved against ``input_root`` (the directory the skill
 passed). The executor REJECTS any ``input_ref`` that escapes that
@@ -65,16 +65,6 @@ def _ffmpeg_bin() -> str:
 
     bin_ = os.environ.get("FFMPEG_BIN", "").strip() or shutil.which("ffmpeg") or "ffmpeg"
     return bin_
-
-
-def _ffprobe_bin() -> str:
-    import os
-
-    return (
-        os.environ.get("FFPROBE_BIN", "").strip()
-        or shutil.which("ffprobe")
-        or "ffprobe"
-    )
 
 
 def _aspect_to_dims(aspect: str, base: int = 1080) -> tuple[int, int]:
@@ -356,16 +346,3 @@ def execute_local(
         )
     return compiled.output_path
 
-
-# --- 2-pass loudnorm (used by polish mode when high audio quality wanted) ---
-
-
-def _loudnorm_2pass(input_mp4: Path, output_mp4: Path, target_lufs: float = -14.0) -> Path:
-    """Run ffmpeg loudnorm in measure → apply mode. Used as a post-pass
-    after :func:`execute_local` for polish mode when the EDL specified
-    ``audio.loudnorm_lufs``. Skipping for now to keep v1 minimal — the
-    -filter_complex chain already includes loudnorm in single-pass mode
-    which is good enough for Shorts. This stub is documented so the
-    follow-up implementer knows where to plug in."""
-    # TODO(editing-agent v2): implement 2-pass measure then apply.
-    return input_mp4

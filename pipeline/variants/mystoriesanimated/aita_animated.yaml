@@ -53,7 +53,7 @@ image_style_prefix: |
 # CHARACTER LOCK STRATEGY (DESIGN.md §14 #2; memory: project_per_story_character.md):
 # The character is now authored per-story by pipeline/cast.py and
 # stored in data/intermediate/<channel>/cast/<slug>.json. The
-# orchestrator (make_shorts.py) reads cast.json's narrator.description
+# orchestrator (the renderer) reads cast.json's narrator.description
 # and prepends it to every per-beat prompt — same as before, just per-story.
 #
 # `character_description` below is the backwards-compat fallback for
@@ -123,7 +123,7 @@ closer_format: "LIKE if YTA, COMMENT if NTA. AITA?"
 closer_hold_s: 1.0
 
 # ---- Upload (Stage 8) — shipped to MyStoriesAnimated YouTube channel.
-# The website passes --upload to make_shorts.py for every render; CLI
+# The website passes --upload to the renderer for every render; CLI
 # users render without uploading by default.
 upload:
   account: mystoriesanimated

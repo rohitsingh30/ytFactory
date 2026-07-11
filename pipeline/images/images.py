@@ -18,8 +18,9 @@ Principles enforced (DESIGN.md §14):
 * **#13 Key-visual weighting** — emitted as plain leading text on the
   cloud guidance-distilled provider (Z-Image-Turbo).
 * **#14 IP-Adapter character lock** — was wired only on the SDXL
-  laptop path, which is gone. Multi-reference editing in FLUX.2 klein
-  is the cloud-side replacement (not yet wired into ``generate()``).
+  laptop path, which is gone. No cloud-side character-lock replacement
+  is wired into ``generate()`` today; cast consistency is carried by
+  the prompt (character_description prepend) instead.
 """
 
 from __future__ import annotations

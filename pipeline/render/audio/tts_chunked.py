@@ -1,13 +1,9 @@
 """Chunked cloud-TTS AudioSynthesizer for the long engine.
 
-Wraps :func:`pipeline.render.long_form.synth_long_narration` (the
-canonical chunked-TTS implementation that splits text into ≤
+Wraps :func:`pipeline.render.shared.long_form_lib.synth_long_narration`
+(the canonical chunked-TTS implementation that splits text into ≤
 ``spec.tts.chunk_target_chars`` chunks, synthesises each with the
 configured provider, and concatenates with silence joiners).
-
-This is a DELEGATING shim — the body still lives in long_form.py.
-The bigbang PR moves it fully into this module so long_form.py can
-be deleted.
 
 Why the long engine needs chunking
 ----------------------------------
@@ -40,8 +36,8 @@ from pipeline.render.shared.voice_fingerprint import (
 class TtsChunked:
     """Chunked cloud-TTS synthesizer.
 
-    Delegates to ``pipeline.render.long_form.synth_long_narration``
-    for now. The bigbang PR moves the body inline.
+    Delegates to
+    ``pipeline.render.shared.long_form_lib.synth_long_narration``.
     """
 
     def synth(

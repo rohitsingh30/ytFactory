@@ -132,9 +132,8 @@ _BREAKER_REASON: str | None = None
 
 def reset_circuit_breaker() -> None:
     """Clear the per-render circuit breaker. Call at the top of
-    every render entry point (make_shorts, render/long_form,
-    render/footage_only, render/sports_doc) so a previous render's
-    cloud failure doesn't carry over to the next one."""
+    every render entry point so a previous render's cloud failure
+    doesn't carry over to the next one."""
     global _CLOUD_DISABLED_THIS_RENDER, _BREAKER_REASON
     with _BREAKER_LOCK:
         if _CLOUD_DISABLED_THIS_RENDER:
@@ -262,8 +261,8 @@ def _post_generate(url: str, payload: dict) -> dict:
     # exceeded" — happens when the renderer fires N parallel image-gen
     # requests against a max-instances=3 service — bumped from 2 on
     # 2026-05-11 alongside the per-render fan-out in
-    # ``pipeline.render.shorts._render_one_beat``; see
-    # ``docs/parallel_per_beat_fanout.md`` for the dispatcher recipe).
+    # ``pipeline.render.visualize.ai_beat_slideshow`` (``_gen_one_beat``);
+    # see ``docs/parallel_per_beat_fanout.md`` for the dispatcher recipe).
     # 2026-05-15: bumped backoff from [1,2,4,8] (15s total) to
     # [5,15,30,60] (110s total). With 32B / 20B image models doing
     # sequential_cpu_offload, cold-load is 60-90s; a single 429 wave

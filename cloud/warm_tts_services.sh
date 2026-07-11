@@ -5,7 +5,7 @@
 #
 # Designed to run from:
 #   - laptop manually before a batch:    `./cloud/warm_tts_services.sh chatterbox`
-#   - render entry point fire-and-forget (pipeline/render/footage_only.py
+#   - render entry point fire-and-forget (``pipeline/cloud/warm.py``
 #     calls this for cloudrun_* providers before the synth call)
 #   - GitHub Actions / Cloud Scheduler 5-10 min before a queued render
 #

@@ -1,9 +1,5 @@
 """Shared watermark PNG renderer for every render engine + plugin.
 
-Pre-2026-05-14 lived inside ``pipeline/render/long_form.py``;
-sports_doc.py imported it from there. Promoted here as part of the
-4-renderer-to-2-engine consolidation (plan.md).
-
 Style defaults (font_size=28, text_color=(255,255,255,140), italic=False)
 are the Sleepy Time History watermark spec — a faint white sans-serif
 in the top-right corner. Channels override via the
