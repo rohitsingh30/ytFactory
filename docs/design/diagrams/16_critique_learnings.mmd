@@ -1,0 +1,54 @@
+classDiagram
+direction TB
+%% Critique / Learnings — score the render, feed the loop
+
+class CritiqueStage {
+  <<stage>>
+  +run(ctx)
+}
+note for CritiqueStage "reads VIDEO + AUDIO + SCRIPT → builds CritiqueRequest → calls CritiqueSkill<br/>→ writes CRITIQUE and appends the findings to the LearningsStore."
+
+class CritiqueSkill {
+  <<Protocol · LLM>>
+  +critique(CritiqueRequest) Critique
+}
+note for CritiqueSkill "watches the video and listens to the audio, scoring it on the perceptual lenses."
+
+class CritiqueRequest {
+  +video : ComposedVideo
+  +audio : AudioResult
+  +script : Script
+  +frames : list~Path~
+}
+note for CritiqueRequest "video = the final mp4 · audio = the narration · script = the intended content<br/>frames = sampled stills for the visual review"
+
+class Critique {
+  +verdict : str
+  +findings : list~Finding~
+}
+note for Critique "verdict = ship / fix / block · findings = the specific issues found"
+
+class Finding {
+  +axis : str
+  +severity : str
+  +detail : str
+  +fix : str
+}
+note for Finding "axis = which lens (cast_consistency / pronunciation / pacing / ...)<br/>severity = info / warn / error · detail = what is wrong · fix = the suggested change"
+
+class LearningsStore {
+  <<infra>>
+  +append(channel, findings)
+  +load(channel, niche) str
+}
+note for LearningsStore "data/&lt;channel&gt;/learnings/ · append() saves findings · load() returns the learnings string,<br/>which is injected into Script / Scene / Prompt / TTS requests on the NEXT render — closing the loop."
+
+CritiqueStage ..> CritiqueSkill : calls
+CritiqueSkill ..> CritiqueRequest : in
+CritiqueSkill ..> Critique : out
+Critique *-- Finding
+CritiqueStage ..> LearningsStore : append findings
+
+style CritiqueStage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+style CritiqueSkill fill:#3a1e5f,stroke:#a04ad9,color:#fff
+style LearningsStore fill:#2d2d2d,stroke:#888,color:#fff

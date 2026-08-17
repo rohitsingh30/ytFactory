@@ -1,4 +1,4 @@
-"""100% line coverage for pipeline/utils/thumbnails.py.
+"""100% line coverage for pipeline/upload/thumbnails.py.
 
 Uses small synthetic PIL images in-memory.  ``_find_font`` is patched to
 return ``ImageFont.load_default()`` so no system font installation is needed.
@@ -20,7 +20,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline import thumbnails
+from pipeline.upload import thumbnails
 
 _BASE = Path(__file__).resolve().parent
 
@@ -532,7 +532,7 @@ class TestFitText(unittest.TestCase):
 
     def test_short_text_fits_at_large_size(self) -> None:
         font = self._font(8)
-        with patch("pipeline.thumbnails._find_font", return_value=font):
+        with patch("pipeline.upload.thumbnails._find_font", return_value=font):
             result_font, lines = thumbnails._fit_text(
                 "HI", max_w=200, max_h=200, max_size=50
             )
@@ -541,7 +541,7 @@ class TestFitText(unittest.TestCase):
 
     def test_long_text_wraps_to_multiple_lines(self) -> None:
         font = self._font(10)
-        with patch("pipeline.thumbnails._find_font", return_value=font):
+        with patch("pipeline.upload.thumbnails._find_font", return_value=font):
             # "HELLO" (50px) and "WORLD" (50px) each fit in max_w=60.
             # Combined "HELLO WORLD" is 110px > 60 → wraps.
             _f, lines = thumbnails._fit_text(
@@ -553,7 +553,7 @@ class TestFitText(unittest.TestCase):
         # Font always reports 9999px wide → nothing fits → fallthrough.
         fat_font = MagicMock()
         fat_font.getbbox.return_value = (0, 0, 9999, 20)
-        with patch("pipeline.thumbnails._find_font", return_value=fat_font):
+        with patch("pipeline.upload.thumbnails._find_font", return_value=fat_font):
             _f, lines = thumbnails._fit_text(
                 "BIG", max_w=10, max_h=10, max_size=50, min_size=44
             )
@@ -561,7 +561,7 @@ class TestFitText(unittest.TestCase):
 
     def test_hyphenated_token_splits_and_joins(self) -> None:
         font = self._font(5)
-        with patch("pipeline.thumbnails._find_font", return_value=font):
+        with patch("pipeline.upload.thumbnails._find_font", return_value=font):
             # "DAUGHTER-IN-LAW" splits → tokens try to join without space
             _f, lines = thumbnails._fit_text(
                 "DAUGHTER-IN-LAW", max_w=200, max_h=200, max_size=50
@@ -571,7 +571,7 @@ class TestFitText(unittest.TestCase):
     def test_lines_too_tall_triggers_smaller_size(self) -> None:
         # Font reports narrow widths but we'll make max_h very small.
         font = self._font(2)  # narrow → all fits in width, but height is tight
-        with patch("pipeline.thumbnails._find_font", return_value=font):
+        with patch("pipeline.upload.thumbnails._find_font", return_value=font):
             # max_h=1 → no size can fit; fall through to min_size
             _f, lines = thumbnails._fit_text(
                 "ONE TWO THREE FOUR", max_w=1000, max_h=1,
@@ -631,7 +631,7 @@ class TestComposeThumbnail(unittest.TestCase):
         shutil.rmtree(self._scratch, ignore_errors=True)
 
     def test_produces_jpeg_file(self) -> None:
-        with patch("pipeline.thumbnails._find_font", return_value=self._font):
+        with patch("pipeline.upload.thumbnails._find_font", return_value=self._font):
             result = thumbnails.compose_thumbnail(
                 scene_path=self._scene,
                 headline="TEST HEADLINE",
@@ -648,7 +648,7 @@ class TestComposeThumbnail(unittest.TestCase):
 
     def test_creates_parent_dir_if_needed(self) -> None:
         nested_out = self._scratch / "subdir" / "thumb.jpg"
-        with patch("pipeline.thumbnails._find_font", return_value=self._font):
+        with patch("pipeline.upload.thumbnails._find_font", return_value=self._font):
             thumbnails.compose_thumbnail(
                 scene_path=self._scene,
                 headline="NESTED",
@@ -662,7 +662,7 @@ class TestComposeThumbnail(unittest.TestCase):
     def test_all_styles(self) -> None:
         for style_name, style in thumbnails._STYLES.items():
             out = self._scratch / f"thumb_{style_name}.jpg"
-            with patch("pipeline.thumbnails._find_font", return_value=self._font):
+            with patch("pipeline.upload.thumbnails._find_font", return_value=self._font):
                 thumbnails.compose_thumbnail(
                     scene_path=self._scene,
                     headline="HELLO",
@@ -702,7 +702,7 @@ class TestAutoThumbnail(unittest.TestCase):
             shutil.rmtree(empty, ignore_errors=True)
 
     def test_style_override_applied(self) -> None:
-        with patch("pipeline.thumbnails._find_font", return_value=self._font):
+        with patch("pipeline.upload.thumbnails._find_font", return_value=self._font):
             result = thumbnails.auto_thumbnail(
                 slug="s",
                 cache_dir=self._scratch,
@@ -714,7 +714,7 @@ class TestAutoThumbnail(unittest.TestCase):
         self.assertIsNotNone(result)
 
     def test_headline_override_used(self) -> None:
-        with patch("pipeline.thumbnails._find_font", return_value=self._font):
+        with patch("pipeline.upload.thumbnails._find_font", return_value=self._font):
             result = thumbnails.auto_thumbnail(
                 slug="s",
                 cache_dir=self._scratch,
@@ -728,7 +728,7 @@ class TestAutoThumbnail(unittest.TestCase):
     def test_scene_index_override(self) -> None:
         # Create a second frame
         Image.new("RGB", (50, 100)).save(self._scratch / "img_01.png")
-        with patch("pipeline.thumbnails._find_font", return_value=self._font):
+        with patch("pipeline.upload.thumbnails._find_font", return_value=self._font):
             result = thumbnails.auto_thumbnail(
                 slug="s",
                 cache_dir=self._scratch,
@@ -740,7 +740,7 @@ class TestAutoThumbnail(unittest.TestCase):
         self.assertIsNotNone(result)
 
     def test_unknown_style_override_falls_through_to_channel(self) -> None:
-        with patch("pipeline.thumbnails._find_font", return_value=self._font):
+        with patch("pipeline.upload.thumbnails._find_font", return_value=self._font):
             result = thumbnails.auto_thumbnail(
                 slug="s",
                 cache_dir=self._scratch,
@@ -752,7 +752,7 @@ class TestAutoThumbnail(unittest.TestCase):
         self.assertIsNotNone(result)
 
     def test_auto_thumbnail_no_overrides(self) -> None:
-        with patch("pipeline.thumbnails._find_font", return_value=self._font):
+        with patch("pipeline.upload.thumbnails._find_font", return_value=self._font):
             result = thumbnails.auto_thumbnail(
                 slug="s",
                 cache_dir=self._scratch,

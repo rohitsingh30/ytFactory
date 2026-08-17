@@ -1,0 +1,38 @@
+classDiagram
+direction TB
+%% Music — pick + duck the background bed
+
+class MusicPolicy {
+  <<enum>>
+  DUCKED_LOOP
+  SINGLE_BED
+  SECTION_MOOD
+  NONE
+}
+note for MusicPolicy "DUCKED_LOOP = loop + duck under VO · SINGLE_BED = one track<br/>SECTION_MOOD = per-chapter bed (long-form) · NONE = no music"
+
+class MusicStage {
+  <<stage>>
+  +run(ctx)
+}
+note for MusicStage "reads RenderSpec + AUDIO → calls MusicBedService → writes MUSIC."
+
+class MusicBedService {
+  <<service · det>>
+  +compose(MusicPolicy, AudioResult) MusicBed
+}
+note for MusicBedService "picks a bed per the policy and plans the ducking under the narration."
+
+class MusicBed {
+  +path : Path
+  +duration_s : float
+}
+note for MusicBed "path = the chosen / rendered music track · duration_s = its length (looped to fit the video)"
+
+MusicStage ..> MusicBedService : calls
+MusicBedService ..> MusicPolicy : uses
+MusicBedService ..> MusicBed : produces
+
+style MusicStage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+style MusicBedService fill:#2d2d2d,stroke:#888,color:#fff
+style MusicPolicy fill:#4a3d1f,stroke:#d9c24a,color:#fff

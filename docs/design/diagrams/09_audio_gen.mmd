@@ -1,0 +1,40 @@
+classDiagram
+direction TB
+%% Audio Generation — TTS narration
+
+class AudioStage {
+  <<stage>>
+  +run(ctx)
+}
+note for AudioStage "reads CHUNKS · synthesizes each chunk's audio_prompt · stitches them → writes AUDIO."
+
+class AudioGenerationModel {
+  <<Protocol · cloud>>
+  +synth(AudioModelPrompt) AudioResult
+}
+note for AudioGenerationModel "an HTTP call to a TTS GPU service (chatterbox = English, indicf5 = Hindi)."
+
+class AudioModelPrompt {
+  +text : str
+  +voice_provider : str
+  +voice_ref : Path
+  +speed : float
+  +atempo : float
+  +sample_rate : int
+}
+note for AudioModelPrompt "text = the pronunciation-normalised narration for this chunk · voice_provider = which TTS service<br/>voice_ref = the reference wav for the voice clone · speed = model speaking rate<br/>atempo = ffmpeg tempo trim applied after synth · sample_rate = output Hz"
+
+class AudioResult {
+  +narration_path : Path
+  +duration_s : float
+  +voice_fingerprint : dict
+  +chunk_timings : list
+}
+note for AudioResult "narration_path = the stitched wav · duration_s = total length<br/>voice_fingerprint = the params used (reproducibility) · chunk_timings = per-chunk (start,end), gives beat timing"
+
+AudioStage ..> AudioGenerationModel : calls
+AudioGenerationModel ..> AudioModelPrompt : in
+AudioGenerationModel ..> AudioResult : out
+
+style AudioStage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+style AudioGenerationModel fill:#3a1e5f,stroke:#a04ad9,color:#fff

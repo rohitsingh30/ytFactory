@@ -1,0 +1,64 @@
+classDiagram
+direction TB
+%% Script — rewrite the raw story into a hook-first narration
+
+class RenderKind {
+  <<enum>>
+  SHORT
+  LONG_FORM
+}
+note for RenderKind "SHORT = 50-60s vertical · LONG_FORM = 20-70 min. Same code, config differs."
+
+class ScriptStage {
+  <<stage>>
+  +run(ctx)
+}
+note for ScriptStage "reads SOURCE → builds ScriptRequest → calls ScriptService → writes SCRIPT."
+
+class ScriptService {
+  <<LLM>>
+  +write(ScriptRequest) Script
+}
+note for ScriptService "rewrites AND enriches the raw source (a heading OR a full story) into a spoken, hook-first narration.<br/>(absorbs what the HLD loosely called 'Ideation' — there is no separate enrichment model.)"
+
+class ScriptRequest {
+  +source : SourceDoc
+  +kind : RenderKind
+  +channel_style : str
+  +language : str
+  +target_words : int
+  +learnings : str
+}
+note for ScriptRequest "source = the raw story · kind = short/long · channel_style = narration-style spec from YAML<br/>language = output language · target_words = length budget (approx duration_s x 2.5)<br/>learnings = accumulated critique feedback"
+
+class Script {
+  +slug : str
+  +kind : RenderKind
+  +hook : str
+  +narration : str
+  +characters : list~str~
+  +sections : list~ScriptSection~
+  +title_options : list~str~
+  +source_url : str
+}
+note for Script "slug = id · kind = short/long · hook = first-line curiosity gap · narration = full spoken text<br/>characters = names the Director will cast · sections = chapters (EMPTY for Shorts, filled long-form)<br/>title_options = candidate titles · source_url = attribution link"
+
+class ScriptSection {
+  +id : str
+  +title : str
+  +narration : str
+  +target_s : float
+  +visual_brief : str
+}
+note for ScriptSection "one long-form chapter · id = key · title = chapter-card text<br/>narration = the chapter's spoken text · target_s = pacing hint (real audio wins) · visual_brief = art-direction note"
+
+ScriptStage ..> ScriptService : calls
+ScriptService ..> ScriptRequest : in
+ScriptService ..> Script : produces
+Script *-- ScriptSection
+Script ..> RenderKind
+ScriptRequest ..> RenderKind
+
+style ScriptStage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+style ScriptService fill:#3a1e5f,stroke:#a04ad9,color:#fff
+style RenderKind fill:#4a3d1f,stroke:#d9c24a,color:#fff

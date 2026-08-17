@@ -1,4 +1,4 @@
-"""Tests for pipeline.cosmos_footage_prep — 100% line coverage."""
+"""Tests for pipeline.footage.cosmos_footage_prep — 100% line coverage."""
 from __future__ import annotations
 
 import io
@@ -67,7 +67,7 @@ class TestHttpGet(unittest.TestCase):
     def test_basic_download(self, mock_open):
         resp = _mock_urlopen(b"image-data", content_type="image/jpeg")
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _http_get
+        from pipeline.footage.cosmos_footage_prep import _http_get
         _http_get("https://example.com/img.jpg", self.dest)
         self.assertTrue(self.dest.exists())
 
@@ -75,7 +75,7 @@ class TestHttpGet(unittest.TestCase):
     def test_image_content_type_guard_fail(self, mock_open):
         resp = _mock_urlopen(b"html", content_type="text/html")
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _http_get
+        from pipeline.footage.cosmos_footage_prep import _http_get
         with self.assertRaises(RuntimeError) as ctx:
             _http_get("https://example.com/img.jpg", self.dest, expect_kind="image")
         self.assertIn("image", str(ctx.exception))
@@ -84,7 +84,7 @@ class TestHttpGet(unittest.TestCase):
     def test_video_content_type_guard_fail(self, mock_open):
         resp = _mock_urlopen(b"html", content_type="text/html")
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _http_get
+        from pipeline.footage.cosmos_footage_prep import _http_get
         with self.assertRaises(RuntimeError) as ctx:
             _http_get("https://example.com/clip.mp4", self.dest, expect_kind="video")
         self.assertIn("video", str(ctx.exception))
@@ -93,31 +93,31 @@ class TestHttpGet(unittest.TestCase):
     def test_video_octet_stream_ok(self, mock_open):
         resp = _mock_urlopen(b"video-data", content_type="application/octet-stream")
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _http_get
+        from pipeline.footage.cosmos_footage_prep import _http_get
         _http_get("https://example.com/clip.mp4", self.dest, expect_kind="video")
         # No exception means it passed the guard
 
     def test_file_url_absolute(self):
         src = Path(self.td.name) / "src.jpg"
         src.write_bytes(b"source-data")
-        from pipeline.cosmos_footage_prep import _http_get
+        from pipeline.footage.cosmos_footage_prep import _http_get
         _http_get(f"file://{src}", self.dest)
         self.assertEqual(self.dest.read_bytes(), b"source-data")
 
     def test_file_url_not_found_raises(self):
-        from pipeline.cosmos_footage_prep import _http_get
+        from pipeline.footage.cosmos_footage_prep import _http_get
         with self.assertRaises(OSError):
             _http_get("file:///nonexistent/path/img.jpg", self.dest)
 
     def test_file_url_relative(self):
         # file://host/path → urllib resolves as network path or missing file
-        from pipeline.cosmos_footage_prep import _http_get
+        from pipeline.footage.cosmos_footage_prep import _http_get
         with self.assertRaises(OSError):
             _http_get("file://no-such/path/img.jpg", self.dest)
 
     def test_file_url_dotslash(self):
         # file://./path → urllib treats as network/relative path → fails
-        from pipeline.cosmos_footage_prep import _http_get
+        from pipeline.footage.cosmos_footage_prep import _http_get
         with self.assertRaises(OSError):
             _http_get("file://./no-such-asset.jpg", self.dest)
 
@@ -128,18 +128,18 @@ class TestHttpGet(unittest.TestCase):
 
 class TestResolveWikimedia(unittest.TestCase):
     def test_already_direct_url(self):
-        from pipeline.cosmos_footage_prep import _resolve_wikimedia
+        from pipeline.footage.cosmos_footage_prep import _resolve_wikimedia
         url = "https://upload.wikimedia.org/wikipedia/commons/thumb/img.jpg"
         result = _resolve_wikimedia(url)
         self.assertEqual(result, url)
 
     def test_non_wikimedia_returns_none(self):
-        from pipeline.cosmos_footage_prep import _resolve_wikimedia
+        from pipeline.footage.cosmos_footage_prep import _resolve_wikimedia
         result = _resolve_wikimedia("https://example.com/img.jpg")
         self.assertIsNone(result)
 
     def test_category_page_returns_none(self):
-        from pipeline.cosmos_footage_prep import _resolve_wikimedia
+        from pipeline.footage.cosmos_footage_prep import _resolve_wikimedia
         result = _resolve_wikimedia(
             "https://commons.wikimedia.org/wiki/Category:Astronomy"
         )
@@ -163,7 +163,7 @@ class TestResolveWikimedia(unittest.TestCase):
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _resolve_wikimedia
+        from pipeline.footage.cosmos_footage_prep import _resolve_wikimedia
         url = "https://commons.wikimedia.org/wiki/File:Eddington.jpg"
         result = _resolve_wikimedia(url)
         self.assertEqual(result, "https://upload.wikimedia.org/thumb.jpg")
@@ -176,13 +176,13 @@ class TestResolveWikimedia(unittest.TestCase):
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _resolve_wikimedia
+        from pipeline.footage.cosmos_footage_prep import _resolve_wikimedia
         result = _resolve_wikimedia("https://commons.wikimedia.org/wiki/File:Test.jpg")
         self.assertIsNone(result)
 
     @patch("urllib.request.urlopen", side_effect=Exception("network error"))
     def test_network_error_returns_none(self, _mock):
-        from pipeline.cosmos_footage_prep import _resolve_wikimedia
+        from pipeline.footage.cosmos_footage_prep import _resolve_wikimedia
         result = _resolve_wikimedia("https://commons.wikimedia.org/wiki/File:Test.jpg")
         self.assertIsNone(result)
 
@@ -204,7 +204,7 @@ class TestResolveWikimedia(unittest.TestCase):
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _resolve_wikimedia
+        from pipeline.footage.cosmos_footage_prep import _resolve_wikimedia
         result = _resolve_wikimedia(
             "https://en.wikipedia.org/wiki/File:Test.jpg"
         )
@@ -217,11 +217,11 @@ class TestResolveWikimedia(unittest.TestCase):
 
 class TestResolveNasaImage(unittest.TestCase):
     def test_non_nasa_returns_none(self):
-        from pipeline.cosmos_footage_prep import _resolve_nasa_image
+        from pipeline.footage.cosmos_footage_prep import _resolve_nasa_image
         self.assertIsNone(_resolve_nasa_image("https://example.com/img.jpg"))
 
     def test_nasa_without_details_returns_none(self):
-        from pipeline.cosmos_footage_prep import _resolve_nasa_image
+        from pipeline.footage.cosmos_footage_prep import _resolve_nasa_image
         self.assertIsNone(
             _resolve_nasa_image("https://images.nasa.gov/gallery")
         )
@@ -243,7 +243,7 @@ class TestResolveNasaImage(unittest.TestCase):
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _resolve_nasa_image
+        from pipeline.footage.cosmos_footage_prep import _resolve_nasa_image
         result = _resolve_nasa_image("https://images.nasa.gov/details/iss-001")
         self.assertIn("orig", result)
 
@@ -262,7 +262,7 @@ class TestResolveNasaImage(unittest.TestCase):
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _resolve_nasa_image
+        from pipeline.footage.cosmos_footage_prep import _resolve_nasa_image
         result = _resolve_nasa_image(
             "https://images.nasa.gov/details/iss-001"
         )
@@ -282,13 +282,13 @@ class TestResolveNasaImage(unittest.TestCase):
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _resolve_nasa_image
+        from pipeline.footage.cosmos_footage_prep import _resolve_nasa_image
         result = _resolve_nasa_image("https://images.nasa.gov/details/iss-001")
         self.assertIsNotNone(result)
 
     @patch("urllib.request.urlopen", side_effect=Exception("timeout"))
     def test_network_error_returns_none(self, _mock):
-        from pipeline.cosmos_footage_prep import _resolve_nasa_image
+        from pipeline.footage.cosmos_footage_prep import _resolve_nasa_image
         result = _resolve_nasa_image("https://images.nasa.gov/details/iss-001")
         self.assertIsNone(result)
 
@@ -300,7 +300,7 @@ class TestResolveNasaImage(unittest.TestCase):
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _resolve_nasa_image
+        from pipeline.footage.cosmos_footage_prep import _resolve_nasa_image
         result = _resolve_nasa_image("https://images.nasa.gov/details/iss-001")
         self.assertIsNone(result)
 
@@ -311,17 +311,17 @@ class TestResolveNasaImage(unittest.TestCase):
 
 class TestResolveArchiveOrg(unittest.TestCase):
     def test_non_archive_returns_none(self):
-        from pipeline.cosmos_footage_prep import _resolve_archive_org
+        from pipeline.footage.cosmos_footage_prep import _resolve_archive_org
         self.assertIsNone(_resolve_archive_org("https://example.com/item"))
 
     def test_direct_download_url(self):
-        from pipeline.cosmos_footage_prep import _resolve_archive_org
+        from pipeline.footage.cosmos_footage_prep import _resolve_archive_org
         url = "https://archive.org/download/item/file.mp4"
         result = _resolve_archive_org(url)
         self.assertEqual(result, url)
 
     def test_non_download_non_details_returns_none(self):
-        from pipeline.cosmos_footage_prep import _resolve_archive_org
+        from pipeline.footage.cosmos_footage_prep import _resolve_archive_org
         result = _resolve_archive_org("https://archive.org/search?q=test")
         self.assertIsNone(result)
 
@@ -338,7 +338,7 @@ class TestResolveArchiveOrg(unittest.TestCase):
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _resolve_archive_org
+        from pipeline.footage.cosmos_footage_prep import _resolve_archive_org
         result = _resolve_archive_org("https://archive.org/details/my-item")
         self.assertIn("video.mp4", result)
 
@@ -354,7 +354,7 @@ class TestResolveArchiveOrg(unittest.TestCase):
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _resolve_archive_org
+        from pipeline.footage.cosmos_footage_prep import _resolve_archive_org
         result = _resolve_archive_org("https://archive.org/details/my-item")
         self.assertIn("video.mp4", result)
 
@@ -366,13 +366,13 @@ class TestResolveArchiveOrg(unittest.TestCase):
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _resolve_archive_org
+        from pipeline.footage.cosmos_footage_prep import _resolve_archive_org
         result = _resolve_archive_org("https://archive.org/details/my-item")
         self.assertIsNone(result)
 
     @patch("urllib.request.urlopen", side_effect=Exception("timeout"))
     def test_network_error_returns_none(self, _mock):
-        from pipeline.cosmos_footage_prep import _resolve_archive_org
+        from pipeline.footage.cosmos_footage_prep import _resolve_archive_org
         result = _resolve_archive_org("https://archive.org/details/my-item")
         self.assertIsNone(result)
 
@@ -383,46 +383,46 @@ class TestResolveArchiveOrg(unittest.TestCase):
 
 class TestResolveUrl(unittest.TestCase):
     def test_file_url(self):
-        from pipeline.cosmos_footage_prep import _resolve_url
+        from pipeline.footage.cosmos_footage_prep import _resolve_url
         url = "file://some/path.jpg"
         resolved, reason = _resolve_url(url)
         self.assertIsNotNone(resolved)
         self.assertIsNone(reason)
 
     def test_direct_upload_wikimedia(self):
-        from pipeline.cosmos_footage_prep import _resolve_url
+        from pipeline.footage.cosmos_footage_prep import _resolve_url
         url = "https://upload.wikimedia.org/wiki/commons/img.jpg"
         resolved, reason = _resolve_url(url)
         self.assertEqual(resolved, url)
 
     def test_direct_asset_jpg(self):
-        from pipeline.cosmos_footage_prep import _resolve_url
+        from pipeline.footage.cosmos_footage_prep import _resolve_url
         url = "https://example.com/photo.jpg"
         resolved, reason = _resolve_url(url)
         self.assertEqual(resolved, url)
         self.assertIsNone(reason)
 
     def test_direct_asset_mp4(self):
-        from pipeline.cosmos_footage_prep import _resolve_url
+        from pipeline.footage.cosmos_footage_prep import _resolve_url
         url = "https://example.com/video.mp4"
         resolved, reason = _resolve_url(url)
         self.assertEqual(resolved, url)
 
     def test_pexels_manual(self):
-        from pipeline.cosmos_footage_prep import _resolve_url
+        from pipeline.footage.cosmos_footage_prep import _resolve_url
         url = "https://www.pexels.com/video/123"
         resolved, reason = _resolve_url(url)
         self.assertIsNone(resolved)
         self.assertIsNotNone(reason)
 
     def test_royalsociety_manual(self):
-        from pipeline.cosmos_footage_prep import _resolve_url
+        from pipeline.footage.cosmos_footage_prep import _resolve_url
         url = "https://royalsocietypublishing.org/doi/abs/10.1098/rsta.1920.0009"
         resolved, reason = _resolve_url(url)
         self.assertIsNone(resolved)
 
     def test_unrecognised_host(self):
-        from pipeline.cosmos_footage_prep import _resolve_url
+        from pipeline.footage.cosmos_footage_prep import _resolve_url
         url = "https://unknown-site.com/page"
         resolved, reason = _resolve_url(url)
         self.assertIsNone(resolved)
@@ -446,14 +446,14 @@ class TestResolveUrl(unittest.TestCase):
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _resolve_url
+        from pipeline.footage.cosmos_footage_prep import _resolve_url
         resolved, reason = _resolve_url(
             "https://commons.wikimedia.org/wiki/File:Test.jpg"
         )
         self.assertIsNotNone(resolved)
 
     def test_wikimedia_unresolvable(self):
-        from pipeline.cosmos_footage_prep import _resolve_url
+        from pipeline.footage.cosmos_footage_prep import _resolve_url
         with patch("urllib.request.urlopen", side_effect=Exception):
             resolved, reason = _resolve_url(
                 "https://en.wikipedia.org/wiki/File:Test.jpg"
@@ -463,7 +463,7 @@ class TestResolveUrl(unittest.TestCase):
 
     @patch("urllib.request.urlopen", side_effect=Exception)
     def test_nasa_unresolvable(self, _mock):
-        from pipeline.cosmos_footage_prep import _resolve_url
+        from pipeline.footage.cosmos_footage_prep import _resolve_url
         resolved, reason = _resolve_url(
             "https://images.nasa.gov/details/hubble-001"
         )
@@ -484,14 +484,14 @@ class TestResolveUrl(unittest.TestCase):
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _resolve_url
+        from pipeline.footage.cosmos_footage_prep import _resolve_url
         resolved, reason = _resolve_url("https://images.nasa.gov/details/iss-001")
         self.assertIsNotNone(resolved)
         self.assertIsNone(reason)
 
     @patch("urllib.request.urlopen", side_effect=Exception)
     def test_archive_unresolvable(self, _mock):
-        from pipeline.cosmos_footage_prep import _resolve_url
+        from pipeline.footage.cosmos_footage_prep import _resolve_url
         resolved, reason = _resolve_url(
             "https://archive.org/details/my-item"
         )
@@ -506,7 +506,7 @@ class TestResolveUrl(unittest.TestCase):
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         mock_open.return_value = resp
-        from pipeline.cosmos_footage_prep import _resolve_url
+        from pipeline.footage.cosmos_footage_prep import _resolve_url
         resolved, reason = _resolve_url("https://archive.org/details/my-video-item")
         self.assertIsNotNone(resolved)
         self.assertIsNone(reason)
@@ -529,7 +529,7 @@ class TestStillToVideo(unittest.TestCase):
         still = Path(self.td.name) / "still.jpg"
         still.touch()
         out = Path(self.td.name) / "out.mp4"
-        from pipeline.cosmos_footage_prep import _still_to_video
+        from pipeline.footage.cosmos_footage_prep import _still_to_video
         _still_to_video(still, out, duration_s=5.0, aspect="9:16")
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
@@ -541,7 +541,7 @@ class TestStillToVideo(unittest.TestCase):
         still = Path(self.td.name) / "still.jpg"
         still.touch()
         out = Path(self.td.name) / "out.mp4"
-        from pipeline.cosmos_footage_prep import _still_to_video
+        from pipeline.footage.cosmos_footage_prep import _still_to_video
         _still_to_video(still, out, duration_s=8.0, aspect="16:9")
         mock_run.assert_called_once()
 
@@ -552,20 +552,20 @@ class TestStillToVideo(unittest.TestCase):
 
 class TestEntriesFromShotlist(unittest.TestCase):
     def test_clips(self):
-        from pipeline.cosmos_footage_prep import _entries_from_shotlist
+        from pipeline.footage.cosmos_footage_prep import _entries_from_shotlist
         sl = {"clips": [{"source": "a.mp4"}], "aspect": "16:9"}
         entries, container = _entries_from_shotlist(sl)
         self.assertEqual(container, "clips")
         self.assertEqual(len(entries), 1)
 
     def test_windows(self):
-        from pipeline.cosmos_footage_prep import _entries_from_shotlist
+        from pipeline.footage.cosmos_footage_prep import _entries_from_shotlist
         sl = {"windows": [{"source": "a.mp4"}], "aspect": "9:16"}
         entries, container = _entries_from_shotlist(sl)
         self.assertEqual(container, "windows")
 
     def test_neither_raises(self):
-        from pipeline.cosmos_footage_prep import _entries_from_shotlist
+        from pipeline.footage.cosmos_footage_prep import _entries_from_shotlist
         with self.assertRaises(ValueError):
             _entries_from_shotlist({"aspect": "16:9"})
 
@@ -609,7 +609,7 @@ class TestPrepShotlist(unittest.TestCase):
         }
         self._write_shotlist("cosmosdecoded", "test-slug", shotlist)
 
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             result = prep_mod.prep_shotlist("cosmosdecoded", "test-slug")
         self.assertEqual(len(result.fetched), 1)
@@ -635,7 +635,7 @@ class TestPrepShotlist(unittest.TestCase):
         dest.parent.mkdir(parents=True)
         dest.touch()
 
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             result = prep_mod.prep_shotlist("cosmosdecoded", "test-slug")
         self.assertEqual(len(result.skipped), 1)
@@ -661,7 +661,7 @@ class TestPrepShotlist(unittest.TestCase):
         }
         self._write_shotlist("cosmosdecoded", "test-slug2", shotlist)
 
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             result = prep_mod.prep_shotlist("cosmosdecoded", "test-slug2")
         self.assertEqual(len(result.fetched), 1)
@@ -682,7 +682,7 @@ class TestPrepShotlist(unittest.TestCase):
         }
         self._write_shotlist("cosmosdecoded", "test-slug3", shotlist)
 
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             result = prep_mod.prep_shotlist("cosmosdecoded", "test-slug3")
         self.assertEqual(len(result.manual), 1)
@@ -699,7 +699,7 @@ class TestPrepShotlist(unittest.TestCase):
         }
         self._write_shotlist("cosmosdecoded", "test-slug4", shotlist)
 
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             result = prep_mod.prep_shotlist("cosmosdecoded", "test-slug4")
         self.assertEqual(len(result.errors), 1)
@@ -716,13 +716,13 @@ class TestPrepShotlist(unittest.TestCase):
         }
         self._write_shotlist("cosmosdecoded", "test-slug5", shotlist)
 
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             result = prep_mod.prep_shotlist("cosmosdecoded", "test-slug5")
         self.assertEqual(len(result.manual), 1)
 
     def test_missing_shotlist_raises_system_exit(self):
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             with self.assertRaises(SystemExit):
                 prep_mod.prep_shotlist("cosmosdecoded", "no-such-slug")
@@ -735,7 +735,7 @@ class TestPrepShotlist(unittest.TestCase):
         }
         self._write_shotlist("cosmosdecoded", "bad-aspect", shotlist)
 
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             with self.assertRaises(SystemExit):
                 prep_mod.prep_shotlist("cosmosdecoded", "bad-aspect")
@@ -759,7 +759,7 @@ class TestPrepShotlist(unittest.TestCase):
         }
         self._write_shotlist("cosmosdecoded", "err-slug", shotlist)
 
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             result = prep_mod.prep_shotlist("cosmosdecoded", "err-slug")
         self.assertEqual(len(result.errors), 1)
@@ -788,7 +788,7 @@ class TestPrepShotlist(unittest.TestCase):
         dest.parent.mkdir(parents=True)
         dest.touch()
 
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             result = prep_mod.prep_shotlist("cosmosdecoded", "force-slug", force=True)
         self.assertEqual(len(result.fetched), 1)
@@ -813,7 +813,7 @@ class TestPrepShotlist(unittest.TestCase):
         }
         self._write_shotlist("cosmosdecoded", "windows-slug", shotlist)
 
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             result = prep_mod.prep_shotlist("cosmosdecoded", "windows-slug")
         sources_dir = self.root / "data" / "cosmosdecoded" / "footage" / "sources"
@@ -840,7 +840,7 @@ class TestPrepShotlist(unittest.TestCase):
         }
         self._write_shotlist("cosmosdecoded", "tiny-slug", shotlist)
 
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             result = prep_mod.prep_shotlist("cosmosdecoded", "tiny-slug")
         self.assertEqual(len(result.errors), 1)
@@ -882,7 +882,7 @@ class TestMain(unittest.TestCase):
         sl_dir.mkdir(parents=True)
         (sl_dir / "main-slug.json").write_text(json.dumps(shotlist))
 
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             ret = prep_mod.main(["--channel", "cosmosdecoded", "--slug", "main-slug"])
         self.assertEqual(ret, 0)
@@ -908,7 +908,7 @@ class TestMain(unittest.TestCase):
         sl_dir.mkdir(parents=True)
         (sl_dir / "err-slug.json").write_text(json.dumps(shotlist))
 
-        import pipeline.cosmos_footage_prep as prep_mod
+        import pipeline.footage.cosmos_footage_prep as prep_mod
         with patch.object(prep_mod, "REPO_ROOT", self.root):
             ret = prep_mod.main(["--channel", "cosmosdecoded", "--slug", "err-slug"])
         self.assertEqual(ret, 1)

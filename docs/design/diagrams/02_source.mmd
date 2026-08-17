@@ -1,0 +1,70 @@
+classDiagram
+direction TB
+%% Source — the render input (RenderSpec) + fetching the specific story
+
+class AudioMode {
+  <<enum>>
+  VOICE
+}
+note for AudioMode "VOICE = TTS narration (song mode is out of v1)"
+
+class RenderSpec {
+  +channel : str
+  +niche : str
+  +source_ref : str
+  +kind : RenderKind
+  +visual_palette : tuple~VisualKind~
+  +aspect_ratio : str
+  +output_resolution : tuple~int~
+  +output_fps : int
+  +duration_target_s : int
+  +duration_max_s : int
+  +audio_mode : AudioMode
+  +voice_provider : str
+  +voice_id : str
+  +caption_style : CaptionStyle
+  +lower_thirds : bool
+  +chapter_cards : bool
+  +closer_panel : bool
+  +watermark : Watermark
+  +video_grade : str
+  +music_policy : MusicPolicy
+  +music_bed : str
+  +tone : str
+  +critic_loop : bool
+  +extra : dict
+}
+note for RenderSpec "the immutable render request = the HLD 'Specs' box · built once, arrives on ctx.spec:<br/>channel = which channel · niche = which lane/adapter (reddit_aita, wikipedia, ...) · source_ref = the SPECIFIC story (a URL, or a topic/query; empty = adapter discovers the top item)<br/>kind = short/long · visual_palette = allowed VisualKinds (user picks) · aspect_ratio / output_resolution / output_fps = output shape · duration_target_s / duration_max_s = length<br/>audio_mode / voice_provider / voice_id = narration voice · caption_style = caption knobs · lower_thirds / chapter_cards / closer_panel = overlay toggles<br/>watermark / video_grade = post-production · music_policy / music_bed = music · tone = tts tone override · critic_loop = re-critique on/off · extra = free channel knobs<br/>(field TYPES RenderKind / VisualKind / CaptionStyle / Watermark / MusicPolicy are detailed in their own diagrams)"
+
+class SourceStage {
+  <<stage>>
+  +run(ctx)
+}
+note for SourceStage "the FIRST render stage · reads spec.niche + spec.source_ref via ctx.spec<br/>→ calls SourceRouter → writes SOURCE."
+
+class SourceRouter {
+  <<service · det>>
+  +fetch(niche, source_ref) SourceDoc
+}
+note for SourceRouter "niche picks the adapter (reddit / wikipedia / youtube / x / text);<br/>source_ref = the exact URL to fetch, OR a query to discover, OR empty = grab the top item for the niche."
+
+class SourceDoc {
+  +slug : str
+  +title : str
+  +body : str
+  +source : str
+  +url : str
+  +backend : str
+  +metadata : dict
+}
+note for SourceDoc "the raw mined story BEFORE rewriting<br/>slug = stable id/filename · title = headline · body = full raw text (ScriptStage condenses + enriches it)<br/>source = origin tag e.g. reddit:AITA · url = the resolved link · backend = which adapter served it · metadata = adapter extras"
+
+RenderSpec ..> AudioMode
+RenderSpec ..> SourceStage : ctx.spec
+SourceStage ..> SourceRouter : calls
+SourceRouter ..> SourceDoc : produces
+
+style RenderSpec fill:#1f3d3d,stroke:#4ad9d9,color:#fff
+style AudioMode fill:#4a3d1f,stroke:#d9c24a,color:#fff
+style SourceStage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+style SourceRouter fill:#2d2d2d,stroke:#888,color:#fff

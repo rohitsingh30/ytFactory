@@ -383,7 +383,7 @@ URLs + filenames. Run `pipeline/cosmos_footage_prep.py` after the four
 JSONs land on disk:
 
 ```bash
-.venv/bin/python -u -m pipeline.cosmos_footage_prep \
+.venv/bin/python -u -m pipeline.footage.cosmos_footage_prep \
     --channel cosmosdecoded --slug <slug>-short
 ```
 

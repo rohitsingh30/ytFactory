@@ -2654,7 +2654,7 @@ def _stage_render_real(
     """
     mp4 = _run_renderer_via_engines(job, work_dir, progress_cb=progress_cb)
     # Generate a thumb. Prefer the CTR-optimized composition from
-    # pipeline.thumbnails.auto_thumbnail (scene frame + curiosity-
+    # pipeline.upload.thumbnails.auto_thumbnail (scene frame + curiosity-
     # headline overlay) — added 2026-05-14 per the audit
     # (docs/pipeline_bug_catalogue_v2_2026-05-14.html) which found
     # cloud renders were shipping a plain ffmpeg first-frame as the
@@ -2664,7 +2664,7 @@ def _stage_render_real(
     # PIL crash, missing script/channel context) so a thumbnail
     # bug never blocks the upload edge.
     # cloud worker thumbnail pick: compose CTR-optimized thumb via
-    # pipeline.thumbnails.auto_thumbnail; fallback ffmpeg first-frame
+    # pipeline.upload.thumbnails.auto_thumbnail; fallback ffmpeg first-frame
     # on any failure. Tests in tests/test_cloudrun_render_worker_thumbnail.py
     # (5 cases pin all branches). The gate's auto-discovery misses
     # the test file because the parent dir name (render-worker-v2)
@@ -2674,7 +2674,7 @@ def _stage_render_real(
     thumb = work_dir / "thumb.jpg"
     thumb_built = False  # coverage: covered by thumbnail tests per line 1247
     try:  # coverage: covered by thumbnail tests per line 1247
-        from pipeline import thumbnails as _thumbs  # noqa: PLC0415  # coverage: covered by thumbnail tests per line 1247
+        from pipeline.upload import thumbnails as _thumbs  # noqa: PLC0415  # coverage: covered by thumbnail tests per line 1247
         from pipeline.paths import RenderPaths  # noqa: PLC0415  # coverage: covered by thumbnail tests per line 1247
         slug = job.get("_slug") or ""  # coverage: covered by thumbnail tests per line 1247
         channel_yaml_path = job.get("_channel_yaml")  # coverage: covered by thumbnail tests per line 1247
@@ -2701,7 +2701,7 @@ def _stage_render_real(
             )
             thumb_built = result is not None and thumb.exists()  # coverage: covered by thumbnail tests per line 1247
             if thumb_built:  # coverage: covered by thumbnail tests per line 1247
-                logger.info("thumbnail composed via pipeline.thumbnails.auto_thumbnail")  # coverage: covered by thumbnail tests per line 1247
+                logger.info("thumbnail composed via pipeline.upload.thumbnails.auto_thumbnail")  # coverage: covered by thumbnail tests per line 1247
             else:
                 logger.info(  # coverage: covered by thumbnail tests per line 1247
                     "auto_thumbnail returned None (no scene frames in %s); "

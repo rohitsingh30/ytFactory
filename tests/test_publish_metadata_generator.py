@@ -12,7 +12,7 @@ from __future__ import annotations
 import unittest
 
 from pipeline.publish import PublishMetadata, generate_publish_metadata
-from pipeline.publish.metadata_generator import MissingMetadataInputError
+from pipeline.upload.metadata_generator import MissingMetadataInputError
 
 
 class GenerateMetadataShapeTest(unittest.TestCase):
@@ -285,7 +285,7 @@ class ChannelPlaybookTest(unittest.TestCase):
         # Defensive — playbook entries are hand-edited; the generator
         # filters malformed entries. Sanity check that nothing in the
         # current table is malformed.
-        from pipeline.publish.metadata_generator import _CHANNEL_PLAYBOOK
+        from pipeline.upload.metadata_generator import _CHANNEL_PLAYBOOK
         for channel, entry in _CHANNEL_PLAYBOOK.items():
             for tag in entry.get("hashtags", []):
                 self.assertTrue(
@@ -296,7 +296,7 @@ class ChannelPlaybookTest(unittest.TestCase):
     def test_playbook_tags_respect_youtube_budget(self) -> None:
         # The playbook hand-curated tag lists must still fit in
         # YouTube's 500-char total + 30-char individual limit.
-        from pipeline.publish.metadata_generator import _CHANNEL_PLAYBOOK
+        from pipeline.upload.metadata_generator import _CHANNEL_PLAYBOOK
         for channel, entry in _CHANNEL_PLAYBOOK.items():
             tags = entry.get("tags", [])
             total = sum(len(t) + 1 for t in tags)

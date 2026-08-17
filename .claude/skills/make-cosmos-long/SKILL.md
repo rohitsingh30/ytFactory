@@ -339,7 +339,7 @@ after the four JSONs land on disk and before kicking off the renderer.
 **Always invoke (idempotent — re-runs skip already-present files):**
 
 ```bash
-.venv/bin/python -u -m pipeline.cosmos_footage_prep \
+.venv/bin/python -u -m pipeline.footage.cosmos_footage_prep \
     --channel cosmosdecoded --slug <slug>
 ```
 

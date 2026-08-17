@@ -5,8 +5,8 @@
 After Section 6 quality gates pass, the skill MUST Bash-execute the prep tool for both the long-form and the Short shotlist:
 
 ```bash
-.venv/bin/python -u -m pipeline.cosmos_footage_prep --channel cosmosdecoded --slug <long-slug>
-.venv/bin/python -u -m pipeline.cosmos_footage_prep --channel cosmosdecoded --slug <short-slug>
+.venv/bin/python -u -m pipeline.footage.cosmos_footage_prep --channel cosmosdecoded --slug <long-slug>
+.venv/bin/python -u -m pipeline.footage.cosmos_footage_prep --channel cosmosdecoded --slug <short-slug>
 ```
 
 The tool resolves Wikimedia / NASA / archive.org URLs automatically, downloads stills, and converts them to right-aspect mp4s via ffmpeg. Manual fallback is only triggered for paywalled hosts (royalsocietypublishing, nature.com, NYT TimesMachine, Pexels) — typically 2–4 entries per video.

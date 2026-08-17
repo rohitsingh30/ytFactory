@@ -1,0 +1,68 @@
+classDiagram
+direction TB
+%% Captions / Overlay — render caption + overlay elements
+
+class CaptionsLayout {
+  <<enum>>
+  CENTER_WORD
+  SENTENCE
+  NONE
+}
+class CaptionPosition {
+  <<enum>>
+  CENTER
+  LOWER_THIRD
+  TOP
+}
+class CaptionHighlight {
+  <<enum>>
+  NONE
+  WORD
+  FULL
+}
+
+class OverlayStage {
+  <<stage>>
+  +run(ctx)
+}
+note for OverlayStage "reads TIMELINE + RenderSpec.caption_style → calls CaptionService → writes OVERLAYS."
+
+class CaptionService {
+  <<service · det>>
+  +render(Timeline, CaptionStyle) list~OverlayElement~
+}
+note for CaptionService "renders caption PNGs from the word timings, styled per CaptionStyle."
+
+class CaptionStyle {
+  +layout : CaptionsLayout
+  +position : CaptionPosition
+  +highlight : CaptionHighlight
+  +font_family : str
+  +font_size : int
+  +enabled : bool
+}
+note for CaptionStyle "the user's caption knobs · layout = one-word vs sentence · position = center / lower-third / top<br/>highlight = none / active-word / full-line bg · font_family · font_size · enabled = captions on/off"
+
+class OverlayElement {
+  +start_s : float
+  +end_s : float
+  +layer : int
+  +asset_path : Path
+  +region : tuple
+  +blend : str
+  +extras : dict
+}
+note for OverlayElement "one composited element · start_s / end_s = when it shows · layer = z-order<br/>(10 footage / 20 lower-third / 30 chapter / 40 caption / 50 watermark) · asset_path = PNG or mp4<br/>region = (x,y,w,h) or None · blend = compositing mode · extras = element-specific fields"
+
+OverlayStage ..> CaptionService : calls
+CaptionService ..> CaptionStyle : uses
+CaptionService ..> OverlayElement : produces
+CaptionStyle ..> CaptionsLayout
+CaptionStyle ..> CaptionPosition
+CaptionStyle ..> CaptionHighlight
+
+style OverlayStage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+style CaptionService fill:#2d2d2d,stroke:#888,color:#fff
+style CaptionsLayout fill:#4a3d1f,stroke:#d9c24a,color:#fff
+style CaptionPosition fill:#4a3d1f,stroke:#d9c24a,color:#fff
+style CaptionHighlight fill:#4a3d1f,stroke:#d9c24a,color:#fff

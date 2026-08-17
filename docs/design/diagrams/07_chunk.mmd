@@ -1,0 +1,45 @@
+classDiagram
+direction TB
+%% Chunk — assemble the executable per-beat model inputs
+
+class ChunkStage {
+  <<stage>>
+  +run(ctx)
+}
+note for ChunkStage "reads STORYBOARD + DIRECTOR · for each animation beat calls ChunkingAI for the image text,<br/>then adds the render numerics + the audio prompt · writes CHUNKS."
+
+class ChunkingAI {
+  <<LLM · the Chunking AI>>
+  +refine_image(PromptRequest) ImagePrompt
+}
+note for ChunkingAI "refines one beat's Scene + Cast + Style into the diffusion prompt text (animation only)."
+
+class PromptRequest {
+  +beat : Beat
+  +cast : CastLock
+  +style : Style
+}
+note for PromptRequest "beat = the scene to render · cast = the appearances to inject · style = the art identity to apply"
+
+class ImagePrompt {
+  +prompt : str
+  +negative_prompt : str
+}
+note for ImagePrompt "AI-authored creative text ONLY · prompt = what to draw · negative_prompt = what to avoid.<br/>ChunkStage adds the numerics (seed/size/steps/cfg/model_id) to form ImageModelPrompt."
+
+class Chunk {
+  +index : int
+  +narration : str
+  +kind : VisualKind
+  +audio_prompt : AudioModelPrompt
+  +visual : ImageModelPrompt / ShotRef
+}
+note for Chunk "the executable render unit · index = order · narration = spoken text · kind = discriminator<br/>audio_prompt = the TTS input (always present) · visual = ImageModelPrompt (ANIMATION) or ShotRef (FOOTAGE)<br/>ImageModelPrompt / AudioModelPrompt are detailed in the Generation diagrams"
+
+ChunkStage ..> ChunkingAI : calls
+ChunkingAI ..> PromptRequest : in
+ChunkingAI ..> ImagePrompt : out
+ChunkStage ..> Chunk : produces
+
+style ChunkStage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+style ChunkingAI fill:#3a1e5f,stroke:#a04ad9,color:#fff

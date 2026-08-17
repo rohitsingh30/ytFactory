@@ -26,6 +26,7 @@ import { StatusPill } from "@/components/app/status-pill";
 import { EmptyState } from "@/components/app/empty-state";
 import { channelLabel, fmtCount } from "@/components/app/channel-meta";
 import { channelsApi, jobsApi, nichesApi } from "@/lib/api";
+import { encodeSelectValue, decodeSelectValue, SELECT_EMPTY_SENTINEL } from "@/lib/select";
 import type {
   ChannelSummary,
   CustomizationField,
@@ -822,15 +823,15 @@ function DefaultsField({
       <div className="mt-1.5">
         {field.kind === "select" && (
           <Select
-            value={value !== undefined && value !== null ? String(value) : undefined}
-            onValueChange={onChange}
+            value={encodeSelectValue(value)}
+            onValueChange={(v) => onChange(decodeSelectValue(v))}
           >
             <SelectTrigger id={field.key}>
               <SelectValue placeholder="—" />
             </SelectTrigger>
             <SelectContent>
               {(field.options ?? []).map((o) => (
-                <SelectItem key={o.value} value={o.value}>
+                <SelectItem key={o.value} value={encodeSelectValue(o.value) ?? SELECT_EMPTY_SENTINEL}>
                   {o.label}
                 </SelectItem>
               ))}

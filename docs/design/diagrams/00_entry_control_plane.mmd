@@ -1,0 +1,26 @@
+flowchart TB
+  U["User · web-next wizard<br/>picks channel, niche, knobs A-G"]:::io
+  SCH["Scheduler · niche rotation<br/>deterministic, no LLM"]:::svc
+  SB["SpecBuilder · app/spec_builder<br/>channel YAML + variant + choices to RenderSpec"]:::stage
+  RS["RenderSpec<br/>the immutable request = the HLD 'Specs' box"]:::spec
+  Q["Job queue · Firestore"]:::svc
+  W["Render Worker · app/worker<br/>builds Context with spec, runs Orchestrator"]:::stage
+  CTX["Context.spec = RenderSpec<br/>every stage reads it"]:::spec
+  SRC["SourceStage<br/>uses spec.niche to fetch the story heading to SourceDoc"]:::stage
+  SCR["ScriptStage · ScriptService<br/>rewrites AND enriches the source into narration"]:::stage
+  REST["render pipeline<br/>Director to Scene to ... to Compose to Upload to Critique"]:::io
+
+  U --> SB
+  SCH --> SB
+  SB --> RS
+  RS --> Q
+  Q --> W
+  W --> CTX
+  CTX --> SRC
+  SRC --> SCR
+  SCR --> REST
+
+  classDef io fill:#3d2d1f,stroke:#d99a4a,color:#fff
+  classDef svc fill:#2d2d2d,stroke:#888,color:#fff
+  classDef stage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+  classDef spec fill:#1f3d3d,stroke:#4ad9d9,color:#fff

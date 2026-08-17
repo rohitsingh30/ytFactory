@@ -4,7 +4,7 @@ The one-click publish flow needs the user to only pick visibility; every
 other knob (title, description, hashtags, tags, thumbnail, category) is
 auto-generated from the rendered script before the modal even opens.
 
-See :mod:`pipeline.publish.metadata_generator` for the generator itself,
+See :mod:`pipeline.upload.metadata_generator` for the generator itself,
 and ``control/routes/render_routes.py``'s ``POST /api/jobs/{id}/publish``
 + ``GET /api/jobs/{id}/publish/preview`` for the control-plane surface.
 
@@ -14,7 +14,7 @@ quota handling, and idempotency records are unchanged.
 """
 from __future__ import annotations
 
-from pipeline.publish.metadata_generator import (
+from pipeline.upload.metadata_generator import (
     PublishMetadata,
     generate_publish_metadata,
 )

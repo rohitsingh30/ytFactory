@@ -1,0 +1,38 @@
+classDiagram
+direction TB
+%% Upload — publish to YouTube
+
+class UploadStage {
+  <<stage>>
+  +run(ctx)
+}
+note for UploadStage "reads VIDEO + SCRIPT → calls UploadService → writes UPLOAD."
+
+class UploadService {
+  <<service · det>>
+  +publish(ComposedVideo, Script) UploadResult
+}
+note for UploadService "builds Metadata + a thumbnail, then uploads<br/>(YouTube Data API, or the Playwright fallback when the API quota is exhausted)."
+
+class Metadata {
+  +title : str
+  +description : str
+  +tags : list~str~
+  +hashtags : list~str~
+}
+note for Metadata "title = chosen from Script.title_options · description = SEO body<br/>tags = search keywords · hashtags = the #tags in the description"
+
+class UploadResult {
+  +video_uri : str
+  +youtube_id : str
+  +metadata : Metadata
+  +thumbnail_path : Path
+}
+note for UploadResult "video_uri = gs:// artifact or the watch URL · youtube_id = the live video id (or None if only staged)<br/>metadata = what was published · thumbnail_path = the uploaded thumbnail"
+
+UploadStage ..> UploadService : calls
+UploadService ..> UploadResult : produces
+UploadResult *-- Metadata
+
+style UploadStage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+style UploadService fill:#2d2d2d,stroke:#888,color:#fff

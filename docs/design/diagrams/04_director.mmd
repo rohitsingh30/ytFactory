@@ -1,0 +1,64 @@
+classDiagram
+direction TB
+%% Director — Cast + Style Lock (animation only)
+
+class DirectorStage {
+  <<stage · animation only>>
+  +run(ctx)
+}
+note for DirectorStage "reads SCRIPT → builds DirectorRequest → calls DirectorLLM → writes DIRECTOR.<br/>Only runs when the render has animation chunks."
+
+class DirectorLLM {
+  <<LLM>>
+  +lock(DirectorRequest) DirectorPlan
+}
+note for DirectorLLM "one LLM call that locks cast + style ONCE for the whole render,<br/>so faces and art-style stay identical across every beat."
+
+class DirectorRequest {
+  +script : Script
+  +channel_aesthetic : str
+  +learnings : str
+}
+note for DirectorRequest "script = authored narration (to read characters + tone)<br/>channel_aesthetic = channel's fixed art-style spec from YAML (line style, palette)<br/>learnings = accumulated critique feedback, to avoid past mistakes"
+
+class DirectorPlan {
+  +cast : CastLock
+  +style : Style
+}
+note for DirectorPlan "the two global locks every downstream beat reuses<br/>cast = who the characters are · style = how everything is drawn"
+
+class CastLock {
+  +narrator : Appearance
+  +characters : dict
+}
+note for CastLock "narrator = the on-screen narrator's look (if any)<br/>characters = map name to Appearance, so each person looks identical in every image"
+
+class Appearance {
+  +name : str
+  +age : str
+  +gender : str
+  +hair : str
+  +build : str
+  +wardrobe : str
+  +signature_prop : str
+}
+note for Appearance "one character's locked look, injected verbatim into every image prompt<br/>name = how narration refers to them · age = concrete e.g. mid-30s · gender<br/>hair = concrete e.g. short cropped black · build = body type<br/>wardrobe = one specific outfit · signature_prop = optional recurring item"
+
+class Style {
+  +aesthetic : str
+  +line_style : str
+  +palette : str
+  +image_style_prefix : str
+  +negative_base : str
+}
+note for Style "the channel's fixed animation identity<br/>aesthetic = overall look e.g. flat 2D crayon · line_style = e.g. bold ink outlines<br/>palette = base colours · image_style_prefix = exact text prepended to EVERY image prompt<br/>negative_base = base negative prompt applied to every image"
+
+DirectorStage ..> DirectorLLM : calls
+DirectorLLM ..> DirectorRequest : in
+DirectorLLM ..> DirectorPlan : out
+DirectorPlan *-- CastLock
+DirectorPlan *-- Style
+CastLock *-- Appearance
+
+style DirectorStage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+style DirectorLLM fill:#3a1e5f,stroke:#a04ad9,color:#fff

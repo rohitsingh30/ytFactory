@@ -1,0 +1,54 @@
+classDiagram
+direction TB
+%% ASR / Timeline — word-level timing for captions
+
+class AlignStage {
+  <<stage>>
+  +run(ctx)
+}
+note for AlignStage "reads AUDIO (+ beat anchors) → builds AlignRequest → calls ASRModel → writes TIMELINE."
+
+class ASRModel {
+  <<Protocol · whisper>>
+  +align(AlignRequest) Timeline
+}
+note for ASRModel "forced-alignment: maps the transcribed words back onto the narration for exact timings."
+
+class AlignRequest {
+  +wav_path : Path
+  +anchors : list~str~
+  +mode : str
+  +language : str
+}
+note for AlignRequest "wav_path = the narration audio · anchors = beat texts / section titles to align against<br/>mode = beats / anchors grouping · language = the ASR language"
+
+class Timeline {
+  +segments : list~Segment~
+}
+note for Timeline "the aligned beat / section timing for the whole render"
+
+class Segment {
+  +start_s : float
+  +end_s : float
+  +text : str
+  +anchor_id : str
+  +kind : str
+  +words : list~Word~
+}
+note for Segment "one timed unit · start_s / end_s = its window · text = its narration<br/>anchor_id = beat_000 / section id · kind = beat / section / chapter · words = word-level timings (captions)"
+
+class Word {
+  +text : str
+  +start_s : float
+  +end_s : float
+}
+note for Word "one spoken word + its exact start / end seconds — drives word-by-word captions"
+
+AlignStage ..> ASRModel : calls
+ASRModel ..> AlignRequest : in
+ASRModel ..> Timeline : out
+Timeline *-- Segment
+Segment *-- Word
+
+style AlignStage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+style ASRModel fill:#3a1e5f,stroke:#a04ad9,color:#fff

@@ -1,0 +1,89 @@
+classDiagram
+direction TB
+%% Spine — orchestration + the artifact bus
+
+class Orchestrator {
+  +run(stages, ctx) RenderResult
+}
+note for Orchestrator "the whole worker: build a Context, pick the stage list, run each stage in order.<br/>Fail-loud — the first stage that raises aborts the render (no placeholder artifacts)."
+
+class RenderResult {
+  +ok : bool
+  +stages_run : list~str~
+  +error : str
+}
+note for RenderResult "ok = success · stages_run = which stages completed · error = the failure message (if any)"
+
+class Stage {
+  <<Protocol>>
+  +name : str
+  +run(ctx) None
+}
+note for Stage "one pipeline step · name = telemetry id · run() reads inputs via ctx.get, does ONE job, writes via ctx.put"
+
+class Artifact {
+  <<string keys>>
+  +SOURCE
+  +SCRIPT
+  +DIRECTOR
+  +STORYBOARD
+  +CHUNKS
+  +AUDIO
+  +TIMELINE
+  +OVERLAYS
+  +MUSIC
+  +VIDEO
+  +UPLOAD
+  +CRITIQUE
+}
+note for Artifact "the 12 canonical keys stages use with ctx.get / ctx.put (one per produced artifact).<br/>Compose renders chunk visuals internally — there is no VISUALS bus artifact."
+
+class Context {
+  +spec : RenderSpec
+  +telemetry : Telemetry
+  +storage : Storage
+  +config : Config
+  +work_dir : Path
+  +get(kind) Any
+  +put(kind, artifact) None
+  +has(kind) bool
+}
+note for Context "the artifact bus + injected services · spec = the request · telemetry / storage / config = injected<br/>work_dir = scratch space · get / put / has = read/write artifacts by key (kills import-time globals)"
+
+class Telemetry {
+  <<Protocol>>
+  +stage(name) Any
+  +event(name, meta) None
+}
+note for Telemetry "stage() = a start/end/failed envelope context manager · event() = a structured log event"
+
+class Storage {
+  <<Protocol>>
+  +put(local, key) str
+  +get(key, local) Path
+}
+note for Storage "the ONLY place GCS / local paths are built · put() uploads, get() downloads"
+
+class Config {
+  <<Protocol>>
+  +service_url(name) str
+  +voice_ref_path(voice_id) Path
+  +channel_yaml(channel) dict
+}
+note for Config "the ONLY place service URLs / paths / channel config resolve"
+
+Orchestrator ..> Stage : runs each
+Orchestrator ..> RenderResult : returns
+Orchestrator ..> Context : threads through
+Stage ..> Context : get / put
+Context *-- Telemetry
+Context *-- Storage
+Context *-- Config
+Context ..> Artifact : keyed by
+
+style Orchestrator fill:#5f1e3a,stroke:#d94a90,color:#fff
+style Stage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+style Telemetry fill:#2d2d2d,stroke:#888,color:#fff
+style Storage fill:#2d2d2d,stroke:#888,color:#fff
+style Config fill:#2d2d2d,stroke:#888,color:#fff
+style Artifact fill:#3d3d1f,stroke:#d9d94a,color:#fff

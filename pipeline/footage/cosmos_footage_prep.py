@@ -29,9 +29,9 @@ Resolvers supported:
         (logged with a clear curator instruction).
 
 CLI:
-    .venv/bin/python -m pipeline.cosmos_footage_prep \\
+    .venv/bin/python -m pipeline.footage.cosmos_footage_prep \
         --channel cosmosdecoded --slug eddington-1919-eclipse
-    .venv/bin/python -m pipeline.cosmos_footage_prep \\
+    .venv/bin/python -m pipeline.footage.cosmos_footage_prep \
         --channel cosmosdecoded --slug eddington-1919-eclipse-short
 """
 

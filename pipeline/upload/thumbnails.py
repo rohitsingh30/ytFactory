@@ -28,7 +28,7 @@ from typing import Sequence
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-from .captions import _find_font  # reuse the cross-platform font loader
+from pipeline.captions import _find_font  # reuse the cross-platform font loader
 
 
 # YouTube thumbnail spec: ≤ 2 MB, recommended 1280×720 (16:9).

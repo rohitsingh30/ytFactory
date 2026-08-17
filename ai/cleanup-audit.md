@@ -130,7 +130,7 @@ siblings). The googleapiclient fixture is duplicated though.
   raw shotlist directly to `historyrecapped/scripts/render_footage_only.py`
   per their SKILL.md — they don't reference `cosmos_footage_prep`.
 - DECISION NEEDED: is the skill expected to invoke
-  `python -m pipeline.cosmos_footage_prep --channel cosmosdecoded
+  `python -m pipeline.footage.cosmos_footage_prep --channel cosmosdecoded
   --slug <s>` between authoring and render? If yes, this module is
   necessary plumbing and the skill SKILL.md is missing the invocation
   line. If no, the module is dead and should go.

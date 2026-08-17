@@ -1,7 +1,7 @@
 """Tests for the cloud worker's CTR-optimized thumbnail wiring
 (added 2026-05-14 per the 27-render audit's bug B2 — cloud renders
 were shipping a plain ffmpeg first-frame as the thumbnail rather
-than the ``pipeline.thumbnails.auto_thumbnail`` curiosity-headline
+than the ``pipeline.upload.thumbnails.auto_thumbnail`` curiosity-headline
 composition that already existed for the laptop path).
 
 Pin:
@@ -85,7 +85,7 @@ class StageRenderThumbnailTests(unittest.TestCase):
             def fake_auto(*, slug, cache_dir, script, channel_yaml, out_path, **kw):
                 Path(out_path).write_bytes(b"\xff\xd8jpeg")  # tiny valid-ish
                 return out_path
-            with mock.patch("pipeline.thumbnails.auto_thumbnail",
+            with mock.patch("pipeline.upload.thumbnails.auto_thumbnail",
                             side_effect=fake_auto) as mock_auto:
                 self.ep._stage_render_real(job, self.work_dir)
 
@@ -104,7 +104,7 @@ class StageRenderThumbnailTests(unittest.TestCase):
                                return_value=self.mp4), \
              mock.patch.object(self.ep, "subprocess") as mock_subp, \
              mock.patch("pipeline.paths.RenderPaths.from_channel_yaml") as mock_rp, \
-             mock.patch("pipeline.thumbnails.auto_thumbnail",
+             mock.patch("pipeline.upload.thumbnails.auto_thumbnail",
                         return_value=None):
             mock_rp.return_value = mock.MagicMock(
                 cache_for=lambda slug: Path(self.tmp) / f"cache_{slug}"
@@ -122,7 +122,7 @@ class StageRenderThumbnailTests(unittest.TestCase):
                                return_value=self.mp4), \
              mock.patch.object(self.ep, "subprocess") as mock_subp, \
              mock.patch("pipeline.paths.RenderPaths.from_channel_yaml") as mock_rp, \
-             mock.patch("pipeline.thumbnails.auto_thumbnail",
+             mock.patch("pipeline.upload.thumbnails.auto_thumbnail",
                         side_effect=RuntimeError("PIL crashed")):
             mock_rp.return_value = mock.MagicMock(
                 cache_for=lambda slug: Path(self.tmp) / f"cache_{slug}"
@@ -140,7 +140,7 @@ class StageRenderThumbnailTests(unittest.TestCase):
                                return_value=self.mp4), \
              mock.patch.object(self.ep, "subprocess"), \
              mock.patch("pipeline.paths.RenderPaths.from_channel_yaml") as mock_rp, \
-             mock.patch("pipeline.thumbnails.auto_thumbnail", return_value=None):
+             mock.patch("pipeline.upload.thumbnails.auto_thumbnail", return_value=None):
             mock_rp.return_value = mock.MagicMock(
                 cache_for=lambda slug: Path(self.tmp) / f"cache_{slug}"
             )
@@ -153,7 +153,7 @@ class StageRenderThumbnailTests(unittest.TestCase):
         with mock.patch.object(self.ep, "_run_renderer_via_engines",
                                return_value=self.mp4), \
              mock.patch.object(self.ep, "subprocess") as mock_subp, \
-             mock.patch("pipeline.thumbnails.auto_thumbnail") as mock_auto:
+             mock.patch("pipeline.upload.thumbnails.auto_thumbnail") as mock_auto:
             self.ep._stage_render_real(job, self.work_dir)
         # auto_thumbnail not even attempted (context guard short-circuits).
         self.assertEqual(mock_auto.call_count, 0)

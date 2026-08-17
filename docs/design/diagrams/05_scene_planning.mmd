@@ -1,0 +1,62 @@
+classDiagram
+direction TB
+%% Scene planning — segment narration into beats, assign each a visual kind
+
+class VisualKind {
+  <<enum>>
+  ANIMATION
+  FOOTAGE
+}
+note for VisualKind "ANIMATION = an AI image · FOOTAGE = a real clip. The planner assigns each beat one."
+
+class SceneStage {
+  <<stage>>
+  +run(ctx)
+}
+note for SceneStage "reads SCRIPT + DIRECTOR → builds SceneRequest → calls SceneDefinitionAI → writes STORYBOARD."
+
+class SceneDefinitionAI {
+  <<LLM>>
+  +direct(SceneRequest) Storyboard
+}
+note for SceneDefinitionAI "segments the narration into beats and directs each one.<br/>ANIMATION beat → a Scene · FOOTAGE beat → here it acts as the HLD 'AI Footage/Clip Planner', emitting a ShotRef query (folded in, not a separate model)."
+
+class SceneRequest {
+  +script : Script
+  +cast : CastLock
+  +style : Style
+  +palette : tuple~VisualKind~
+  +learnings : str
+}
+note for SceneRequest "script = narration to segment · cast = locked characters · style = locked art identity<br/>palette = allowed VisualKinds this render (model picks per beat) · learnings = critique feedback"
+
+class Storyboard {
+  +beats : list~Beat~
+}
+note for Storyboard "the ordered visual breakdown of the whole narration"
+
+class Beat {
+  +index : int
+  +narration : str
+  +kind : VisualKind
+  +visual : Scene / ShotRef
+}
+note for Beat "one narration segment + ONE visual · index = order · narration = its spoken text<br/>kind = the discriminator · visual = a Scene (ANIMATION — see Scene composition) or a ShotRef (FOOTAGE)"
+
+class ShotRef {
+  +query : str
+  +source_hint : str
+}
+note for ShotRef "footage visual · query = what the clip should show<br/>source_hint = stock / archival / wikimedia / any"
+
+SceneStage ..> SceneDefinitionAI : calls
+SceneDefinitionAI ..> SceneRequest : in
+SceneDefinitionAI ..> Storyboard : out
+Storyboard *-- Beat
+Beat ..> VisualKind
+Beat ..> ShotRef : FOOTAGE
+SceneRequest ..> VisualKind
+
+style SceneStage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+style SceneDefinitionAI fill:#3a1e5f,stroke:#a04ad9,color:#fff
+style VisualKind fill:#4a3d1f,stroke:#d9c24a,color:#fff

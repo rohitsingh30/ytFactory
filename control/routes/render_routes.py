@@ -620,7 +620,7 @@ def _build_publish_metadata(job_id: str, doc: dict) -> PublishMetadataView:
     from pipeline.publish import (  # noqa: PLC0415
         generate_publish_metadata,
     )
-    from pipeline.publish.metadata_generator import (  # noqa: PLC0415
+    from pipeline.upload.metadata_generator import (  # noqa: PLC0415
         MissingMetadataInputError,
     )
 

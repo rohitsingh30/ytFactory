@@ -1,0 +1,85 @@
+classDiagram
+direction TB
+%% Scene composition — the visual detail of one ANIMATION beat
+
+class Scene {
+  +setting : str
+  +time_of_day : str
+  +characters_present : list~str~
+  +action : str
+  +camera : Camera
+  +mood : Mood
+}
+note for Scene "full visual definition of one animation beat<br/>setting = location / environment · time_of_day = morning / dusk / night<br/>characters_present = names (resolved via CastLock) · action = what happens / blocking<br/>camera = how it is shot · mood = how it feels"
+
+class Camera {
+  +shot_size : ShotSize
+  +angle : CameraAngle
+  +framing : Framing
+}
+note for Camera "how the beat is shot — bounded vocab so the model cannot drift<br/>shot_size = how close · angle = viewpoint · framing = subject placement"
+
+class Mood {
+  +tone : Tone
+  +lighting : Lighting
+  +palette : str
+}
+note for Mood "how the beat feels · tone + lighting are bounded enums<br/>palette = per-scene colour (may differ from the global Style.palette)"
+
+class ShotSize {
+  <<enum>>
+  ESTABLISHING
+  WIDE
+  MEDIUM
+  CLOSE_UP
+  EXTREME_CLOSE_UP
+}
+class CameraAngle {
+  <<enum>>
+  EYE_LEVEL
+  LOW
+  HIGH
+  OVER_SHOULDER
+  DUTCH
+  BIRDS_EYE
+}
+class Framing {
+  <<enum>>
+  CENTERED
+  THIRDS_LEFT
+  THIRDS_RIGHT
+  TWO_SHOT
+}
+class Tone {
+  <<enum>>
+  TENSE
+  JOYFUL
+  SOMBER
+  TRIUMPHANT
+  EERIE
+  TENDER
+  NEUTRAL
+}
+class Lighting {
+  <<enum>>
+  WARM_FIRELIGHT
+  HARSH_NOON
+  NEON_NIGHT
+  OVERCAST
+  GOLDEN_HOUR
+  SOFT_INDOOR
+}
+
+Scene *-- Camera
+Scene *-- Mood
+Camera ..> ShotSize
+Camera ..> CameraAngle
+Camera ..> Framing
+Mood ..> Tone
+Mood ..> Lighting
+
+style ShotSize fill:#4a3d1f,stroke:#d9c24a,color:#fff
+style CameraAngle fill:#4a3d1f,stroke:#d9c24a,color:#fff
+style Framing fill:#4a3d1f,stroke:#d9c24a,color:#fff
+style Tone fill:#4a3d1f,stroke:#d9c24a,color:#fff
+style Lighting fill:#4a3d1f,stroke:#d9c24a,color:#fff

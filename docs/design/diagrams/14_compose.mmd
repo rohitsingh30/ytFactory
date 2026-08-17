@@ -1,0 +1,62 @@
+classDiagram
+direction TB
+%% Compose / Mux — renders each chunk's visual AND composes everything into one video
+
+class ComposeStage {
+  <<stage>>
+  +run(ctx)
+}
+note for ComposeStage "reads CHUNKS + TIMELINE + OVERLAYS + AUDIO + MUSIC (+ RenderSpec) → calls Compositor → writes VIDEO."
+
+class Compositor {
+  <<service · det ffmpeg>>
+  +compose(chunks, timeline, overlays, audio, music) ComposedVideo
+}
+note for Compositor "does it ALL in one place:<br/>1) renders each chunk's visual via VisualProvider (still or clip)<br/>2) places each on its time window (from the Timeline), overlays captions, mixes narration + music,<br/>3) applies video_grade + watermark and encodes ONE mp4. No intermediate visual track."
+
+class VisualProvider {
+  <<service · det router>>
+  +render(chunk, window) VisualAsset
+}
+note for VisualProvider "per chunk.kind: ANIMATION → ImageGenerationModel (a still), FOOTAGE → FootageCloneRetrieval (a clip).<br/>This is how one render mixes AI images and real footage, per chunk."
+
+class FootageCloneRetrieval {
+  <<service · det>>
+  +fetch(ShotRef, window) VisualAsset
+}
+note for FootageCloneRetrieval "resolves ShotRef.query to a real clip (yt-dlp / stock) and trims it to the chunk's time window."
+
+class VisualAsset {
+  +index : int
+  +path : Path
+  +kind : VisualKind
+}
+note for VisualAsset "one rendered per-chunk visual (internal to Compose) · index = which chunk<br/>path = PNG (animation) or mp4 clip (footage) · kind = ANIMATION / FOOTAGE"
+
+class Watermark {
+  +enabled : bool
+  +text : str
+  +position : str
+  +opacity : float
+}
+note for Watermark "enabled = show it or not · text = the mark · position = which corner · opacity = 0 to 1"
+
+class ComposedVideo {
+  +mp4_path : Path
+  +duration_s : float
+  +width : int
+  +height : int
+}
+note for ComposedVideo "mp4_path = the final rendered file · duration_s = length · width / height = output pixels"
+
+ComposeStage ..> Compositor : calls
+Compositor ..> VisualProvider : renders each chunk
+VisualProvider ..> FootageCloneRetrieval : FOOTAGE
+VisualProvider ..> VisualAsset : produces
+Compositor ..> Watermark : applies
+Compositor ..> ComposedVideo : produces
+
+style ComposeStage fill:#1e3a5f,stroke:#4a90d9,color:#fff
+style Compositor fill:#2d2d2d,stroke:#888,color:#fff
+style VisualProvider fill:#2d2d2d,stroke:#888,color:#fff
+style FootageCloneRetrieval fill:#2d2d2d,stroke:#888,color:#fff

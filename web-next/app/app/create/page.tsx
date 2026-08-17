@@ -54,6 +54,7 @@ import {
 } from "@/lib/api";
 import type { ChannelSummary, CustomizationField, CustomizationSchema, NicheDoc } from "@/lib/types";
 import { buildChannelOverrides, resolveLengthSeconds } from "@/lib/render-payload";
+import { encodeSelectValue, decodeSelectValue, SELECT_EMPTY_SENTINEL } from "@/lib/select";
 import { cn } from "@/lib/utils";
 
 // Lazy-loaded heavy panels — only fetched when the user actually opens
@@ -2313,15 +2314,15 @@ function FieldRenderer({
       <div className="mt-2">
         {field.kind === "select" && (
           <Select
-            value={value !== undefined && value !== null ? String(value) : undefined}
-            onValueChange={(v) => onChange(v)}
+            value={encodeSelectValue(value)}
+            onValueChange={(v) => onChange(decodeSelectValue(v))}
           >
             <SelectTrigger id={field.key}>
               <SelectValue placeholder="Choose…" />
             </SelectTrigger>
             <SelectContent>
               {(field.options ?? []).map((o) => (
-                <SelectItem key={o.value} value={o.value}>
+                <SelectItem key={o.value} value={encodeSelectValue(o.value) ?? SELECT_EMPTY_SENTINEL}>
                   <div className="flex flex-col">
                     <span>{o.label}</span>
                     {o.description && (

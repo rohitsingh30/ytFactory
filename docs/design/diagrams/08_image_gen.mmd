@@ -1,0 +1,32 @@
+classDiagram
+direction TB
+%% Image Generation — diffusion (z-image-turbo)
+
+class ImageGenerationModel {
+  <<Protocol · diffusion>>
+  +generate(ImageModelPrompt) ImageResult
+}
+note for ImageGenerationModel "an HTTP call to the z-image-turbo GPU service · produces one still per animation chunk."
+
+class ImageModelPrompt {
+  +prompt : str
+  +negative_prompt : str
+  +seed : int
+  +width : int
+  +height : int
+  +steps : int
+  +cfg : float
+  +model_id : str
+}
+note for ImageModelPrompt "the fully-assembled diffusion input (ImagePrompt text + numerics, built by ChunkStage)<br/>prompt = already contains cast Appearance + scene + style_prefix · negative_prompt = avoid-list<br/>seed = reproducibility · width / height = output pixels · steps = denoise steps<br/>cfg = guidance scale · model_id = which diffusion model"
+
+class ImageResult {
+  +image_path : Path
+  +seed : int
+}
+note for ImageResult "image_path = the rendered still on disk · seed = echoed back for cache / reproducibility"
+
+ImageGenerationModel ..> ImageModelPrompt : in
+ImageGenerationModel ..> ImageResult : out
+
+style ImageGenerationModel fill:#3a1e5f,stroke:#a04ad9,color:#fff

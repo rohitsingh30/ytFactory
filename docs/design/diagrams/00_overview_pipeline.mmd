@@ -1,0 +1,28 @@
+flowchart TD
+    SPEC([RenderSpec · visual_palette · eval_gates]):::io --> SRC
+    SRC[SourceStage · SourceRouter det]:::det --> SCR
+    SCR[ScriptStage · ScriptService]:::ai --> DIR
+    DIR[DirectorStage · DirectorLLM · animation-only]:::ai --> SCN
+    SCN[SceneStage · SceneDefinitionAI to Storyboard]:::ai --> CHK
+    CHK[ChunkStage · ChunkingAI plus assemble]:::ai --> AUD
+    AUD[AudioStage · AudioGenerationModel · per chunk]:::ai --> ALN
+    ALN[AlignStage · ASRModel · word timing]:::ai --> OVL
+    OVL[OverlayStage · CaptionService det]:::det --> EV1
+    AUD --> MUS[MusicStage · MusicBedService det]:::det --> EV1
+    EV1{Eval Check · pre-compose}:::eval
+    EV1 -.->|fail · retry with changes| CHK
+    EV1 -->|pass| CMP
+    CMP[ComposeStage · Compositor · renders chunk visuals plus composes all]:::det --> EV2
+    EV2{Eval Checks · pre-upload}:::eval
+    EV2 -.->|fail · retry| CHK
+    EV2 -->|pass| UPL
+    UPL[UploadStage · UploadService det]:::det --> DONE([UploadResult]):::io
+    CMP --> CRT[CritiqueStage · CritiqueSkill]:::ai
+    CRT -.->|findings to LearningsStore| SCR
+    NOTE["Eval gates (HLD Eval Check / Eval Checks) are<br/>SKIPPED when RenderSpec.eval_gates = False"]:::note
+    EV1 -.- NOTE
+    classDef ai fill:#1e3a5f,stroke:#4a90d9,color:#fff
+    classDef det fill:#2d2d2d,stroke:#888,color:#fff
+    classDef io fill:#3d2d1f,stroke:#d99a4a,color:#fff
+    classDef eval fill:#5f3a1e,stroke:#d9904a,color:#fff
+    classDef note fill:#222,stroke:#555,color:#bbb
