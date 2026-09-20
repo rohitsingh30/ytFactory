@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nikamma Deploy"
+  short_description: "Deploy websites and APIs on the Nikamma cluster"
+  default_prompt: "Use $nikamma-deploy to deploy this app on Nikamma with a stable website URL."

@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ytfactory-gatus
+  labels: {gatus-config: 'true'}
+data:
+  ytfactory.yaml: |
+    endpoints:
+      - name: ytfactory-api
+        group: ytfactory
+        url: http://ytfactory-api.ytfactory.svc.cluster.local:8080/healthz
+        interval: 1m
+        conditions:
+          - '[STATUS] == 200'
+      - name: ytfactory-web
+        group: ytfactory
+        url: http://ytfactory-web.ytfactory.svc.cluster.local:8080/login
+        headers:
+          Host: ytfactory.nikamma.in
+        interval: 1m
+        conditions:
+          - '[STATUS] == 200'

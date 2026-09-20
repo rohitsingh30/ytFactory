@@ -419,7 +419,7 @@ async def start(
         csrf_value,
         max_age=_STATE_TTL_S,
         httponly=True,
-        secure=bool(os.environ.get("K_SERVICE")),
+        secure=bool(os.environ.get("K_SERVICE")) or os.environ.get("YTFACTORY_COOKIE_SECURE") == "1",
         samesite="lax",
         path="/api/oauth/",
     )

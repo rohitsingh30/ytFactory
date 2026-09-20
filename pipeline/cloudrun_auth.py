@@ -138,6 +138,18 @@ def get_id_token(audience: str) -> str:
         _TOKENS[audience] = (md_token, now + _TOKEN_TTL_S)
         return md_token
 
+    # A homelab has no Google metadata server or gcloud login. Use the
+    # explicitly mounted service-account credential with Google's SDK.
+    # Failure is deliberate: don't silently switch identity when configured
+    # production credentials are invalid.
+    if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        from google.auth.transport.requests import Request
+        from google.oauth2.id_token import fetch_id_token
+
+        token = fetch_id_token(Request(), audience)
+        _TOKENS[audience] = (token, now + _TOKEN_TTL_S)
+        return token
+
     # Path 2 + 3: gcloud subprocess.
     cmds = [
         ["gcloud", "auth", "print-identity-token", f"--audiences={audience}"],

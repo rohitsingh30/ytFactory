@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ytfactory-api-config
+data:
+  GOOGLE_CLOUD_PROJECT: ytfactory-prod-v3
+  GOOGLE_APPLICATION_CREDENTIALS: /secrets/google/credentials.json
+  YTFACTORY_BUCKET: ytfactory-prod-v3-artifacts
+  YTFACTORY_STATE_BUCKET: ytfactory-prod-v3-state
+  YTFACTORY_QUEUE_BACKEND: firestore
+  YTFACTORY_RENDER_BACKEND: cloudrun
+  YTFACTORY_SIM_WORKER: '0'
+  YTFACTORY_CLOUDRUN_JOB: ytfactory-render-worker-v2
+  YTFACTORY_CLOUDRUN_REGION: asia-southeast1
+  YTFACTORY_REQUIRE_AUTH: '1'
+  YTFACTORY_COOKIE_SECURE: '1'
+  YTFACTORY_PUBLIC_FRONTEND_URL: https://ytfactory.nikamma.in
+  YTFACTORY_AUTH_REDIRECT_URI: https://ytfactory.nikamma.in/api/auth/google/callback
+  YTFACTORY_LLM_BACKEND: azure_openai
+  YTFACTORY_ADMIN_DOMAINS: docx.co.in
+  YTFACTORY_ADMIN_EMAILS: sanimated219@gmail.com
+  OTEL_SERVICE_NAME: ytfactory-api-nikamma
+  OTEL_EXPORTER: inmemory

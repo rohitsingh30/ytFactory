@@ -1898,7 +1898,7 @@ def _server_is_open() -> bool:
     so a production env without explicit auth config still blocks
     public traffic.
     """
-    if os.environ.get("K_SERVICE"):
+    if os.environ.get("K_SERVICE") or os.environ.get("YTFACTORY_REQUIRE_AUTH") == "1":
         return False
     return (
         not os.environ.get("YTFACTORY_TOKEN")
@@ -1935,7 +1935,14 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     # 2. M2M paths
-    if any(path.startswith(p) for p in _M2M_PATH_PREFIXES):
+    # The Studio reads scheduler state with its browser session. Mutating
+    # scheduler/cron/agent endpoints continue to require M2M credentials.
+    scheduler_session_read = (
+        not os.environ.get("K_SERVICE")
+        and request.method == "GET"
+        and path == "/api/scheduler/state"
+    )
+    if any(path.startswith(p) for p in _M2M_PATH_PREFIXES) and not scheduler_session_read:
         # Cloud Run runtime sets K_SERVICE. Google Frontend has already
         # validated the caller's OIDC token against the run.invoker
         # binding before the request reached us; the OIDC consumed the
@@ -1990,6 +1997,15 @@ async def auth_middleware(request: Request, call_next):
     if status == USER_STATUS_APPROVED:
         request.state.user_email = email
         request.state.user_is_admin = bool((user or {}).get("is_admin"))
+        # Off Cloud Run these legacy routers check an agent bearer even
+        # after the browser's session and Firestore approval were verified.
+        # Bridge only those operator routes, inside the API after approval;
+        # never expose the token to the browser or skip the approval lookup.
+        operator_route = path.startswith(("/api/cloud/", "/api/state/", "/api/telemetry/"))
+        if not os.environ.get("K_SERVICE") and AGENT_TOKEN and (operator_route or scheduler_session_read):
+            headers = [(k, v) for k, v in request.scope["headers"] if k.lower() != b"authorization"]
+            headers.append((b"authorization", f"Bearer {AGENT_TOKEN}".encode()))
+            request.scope["headers"] = headers
         return await call_next(request)
     if status == USER_STATUS_PENDING:
         if _is_browser_request(request):

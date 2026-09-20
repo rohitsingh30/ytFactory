@@ -1,0 +1,10 @@
+**
+!web-next/
+!web-next/package.json
+!web-next/package-lock.json
+!web-next/next.config.mjs
+!web-next/.next/
+!web-next/.next/**
+!web-next/public/
+!web-next/public/**
+web-next/.next/cache/

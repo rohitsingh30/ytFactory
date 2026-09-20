@@ -1,0 +1,31 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ytfactory-api-ingress
+spec:
+  podSelector:
+    matchLabels: {app: ytfactory-api}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: ytfactory-web}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: gatus}
+      ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ytfactory-web-ingress
+spec:
+  podSelector:
+    matchLabels: {app: ytfactory-web}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: networking}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: gatus}
+      ports: [{protocol: TCP, port: 8080}]

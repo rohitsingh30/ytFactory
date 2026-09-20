@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ytfactory-web
+  labels: {app: ytfactory-web}
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {app: ytfactory-web}
+  template:
+    metadata:
+      labels: {app: ytfactory-web}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector: {node-type: main-server}
+      containers:
+        - name: web
+          image: ytfactory-web
+          ports: [{name: http, containerPort: 8080}]
+          envFrom:
+            - secretRef: {name: ytfactory-session}
+          env:
+            - {name: PORT, value: '8080'}
+            - {name: YTFACTORY_API_BASE, value: 'http://ytfactory-api:8080'}
+            - {name: YTFACTORY_API_AUTH_MODE, value: passthrough}
+            - {name: YT_AUTH_ENABLED, value: '1'}
+            - {name: YTFACTORY_CANONICAL_HOST, value: ytfactory.nikamma.in}
+          readinessProbe:
+            httpGet:
+              path: /login
+              port: http
+              httpHeaders: [{name: Host, value: ytfactory.nikamma.in}]
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket: {port: http}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: '1', memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ytfactory-api
+  labels: {app: ytfactory-api}
+spec:
+  replicas: 1
+  # The single RWO data volume is shared with the asset-seeding init container.
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: ytfactory-api}
+  template:
+    metadata:
+      labels: {app: ytfactory-api}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector: {node-type: main-server}
+      initContainers:
+        - name: channel-assets
+          image: ytfactory-api
+          command: [sh, -c, 'mkdir -p /state/research/channel_assets && cp -a /workspace/data/research/channel_assets/. /state/research/channel_assets/']
+          volumeMounts: [{name: data, mountPath: /state}]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 100m, memory: 128Mi}
+      containers:
+        - name: api
+          image: ytfactory-api
+          ports: [{name: http, containerPort: 8080}]
+          envFrom:
+            - configMapRef: {name: ytfactory-api-config}
+            - secretRef: {name: ytfactory-api-secrets}
+            - secretRef: {name: ytfactory-session}
+          env:
+            - {name: PORT, value: '8080'}
+          volumeMounts:
+            - {name: data, mountPath: /workspace/data}
+            - {name: google, mountPath: /secrets/google, readOnly: true}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: '2', memory: 2Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: ytfactory-data}
+        - name: google
+          secret:
+            secretName: ytfactory-google-credentials
+            defaultMode: 0400

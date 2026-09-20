@@ -62,9 +62,17 @@ async function _proxy(
     outHeaders.set(k, v);
   }
 
-  const aud = new URL(API_BASE).origin;
-  const idToken = await _getIdToken(aud);
-  if (idToken) outHeaders.set("Authorization", `Bearer ${idToken}`);
+  // Internal Kubernetes service: preserve the caller's bearer for the API
+  // to validate. Never inject a privileged shared token for anonymous users.
+  // Cloud Run retains its existing audience-scoped IAM identity flow.
+  if (process.env.YTFACTORY_API_AUTH_MODE === "passthrough") {
+    const authorization = req.headers.get("authorization");
+    if (authorization) outHeaders.set("Authorization", authorization);
+  } else {
+    const aud = new URL(API_BASE).origin;
+    const idToken = await _getIdToken(aud);
+    if (idToken) outHeaders.set("Authorization", `Bearer ${idToken}`);
+  }
 
   let body: BodyInit | undefined;
   if (req.method !== "GET" && req.method !== "HEAD") {
