@@ -76,3 +76,24 @@ class StageTests(unittest.TestCase):
         again = subprocess.run(command, capture_output=True, text=True)
         self.assertNotEqual(again.returncode, 0)
         self.assertIn("already exists", again.stderr)
+
+    def test_frontend_only_does_not_require_cloud_credentials(self):
+        (self.root / "AGENTS.md").write_text("Test fixture")
+        (self.root / "argocd/apps").mkdir(parents=True)
+        (self.root / "argocd/root.yaml").write_text("{}")
+        (self.root / "cluster/namespaces").mkdir(parents=True)
+        result = subprocess.run([
+            sys.executable, str(SCRIPT), "--frontend-only", "--nikamma-checkout", str(self.root),
+            "--web-image", "ghcr.io/rohitsingh30/ytfactory-web@sha256:" + "a" * 64,
+        ], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        app = self.root / "apps/ytfactory"
+        config = yaml.safe_load((app / "kustomization.yaml").read_text())
+        resources = [r for file in config["resources"] for r in yaml.safe_load_all((app / file).read_text())]
+        self.assertFalse(any(r["kind"] in ("Secret", "SealedSecret", "PersistentVolumeClaim") for r in resources))
+        deployments = [r for r in resources if r["kind"] == "Deployment"]
+        self.assertEqual(len(deployments), 1)
+        container = deployments[0]["spec"]["template"]["spec"]["containers"][0]
+        self.assertNotIn("envFrom", container)
+        self.assertIn({"name": "YTFACTORY_FRONTEND_ONLY", "value": "1"}, container["env"])
+        self.assertIn({"name": "YT_AUTH_ENABLED", "value": "1"}, container["env"])

@@ -52,6 +52,12 @@ async function _proxy(
   req: Request,
   ctx: { params: { path: string[] } },
 ): Promise<Response> {
+  if (process.env.YTFACTORY_FRONTEND_ONLY === "1") {
+    return Response.json(
+      { error: "api_not_connected", message: "The website is online. The API is not connected yet." },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
+    );
+  }
   const upstreamPath = "/api/" + (ctx.params.path?.join("/") ?? "");
   const url = new URL(req.url);
   const upstreamUrl = API_BASE + upstreamPath + (url.search || "");

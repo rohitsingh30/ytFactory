@@ -112,6 +112,11 @@ jobs:
           IMAGE: ghcr.io/rohitsingh30/ytfactory-${{ matrix.service }}:${{ github.sha }}
           SERVICE: ${{ matrix.service }}
         run: python3 cloud/nikamma/smoke_image.py "$SERVICE" "$IMAGE"
+      - name: Verify frontend without Google or API credentials
+        if: matrix.service == 'web'
+        env:
+          IMAGE: ghcr.io/rohitsingh30/ytfactory-web:${{ github.sha }}
+        run: python3 cloud/nikamma/smoke_image.py web "$IMAGE" --frontend-only
       - name: Publish tested image
         env:
           IMAGE: ghcr.io/rohitsingh30/ytfactory-${{ matrix.service }}:${{ github.sha }}

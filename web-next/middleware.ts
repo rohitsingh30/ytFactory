@@ -42,6 +42,15 @@ export async function middleware(req: NextRequest) {
     }
   }
 
+  if (process.env.YTFACTORY_FRONTEND_ONLY === "1") {
+    if (req.nextUrl.pathname === "/healthz") {
+      return NextResponse.json({ ok: true, mode: "frontend_only" });
+    }
+    if (req.nextUrl.pathname.startsWith("/agent/")) {
+      return NextResponse.json({ error: "api_not_connected" }, { status: 503 });
+    }
+  }
+
   // 2. Auth gate for /app/* only. Skip everything else early so the
   // matcher's broader scope (needed for host normalization) doesn't
   // change behaviour outside the studio.

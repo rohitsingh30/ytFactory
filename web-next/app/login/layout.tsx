@@ -22,6 +22,8 @@
  * up (CDN edge cache hits) is irrelevant for a page that's hit
  * once per signed-out user per session.
  */
+import Link from "next/link";
+
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
@@ -30,5 +32,21 @@ export default function LoginLayout({
 }: {
   children: React.ReactNode;
 }) {
+  if (process.env.YTFACTORY_FRONTEND_ONLY === "1") {
+    return (
+      <main className="flex min-h-screen items-center justify-center px-6">
+        <div className="w-full max-w-sm rounded-xl border border-border bg-surface p-6">
+          <p className="font-mono text-xs text-muted-foreground">ytFactory</p>
+          <h1 className="mt-3 text-xl font-medium">The website is online</h1>
+          <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+            Sign-in and video creation will be available once the API is connected.
+          </p>
+          <Link href="/" className="mt-6 inline-block text-sm underline underline-offset-4">
+            Back to the website
+          </Link>
+        </div>
+      </main>
+    );
+  }
   return children;
 }

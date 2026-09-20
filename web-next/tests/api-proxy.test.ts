@@ -4,6 +4,20 @@ import assert from "node:assert/strict";
 process.env.YTFACTORY_API_BASE = "http://ytfactory-api:8080";
 const { GET } = await import("../app/api/[...path]/route.ts");
 
+test("frontend-only mode reports unavailable API without a backend request", async () => {
+  const original = globalThis.fetch;
+  process.env.YTFACTORY_FRONTEND_ONLY = "1";
+  globalThis.fetch = async () => { throw new Error("Backend must not be contacted"); };
+  try {
+    const response = await GET(new Request("https://ytfactory.nikamma.in/api/jobs"), { params: { path: ["jobs"] } });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error, "api_not_connected");
+  } finally {
+    globalThis.fetch = original;
+    delete process.env.YTFACTORY_FRONTEND_ONLY;
+  }
+});
+
 test("internal proxy preserves caller auth without contacting Google metadata", async () => {
   const original = globalThis.fetch;
   process.env.YTFACTORY_API_AUTH_MODE = "passthrough";

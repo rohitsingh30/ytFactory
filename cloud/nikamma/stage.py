@@ -47,12 +47,15 @@ def validated_secrets(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--nikamma-checkout", type=Path, required=True)
-    parser.add_argument("--sealed-secrets", type=Path, required=True)
+    parser.add_argument("--frontend-only", action="store_true", help="Deploy the public website without API or cloud credentials")
+    parser.add_argument("--sealed-secrets", type=Path)
     parser.add_argument("--web-image", required=True)
-    parser.add_argument("--api-image", required=True)
+    parser.add_argument("--api-image")
     args = parser.parse_args()
+    if not args.frontend_only and (not args.api_image or not args.sealed_secrets):
+        parser.error("Full deployment requires --api-image and --sealed-secrets")
     images = []
-    for service in ("web", "api"):
+    for service in (("web",) if args.frontend_only else ("web", "api")):
         image = getattr(args, f"{service}_image")
         match = re.fullmatch(rf"(ghcr\.io/rohitsingh30/ytfactory-{service})@(sha256:[a-f0-9]{{64}})", image)
         if not match:
@@ -61,7 +64,7 @@ def main():
     root = args.nikamma_checkout.resolve()
     if not (root / "AGENTS.md").is_file() or not (root / "argocd/root.yaml").is_file():
         parser.error("Destination must be an existing Nikamma checkout")
-    documents = validated_secrets(args.sealed_secrets)
+    documents = [] if args.frontend_only else validated_secrets(args.sealed_secrets)
     destination = root / "apps/ytfactory"
     template = Path(__file__).resolve().parent / "manifests"
     # Refuse to overwrite drift: updates should change only image digests unless
@@ -70,9 +73,27 @@ def main():
         parser.error("ytfactory already exists; update its image digests in kustomization.yaml for subsequent releases")
     shutil.copytree(template, destination)
     kustomization = yaml.safe_load((destination / "kustomization.yaml").read_text())
+    if args.frontend_only:
+        kustomization["resources"] = ["deployment.yaml", "svc.yaml", "ingress.yaml", "network-policy.yaml", "gatus-check.yaml"]
+        for filename in ("configmap.yaml", "pvc.yaml"):
+            (destination / filename).unlink()
+        for filename in ("deployment.yaml", "svc.yaml", "network-policy.yaml"):
+            resources = [resource for resource in yaml.safe_load_all((destination / filename).read_text())
+                         if resource["metadata"]["name"].startswith("ytfactory-web")]
+            if filename == "deployment.yaml":
+                container = resources[0]["spec"]["template"]["spec"]["containers"][0]
+                container.pop("envFrom", None)
+                container["env"].append({"name": "YTFACTORY_FRONTEND_ONLY", "value": "1"})
+            (destination / filename).write_text(yaml.safe_dump_all(resources, sort_keys=False))
+        gatus = yaml.safe_load((destination / "gatus-check.yaml").read_text())
+        checks = yaml.safe_load(gatus["data"]["ytfactory.yaml"])
+        checks["endpoints"] = [check for check in checks["endpoints"] if check["name"] == "ytfactory-web"]
+        gatus["data"]["ytfactory.yaml"] = yaml.safe_dump(checks, sort_keys=False)
+        (destination / "gatus-check.yaml").write_text(yaml.safe_dump(gatus, sort_keys=False))
     kustomization["images"] = images
     (destination / "kustomization.yaml").write_text(yaml.safe_dump(kustomization, sort_keys=False))
-    (destination / "sealed-secrets.yaml").write_text(yaml.safe_dump_all(documents, sort_keys=False))
+    if documents:
+        (destination / "sealed-secrets.yaml").write_text(yaml.safe_dump_all(documents, sort_keys=False))
     namespace = {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "ytfactory", "labels": {"name": "ytfactory"}}}
     (root / "cluster/namespaces/ytfactory.yaml").write_text(yaml.safe_dump(namespace, sort_keys=False))
     application = {

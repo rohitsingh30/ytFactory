@@ -2,7 +2,7 @@
 
 Source: `https://github.com/rohitsingh30/ytFactory`.
 Deployment repo: `https://github.com/mukul-mehta/nikamma`.
-Intended hostname: `ytfactory.nikamma.in` (verify live state, not just this file).
+Hostname: `ytfactory.nikamma.in` (verify live state, not just this file).
 
 Read `cloud/nikamma/README.md` from the current source checkout for exact
 commands and credential requirements. The reusable implementation is:
@@ -15,6 +15,8 @@ commands and credential requirements. The reusable implementation is:
 - `cloud/nikamma/stage.py`: validates digest-pinned images and three named
   SealedSecrets and stages the first release in Nikamma. Requires PyYAML.
   It never commits/pushes; rejects existing app directories to avoid drift.
+  `--frontend-only --web-image IMAGE@sha256:DIGEST` stages only the website,
+  with no Google credentials, session secret, API deployment, or PVC needed.
 - `cloud/nikamma/smoke_image.py`: exercises health and anonymous access in
   a disposable Docker container; does not prove Google credentials/login.
 
@@ -41,6 +43,14 @@ seeding channel assets. API updates use Recreate and briefly interrupt it.
 The frontend uses rolling updates. Subsequent releases update both image
 digests in Nikamma's `apps/ytfactory/kustomization.yaml`.
 
-Initial preparation found missing Nikamma cluster credentials and denied
-access to `ytfactory-prod-v3`. Recheck these; do not treat earlier preparation
-or this skill's existence as evidence of a completed deployment.
+For a frontend-only release, keep `YT_AUTH_ENABLED=1` and set
+`YTFACTORY_FRONTEND_ONLY=1`. Leave session secrets unset: the Studio remains
+protected. `/login` explains that the API is not connected, `/api/*` returns
+503, and `/healthz` reports frontend-only mode. Upgrade to the full app by
+adding the API resources and secrets and removing the frontend-only flag.
+Do not overwrite an existing app or delete its resources during that upgrade.
+
+GitHub write access is sufficient to publish valid Nikamma manifests; ArgoCD
+automatically deploys them. Cluster credentials are not required to push.
+Google access is needed for the cloud-connected API, not for the frontend.
+Verify the public homepage and assets after pushing before reporting success.

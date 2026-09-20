@@ -19,6 +19,14 @@ reconciliation; a request to prepare or explain does not.
   existing hostname on updates. Do not claim a proposed hostname is live.
 - Check GitHub identity and repository permissions. They are distinct from
   kubectl/ArgoCD permissions and any external cloud credentials.
+- Pushing the watched main branch is enough to deploy through ArgoCD.
+  A kubectl/ArgoCD login is useful for inspection, not a prerequisite for a
+  valid push-based deployment. Verify public HTTP responses if cluster
+  inspection is unavailable. Do not request redundant deployment permission.
+- Match credentials to the requested component. A public frontend can run
+  without Google credentials or API secrets. When frontend-only deployment
+  is requested, publish it with protected Studio access and a clear API
+  unavailable state; missing backend credentials do not block that work.
 - Keep unrelated local edits intact. Use an isolated checkout when needed,
   and follow the repository's reconciliation rules before publishing.
 - Check credentials by names/permissions, without printing secret values.

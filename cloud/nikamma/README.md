@@ -1,8 +1,29 @@
 # ytFactory on Nikamma
 
-Target URL: `https://ytfactory.nikamma.in` (only live after successful deployment).
+Target URL: `https://ytfactory.nikamma.in` (verify live HTTP responses after deployment).
 Next.js and FastAPI run on Nikamma; render jobs, GPU services, Firestore,
 Secret Manager and GCS remain in `ytfactory-prod-v3`.
+
+## Frontend-only deployment
+
+The website can be deployed without Google credentials or a cluster login.
+GitHub write access to Nikamma is sufficient: push valid manifests to `main`
+and ArgoCD deploys automatically. For a first frontend-only release:
+
+```sh
+python3 cloud/nikamma/stage.py --frontend-only \
+  --nikamma-checkout /path/to/nikamma \
+  --web-image ghcr.io/rohitsingh30/ytfactory-web@sha256:REAL_DIGEST
+```
+
+This creates only the frontend deployment, service, ingress, monitoring, and
+network policy plus namespace and ArgoCD Application. It needs no secrets,
+API, or storage. Validate/render, review, commit, and push these resources.
+The frontend uses `YTFACTORY_FRONTEND_ONLY=1`: the public website works,
+Studio access stays protected, and login explains that the API is pending.
+Check `/`, a referenced JS asset, `/login`, and `/healthz` after reconciliation.
+For an existing release, change only its image digest. Add the full API and
+secrets later without deleting the frontend or any existing persistent data.
 
 ## Build and verify
 
@@ -22,9 +43,9 @@ The API image needs Python 3.12, not the macOS system Python.
 ## Required access and configuration
 
 - Write access to `rohitsingh30/ytFactory` and `mukul-mehta/nikamma`.
-- An authenticated Nikamma kubectl or ArgoCD connection, plus the cluster's
-  Sealed Secrets public certificate. GitHub write permission alone does not
-  grant access to existing cluster secrets.
+- For the full API deployment, the cluster's Sealed Secrets public certificate
+  (or correctly sealed secrets supplied by its operator). A kubectl/ArgoCD
+  connection helps inspect rollout status but is not needed for a GitOps push.
 - A Google runtime service identity authorized for the existing project.
   Check Firestore read/write, the two GCS buckets, required Secret Manager
   secrets, Cloud Run job execution with overrides, service invocation, and
