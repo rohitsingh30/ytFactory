@@ -5,6 +5,7 @@ metadata:
 data:
   GOOGLE_CLOUD_PROJECT: ytfactory-prod-v3
   GOOGLE_APPLICATION_CREDENTIALS: /secrets/google/credentials.json
+  CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: /secrets/google/credentials.json
   YTFACTORY_BUCKET: ytfactory-prod-v3-artifacts
   YTFACTORY_STATE_BUCKET: ytfactory-prod-v3-state
   YTFACTORY_QUEUE_BACKEND: firestore
